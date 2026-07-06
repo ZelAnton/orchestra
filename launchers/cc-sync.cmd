@@ -16,3 +16,12 @@ if errorlevel 8 (
 ) else (
   echo Synced agent definitions -^> "%USERPROFILE%\.claude\agents"
 )
+
+rem Also mirror the launchers themselves (this folder's *.cmd) into
+rem %USERPROFILE%\.claude\scripts, which is where they're invoked from on PATH.
+robocopy "%~dp0." "%USERPROFILE%\.claude\scripts" *.cmd /NJH /NJS /NDL /NFL
+if errorlevel 8 (
+  echo Sync failed: robocopy returned an error code.
+) else (
+  echo Synced launcher scripts -^> "%USERPROFILE%\.claude\scripts"
+)
