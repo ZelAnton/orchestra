@@ -1,4 +1,35 @@
 @echo off
+rem If this copy of cc-sync.cmd lives in the actual repo checkout - generate-coders.cmd
+rem sits two levels up next to coder.template.md - regenerate coder.md, coder_fast.md
+rem and coder_deep.md before mirroring, so sync always ships what the template
+rem currently says instead of a possibly stale on-disk copy. generate-coders.cmd
+rem always overwrites the three files, so this also self-heals drift: a manual edit
+rem to one variant, or a template edit without a manual regen run.
+rem This is skipped when running from the ~/.claude/scripts mirror instead - only
+rem launchers\*.cmd get mirrored there, not the repo-root generator or template -
+rem in that case there is no source template to regenerate from anyway.
+rem NOTE: comments inside the parenthesized blocks below must avoid unescaped
+rem parentheses - cmd treats a stray ) inside rem text as closing the block early.
+rem NOTE: this whole step runs before "chcp 65001" further down - generate-coders.cmd
+rem has its own Cyrillic rem comments, and calling it while codepage 65001 is already
+rem active corrupts cmd's line parsing (garbled bytes get executed as bogus
+rem commands); running it under the default codepage first avoids that entirely.
+if exist "%~dp0..\generate-coders.cmd" (
+  call "%~dp0..\generate-coders.cmd"
+  rem Detect whether that regeneration actually changed anything, i.e. whether the
+  rem committed coder*.md files were stale or drifted before this run. This check
+  rem is informational only: the files on disk are already correct after the call
+  rem above, so we deliberately keep going into the robocopy mirror below instead
+  rem of aborting the sync - the drift is fixed, it just was not committed yet.
+  if exist "%~dp0..\.git" (
+    git -C "%~dp0.." diff --exit-code -- coder.md coder_fast.md coder_deep.md >nul 2>nul
+    if errorlevel 1 (
+      echo Warning: coder.md/coder_fast.md/coder_deep.md differed from coder.template.md
+      echo and were regenerated. Commit the changes to those files.
+    )
+  )
+)
+
 chcp 65001 >nul
 rem Sync agent definitions from this folder (%~dp0..) into the mirror
 rem %USERPROFILE%\.claude\agents\, which is where "claude --agent" actually loads them.
