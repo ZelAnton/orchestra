@@ -11,7 +11,13 @@
 окружение. Удобно включить codex глобально (в профиле/CI) без правки `config.md`
 каждого проекта. Остальные ключи — только из `config.md`.
 
+`launchers/cc-config.cmd` сеет `.work/config.md` из блока ниже, ограниченного
+маркерами `# >>> config.md seed start >>>` / `# <<< config.md seed end <<<`, —
+копируются только сами маркеры-границы и всё между ними, без заголовков и
+пояснительного текста этого документа.
+
 ```
+# >>> config.md seed start (cc-config.cmd copies only this block) >>>
 MAX_PARALLEL: 5
 # --- Роллинг-приём когорты (см. ниже) ---
 # COHORT_SIZE: 15        # по умолч. 3×MAX_PARALLEL — сколько задач максимум принять
@@ -34,7 +40,7 @@ REVIEWER_TIERING: true
 # KB_CAP: 12             # максимум записей на область
 # --- Codex-агенты (опционально; требуют установленного codex + `codex login`) ---
 # CODEX_CODER: fast+std        # реализация/R--фиксы: off (по умолч.) | fast | fast+std
-CODEX_REVIEWER: fast+std       # ревью: off (по умолч.) | fast | fast+std | deep
+# CODEX_REVIEWER: fast+std      # ревью: off (по умолч.) | fast | fast+std | deep
                                # ^ РЕКОМЕНДУЕТСЯ при наличии codex: снимает самый дорогой
                                #   повторяющийся расход (opus reviewer) и ускоряет loop;
                                #   без codex — чистый фолбэк на Claude (лишний спавн на задачу).
@@ -43,6 +49,7 @@ CODEX_REVIEWER: fast+std       # ревью: off (по умолч.) | fast | fas
 # CODEX_REASONING: auto        # auto | low | medium | high
 # CODEX_SANDBOX: workspace-write
 # CODEX_CMD: codex
+# <<< config.md seed end <<<
 ```
 
 ## Значения по умолчанию
