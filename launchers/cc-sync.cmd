@@ -7,7 +7,8 @@ rem
 rem Copies top-level *.md only (no recursion, so launchers\ is skipped) and does NOT
 rem purge (other agents already in the mirror are preserved). Excluded:
 rem   coder.template.md      - "name: {{NAME}}" frontmatter would register a broken agent
-rem   config.example.md      - documentation, not an agent
+rem   config.example.md      - not an agent; mirrored separately below, next to the
+rem                            launchers in scripts\, so cc-config.cmd can find it there
 rem   AGENTS.md/knowledge.md/*_PLAN.md/*_ROADMAP.md - repository docs, not agents
 rem   Orchestra_Review_*.md  - dated review reports, not agents
 robocopy "%~dp0.." "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md config.example.md AGENTS.md knowledge.md "*_PLAN.md" "*_ROADMAP.md" "Orchestra_Review_*.md" /NJH /NJS /NDL /NFL
@@ -25,4 +26,13 @@ if errorlevel 8 (
   echo Sync failed: robocopy returned an error code.
 ) else (
   echo Synced launcher scripts -^> "%USERPROFILE%\.claude\scripts"
+)
+
+rem Also mirror config.example.md next to the launchers in scripts\, so that
+rem cc-config.cmd (run from the mirror, off PATH) can find its template via %~dp0.
+robocopy "%~dp0.." "%USERPROFILE%\.claude\scripts" config.example.md /NJH /NJS /NDL /NFL
+if errorlevel 8 (
+  echo Sync failed: robocopy returned an error code.
+) else (
+  echo Synced config.example.md -^> "%USERPROFILE%\.claude\scripts"
 )
