@@ -92,7 +92,8 @@ workspace, коммитит результаты листовых агентов
 | `.work/Tasks_Done.md` | архив завершённых задач |
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
 | `.work/orchestrator.lock` | защита от двух processor одновременно |
-| `.work/batch.md` | снимок активного батча |
+| `.work/batch.md` | append-only манифест текущей когорты (строки волн приёма дописываются, не переписываются) |
+| `.work/cohort_state.md` | состояние роллинг-приёма когорты (открыт/закрыт, волна, счётчики) |
 | `.work/tasks/<T-ID>/task.md` | дескриптор и критерии от planner |
 | `.work/tasks/<T-ID>/review.md` | per-task находки `R-NN` |
 | `.work/tasks/<T-ID>/status.md` | статус листового агента |
