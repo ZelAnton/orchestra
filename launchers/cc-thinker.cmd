@@ -4,8 +4,25 @@ rem Launch the "thinker" analytical partner in the current folder (Claude Code, 
 rem No fixed task: describe problems/ideas/goals in the chat and think together; thinker
 rem analyzes the project with you and turns agreed work into tasks in .work\Tasks_Queue.md.
 rem Optional: pass an opening topic as an argument.
+rem
+rem The argument is made robust against quotes/%% the same way as in cc-queue.cmd:
+rem   1) %* is captured into ARGS BEFORE setlocal EnableDelayedExpansion — otherwise
+rem      literal "!" characters in the argument would be eaten by delayed expansion
+rem      already at capture time;
+rem   2) the argument is substituted into the claude prompt via !ARGS! (delayed
+rem      expansion), not a second direct use of %* on this line;
+rem   3) double quotes inside ARGS are replaced with single quotes — otherwise a
+rem      quote in the argument would break out of the prompt's quoting and claude
+rem      would receive several unrelated positional arguments instead of one prompt.
+rem Known limitation of cmd.exe that cannot be fixed from inside a .cmd file: if the
+rem argument contains "%NAME%" matching an actually defined environment variable
+rem (e.g. "%PATH%"), cmd substitutes its value — this happens while binding %* to
+rem the batch file, before the first line of script code runs.
+set "ARGS=%*"
+setlocal EnableDelayedExpansion
+set "ARGS=!ARGS:"='!"
 if "%~1"=="" (
   claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Greet me briefly, then ask what I want to explore or build. Analyze it with me and, once we agree on concrete work, enqueue it into .work/Tasks_Queue.md per your instructions."
 ) else (
-  claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: %*"
+  claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: !ARGS!"
 )
