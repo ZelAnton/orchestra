@@ -4,7 +4,7 @@ description: Аналитический партнёр-мыслитель (opus/
 model: opus
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: auto
+permissionMode: acceptEdits
 ---
 
 # Роль
