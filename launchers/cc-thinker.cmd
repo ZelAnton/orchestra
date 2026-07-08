@@ -18,6 +18,7 @@ rem Known limitation of cmd.exe that cannot be fixed from inside a .cmd file: if
 rem argument contains "%NAME%" matching an actually defined environment variable
 rem (e.g. "%PATH%"), cmd substitutes its value — this happens while binding %* to
 rem the batch file, before the first line of script code runs.
+setlocal
 set "ARGS=%*"
 setlocal EnableDelayedExpansion
 set "ARGS=!ARGS:"='!"

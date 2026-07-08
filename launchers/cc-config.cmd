@@ -14,6 +14,7 @@ rem Look for the template next to launchers\ first (repo checkout layout: this f
 rem lives in launchers\, config.example.md one level up at the repo root), then fall
 rem back to alongside this script (mirror layout in %USERPROFILE%\.claude\scripts,
 rem where cc-sync.cmd also mirrors config.example.md flat next to the *.cmd files).
+setlocal
 set "CC_CONFIG_TEMPLATE=%~dp0..\config.example.md"
 if not exist "%CC_CONFIG_TEMPLATE%" set "CC_CONFIG_TEMPLATE=%~dp0config.example.md"
 if not exist "%CC_CONFIG_TEMPLATE%" (
