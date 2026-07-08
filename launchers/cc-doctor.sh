@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # POSIX counterpart of cc-doctor.cmd. Read-only preflight/readiness audit for the
-# optional Codex executor and the target project's orchestration state. Makes NO
-# changes to any file (not even a stuck orchestrator.lock or an orphaned worktree - it
-# only reports on them). Implemented with plain POSIX shell + grep/sed/awk, no
-# PowerShell. Run from the project root.
+# optional Codex executor (binary, auth, and the Claude Code allow-rule for autonomous
+# `codex exec`) and the target project's orchestration state. Makes NO changes to any
+# file (not even a stuck orchestrator.lock or an orphaned worktree - it only reports on
+# them). Implemented with plain POSIX shell + grep/sed/awk, no PowerShell. Run from the
+# project root.
 
 # Directory of this script and the repo root above launchers/ (used by the
 # agent-mirror freshness check further down; agent definitions live under
@@ -49,6 +50,19 @@ if [ -f "$HOME/.codex/auth.json" ]; then
   echo "auth         : ~/.codex/auth.json present"
 else
   echo "auth         : NOT found -> run: codex login"
+fi
+# Claude Code allow-rule for autonomous `codex exec` - a simple substring search across
+# the project/user settings files (same "text search for codex exec" heuristic the
+# processor gate uses); without the rule the auto-mode classifier blocks coder_codex/
+# reviewer_codex and they escalate to Claude.
+permrule=0
+for sf in ".claude/settings.local.json" ".claude/settings.json" "$HOME/.claude/settings.json"; do
+  if [ -f "$sf" ] && grep -q 'codex exec' "$sf" 2>/dev/null; then permrule=1; fi
+done
+if [ "$permrule" -eq 1 ]; then
+  echo "exec permission: allow-rule for codex exec present in Claude Code settings"
+else
+  echo "exec permission: NOT found -> auto-mode classifier blocks autonomous codex exec; run cc-config (seeds Bash(codex exec *)) or add the allow-rule manually, else coder_codex/reviewer_codex escalate to Claude"
 fi
 echo
 echo "== Effective CODEX_* (.work/config.md; CODEX_CODER/CODEX_REVIEWER fall back to env; blank = default) =="
