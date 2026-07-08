@@ -16,20 +16,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Regenerate coder variants and check for drift
+      - name: Regenerate agent variants and check for drift
         # Regenerates coder.md / coder_fast.md / coder_deep.md from
-        # coder.template.md via generate-coders.ps1, then fails the build if the
+        # coder.template.md and reviewer.md / reviewer_std.md from
+        # reviewer.template.md via generate-coders.ps1, then fails the build if the
         # regenerated files differ from what is committed. Mirrors the drift
-        # check already used by launchers/cc-sync.cmd (see T-011): the template
-        # is the source of truth, and a stale/hand-edited variant must not reach
+        # check already used by launchers/cc-sync.cmd (see T-011): the templates
+        # are the source of truth, and a stale/hand-edited variant must not reach
         # main unnoticed.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           .\generate-coders.ps1
-          git diff --exit-code -- coder.md coder_fast.md coder_deep.md
+          git diff --exit-code -- coder.md coder_fast.md coder_deep.md reviewer.md reviewer_std.md
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "coder.md / coder_fast.md / coder_deep.md drifted from coder.template.md. Run generate-coders.ps1 (or generate-coders.cmd) locally and commit the regenerated files."
+            Write-Error "coder.md / coder_fast.md / coder_deep.md / reviewer.md / reviewer_std.md drifted from their templates (coder.template.md / reviewer.template.md). Run generate-coders.ps1 (or generate-coders.cmd) locally and commit the regenerated files."
             exit 1
           }
 
