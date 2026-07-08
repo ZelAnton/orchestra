@@ -11,7 +11,8 @@ rem      literal "!" characters in the argument would be eaten by delayed expans
 rem      already at capture time;
 rem   2) the argument is substituted into the claude prompt via !ARGS! (delayed
 rem      expansion), not a second direct use of %* on this line;
-rem   3) double quotes inside ARGS are replaced with single quotes — otherwise a
+rem   3) double quotes inside ARGS are replaced with single quotes (shared step,
+rem      cc-common.cmd:sanitize, the same one cc-queue.cmd uses) — otherwise a
 rem      quote in the argument would break out of the prompt's quoting and claude
 rem      would receive several unrelated positional arguments instead of one prompt.
 rem Known limitation of cmd.exe that cannot be fixed from inside a .cmd file: if the
@@ -21,7 +22,7 @@ rem the batch file, before the first line of script code runs.
 setlocal
 set "ARGS=%*"
 setlocal EnableDelayedExpansion
-set "ARGS=!ARGS:"='!"
+call "%~dp0cc-common.cmd" sanitize
 if "%~1"=="" (
   claude --agent thinker --permission-mode acceptEdits "Per your system prompt: act as the analytical thinking partner for this project. Greet me briefly, then ask what I want to explore or build. Analyze it with me and, once we agree on concrete work, enqueue it into .work/Tasks_Queue.md per your instructions."
 ) else (
