@@ -4,7 +4,10 @@
 #   - файл хранится как UTF-8 без BOM;
 #   - обязательные поля name/description присутствуют во frontmatter и непусты;
 #   - поле name совпадает с именем файла без расширения;
-#   - имя файла (и, соответственно, name) — в snake_case.
+#   - имя файла (и, соответственно, name) — в snake_case;
+#   - поле permissionMode присутствует и равно строго "auto" (не "acceptEdits"/
+#     "bypassPermissions" — это защита от прошлой реальной регрессии, см. AGENTS.md);
+#   - поле model присутствует (конкретное значение не проверяется).
 #
 # Запуск: pwsh -File tools/validate-agents.ps1 (или powershell -File tools\validate-agents.ps1).
 # Печатает перечень нарушений (файл — конкретное нарушение) и завершается кодом 1, если
@@ -78,12 +81,25 @@ foreach ($file in $agentFiles) {
 
     $name = $fields['name']
     $description = $fields['description']
+    $model = $fields['model']
+    $permissionMode = $fields['permissionMode']
 
     if ([string]::IsNullOrWhiteSpace($name)) {
         $violations += "${relPath}: поле 'name' отсутствует или пусто во frontmatter"
     }
     if ([string]::IsNullOrWhiteSpace($description)) {
         $violations += "${relPath}: поле 'description' отсутствует или пусто во frontmatter"
+    }
+    if ([string]::IsNullOrWhiteSpace($model)) {
+        $violations += "${relPath}: поле 'model' отсутствует или пусто во frontmatter"
+    }
+
+    # -cne: сравнение обязано быть регистрозависимым — permissionMode должен быть
+    # именно "auto", а не, например, "Auto" или "AUTO".
+    if ([string]::IsNullOrWhiteSpace($permissionMode)) {
+        $violations += "${relPath}: поле 'permissionMode' отсутствует или пусто во frontmatter (ожидается 'auto')"
+    } elseif ($permissionMode -cne 'auto') {
+        $violations += "${relPath}: поле 'permissionMode' ('$permissionMode') должно быть строго 'auto' (не 'acceptEdits'/'bypassPermissions')"
     }
 
     # -cne: сравнение обязано быть регистрозависимым (обычный -ne в PowerShell по
