@@ -42,7 +42,8 @@ workspace, коммитит результаты листовых агентов
 Все перечисленные ниже агентские `.md` лежат в каталоге `agents/` (в тексте — краткими
 именами файлов, например `agents/processor.md`); там же — шаблоны `coder.template.md` и
 `reviewer.template.md`. Документация (`AGENTS.md`, `knowledge.md`, `config.example.md`,
-`README.md`, `plans/`) и генератор `generate-coders.ps1`/`.cmd` остаются в корне репозитория.
+`constraints.example.md`, `README.md`, `plans/`) и генератор `generate-coders.ps1`/`.cmd`
+остаются в корне репозитория.
 
 ### Координация и интеграция
 
@@ -84,8 +85,11 @@ workspace, коммитит результаты листовых агентов
 ### Конфигурация и запуск
 
 - `config.example.md` — каноническое описание `.work/config.md`, всех defaults и
-  Codex/KB-переключателей. `launchers\cc-config.cmd` создаёт локальный config, не
-  перезаписывая существующий.
+  Codex/KB-переключателей. `launchers\cc-config.cmd`/`.sh` создаёт локальные `.work/config.md`
+  (блочный seed) и `.work/constraints.md` (полная копия), не перезаписывая существующие.
+- `constraints.example.md` — шаблон человекочитаемой политики ограничений проекта
+  (`.work/constraints.md`): denylist путей, ветки/remotes, push/merge policy, обязательные
+  проверки, пороги размера, human-review категории. Сеется целиком через `cc-config`.
 - `cc-processor` запускает цикл, `cc-resume` продолжает последнюю сессию,
   `cc-status`/`cc-journal` читают состояние, `cc-doctor` проверяет Codex, `cc-queue`,
   `cc-thinker`, `cc-audit`, `cc-enhance`, `cc-github` запускают соответствующие роли.
@@ -98,6 +102,7 @@ workspace, коммитит результаты листовых агентов
 | `.work/Tasks_Done.md` | архив завершённых задач |
 | `.work/Github_Sync.md` | таблица соответствия GitHub issues/PR и задач очереди; ведёт `github_sync` |
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
+| `.work/constraints.md` | человекочитаемая политика ограничений проекта (denylist путей, ветки/remotes, push/merge policy, обязательные проверки, пороги, human-review категории); шаблон — `constraints.example.md`, сеет `cc-config`; читают processor/planner/coder/reviewer, нет файла — деградация без ошибок |
 | `.work/orchestrator.lock` | защита от двух processor одновременно |
 | `.work/PAUSE` | kill switch: при наличии processor штатно останавливается на границе фазы/раунда (освобождает lock, состояние подхватит Фаза 0); ставит/снимает `cc-pause`/`cc-unpause` |
 | `.work/batch.md` | append-only манифест текущей когорты (строки волн приёма дописываются, не переписываются) |
