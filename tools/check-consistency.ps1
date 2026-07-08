@@ -21,12 +21,12 @@
                              referenced in an agent file appears in the runtime-artifact
                              table of knowledge.md.
 
-    "Agent files" = the *.md files directly under the repo root that start with a YAML
+    "Agent files" = the *.md files under the agents/ directory that start with a YAML
     frontmatter block (`---` as the very first line) — i.e. the actual role definitions
-    (processor.md, coder*.md, reviewer*.md, ...). Plain documentation (AGENTS.md,
-    knowledge.md, config.example.md itself, plans/*.md) is excluded from scanning; two of
-    those files (config.example.md, knowledge.md) instead serve as the source of truth
-    that agent files are checked against.
+    (processor.md, coder*.md, reviewer*.md, ...). Documentation lives in the repo root
+    (AGENTS.md, knowledge.md, config.example.md, README.md, plans/*.md), not in agents/,
+    and is not scanned; two of those root files (config.example.md, knowledge.md) instead
+    serve as the source of truth that agent files are checked against.
 
     On any discrepancy, prints one line per finding in the form
     "<file> — <check> — <detail>" and exits with a non-zero code. With nothing to
@@ -46,9 +46,12 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
+# Agent role definitions live under agents/; config.example.md and knowledge.md (the
+# reference sources of truth) stay in the repo root.
+$AgentsDir = Join-Path $RepoRoot 'agents'
 $ConfigFile = Join-Path $RepoRoot 'config.example.md'
 $KnowledgeFile = Join-Path $RepoRoot 'knowledge.md'
-$ProcessorFile = Join-Path $RepoRoot 'processor.md'
+$ProcessorFile = Join-Path $AgentsDir 'processor.md'
 
 foreach ($required in @($ConfigFile, $KnowledgeFile, $ProcessorFile)) {
     if (-not (Test-Path -LiteralPath $required)) {
@@ -79,16 +82,16 @@ function Strip-InlineCode {
 
 # --- Discover agent files (frontmatter-bearing .md files at repo root) -----
 
-$agentFiles = Get-ChildItem -Path $RepoRoot -Filter '*.md' -File | Where-Object {
+$agentFiles = Get-ChildItem -Path $AgentsDir -Filter '*.md' -File | Where-Object {
     (Get-Content -LiteralPath $_.FullName -TotalCount 1 -Encoding utf8) -ceq '---'
 } | Sort-Object Name
 
 if (-not $agentFiles -or $agentFiles.Count -eq 0) {
-    Write-Error "No agent .md files (YAML-frontmatter role files) found under $RepoRoot"
+    Write-Error "No agent .md files (YAML-frontmatter role files) found under $AgentsDir"
     exit 2
 }
 
-Write-Host "Discovered $($agentFiles.Count) agent files under $RepoRoot"
+Write-Host "Discovered $($agentFiles.Count) agent files under $AgentsDir"
 
 # =============================================================================
 # Class 1 — config keys vs config.example.md defaults table

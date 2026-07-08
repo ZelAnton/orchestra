@@ -10,37 +10,36 @@
 # Печатает перечень нарушений (файл — конкретное нарушение) и завершается кодом 1, если
 # нарушения найдены; при их отсутствии — печатает краткое подтверждение и код 0.
 #
-# Список исключений ниже — те же самые не-агентские .md в корне репозитория, что и в
-# /XF у launchers\cc-sync.cmd и в $excludeNames блока "agent-mirror freshness" у
-# launchers\cc-doctor.cmd; при изменении списка не-агентских .md держите все три места
-# синхронными.
+# Проверяется каталог agents/ (агентские определения; документация — AGENTS.md,
+# knowledge.md, README.md, config.example.md, plans\ — живёт в корне и здесь не
+# сканируется). Единственное исключение внутри agents/ — два шаблона генератора
+# (coder.template.md, reviewer.template.md): их frontmatter содержит плейсхолдер
+# "name: {{NAME}}", поэтому под инварианты настоящих агентов они не подпадают. Тот же
+# сокращённый набор исключений используют /XF у launchers\cc-sync.cmd(.sh) и блок
+# "agent-mirror freshness" у launchers\cc-doctor.cmd(.sh); держите все места синхронными.
 
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
+$agentsDir = Join-Path $repoRoot 'agents'
 
-$excludeNames = @('coder.template.md', 'reviewer.template.md', 'config.example.md', 'AGENTS.md', 'knowledge.md', 'README.md')
-$excludePatterns = @('*_PLAN.md', '*_ROADMAP.md', 'Orchestra_Review_*.md')
+$excludeNames = @('coder.template.md', 'reviewer.template.md')
 
 function Test-Excluded([string]$fileName) {
-    if ($excludeNames -contains $fileName) { return $true }
-    foreach ($pattern in $excludePatterns) {
-        if ($fileName -like $pattern) { return $true }
-    }
-    return $false
+    return ($excludeNames -contains $fileName)
 }
 
 # snake_case: строчные латинские буквы/цифры, слова разделены одиночным "_", без
 # ведущего/конечного "_" и без пустых компонентов ("__").
 $snakeCasePattern = '^[a-z][a-z0-9]*(_[a-z0-9]+)*$'
 
-$agentFiles = Get-ChildItem -Path $repoRoot -File -Filter '*.md' |
+$agentFiles = Get-ChildItem -Path $agentsDir -File -Filter '*.md' -ErrorAction SilentlyContinue |
     Where-Object { -not (Test-Excluded $_.Name) } |
     Sort-Object Name
 
 if ($agentFiles.Count -eq 0) {
-    Write-Host "Агентские .md файлы не найдены в $repoRoot"
+    Write-Host "Агентские .md файлы не найдены в $agentsDir"
     exit 1
 }
 

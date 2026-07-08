@@ -33,8 +33,8 @@ a human only needs to seed the queue and periodically check status or escalation
   conflict domain that doesn't overlap with active tasks, writes acceptance
   criteria and, for larger work, a staged plan.
 - **coder_fast / coder / coder_deep** — the three tiers of implementer, identical
-  in algorithm and differing only in model/effort (see `coder.template.md`, the
-  single source `generate-coders.ps1` expands into all three). They implement a
+  in algorithm and differing only in model/effort (see `agents/coder.template.md`,
+  the single source `generate-coders.ps1` expands into all three). They implement a
   task, address review findings, or apply a targeted CI/build fix in the worktree
   they're pointed at; they never touch the queue or VCS state directly.
 - **coder_codex** — a thin `codex exec` adapter for implementation and per-task
@@ -83,7 +83,7 @@ launchers/cc-sync.sh       # macOS/Linux
 
 It mirrors:
 
-- the root-level agent `*.md` files into your Claude agents directory
+- the agent `*.md` files under `agents/` into your Claude agents directory
   (`%USERPROFILE%\.claude\agents` on Windows, `~/.claude/agents` on macOS/Linux),
   where `claude --agent <name>` loads them from;
 - the launchers into your Claude scripts directory (`%USERPROFILE%\.claude\scripts`
@@ -92,13 +92,14 @@ It mirrors:
   `cc-config` can find its template from the mirror.
 
 Neither variant purges other agents already present in the mirror. On Windows, if a
-template-generated coder variant (`coder.md`, `coder_fast.md`, `coder_deep.md`) has
-drifted from `coder.template.md`, `cc-sync.cmd` regenerates it before mirroring; the
-POSIX `cc-sync.sh` mirrors the committed coder variants as-is (the regeneration and
-agent-invariant checks are Windows-only PowerShell steps — if you change
-`coder.template.md`, regenerate the variants with `generate-coders` on a machine with
-PowerShell before syncing). Re-run the sync launcher after editing any agent
-definition or launcher — otherwise Claude keeps using the previously mirrored copy.
+template-generated coder variant (`agents/coder.md`, `agents/coder_fast.md`,
+`agents/coder_deep.md`) has drifted from `agents/coder.template.md`, `cc-sync.cmd`
+regenerates it before mirroring; the POSIX `cc-sync.sh` mirrors the committed coder
+variants as-is (the regeneration and agent-invariant checks are Windows-only PowerShell
+steps — if you change `agents/coder.template.md`, regenerate the variants with
+`generate-coders` on a machine with PowerShell before syncing). Re-run the sync launcher
+after editing any agent definition or launcher — otherwise Claude keeps using the
+previously mirrored copy.
 
 ## Quick start in a target project
 

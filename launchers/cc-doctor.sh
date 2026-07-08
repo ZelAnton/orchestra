@@ -6,8 +6,9 @@
 # PowerShell. Run from the project root.
 
 # Directory of this script and the repo root above launchers/ (used by the
-# agent-mirror freshness check further down; when run from the ~/.claude/scripts
-# mirror the parent has no agent .md, and that check is skipped).
+# agent-mirror freshness check further down; agent definitions live under
+# $REPO_ROOT/agents, and when run from the ~/.claude/scripts mirror the parent has no
+# agents/ folder, so that check is skipped).
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 
@@ -217,16 +218,17 @@ else
   echo "WARN not a git or jj repository here - main-branch check skipped (run cc-doctor.sh from the target project root)"
 fi
 # Agent-mirror freshness - only meaningful when this script runs from the actual
-# Orchestra repo checkout (agent .md files sit next to launchers/), NOT from the
-# launchers-only ~/.claude/scripts mirror. Same file set/exclusions as cc-sync.sh.
+# Orchestra repo checkout (agent definitions live under $REPO_ROOT/agents), NOT from the
+# launchers-only ~/.claude/scripts mirror. Same agents/ source and reduced exclusion set
+# (only the two generator templates) as cc-sync.sh.
 mirrorDir="$HOME/.claude/agents"
+agentsSrc="$REPO_ROOT/agents"
 srcCount=0; missing=""; stale=""
-for f in "$REPO_ROOT"/*.md; do
+for f in "$agentsSrc"/*.md; do
   [ -f "$f" ] || continue
   n="$(basename "$f")"
   case "$n" in
-    coder.template.md|reviewer.template.md|config.example.md|AGENTS.md|knowledge.md|README.md) continue ;;
-    *_PLAN.md|*_ROADMAP.md|Orchestra_Review_*.md) continue ;;
+    coder.template.md|reviewer.template.md) continue ;;
   esac
   srcCount=$((srcCount + 1))
   dst="$mirrorDir/$n"
@@ -237,7 +239,7 @@ for f in "$REPO_ROOT"/*.md; do
   fi
 done
 if [ "$srcCount" -eq 0 ]; then
-  echo "OK   agent-mirror freshness check skipped (no agent .md files found next to launchers/ - not the Orchestra repo checkout)"
+  echo "OK   agent-mirror freshness check skipped (no agents/ folder next to launchers/ - not the Orchestra repo checkout)"
 elif [ -z "$missing" ] && [ -z "$stale" ]; then
   echo "OK   ~/.claude/agents mirror up to date with $srcCount agent file(s) in this checkout"
 else

@@ -11,10 +11,11 @@
 ## Назначение и установка
 
 Orchestra — не приложение и не библиотека. Это комплект системных промптов Claude Code,
-адаптеров Codex CLI и Windows-launchers для автономной обработки очереди задач. Агентские
-описания находятся в корне и устанавливаются в `%USERPROFILE%\.claude\agents`; launchers
-устанавливаются в `%USERPROFILE%\.claude\scripts`. После изменения ролей или `.cmd`
-выполните `launchers\cc-sync.cmd`, иначе Claude продолжит использовать старую копию.
+адаптеров Codex CLI и кросс-платформенных launchers для автономной обработки очереди задач.
+Агентские описания лежат в каталоге `agents/` и устанавливаются в
+`%USERPROFILE%\.claude\agents`; launchers устанавливаются в `%USERPROFILE%\.claude\scripts`.
+После изменения ролей или launcher выполните `launchers\cc-sync.cmd` (или `cc-sync.sh`),
+иначе Claude продолжит использовать старую копию.
 Стратегические направления и порядок развития зафиксированы в
 `LOOP_ORCHESTRA_ROADMAP.md`; это план, а не действующий runtime-контракт.
 Архитектура неблокирующего human in the loop, web/Android control plane, событий и PoC
@@ -37,6 +38,11 @@ workspace, коммитит результаты листовых агентов
 Листовые coder/reviewer не должны самостоятельно управлять очередью, коммитами или push.
 
 ## Карта исходных файлов
+
+Все перечисленные ниже агентские `.md` лежат в каталоге `agents/` (в тексте — краткими
+именами файлов, например `agents/processor.md`); там же — шаблоны `coder.template.md` и
+`reviewer.template.md`. Документация (`AGENTS.md`, `knowledge.md`, `config.example.md`,
+`README.md`, `plans/`) и генератор `generate-coders.ps1`/`.cmd` остаются в корне репозитория.
 
 ### Координация и интеграция
 
@@ -133,6 +139,6 @@ workspace, коммитит результаты листовых агентов
 ## Быстрый поиск
 
 - Роль агента: `rg -n "^(name:|description:|# Роль)" -g "*.md" .`
-- Фаза оркестратора: `rg -n "^## Фаза|Фаза 5\." processor.md`
+- Фаза оркестратора: `rg -n "^## Фаза|Фаза 5\." agents/processor.md`
 - Runtime-файл и его писатели: `rg -n "review_integration|merge_report|Tasks_Queue" -g "*.md" .`
-- Конфигурационный ключ: `rg -n "CODEX_CIFIX|REVIEW_LOOP_MAX" processor.md config.example.md`
+- Конфигурационный ключ: `rg -n "CODEX_CIFIX|REVIEW_LOOP_MAX" agents/processor.md config.example.md`

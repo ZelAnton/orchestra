@@ -17,10 +17,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Regenerate agent variants and check for drift
-        # Regenerates coder.md / coder_fast.md / coder_deep.md from
-        # coder.template.md and reviewer.md / reviewer_std.md from
-        # reviewer.template.md via generate-coders.ps1, then fails the build if the
-        # regenerated files differ from what is committed. Mirrors the drift
+        # Regenerates agents/coder.md / coder_fast.md / coder_deep.md from
+        # agents/coder.template.md and agents/reviewer.md / reviewer_std.md from
+        # agents/reviewer.template.md via generate-coders.ps1 (the generator lives in
+        # the repo root; templates and variants under agents/), then fails the build if
+        # the regenerated files differ from what is committed. Mirrors the drift
         # check already used by launchers/cc-sync.cmd (see T-011): the templates
         # are the source of truth, and a stale/hand-edited variant must not reach
         # main unnoticed.
@@ -28,9 +29,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           .\generate-coders.ps1
-          git diff --exit-code -- coder.md coder_fast.md coder_deep.md reviewer.md reviewer_std.md
+          git diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md agents/reviewer.md agents/reviewer_std.md
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "coder.md / coder_fast.md / coder_deep.md / reviewer.md / reviewer_std.md drifted from their templates (coder.template.md / reviewer.template.md). Run generate-coders.ps1 (or generate-coders.cmd) locally and commit the regenerated files."
+            Write-Error "agents/coder.md / coder_fast.md / coder_deep.md / reviewer.md / reviewer_std.md drifted from their templates (agents/coder.template.md / agents/reviewer.template.md). Run generate-coders.ps1 (or generate-coders.cmd) locally and commit the regenerated files."
             exit 1
           }
 

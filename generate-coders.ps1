@@ -1,8 +1,9 @@
 # Генерирует агентские .md-файлы из общих шаблонов подстановкой плейсхолдеров {{...}}:
-#   coder.template.md    -> coder.md, coder_fast.md, coder_deep.md
-#   reviewer.template.md -> reviewer.md, reviewer_std.md
-# Запускать после правки любого шаблона (или параметра варианта ниже) — все выходные
-# файлы соответствующего семейства перезаписываются целиком.
+#   agents/coder.template.md    -> agents/coder.md, agents/coder_fast.md, agents/coder_deep.md
+#   agents/reviewer.template.md -> agents/reviewer.md, agents/reviewer_std.md
+# Шаблоны и сгенерированные варианты лежат в каталоге agents/; сам скрипт — в корне
+# репозитория. Запускать после правки любого шаблона (или параметра варианта ниже) — все
+# выходные файлы соответствующего семейства перезаписываются целиком.
 #
 # Coder-семейство: тела трёх файлов идентичны, различается только фронтматтер
 # (name/model/effort/description). Reviewer-семейство: расходится и тело — вводный
@@ -19,10 +20,14 @@
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Templates and their generated variants live under agents/ (this script itself stays in
+# the repo root). Read the *.template.md from there and write the generated *.md back to
+# the same folder.
+$agentsDir = Join-Path $root "agents"
 
 $templates = @{
-    coder    = Get-Content -Raw -Encoding UTF8 (Join-Path $root "coder.template.md")
-    reviewer = Get-Content -Raw -Encoding UTF8 (Join-Path $root "reviewer.template.md")
+    coder    = Get-Content -Raw -Encoding UTF8 (Join-Path $agentsDir "coder.template.md")
+    reviewer = Get-Content -Raw -Encoding UTF8 (Join-Path $agentsDir "reviewer.template.md")
 }
 
 # --- Тексты, расходящиеся между reviewer.md и reviewer_std.md (тело, не фронтматтер).
@@ -157,7 +162,7 @@ foreach ($v in $variants) {
     # байты выхода не зависели от того, какими переводами строк редактор сохранил
     # шаблон или встроенные значения. Для текущих LF-шаблонов это no-op.
     $out = $out.Replace("`r`n", "`n").Replace("`r", "`n")
-    $outPath = Join-Path $root $v.File
+    $outPath = Join-Path $agentsDir $v.File
     # Пишем UTF-8 БЕЗ BOM явно: Set-Content -Encoding UTF8 в Windows PowerShell 5.1
     # добавляет BOM, а BOM перед `---` frontmatter ломает парсинг агента.
     [System.IO.File]::WriteAllText($outPath, $out, (New-Object System.Text.UTF8Encoding($false)))
