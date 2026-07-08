@@ -11,7 +11,8 @@
 # нарушения найдены; при их отсутствии — печатает краткое подтверждение и код 0.
 #
 # Список исключений ниже — те же самые не-агентские .md в корне репозитория, что и в
-# /XF у launchers\cc-sync.cmd; при изменении списка не-агентских .md держите оба места
+# /XF у launchers\cc-sync.cmd и в $excludeNames блока "agent-mirror freshness" у
+# launchers\cc-doctor.cmd; при изменении списка не-агентских .md держите все три места
 # синхронными.
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +20,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 
-$excludeNames = @('coder.template.md', 'config.example.md', 'AGENTS.md', 'knowledge.md')
+$excludeNames = @('coder.template.md', 'config.example.md', 'AGENTS.md', 'knowledge.md', 'README.md')
 $excludePatterns = @('*_PLAN.md', '*_ROADMAP.md', 'Orchestra_Review_*.md')
 
 function Test-Excluded([string]$fileName) {

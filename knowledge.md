@@ -90,6 +90,7 @@ workspace, коммитит результаты листовых агентов
 |---|---|
 | `.work/Tasks_Queue.md` | входная очередь; новые задачи имеют ID `T-NNN` |
 | `.work/Tasks_Done.md` | архив завершённых задач |
+| `.work/Github_Sync.md` | таблица соответствия GitHub issues/PR и задач очереди; ведёт `github_sync` |
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
 | `.work/orchestrator.lock` | защита от двух processor одновременно |
 | `.work/batch.md` | append-only манифест текущей когорты (строки волн приёма дописываются, не переписываются) |
@@ -100,6 +101,7 @@ workspace, коммитит результаты листовых агентов
 | `.work/worktrees/<T-ID>` | изолированная рабочая копия задачи |
 | `.work/worktrees/_integration` | join-барьер и совокупный результат батча |
 | `.work/review_integration.md` | интеграционные находки `F-NN` |
+| `.work/integration_state.md` | служебное состояние джойна (Ревью-SHA предыдущего интеграционного ревью, F-циклов); ведёт processor, создаётся в Фазе 5, удаляется в 6.4 |
 | `.work/merge_report.md` | результаты merge и причины карантина |
 | `.work/status.md` | текущий обзор processor |
 | `.work/journal.md` | постоянный журнал завершённых прогонов |

@@ -66,9 +66,9 @@ rem purge (other agents already in the mirror are preserved). Excluded:
 rem   coder.template.md      - "name: {{NAME}}" frontmatter would register a broken agent
 rem   config.example.md      - not an agent; mirrored separately below, next to the
 rem                            launchers in scripts\, so cc-config.cmd can find it there
-rem   AGENTS.md/knowledge.md/*_PLAN.md/*_ROADMAP.md - repository docs, not agents
+rem   AGENTS.md/knowledge.md/README.md/*_PLAN.md/*_ROADMAP.md - repository docs, not agents
 rem   Orchestra_Review_*.md  - dated review reports, not agents
-robocopy "%~dp0.." "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md config.example.md AGENTS.md knowledge.md "*_PLAN.md" "*_ROADMAP.md" "Orchestra_Review_*.md" /NJH /NJS /NDL /NFL
+robocopy "%~dp0.." "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md config.example.md AGENTS.md knowledge.md README.md "*_PLAN.md" "*_ROADMAP.md" "Orchestra_Review_*.md" /NJH /NJS /NDL /NFL
 rem robocopy exit codes 0-7 mean success; 8+ is a real error.
 if errorlevel 8 (
   echo Sync failed: robocopy returned an error code.
