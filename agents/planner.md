@@ -4,7 +4,7 @@ description: Планирует батч задач и выбирает испо
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 maxTurns: 80
 ---
 

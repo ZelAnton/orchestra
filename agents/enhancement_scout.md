@@ -4,7 +4,7 @@ description: Аналитик развития проекта на модели 
 model: fable
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 maxTurns: 150
 ---
 

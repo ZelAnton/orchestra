@@ -13,4 +13,4 @@ rem
 rem ВНИМАНИЕ: --continue подхватывает САМУЮ ПОСЛЕДНЮЮ сессию Claude Code в этом каталоге,
 rem какой бы она ни была. Не запускай между падением и cc-resume другие cc-* лаунчеры
 rem или интерактивный claude — иначе --continue возобновит их сессию, а не processor.
-claude --agent processor --permission-mode acceptEdits --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+claude --agent processor --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."

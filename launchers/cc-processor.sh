@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the processor orchestrator in the current folder (Claude Code, acceptEdits mode).
+# Run the processor orchestrator in the current folder (Claude Code, auto mode).
 # Processes the .work/Tasks_Queue.md queue in parallel batches end to end.
 #
 # Optional flags (any order, before the remaining arguments):
@@ -44,4 +44,4 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --permission-mode acceptEdits "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."

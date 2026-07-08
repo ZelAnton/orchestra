@@ -23,6 +23,8 @@ Keep Markdown instructions direct, imperative, and consistent with the existing 
 
 Do not edit generated coder variants independently. Change `agents/coder.template.md` or the variant metadata in `generate-coders.ps1`, regenerate, and review all three outputs.
 
+All agent frontmatter (`permissionMode:`) and every `claude ... --permission-mode` invocation in `launchers/cc-*.cmd`/`.sh` must use `auto`, not `acceptEdits` or `bypassPermissions`. `auto` is a supported value — it was previously (wrongly, see history of T-007 in `.work/Tasks_Done.md`) replaced repo-wide with `acceptEdits` on the mistaken belief that `auto` was unsupported/undocumented; that regressed every agent from `⏵⏵ auto mode` to `⏵⏵ accept edits`. Do not repeat that change.
+
 ## Testing Guidelines
 
 Test role boundaries: file ownership, VCS permissions, status transitions, retry limits, and fallbacks. For launchers, verify argument parsing and failures. Use a disposable repository for destructive flow tests.

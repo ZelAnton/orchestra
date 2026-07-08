@@ -4,7 +4,7 @@ description: Тонкий адаптер-исполнитель поверх Ope
 model: haiku
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 ---
 
 # Роль

@@ -12,4 +12,4 @@
 # WARNING: --continue picks up the MOST RECENT Claude Code session in this directory,
 # whatever it is. Do not run other cc-* launchers or an interactive claude between
 # the crash and cc-resume - otherwise --continue resumes their session, not processor.
-exec claude --agent processor --permission-mode acceptEdits --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+exec claude --agent processor --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."

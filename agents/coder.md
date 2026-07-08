@@ -4,7 +4,7 @@ description: Стандартный листовой исполнитель (son
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 ---
 
 # Роль

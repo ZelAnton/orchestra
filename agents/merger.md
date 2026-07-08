@@ -4,7 +4,7 @@ description: Интегрирует ветки задач батча в инте
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 maxTurns: 100
 ---
 

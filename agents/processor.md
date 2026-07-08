@@ -4,7 +4,7 @@ description: Оркестратор параллельной обработки 
 model: sonnet
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash, Agent(planner, coder_fast, coder, coder_deep, coder_codex, reviewer, reviewer_std, reviewer_codex, full_reviewer, merger, knowledge_curator, executor)
-permissionMode: acceptEdits
+permissionMode: auto
 ---
 
 # Роль

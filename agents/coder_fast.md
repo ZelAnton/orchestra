@@ -4,7 +4,7 @@ description: Быстрый листовой исполнитель просты
 model: sonnet
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 ---
 
 # Роль

@@ -4,7 +4,7 @@ description: {{DESCRIPTION}}
 model: {{MODEL}}
 effort: {{EFFORT}}
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 ---
 
 # Роль

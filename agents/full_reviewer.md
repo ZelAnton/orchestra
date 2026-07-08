@@ -4,7 +4,7 @@ description: Интеграционное ревью батча на джойн-
 model: opus
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: acceptEdits
+permissionMode: auto
 maxTurns: 120
 ---
 
