@@ -1,10 +1,11 @@
 # Orchestra
 
-Orchestra is a kit of Claude Code system prompts, Codex CLI adapters, and Windows
-launchers for autonomously processing a task queue with Claude Code / Codex agents.
-It is not an application or a library you import; it is agent definitions plus
-`.cmd` entry points that you install into your Claude Code environment and then run
-against any target project.
+Orchestra is a kit of Claude Code system prompts, Codex CLI adapters, and
+cross-platform launchers for autonomously processing a task queue with Claude Code /
+Codex agents. It is not an application or a library you import; it is agent
+definitions plus launcher entry points — `.cmd` on Windows, `.sh` on macOS/Linux —
+that you install into your Claude Code environment and then run against any target
+project.
 
 ## What problem it solves
 
@@ -72,29 +73,40 @@ summary.
 ## Installation
 
 Orchestra is installed by mirroring this repository's agent definitions and
-launchers into your Claude Code environment:
+launchers into your Claude Code environment. Run the sync launcher from a checkout of
+this repository:
 
 ```
-launchers\cc-sync.cmd
+launchers\cc-sync.cmd      # Windows
+launchers/cc-sync.sh       # macOS/Linux
 ```
 
-Run it from a checkout of this repository. It mirrors:
+It mirrors:
 
-- the root-level agent `*.md` files into `%USERPROFILE%\.claude\agents` (where
-  `claude --agent <name>` loads them from);
-- `launchers\*.cmd` into `%USERPROFILE%\.claude\scripts` (which should be on
-  `PATH`), plus `config.example.md` alongside them so `cc-config.cmd` can find its
-  template from the mirror.
+- the root-level agent `*.md` files into your Claude agents directory
+  (`%USERPROFILE%\.claude\agents` on Windows, `~/.claude/agents` on macOS/Linux),
+  where `claude --agent <name>` loads them from;
+- the launchers into your Claude scripts directory (`%USERPROFILE%\.claude\scripts`
+  or `~/.claude/scripts`, which should be on `PATH`) — `launchers\*.cmd` on Windows,
+  `launchers/*.sh` on macOS/Linux — plus `config.example.md` alongside them so
+  `cc-config` can find its template from the mirror.
 
-If a template-generated coder variant (`coder.md`, `coder_fast.md`,
-`coder_deep.md`) has drifted from `coder.template.md`, `cc-sync.cmd` regenerates it
-before mirroring. Re-run `cc-sync.cmd` after editing any agent definition or
-launcher — otherwise Claude keeps using the previously mirrored copy.
+Neither variant purges other agents already present in the mirror. On Windows, if a
+template-generated coder variant (`coder.md`, `coder_fast.md`, `coder_deep.md`) has
+drifted from `coder.template.md`, `cc-sync.cmd` regenerates it before mirroring; the
+POSIX `cc-sync.sh` mirrors the committed coder variants as-is (the regeneration and
+agent-invariant checks are Windows-only PowerShell steps — if you change
+`coder.template.md`, regenerate the variants with `generate-coders` on a machine with
+PowerShell before syncing). Re-run the sync launcher after editing any agent
+definition or launcher — otherwise Claude keeps using the previously mirrored copy.
 
 ## Quick start in a target project
 
 Run these from the root of the project whose task queue you want Orchestra to
-process (any project on your machine, not this repository):
+process (any project on your machine, not this repository). The command names below
+are extensionless: on Windows they resolve to the `.cmd` launchers via `PATH`; on
+macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
+`cc-processor.sh`, and so on):
 
 1. `cc-config` — seeds `.work\config.md` for the project from the template block in
    `config.example.md` (an existing `.work\config.md` is never overwritten).
