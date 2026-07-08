@@ -88,8 +88,9 @@ It mirrors:
   where `claude --agent <name>` loads them from;
 - the launchers into your Claude scripts directory (`%USERPROFILE%\.claude\scripts`
   or `~/.claude/scripts`, which should be on `PATH`) — `launchers\*.cmd` on Windows,
-  `launchers/*.sh` on macOS/Linux — plus `config.example.md` alongside them so
-  `cc-config` can find its template from the mirror.
+  `launchers/*.sh` on macOS/Linux — plus `config.example.md` and
+  `constraints.example.md` alongside them so `cc-config` can find its templates
+  from the mirror.
 
 Neither variant purges other agents already present in the mirror. On Windows, if a
 template-generated coder variant (`agents/coder.md`, `agents/coder_fast.md`,
@@ -110,7 +111,8 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
 `cc-processor.sh`, and so on):
 
 1. `cc-config` — seeds `.work\config.md` for the project from the template block in
-   `config.example.md` (an existing `.work\config.md` is never overwritten).
+   `config.example.md`, and `.work\constraints.md` from the whole of
+   `constraints.example.md` (an existing target file is never overwritten).
 2. Populate `.work\Tasks_Queue.md` with tasks. Add entries by hand following the
    queue format, or use `cc-queue <source or description>` (`queue_builder`) to
    turn a spec/backlog/description into deduplicated `T-NNN` entries, or
@@ -127,6 +129,8 @@ read-only Codex/configuration preflight, `cc-audit` and `cc-enhance` run
 
 - `config.example.md` — the canonical description of every `.work/config.md` key,
   its default, and the Codex/knowledge-base toggles.
+- `constraints.example.md` — the template for `.work/constraints.md`, an optional
+  project policy file (e.g. a denylist of paths agents must not edit).
 - `knowledge.md` — the internal map of this repository (ownership, control flow,
   runtime artifacts, invariants); read it before making changes to Orchestra
   itself. It is distinct from a target project's own `.work/knowledge/`, which
