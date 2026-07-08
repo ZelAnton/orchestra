@@ -8,6 +8,8 @@
 #   - launchers/*.sh (this folder)            -> ~/.claude/scripts
 #   - config.example.md (repo root)           -> ~/.claude/scripts (so cc-config.sh
 #                                                can find its template from the mirror)
+#   - constraints.example.md (repo root)      -> ~/.claude/scripts (so cc-config.sh
+#                                                can find its template from the mirror)
 #
 # Deliberate cross-platform choices (documented per task T-027):
 #   * launchers/*.cmd are NOT mirrored on POSIX - they do not run there; only the *.sh
@@ -85,12 +87,21 @@ else
   echo "Synced $launcher_count launcher script(s) -> $SCRIPTS_DIR"
 fi
 
-# 3) Also mirror config.example.md next to the launchers in scripts/, so that
-#    cc-config.sh (run from the mirror, off PATH) can find its template via its own dir.
+# 3) Also mirror config.example.md and constraints.example.md next to the launchers in
+#    scripts/, so that cc-config.sh (run from the mirror, off PATH) can find its
+#    templates via its own dir.
 if [ -f "$REPO_ROOT/config.example.md" ]; then
   if cp -f "$REPO_ROOT/config.example.md" "$SCRIPTS_DIR/config.example.md"; then
     echo "Synced config.example.md -> $SCRIPTS_DIR"
   else
     echo "Sync failed: could not copy config.example.md."
+  fi
+fi
+
+if [ -f "$REPO_ROOT/constraints.example.md" ]; then
+  if cp -f "$REPO_ROOT/constraints.example.md" "$SCRIPTS_DIR/constraints.example.md"; then
+    echo "Synced constraints.example.md -> $SCRIPTS_DIR"
+  else
+    echo "Sync failed: could not copy constraints.example.md."
   fi
 fi
