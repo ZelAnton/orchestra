@@ -1,4 +1,4 @@
-# Verifies launchers/cc-resume.cmd invokes claude with --continue plus the
+﻿# Verifies launchers/cc-resume.cmd invokes claude with --continue plus the
 # expected static argument list, and propagates its exit code.
 
 . (Join-Path $PSScriptRoot 'common.ps1')

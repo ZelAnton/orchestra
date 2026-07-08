@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Checks cross-agent textual contract consistency across Orchestra's role .md files.
 
