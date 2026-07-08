@@ -1,4 +1,4 @@
-<#
+﻿<#
   Shared test harness for tests/launchers/*.ps1.
 
   Dot-source this file from each test-*.ps1. Every test-*.ps1 runs as its own
@@ -119,7 +119,15 @@ function Install-Launcher {
         if (-not (Test-Path -LiteralPath $src)) {
             throw "Launcher not found: $src"
         }
-        $text = Get-Content -LiteralPath $src -Raw
+        # -Encoding UTF8 is required here: launchers/*.cmd are saved as UTF-8
+        # without BOM (adding a BOM to .cmd batch files is unsafe - cmd.exe
+        # does not reliably skip it), and Get-Content -Raw without an
+        # explicit encoding falls back to the system ANSI codepage under
+        # Windows PowerShell 5.1 when no BOM is present, corrupting the
+        # non-ASCII characters embedded in some launchers (mirrors the exact
+        # defect this test suite's own .ps1 sources were fixed against - see
+        # T-029).
+        $text = Get-Content -LiteralPath $src -Raw -Encoding UTF8
         if ($script:LauncherContentFixups.ContainsKey($n)) {
             foreach ($pair in $script:LauncherContentFixups[$n]) {
                 $text = [regex]::Replace($text, $pair[0], [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $pair[1] })

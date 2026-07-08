@@ -1,4 +1,20 @@
 @echo off
+rem Detect whether this script is running from an actual repo checkout or from its
+rem own mirror at %USERPROFILE%\.claude\scripts (where cc-sync.cmd copies itself so
+rem launchers can be invoked from PATH; see the robocopy step further down). Only
+rem launchers\*.cmd get mirrored there - the repo-root generator and the agents\
+rem templates do NOT exist in the mirror layout. Every step below that only makes
+rem sense against a checkout (regenerating agents, and the three robocopy blocks
+rem that mirror repo content out to ~/.claude) is gated on this one flag instead of
+rem each step silently degrading on its own when run from the mirror: without the
+rem gate, "%~dp0.." from the mirror resolves to ~/.claude itself, so those robocopy
+rem calls either copy the mirror onto itself (self-copy no-op) or look for a source
+rem file that plainly is not there - and still print "Synced ... -^>..." as if real
+rem work had happened.
+set "IS_REPO_CHECKOUT="
+if exist "%~dp0..\generate-coders.cmd" set "IS_REPO_CHECKOUT=1"
+if exist "%~dp0..\agents\coder.template.md" set "IS_REPO_CHECKOUT=1"
+
 rem If this copy of cc-sync.cmd lives in the actual repo checkout - generate-coders.cmd
 rem sits one level up in the repo root and resolves the templates under agents\
 rem (agents\coder.template.md/agents\reviewer.template.md) - regenerate the
@@ -16,20 +32,24 @@ rem NOTE: this whole step runs before "chcp 65001" further down - generate-coder
 rem has its own Cyrillic rem comments, and calling it while codepage 65001 is already
 rem active corrupts cmd's line parsing (garbled bytes get executed as bogus
 rem commands); running it under the default codepage first avoids that entirely.
-if exist "%~dp0..\generate-coders.cmd" (
-  call "%~dp0..\generate-coders.cmd"
-  rem Detect whether that regeneration actually changed anything, i.e. whether the
-  rem committed coder*.md files were stale or drifted before this run. This check
-  rem is informational only: the files on disk are already correct after the call
-  rem above, so we deliberately keep going into the robocopy mirror below instead
-  rem of aborting the sync - the drift is fixed, it just was not committed yet.
-  if exist "%~dp0..\.git" (
-    git -C "%~dp0.." diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md agents/reviewer.md agents/reviewer_std.md >nul 2>nul
-    if errorlevel 1 (
-      echo Warning: generated agent files differed from their templates and were
-      echo regenerated. Commit the changes to coder*.md / reviewer*.md.
+if defined IS_REPO_CHECKOUT (
+  if exist "%~dp0..\generate-coders.cmd" (
+    call "%~dp0..\generate-coders.cmd"
+    rem Detect whether that regeneration actually changed anything, i.e. whether the
+    rem committed coder*.md files were stale or drifted before this run. This check
+    rem is informational only: the files on disk are already correct after the call
+    rem above, so we deliberately keep going into the robocopy mirror below instead
+    rem of aborting the sync - the drift is fixed, it just was not committed yet.
+    if exist "%~dp0..\.git" (
+      git -C "%~dp0.." diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md agents/reviewer.md agents/reviewer_std.md >nul 2>nul
+      if errorlevel 1 (
+        echo Warning: generated agent files differed from their templates and were
+        echo regenerated. Commit the changes to coder*.md / reviewer*.md.
+      )
     )
   )
+) else (
+  echo Skipping agent regeneration - not running from a repository checkout ^(mirror detected^); run cc-sync from the repo checkout instead.
 )
 
 chcp 65001 >nul
@@ -59,40 +79,62 @@ if exist "%~dp0..\tools\validate-agents.ps1" (
   )
 )
 
-rem Sync agent definitions from the agents\ folder (%~dp0..\agents) into the mirror
+rem The three robocopy steps below all mirror content out of the repo checkout into
+rem %USERPROFILE%\.claude\, so they only make sense when this script is actually
+rem running from a checkout - IS_REPO_CHECKOUT, detected at the top of this file.
+rem Run from the ~/.claude\scripts mirror instead, "%~dp0.." resolves to ~/.claude
+rem itself: the agents and launchers robocopy calls would copy the mirror onto
+rem itself - source == destination, a self-copy no-op - and the config.example.md
+rem call would look for a source file that is not there - all three would still
+rem exit 0-7 and print "Synced ... -^>..." as if real work had happened, which is
+rem exactly the silent-no-op-reported-as-success bug this gate exists to prevent.
+rem
+rem Sync agent definitions from the agents\ folder - %~dp0..\agents - into the mirror
 rem %USERPROFILE%\.claude\agents\, which is where "claude --agent" actually loads them.
 rem Without this step, edits to the .md files there do NOT take effect at runtime.
 rem
-rem Copies top-level *.md from agents\ only (no recursion) and does NOT purge (other
-rem agents already in the mirror are preserved). Repository documentation (AGENTS.md,
-rem knowledge.md, README.md, config.example.md, plans\) lives in the repo root, NOT in
+rem Copies top-level *.md from agents\ only - no recursion - and does NOT purge - other
+rem agents already in the mirror are preserved. Repository documentation - AGENTS.md,
+rem knowledge.md, README.md, config.example.md, plans\ - lives in the repo root, NOT in
 rem agents\, so the old growing documentation-exclusion list is gone. The only remaining
 rem exclusions are the two generator templates, which sit in agents\ next to the real
 rem agents but are not themselves loadable agents:
 rem   coder.template.md      - "name: {{NAME}}" frontmatter would register a broken agent
 rem   reviewer.template.md   - same: placeholder "name: {{NAME}}" frontmatter, not an agent
-robocopy "%~dp0..\agents" "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md reviewer.template.md /NJH /NJS /NDL /NFL
-rem robocopy exit codes 0-7 mean success; 8+ is a real error.
-if errorlevel 8 (
-  echo Sync failed: robocopy returned an error code.
-) else (
-  echo Synced agent definitions -^> "%USERPROFILE%\.claude\agents"
-)
-
-rem Also mirror the launchers themselves (this folder's *.cmd) into
+rem
+rem Also mirrors the launchers themselves - this folder's *.cmd - into
 rem %USERPROFILE%\.claude\scripts, which is where they're invoked from on PATH.
-robocopy "%~dp0." "%USERPROFILE%\.claude\scripts" *.cmd /NJH /NJS /NDL /NFL
-if errorlevel 8 (
-  echo Sync failed: robocopy returned an error code.
-) else (
-  echo Synced launcher scripts -^> "%USERPROFILE%\.claude\scripts"
-)
+rem
+rem Also mirrors config.example.md next to the launchers in scripts\, so that
+rem cc-config.cmd - run from the mirror, off PATH - can find its template via %~dp0.
+rem
+rem NOTE: unlike the generate-coders block above, none of the rem lines above this
+rem point are inside the parenthesized block below - the earlier NOTE about stray
+rem parentheses closing a block early only applies to comments INSIDE a block, so
+rem the descriptive comments were deliberately kept above "if defined (" here and
+rem parenthetical asides were rewritten with "-" instead of literal "(" ")".
+if defined IS_REPO_CHECKOUT (
+  robocopy "%~dp0..\agents" "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md reviewer.template.md /NJH /NJS /NDL /NFL
+  rem robocopy exit codes 0-7 mean success; 8+ is a real error.
+  if errorlevel 8 (
+    echo Sync failed: robocopy returned an error code.
+  ) else (
+    echo Synced agent definitions -^> "%USERPROFILE%\.claude\agents"
+  )
 
-rem Also mirror config.example.md next to the launchers in scripts\, so that
-rem cc-config.cmd (run from the mirror, off PATH) can find its template via %~dp0.
-robocopy "%~dp0.." "%USERPROFILE%\.claude\scripts" config.example.md /NJH /NJS /NDL /NFL
-if errorlevel 8 (
-  echo Sync failed: robocopy returned an error code.
+  robocopy "%~dp0." "%USERPROFILE%\.claude\scripts" *.cmd /NJH /NJS /NDL /NFL
+  if errorlevel 8 (
+    echo Sync failed: robocopy returned an error code.
+  ) else (
+    echo Synced launcher scripts -^> "%USERPROFILE%\.claude\scripts"
+  )
+
+  robocopy "%~dp0.." "%USERPROFILE%\.claude\scripts" config.example.md /NJH /NJS /NDL /NFL
+  if errorlevel 8 (
+    echo Sync failed: robocopy returned an error code.
+  ) else (
+    echo Synced config.example.md -^> "%USERPROFILE%\.claude\scripts"
+  )
 ) else (
-  echo Synced config.example.md -^> "%USERPROFILE%\.claude\scripts"
+  echo Skipping agent/launcher/config mirroring - not running from a repository checkout ^(mirror detected^); run cc-sync from the repo checkout instead.
 )
