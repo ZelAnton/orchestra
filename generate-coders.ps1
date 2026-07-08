@@ -149,7 +149,17 @@ foreach ($v in $variants) {
     if (-not $templates.ContainsKey($v.Template)) {
         throw "Неизвестный шаблон '$($v.Template)' для $($v.File)"
     }
-    $out = $templates[$v.Template]
+    $rawTemplate = $templates[$v.Template]
+    foreach ($key in $v.Tokens.Keys) {
+        # Страховка от опечаток/удалённых плейсхолдеров в самом шаблоне: если ключ
+        # из Tokens ни разу не встречается в сыром (ещё не заменённом) тексте
+        # шаблона, подстановка молча ничего не находит и не заменяет — итоговый
+        # файл получится неверным без единого следа {{...}} в выводе.
+        if ($rawTemplate -notlike ('*{{' + $key + '}}*')) {
+            throw "Плейсхолдер {{$key}} отсутствует в шаблоне '$($v.Template)' для $($v.File)"
+        }
+    }
+    $out = $rawTemplate
     foreach ($key in $v.Tokens.Keys) {
         $out = $out.Replace('{{' + $key + '}}', [string]$v.Tokens[$key])
     }
