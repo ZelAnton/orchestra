@@ -114,7 +114,22 @@ function Install-Launcher {
         [Parameter(Mandatory)] $Paths,
         [Parameter(Mandatory)] [string[]] $Names
     )
-    foreach ($n in $Names) {
+    # Names requested by the caller are installed breadth-first, but any
+    # sibling launchers\*.cmd file that an installed launcher itself invokes
+    # via `call "%~dp0<name>.cmd" ...` (e.g. cc-queue.cmd/cc-thinker.cmd/
+    # cc-audit.cmd/cc-enhance.cmd/cc-github.cmd calling into the shared
+    # launchers\cc-common.cmd helper, T-037) is discovered from that
+    # launcher's own source and installed automatically too - otherwise an
+    # isolated sandbox test would fail on a missing helper file the moment
+    # the launcher under test tries to "call" it, even though the test only
+    # asked to install itself. This keeps test-*.ps1 files from having to
+    # know about a launcher's internal helper dependencies.
+    $installed = New-Object 'System.Collections.Generic.HashSet[string]'
+    $queue = New-Object 'System.Collections.Generic.Queue[string]'
+    foreach ($n in $Names) { $queue.Enqueue($n) }
+    while ($queue.Count -gt 0) {
+        $n = $queue.Dequeue()
+        if (-not $installed.Add($n)) { continue }
         $src = Join-Path $script:LaunchersDir $n
         if (-not (Test-Path -LiteralPath $src)) {
             throw "Launcher not found: $src"
@@ -133,10 +148,15 @@ function Install-Launcher {
                 $text = [regex]::Replace($text, $pair[0], [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $pair[1] })
             }
         }
-        $text = $text -replace "`r`n", "`n"
-        $text = $text -replace "`n", "`r`n"
+        $normalized = $text -replace "`r`n", "`n"
+        $normalized = $normalized -replace "`n", "`r`n"
         $dest = Join-Path $Paths.Scripts $n
-        [System.IO.File]::WriteAllText($dest, $text, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($dest, $normalized, (New-Object System.Text.UTF8Encoding($false)))
+
+        foreach ($m in [regex]::Matches($text, 'call\s+"%~dp0([A-Za-z0-9_.-]+\.cmd)"')) {
+            $dep = $m.Groups[1].Value
+            if (-not $installed.Contains($dep)) { $queue.Enqueue($dep) }
+        }
     }
 }
 
@@ -281,10 +301,22 @@ function Get-ExpectedPermissionMode {
     param([Parameter(Mandatory)] [string] $LauncherName)
     $src = Get-Content -LiteralPath (Join-Path $script:LaunchersDir $LauncherName) -Raw
     $m = [regex]::Match($src, '--permission-mode\s+(\S+)')
-    if (-not $m.Success) {
-        throw "Could not find --permission-mode in $LauncherName"
+    if ($m.Success) {
+        return $m.Groups[1].Value
     }
-    return $m.Groups[1].Value
+    # Some launchers (cc-audit.cmd, cc-enhance.cmd, cc-github.cmd, T-037) do
+    # not invoke claude directly - they forward to the shared
+    # launchers\cc-common.cmd ":run" helper as
+    #   call "%~dp0cc-common.cmd" run <agent> <permission-mode> "<prompt>"
+    # where the literal "--permission-mode" flag itself lives in
+    # cc-common.cmd, not in the launcher's own source. In that case the
+    # permission-mode value is the second whitespace-separated token after
+    # "run" (the first is the agent name).
+    $m = [regex]::Match($src, 'cc-common\.cmd"\s+run\s+\S+\s+(\S+)\s')
+    if ($m.Success) {
+        return $m.Groups[1].Value
+    }
+    throw "Could not find --permission-mode in $LauncherName"
 }
 
 function Assert-True {
