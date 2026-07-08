@@ -4,7 +4,7 @@ description: Синхронизирует GitHub с очередью задач.
 model: sonnet
 effort: high
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: auto
+permissionMode: acceptEdits
 maxTurns: 200
 ---
 
