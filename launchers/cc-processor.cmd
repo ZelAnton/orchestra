@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-rem Запуск оркестратора processor в текущей папке (Claude Code, auto-режим).
+rem Запуск оркестратора processor в текущей папке (Claude Code, acceptEdits-режим).
 rem Обрабатывает очередь .work/Tasks_Queue.md параллельными батчами до конца.
 rem
 rem Необязательные флаги (в любом порядке, перед остальными аргументами):
@@ -50,4 +50,4 @@ shift
 goto :parse
 
 :run
-claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --permission-mode acceptEdits "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
