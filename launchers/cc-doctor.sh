@@ -15,17 +15,19 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 CFG=".work/config.md"
 
 # get_cfg KEY - print the value of "KEY: value" from .work/config.md, matching
-# cc-doctor.cmd's GetCfg exactly: leading/trailing whitespace trimmed, and a value
-# that contains a '#' (inline comment) yields NO match (empty), same as the strict
-# '^\s*KEY\s*:\s*([^#]+?)\s*$' regex there. First match wins.
+# cc-doctor.cmd's GetCfg exactly: leading/trailing whitespace trimmed, and the value
+# is read up to (but not including) an inline '#' comment, if present, mirroring the
+# '^\s*KEY\s*:\s*([^#]*?)\s*(?:#.*)?$' regex there. If nothing remains after
+# stripping the comment (or there was no value to begin with), the printed value is
+# empty, i.e. treated as unset - not an error. First match wins.
 get_cfg() {
   [ -f "$CFG" ] || return 0
   awk -v k="$1" '
     match($0, "^[[:space:]]*" k "[[:space:]]*:[[:space:]]*") {
       rest = substr($0, RLENGTH + 1)
-      if (index(rest, "#") > 0) next
+      hIdx = index(rest, "#")
+      if (hIdx > 0) rest = substr(rest, 1, hIdx - 1)
       sub(/[[:space:]]+$/, "", rest)
-      if (rest == "") next
       print rest
       exit
     }
