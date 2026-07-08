@@ -1,0 +1,89 @@
+name: CI
+
+# Runs on every push and every pull request. All checks below are read-only /
+# static (no consuming project's .work/ is touched) and run on windows-latest
+# because the repository's scripts and launchers are PowerShell/.cmd targeting
+# Windows.
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    name: Validate repository
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Regenerate coder variants and check for drift
+        # Regenerates coder.md / coder_fast.md / coder_deep.md from
+        # coder.template.md via generate-coders.ps1, then fails the build if the
+        # regenerated files differ from what is committed. Mirrors the drift
+        # check already used by launchers/cc-sync.cmd (see T-011): the template
+        # is the source of truth, and a stale/hand-edited variant must not reach
+        # main unnoticed.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\generate-coders.ps1
+          git diff --exit-code -- coder.md coder_fast.md coder_deep.md
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "coder.md / coder_fast.md / coder_deep.md drifted from coder.template.md. Run generate-coders.ps1 (or generate-coders.cmd) locally and commit the regenerated files."
+            exit 1
+          }
+
+      - name: Validate agent file format
+        # Runs tools/validate-agents.ps1 (added by T-016), which checks every
+        # agent *.md file for: frontmatter starting at byte 0, UTF-8 without BOM,
+        # required non-empty name/description fields, name matching the
+        # filename, and snake_case naming. Until T-016 lands the script, this
+        # step is skipped with an explicit warning rather than failing the build.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path .\tools\validate-agents.ps1) {
+            .\tools\validate-agents.ps1
+            if ($LASTEXITCODE -ne 0) {
+              exit 1
+            }
+          } else {
+            Write-Warning "tools/validate-agents.ps1 not found yet (see T-016) - skipping agent file validation."
+          }
+
+      - name: Check cross-agent contract consistency
+        # Runs tools/check-consistency.ps1 (added by T-017), which cross-checks
+        # UPPER_SNAKE_CASE configuration keys against the config.example.md
+        # defaults table, processor phase references against processor.md, and
+        # runtime artifact names against the knowledge.md table. Until T-017
+        # lands the script, this step is skipped with an explicit warning rather
+        # than failing the build.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path .\tools\check-consistency.ps1) {
+            .\tools\check-consistency.ps1
+            if ($LASTEXITCODE -ne 0) {
+              exit 1
+            }
+          } else {
+            Write-Warning "tools/check-consistency.ps1 not found yet (see T-017) - skipping consistency check."
+          }
+
+      - name: Run launcher tests
+        # Runs tests/launchers/run-all.ps1 (added by T-018), the single entry
+        # point that exercises every launchers/cc-*.cmd in an isolated temporary
+        # sandbox against PATH-stubbed claude/codex binaries. Until T-018 lands
+        # the test suite, this step is skipped with an explicit warning rather
+        # than failing the build.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path .\tests\launchers\run-all.ps1) {
+            .\tests\launchers\run-all.ps1
+            if ($LASTEXITCODE -ne 0) {
+              exit 1
+            }
+          } else {
+            Write-Warning "tests/launchers/run-all.ps1 not found yet (see T-018) - skipping launcher tests."
+          }
