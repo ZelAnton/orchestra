@@ -41,7 +41,8 @@ a human only needs to seed the queue and periodically check status or escalation
   fixes, with mandatory fallback to a Claude coder.
 - **reviewer_std / reviewer** — per-task review of a finished branch (fast-tier vs.
   standard/deep-tier work respectively), logging `R-NN` findings in the task's
-  `review.md`.
+  `review.md`. Both are generated from the single source `agents/reviewer.template.md`
+  by `generate-coders.ps1`, the same way the coder variants are.
 - **reviewer_codex** — a read-only Codex adapter for per-task review.
 - **full_reviewer** — reviews the integrated result of the whole cohort in
   `_integration`, logging `F-NN` findings in `.work/review_integration.md`.
@@ -93,14 +94,15 @@ It mirrors:
   from the mirror.
 
 Neither variant purges other agents already present in the mirror. On Windows, if a
-template-generated coder variant (`agents/coder.md`, `agents/coder_fast.md`,
-`agents/coder_deep.md`) has drifted from `agents/coder.template.md`, `cc-sync.cmd`
-regenerates it before mirroring; the POSIX `cc-sync.sh` mirrors the committed coder
-variants as-is (the regeneration and agent-invariant checks are Windows-only PowerShell
-steps — if you change `agents/coder.template.md`, regenerate the variants with
-`generate-coders` on a machine with PowerShell before syncing). Re-run the sync launcher
-after editing any agent definition or launcher — otherwise Claude keeps using the
-previously mirrored copy.
+template-generated coder or reviewer variant (`agents/coder.md`, `agents/coder_fast.md`,
+`agents/coder_deep.md`, `agents/reviewer.md`, `agents/reviewer_std.md`) has drifted from
+`agents/coder.template.md`/`agents/reviewer.template.md`, `cc-sync.cmd` regenerates it
+before mirroring; the POSIX `cc-sync.sh` mirrors the committed coder/reviewer variants
+as-is (the regeneration and agent-invariant checks are Windows-only PowerShell
+steps — if you change `agents/coder.template.md` or `agents/reviewer.template.md`,
+regenerate the variants with `generate-coders` on a machine with PowerShell before
+syncing). Re-run the sync launcher after editing any agent definition or launcher —
+otherwise Claude keeps using the previously mirrored copy.
 
 ## Quick start in a target project
 
@@ -135,6 +137,8 @@ read-only Codex/configuration preflight, `cc-audit` and `cc-enhance` run
   runtime artifacts, invariants); read it before making changes to Orchestra
   itself. It is distinct from a target project's own `.work/knowledge/`, which
   `knowledge_curator` maintains at runtime when `KB: on`.
+- `docs/operations.md` — the operator's guide: running and monitoring a processor
+  session, interpreting status/journal output, and handling escalations.
 - `plans/` — development plans: `LOOP_ORCHESTRA_ROADMAP.md` (strategic direction
   and sequencing) and `OBSERVABILITY_PLATFORM_PLAN.md` (human-in-the-loop
   observability, control plane, and event architecture). Both describe proposed,

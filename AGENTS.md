@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository defines a Claude/Codex agent orchestra. Agent definitions (YAML frontmatter, Russian instructions) live in `agents/`; `agents/processor.md` orchestrates specialized planner, merger, reviewer, and coder roles, and `agents/coder.template.md` generates the three Claude coder variants. The repository root holds documentation only — `AGENTS.md`, `knowledge.md`, `config.example.md` (which documents `.work/config.md`), `README.md`, and `plans/`. Windows/POSIX entry points live in `launchers/`. Runtime state belongs in a consuming project's `.work/`, not here.
+This repository defines a Claude/Codex agent orchestra. Agent definitions (YAML frontmatter, Russian instructions) live in `agents/`; `agents/processor.md` orchestrates specialized planner, merger, reviewer, and coder roles. `agents/coder.template.md` generates the three Claude coder variants (`coder.md`, `coder_fast.md`, `coder_deep.md`), and `agents/reviewer.template.md` generates the two Claude reviewer variants (`reviewer.md`, `reviewer_std.md`). The repository root holds documentation only — `AGENTS.md`, `knowledge.md`, `config.example.md` (which documents `.work/config.md`), `README.md`, and `plans/`. Windows/POSIX entry points live in `launchers/`. Runtime state belongs in a consuming project's `.work/`, not here.
 
 ## Project Knowledge
 
@@ -10,8 +10,8 @@ Read `knowledge.md` before exploring or changing the repository. Use its map of 
 
 ## Build, Test, and Development Commands
 
-- `powershell -NoProfile -ExecutionPolicy Bypass -File .\generate-coders.ps1` regenerates all Claude coder variants under `agents/` after editing the template.
-- `git diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md` checks that regeneration produced no unexpected drift.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\generate-coders.ps1` regenerates all Claude coder and reviewer variants under `agents/` after editing either template.
+- `git diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md agents/reviewer.md agents/reviewer_std.md` checks that regeneration produced no unexpected drift.
 - `launchers\cc-doctor.cmd` performs the read-only Codex/configuration preflight when run from a target project root.
 - `launchers\cc-processor.cmd` starts the end-to-end queue processor in a configured target project.
 
@@ -21,7 +21,7 @@ There is no compiled build or automated test suite. Validate changes by regenera
 
 Keep Markdown instructions direct, imperative, and consistent with the existing Russian terminology. Preserve YAML frontmatter as the first bytes of agent files; files must be UTF-8 without BOM. Use lowercase snake_case for agent names and files (`knowledge_curator.md`) and the `cc-<action>.cmd` pattern for launchers. Use four-space indentation in PowerShell blocks and uppercase snake case for configuration keys such as `REVIEW_LOOP_MAX`. `.cmd` launchers must use Windows (CRLF) line endings; this is enforced by `.gitattributes` (`*.cmd text eol=crlf`), so a plain checkout is always correct — do not hand-fix line endings per file or per contributor.
 
-Do not edit generated coder variants independently. Change `agents/coder.template.md` or the variant metadata in `generate-coders.ps1`, regenerate, and review all three outputs.
+Do not edit generated coder or reviewer variants independently. Change `agents/coder.template.md`/`agents/reviewer.template.md` or the variant metadata in `generate-coders.ps1`, regenerate, and review all generated outputs.
 
 All agent frontmatter (`permissionMode:`) and every `claude ... --permission-mode` invocation in `launchers/cc-*.cmd`/`.sh` must use `auto`, not `acceptEdits` or `bypassPermissions`. `auto` is a supported value — it was previously (wrongly, see history of T-007 in `.work/Tasks_Done.md`) replaced repo-wide with `acceptEdits` on the mistaken belief that `auto` was unsupported/undocumented; that regressed every agent from `⏵⏵ auto mode` to `⏵⏵ accept edits`. Do not repeat that change.
 
