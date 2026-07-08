@@ -1,4 +1,4 @@
-# Verifies launchers/cc-processor.cmd argument parsing: --force-lock removal,
+﻿# Verifies launchers/cc-processor.cmd argument parsing: --force-lock removal,
 # --model with/without a value, EXTRA_ARGS passthrough (and ordering relative
 # to --permission-mode), and exit-code propagation.
 

@@ -1,4 +1,4 @@
-# Генерирует агентские .md-файлы из общих шаблонов подстановкой плейсхолдеров {{...}}:
+﻿# Генерирует агентские .md-файлы из общих шаблонов подстановкой плейсхолдеров {{...}}:
 #   agents/coder.template.md    -> agents/coder.md, agents/coder_fast.md, agents/coder_deep.md
 #   agents/reviewer.template.md -> agents/reviewer.md, agents/reviewer_std.md
 # Шаблоны и сгенерированные варианты лежат в каталоге agents/; сам скрипт — в корне
