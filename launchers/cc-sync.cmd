@@ -118,8 +118,9 @@ rem
 rem Also mirrors the launchers themselves - this folder's *.cmd - into
 rem %USERPROFILE%\.claude\scripts, which is where they're invoked from on PATH.
 rem
-rem Also mirrors config.example.md next to the launchers in scripts\, so that
-rem cc-config.cmd - run from the mirror, off PATH - can find its template via %~dp0.
+rem Also mirrors config.example.md and constraints.example.md next to the launchers in
+rem scripts\, so that cc-config.cmd - run from the mirror, off PATH - can find its
+rem templates via %~dp0.
 rem
 rem NOTE: unlike the generate-coders block above, none of the rem lines above this
 rem point are inside the parenthesized block below - the earlier NOTE about stray
@@ -147,6 +148,13 @@ if defined IS_REPO_CHECKOUT (
     echo Sync failed: robocopy returned an error code.
   ) else (
     echo Synced config.example.md -^> "%USERPROFILE%\.claude\scripts"
+  )
+
+  robocopy "%~dp0.." "%USERPROFILE%\.claude\scripts" constraints.example.md /NJH /NJS /NDL /NFL
+  if errorlevel 8 (
+    echo Sync failed: robocopy returned an error code.
+  ) else (
+    echo Synced constraints.example.md -^> "%USERPROFILE%\.claude\scripts"
   )
 ) else (
   echo Skipping agent/launcher/config mirroring - not running from a repository checkout ^(mirror detected^); run cc-sync from the repo checkout instead.
