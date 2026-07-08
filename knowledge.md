@@ -42,10 +42,10 @@ workspace, коммитит результаты листовых агентов
 Все перечисленные ниже агентские `.md` лежат в каталоге `agents/` (в тексте — краткими
 именами файлов, например `agents/processor.md`); там же — шаблоны `coder.template.md` и
 `reviewer.template.md`. Документация (`AGENTS.md`, `knowledge.md`, `config.example.md`,
-`constraints.example.md`, `README.md`, `docs/operations.md`, `plans/`) и генератор
-`generate-coders.ps1`/`.cmd` остаются в корне репозитория (`docs/operations.md` —
+`constraints.example.md`, `README.md`, `plans/`) и генератор `generate-coders.ps1`/`.cmd`
+остаются в корне репозитория. Отдельно, в подкаталоге `docs/`, лежит `docs/operations.md` —
 руководство оператора: запуск и мониторинг сессии processor, чтение status/journal,
-обработка эскалаций).
+обработка эскалаций.
 
 ### Координация и интеграция
 
