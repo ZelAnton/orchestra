@@ -291,6 +291,68 @@ foreach ($name in $artifactLocations.Keys) {
 }
 
 # =============================================================================
+# Class 4 — cc-doctor allowlists vs config.example.md defaults table
+# =============================================================================
+#
+# launchers/cc-doctor.cmd and launchers/cc-doctor.sh each hardcode their own
+# allowlist of recognized .work/config.md keys (used to flag unknown/mistyped
+# keys). Both lists are meant to track the defaults table in config.example.md
+# exactly (task T-043) — this check catches drift between the three without
+# requiring cc-doctor itself to parse config.example.md at runtime (it must
+# keep working when mirrored standalone into ~/.claude/scripts, see the
+# comments in cc-doctor.cmd/.sh).
+
+$CcDoctorCmdFile = Join-Path $RepoRoot 'launchers\cc-doctor.cmd'
+$CcDoctorShFile = Join-Path $RepoRoot 'launchers/cc-doctor.sh'
+
+foreach ($required in @($CcDoctorCmdFile, $CcDoctorShFile)) {
+    if (-not (Test-Path -LiteralPath $required)) {
+        Write-Error "Required reference file not found: $required"
+        exit 2
+    }
+}
+
+$cmdContent = Get-Content -LiteralPath $CcDoctorCmdFile -Raw -Encoding utf8
+$cmdMatch = [regex]::Match($cmdContent, '\$known\s*=\s*@\(([^)]*)\)')
+if (-not $cmdMatch.Success) {
+    Write-Error "Could not find the `$known=@(...)` allowlist in $CcDoctorCmdFile - format may have changed"
+    exit 2
+}
+$cmdKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($m in [regex]::Matches($cmdMatch.Groups[1].Value, "'([A-Za-z0-9_]+)'")) {
+    [void]$cmdKeys.Add($m.Groups[1].Value)
+}
+
+$shContent = Get-Content -LiteralPath $CcDoctorShFile -Raw -Encoding utf8
+$shMatch = [regex]::Match($shContent, 'known="\s*([^"]*?)\s*"')
+if (-not $shMatch.Success) {
+    Write-Error "Could not find the `known=`"...`"` allowlist in $CcDoctorShFile - format may have changed"
+    exit 2
+}
+$shKeys = [System.Collections.Generic.HashSet[string]]::new([string[]]($shMatch.Groups[1].Value -split '\s+' | Where-Object { $_ }), [StringComparer]::Ordinal)
+
+$doctorSources = [ordered]@{
+    'launchers/cc-doctor.cmd' = $cmdKeys
+    'launchers/cc-doctor.sh'  = $shKeys
+}
+
+foreach ($srcName in $doctorSources.Keys) {
+    $keys = $doctorSources[$srcName]
+    foreach ($key in $keys) {
+        if (-not $defaultKeys.Contains($key)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-allowlist' `
+                -Detail "'$key' is in the allowlist but missing from the defaults table in config.example.md"
+        }
+    }
+    foreach ($key in $defaultKeys) {
+        if (-not $keys.Contains($key)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-allowlist' `
+                -Detail "'$key' is in the defaults table in config.example.md but missing from the allowlist"
+        }
+    }
+}
+
+# =============================================================================
 # Report
 # =============================================================================
 
