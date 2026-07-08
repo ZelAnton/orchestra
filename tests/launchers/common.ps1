@@ -185,7 +185,25 @@ exit $code
 function Install-FakeClaude {
     param([Parameter(Mandatory)] $Paths)
     Set-Content -LiteralPath (Join-Path $Paths.Bin 'capture-args.ps1') -Value $script:CaptureArgsScript -Encoding utf8
-    $stub = "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0capture-args.ps1`" %*`r`n"
+    # "setlocal DisableDelayedExpansion" right after "@echo off" is required
+    # here, not optional flourish: the real `claude` this stub replaces is a
+    # standalone .exe, so cmd.exe always spawns it as a genuinely separate
+    # process, immune to whatever delayed-expansion state the launcher that
+    # invoked it happened to have active. This stub, being a .cmd file
+    # itself, does not get that same isolation "for free" - a launcher like
+    # cc-queue.cmd/cc-thinker.cmd invokes `claude ...` (this stub) without
+    # "call" while its own "setlocal EnableDelayedExpansion" is still active,
+    # and cmd.exe transfers straight into this file's code within that same
+    # interpreter/scope (no "call" means no new scope, and unlike a real
+    # .exe, no new process boundary either) - so the "%*" below would
+    # otherwise be parsed with delayed expansion still (unwantedly) enabled,
+    # inflicting a second, spurious delayed-expansion pass over the already
+    # percent-expanded text and silently eating any literal "!" the launcher
+    # forwarded (see launchers/cc-common.cmd:sanitize and its test coverage
+    # for the argument-content half of this same "!" class of bug - this is
+    # the test-harness half, needed so that coverage can actually observe a
+    # correct result instead of an artifact of the stub itself).
+    $stub = "@echo off`r`nsetlocal DisableDelayedExpansion`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0capture-args.ps1`" %*`r`n"
     Set-Content -LiteralPath (Join-Path $Paths.Bin 'claude.cmd') -Value $stub -Encoding ascii -NoNewline
 }
 
@@ -195,8 +213,11 @@ function Install-FakeCodex {
         [string] $Version = 'codex-fake 0.0.0-test'
     )
     Set-Content -LiteralPath (Join-Path $Paths.Bin 'capture-args.ps1') -Value $script:CaptureArgsScript -Encoding utf8 -Force
+    # See the matching comment in Install-FakeClaude above for why this stub
+    # needs its own "setlocal DisableDelayedExpansion" too.
     $stub = @"
 @echo off
+setlocal DisableDelayedExpansion
 if "%~1"=="--version" (
   echo $Version
   exit /b 0

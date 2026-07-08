@@ -28,27 +28,38 @@ exit /b %errorlevel%
 :sanitize
 rem Shared tail end of the ARGS-sanitization block duplicated (before this
 rem task) in cc-queue.cmd and cc-thinker.cmd: replaces every embedded double
-rem quote in ARGS with a single quote, in place, then writes the result back
-rem to ARGS in the caller's environment.
+rem quote in ARGS with a single quote, in place, in the CALLER's own ARGS
+rem variable.
 rem
-rem Contract with the caller: the caller must already have a variable named
-rem ARGS set to the raw "%*" it received, captured as its OWN first
+rem Contract with the caller: the caller must already have (a) a variable
+rem named ARGS set to the raw "%*" it received, captured as its OWN first
 rem executable step, BEFORE the caller's own "setlocal EnableDelayedExpansion"
 rem - capturing %* only here, after delayed expansion is already active in
 rem the caller, would be too late: any literal "!" in the argument would
 rem already have been eaten by delayed expansion at capture time. That
 rem capture step cannot be moved into this shared file, since it has to run
 rem while the CALLER's own %* (its own positional parameters) is in scope.
+rem And (b) delayed expansion already enabled (the caller's own "setlocal
+rem EnableDelayedExpansion", issued after the ARGS capture above) - this
+rem label relies on that being active already and deliberately does NOT
+rem open its own setlocal here.
 rem
-rem The "endlocal & set VAR=value" on the line below is the standard cmd.exe
-rem idiom for returning a value out of a setlocal block: the right-hand side
-rem is expanded once, before either half of the line runs, so it still sees
-rem the sanitized value computed inside this block, and "set" after endlocal
-rem then writes it into the caller's environment (a plain "call" to another
-rem .cmd file does not create its own environment scope by itself - only
-rem "setlocal" does - so this executes in whatever scope was already active
-rem when the caller issued "call cc-common.cmd sanitize").
-setlocal EnableDelayedExpansion
-set "SANITIZED=!ARGS:"='!"
-endlocal & set "ARGS=%SANITIZED%"
+rem A plain "call" to another .cmd file does not create its own environment
+rem scope by itself - only "setlocal" does - so the line below runs directly
+rem in whatever scope the caller had active when it issued "call
+rem cc-common.cmd sanitize", and writes ARGS right back into that same scope.
+rem This must NOT be split into "compute into a temp var, then endlocal &
+rem set ARGS=%TEMP%" (as an earlier version of this file did): that pattern
+rem returns a value out of a setlocal block by letting "%TEMP%" percent-
+rem expand while the block's own delayed expansion is still active for
+rem parsing that line, and cmd.exe then runs a SECOND, delayed-expansion
+rem pass over the resulting text - so any literal "!" that made it into the
+rem sanitized value (a very plausible character in a task description, e.g.
+rem "fix bug ASAP!") gets silently eaten as a (usually undefined, empty)
+rem !variable! reference instead of surviving as a literal character.
+rem Assigning directly with "!ARGS:"='!" below performs the substring
+rem replacement and the assignment in the exact same single delayed-
+rem expansion pass that produced the replacement text, so there is no
+rem second pass left to mis-parse any "!" the resulting value contains.
+set "ARGS=!ARGS:"='!"
 exit /b 0

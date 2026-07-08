@@ -140,4 +140,63 @@ Invoke-Test -Name 'cc-queue.cmd' -Body {
     finally {
         Remove-Sandbox $paths
     }
+
+    # --- Scenario 5: a literal "!" character in the argument must survive
+    # untouched (regression coverage for the cc-common.cmd:sanitize helper
+    # eating "!" via a second, unwanted delayed-expansion pass when the
+    # sanitized value was relayed back through "endlocal & set VAR=%TMP%" -
+    # see T-037 review finding R-01). Single word, no spaces, so PowerShell
+    # passes it through as one unquoted argv token and no quote substitution
+    # is triggered - isolates the "!" handling from the quote-substitution
+    # behavior covered by the scenarios above.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-queue.cmd'
+        Install-FakeClaude -Paths $paths
+        $captureFile = Join-Path $paths.Root 'claude-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-queue.cmd' -LauncherArgs @('foo!bar!baz') -EnvVars @{
+            FAKE_ARGS_FILE = $captureFile
+            FAKE_EXIT_CODE = '0'
+        }
+        Assert-Equal 0 $result.ExitCode '[bang arg] exit code'
+
+        $expected = @(
+            '--agent', 'queue_builder',
+            '--permission-mode', $expectedMode,
+            'Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: foo!bar!baz'
+        )
+        Assert-ArrayEqual $expected (Get-CapturedArgs $captureFile) '[bang arg] every "!" must be preserved literally'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 6: same "!" preservation, but for a multi-word argument
+    # passed as a single caller-quoted token (like `cc-queue "fix bug
+    # ASAP!"`), which - per scenario 3b above - reaches ARGS wrapped in the
+    # argv-boundary quotes and so also exercises the quote-substitution path
+    # together with "!" in the same value.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-queue.cmd'
+        Install-FakeClaude -Paths $paths
+        $captureFile = Join-Path $paths.Root 'claude-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-queue.cmd' -LauncherArgs @('fix bug ASAP!') -EnvVars @{
+            FAKE_ARGS_FILE = $captureFile
+            FAKE_EXIT_CODE = '0'
+        }
+        Assert-Equal 0 $result.ExitCode '[bang quoted arg] exit code'
+
+        $expected = @(
+            '--agent', 'queue_builder',
+            '--permission-mode', $expectedMode,
+            "Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: 'fix bug ASAP!'"
+        )
+        Assert-ArrayEqual $expected (Get-CapturedArgs $captureFile) '[bang quoted arg] trailing "!" must be preserved literally'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }
