@@ -20,7 +20,7 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 
-$excludeNames = @('coder.template.md', 'config.example.md', 'AGENTS.md', 'knowledge.md', 'README.md')
+$excludeNames = @('coder.template.md', 'reviewer.template.md', 'config.example.md', 'AGENTS.md', 'knowledge.md', 'README.md')
 $excludePatterns = @('*_PLAN.md', '*_ROADMAP.md', 'Orchestra_Review_*.md')
 
 function Test-Excluded([string]$fileName) {
