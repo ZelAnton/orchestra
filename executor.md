@@ -3,7 +3,7 @@ name: executor
 description: Быстрый исполнитель рутинных правок очереди для processor — все четыре операции: пометка захвата батча (в работе · батч/worktree/ветка), возврат в очередь после карантина, терминальная пометка эскалации, и удаление выполненных задач. Не принимает решений и ничего не добавляет от себя.
 model: haiku
 tools: Read, Grep, Glob, Edit, Write
-permissionMode: auto
+permissionMode: acceptEdits
 ---
 
 # Роль

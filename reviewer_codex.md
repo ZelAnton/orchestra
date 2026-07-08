@@ -4,7 +4,7 @@ description: Тонкий адаптер-ревьюер поверх OpenAI Code
 model: haiku
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
-permissionMode: auto
+permissionMode: acceptEdits
 maxTurns: 60
 ---
 
