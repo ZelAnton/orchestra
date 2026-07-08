@@ -92,15 +92,16 @@ if exist "%~dp0..\tools\validate-agents.ps1" (
   )
 )
 
-rem The three robocopy steps below all mirror content out of the repo checkout into
+rem The four robocopy steps below all mirror content out of the repo checkout into
 rem %USERPROFILE%\.claude\, so they only make sense when this script is actually
 rem running from a checkout - IS_REPO_CHECKOUT, detected at the top of this file.
 rem Run from the ~/.claude\scripts mirror instead, "%~dp0.." resolves to ~/.claude
 rem itself: the agents and launchers robocopy calls would copy the mirror onto
 rem itself - source == destination, a self-copy no-op - and the config.example.md
-rem call would look for a source file that is not there - all three would still
-rem exit 0-7 and print "Synced ... -^>..." as if real work had happened, which is
-rem exactly the silent-no-op-reported-as-success bug this gate exists to prevent.
+rem and constraints.example.md calls would each look for a source file that is not
+rem there - all four would still exit 0-7 and print "Synced ... -^>..." as if real
+rem work had happened, which is exactly the silent-no-op-reported-as-success bug
+rem this gate exists to prevent.
 rem
 rem Sync agent definitions from the agents\ folder - %~dp0..\agents - into the mirror
 rem %USERPROFILE%\.claude\agents\, which is where "claude --agent" actually loads them.
