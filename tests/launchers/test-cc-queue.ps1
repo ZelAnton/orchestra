@@ -1,14 +1,15 @@
-﻿# Verifies launchers/cc-queue.cmd: the no-argument branch (asks for a
-# source), single-word and multi-word argument forwarding, and the
-# double-quote -> single-quote substitution used to keep an embedded quote
-# from breaking out of the prompt's own quoting.
+﻿# Verifies launchers/cc-queue.cmd: the no-argument branch (launches with no
+# predefined prompt and waits for the task in chat), single-word and
+# multi-word argument forwarding, and the double-quote -> single-quote
+# substitution used to keep an embedded quote from breaking out of the
+# prompt's own quoting.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 Invoke-Test -Name 'cc-queue.cmd' -Body {
     $expectedMode = Get-ExpectedPermissionMode 'cc-queue.cmd'
 
-    # --- Scenario 1: no arguments -> asks for a source ------------------
+    # --- Scenario 1: no arguments -> bare launch, no predefined prompt ---
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-queue.cmd'
@@ -23,8 +24,7 @@ Invoke-Test -Name 'cc-queue.cmd' -Body {
 
         $expected = @(
             '--agent', 'queue_builder',
-            '--permission-mode', $expectedMode,
-            'Per your system prompt, ask me for the source (file/spec/backlog) or task description to enqueue into .work/Tasks_Queue.md — none was given on the command line.'
+            '--permission-mode', $expectedMode
         )
         Assert-ArrayEqual $expected (Get-CapturedArgs $captureFile) '[no args] claude argv'
     }

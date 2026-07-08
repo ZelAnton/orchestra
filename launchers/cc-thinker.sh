@@ -10,7 +10,8 @@
 # (including any "$VAR" text) are NOT re-expanded, so quotes and special characters in
 # typical input are preserved. Quote the argument so the shell keeps it as one token.
 if [ "$#" -eq 0 ]; then
-  exec claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Greet me briefly, then ask what I want to explore or build. Analyze it with me and, once we agree on concrete work, enqueue it into .work/Tasks_Queue.md per your instructions."
+  # No predefined prompt: the agent launches and waits for the task in chat.
+  exec claude --agent thinker --permission-mode auto
 else
   exec claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: $*"
 fi

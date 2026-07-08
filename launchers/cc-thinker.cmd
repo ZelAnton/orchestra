@@ -24,7 +24,8 @@ set "ARGS=%*"
 setlocal EnableDelayedExpansion
 call "%~dp0cc-common.cmd" sanitize
 if "%~1"=="" (
-  claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Greet me briefly, then ask what I want to explore or build. Analyze it with me and, once we agree on concrete work, enqueue it into .work/Tasks_Queue.md per your instructions."
+  rem Без предопределённого промпта: агент запускается и ждёт указания задачи в чате.
+  claude --agent thinker --permission-mode auto
 ) else (
   claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: !ARGS!"
 )

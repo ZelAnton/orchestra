@@ -1,13 +1,14 @@
-# Verifies launchers/cc-thinker.cmd: the no-argument branch (generic greeting
-# prompt) and the opening-topic argument forwarding (including the same
-# quote-substitution behavior as cc-queue.cmd).
+# Verifies launchers/cc-thinker.cmd: the no-argument branch (bare launch, no
+# predefined prompt - waits for the task in chat) and the opening-topic
+# argument forwarding (including the same quote-substitution behavior as
+# cc-queue.cmd).
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 Invoke-Test -Name 'cc-thinker.cmd' -Body {
     $expectedMode = Get-ExpectedPermissionMode 'cc-thinker.cmd'
 
-    # --- Scenario 1: no arguments -----------------------------------------
+    # --- Scenario 1: no arguments -> bare launch, no predefined prompt ---
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-thinker.cmd'
@@ -22,8 +23,7 @@ Invoke-Test -Name 'cc-thinker.cmd' -Body {
 
         $expected = @(
             '--agent', 'thinker',
-            '--permission-mode', $expectedMode,
-            'Per your system prompt: act as the analytical thinking partner for this project. Greet me briefly, then ask what I want to explore or build. Analyze it with me and, once we agree on concrete work, enqueue it into .work/Tasks_Queue.md per your instructions.'
+            '--permission-mode', $expectedMode
         )
         Assert-ArrayEqual $expected (Get-CapturedArgs $captureFile) '[no args] claude argv'
     }

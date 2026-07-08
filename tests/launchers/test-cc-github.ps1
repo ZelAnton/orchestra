@@ -1,5 +1,6 @@
 # Verifies launchers/cc-github.cmd invokes claude with the expected static
-# argument list (agent, permission mode, prompt) and propagates its exit code.
+# argument list (agent, permission mode - no predefined prompt, waits for the
+# task in chat) and propagates its exit code.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -20,8 +21,7 @@ Invoke-Test -Name 'cc-github.cmd' -Body {
         $expectedMode = Get-ExpectedPermissionMode 'cc-github.cmd'
         $expected = @(
             '--agent', 'github_sync',
-            '--permission-mode', $expectedMode,
-            'Per your system prompt, sync GitHub with the task queue: enqueue tasks from open issues/PRs and close the ones that are done. Start now.'
+            '--permission-mode', $expectedMode
         )
         Assert-ArrayEqual $expected (Get-CapturedArgs $captureFile) 'claude argv'
     }

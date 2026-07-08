@@ -9,7 +9,8 @@
 # (including any "$VAR" text) are NOT re-expanded, so quotes and special characters in
 # typical input are preserved. Quote the argument so the shell keeps it as one token.
 if [ "$#" -eq 0 ]; then
-  exec claude --agent queue_builder --permission-mode auto "Per your system prompt, ask me for the source (file/spec/backlog) or task description to enqueue into .work/Tasks_Queue.md - none was given on the command line."
+  # No predefined prompt: the agent launches and waits for the task in chat.
+  exec claude --agent queue_builder --permission-mode auto
 else
   exec claude --agent queue_builder --permission-mode auto "Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: $*"
 fi

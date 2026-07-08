@@ -25,7 +25,8 @@ set "ARGS=%*"
 setlocal EnableDelayedExpansion
 call "%~dp0cc-common.cmd" sanitize
 if "%~1"=="" (
-  claude --agent queue_builder --permission-mode auto "Per your system prompt, ask me for the source (file/spec/backlog) or task description to enqueue into .work/Tasks_Queue.md — none was given on the command line."
+  rem Без предопределённого промпта: агент запускается и ждёт указания задачи в чате.
+  claude --agent queue_builder --permission-mode auto
 ) else (
   claude --agent queue_builder --permission-mode auto "Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: !ARGS!"
 )
