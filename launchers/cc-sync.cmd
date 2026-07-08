@@ -1,10 +1,11 @@
 @echo off
 rem If this copy of cc-sync.cmd lives in the actual repo checkout - generate-coders.cmd
-rem sits two levels up next to coder.template.md - regenerate coder.md, coder_fast.md
-rem and coder_deep.md before mirroring, so sync always ships what the template
-rem currently says instead of a possibly stale on-disk copy. generate-coders.cmd
-rem always overwrites the three files, so this also self-heals drift: a manual edit
-rem to one variant, or a template edit without a manual regen run.
+rem sits two levels up next to coder.template.md/reviewer.template.md - regenerate the
+rem coder.md/coder_fast.md/coder_deep.md and reviewer.md/reviewer_std.md variants before
+rem mirroring, so sync always ships what the templates currently say instead of a
+rem possibly stale on-disk copy. generate-coders.cmd always overwrites those files, so
+rem this also self-heals drift: a manual edit to one variant, or a template edit without
+rem a manual regen run.
 rem This is skipped when running from the ~/.claude/scripts mirror instead - only
 rem launchers\*.cmd get mirrored there, not the repo-root generator or template -
 rem in that case there is no source template to regenerate from anyway.
@@ -22,10 +23,10 @@ if exist "%~dp0..\generate-coders.cmd" (
   rem above, so we deliberately keep going into the robocopy mirror below instead
   rem of aborting the sync - the drift is fixed, it just was not committed yet.
   if exist "%~dp0..\.git" (
-    git -C "%~dp0.." diff --exit-code -- coder.md coder_fast.md coder_deep.md >nul 2>nul
+    git -C "%~dp0.." diff --exit-code -- coder.md coder_fast.md coder_deep.md reviewer.md reviewer_std.md >nul 2>nul
     if errorlevel 1 (
-      echo Warning: coder.md/coder_fast.md/coder_deep.md differed from coder.template.md
-      echo and were regenerated. Commit the changes to those files.
+      echo Warning: generated agent files differed from their templates and were
+      echo regenerated. Commit the changes to coder*.md / reviewer*.md.
     )
   )
 )
@@ -64,11 +65,12 @@ rem
 rem Copies top-level *.md only (no recursion, so launchers\ is skipped) and does NOT
 rem purge (other agents already in the mirror are preserved). Excluded:
 rem   coder.template.md      - "name: {{NAME}}" frontmatter would register a broken agent
+rem   reviewer.template.md   - same: placeholder "name: {{NAME}}" frontmatter, not an agent
 rem   config.example.md      - not an agent; mirrored separately below, next to the
 rem                            launchers in scripts\, so cc-config.cmd can find it there
 rem   AGENTS.md/knowledge.md/README.md/*_PLAN.md/*_ROADMAP.md - repository docs, not agents
 rem   Orchestra_Review_*.md  - dated review reports, not agents
-robocopy "%~dp0.." "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md config.example.md AGENTS.md knowledge.md README.md "*_PLAN.md" "*_ROADMAP.md" "Orchestra_Review_*.md" /NJH /NJS /NDL /NFL
+robocopy "%~dp0.." "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md reviewer.template.md config.example.md AGENTS.md knowledge.md README.md "*_PLAN.md" "*_ROADMAP.md" "Orchestra_Review_*.md" /NJH /NJS /NDL /NFL
 rem robocopy exit codes 0-7 mean success; 8+ is a real error.
 if errorlevel 8 (
   echo Sync failed: robocopy returned an error code.
