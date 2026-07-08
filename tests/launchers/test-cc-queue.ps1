@@ -1,4 +1,4 @@
-# Verifies launchers/cc-queue.cmd: the no-argument branch (asks for a
+﻿# Verifies launchers/cc-queue.cmd: the no-argument branch (asks for a
 # source), single-word and multi-word argument forwarding, and the
 # double-quote -> single-quote substitution used to keep an embedded quote
 # from breaking out of the prompt's own quoting.
