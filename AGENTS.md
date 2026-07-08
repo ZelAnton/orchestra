@@ -19,7 +19,7 @@ There is no compiled build or automated test suite. Validate changes by regenera
 
 ## Coding Style & Naming Conventions
 
-Keep Markdown instructions direct, imperative, and consistent with the existing Russian terminology. Preserve YAML frontmatter as the first bytes of agent files; files must be UTF-8 without BOM. Use lowercase snake_case for agent names and files (`knowledge_curator.md`) and the `cc-<action>.cmd` pattern for launchers. Use four-space indentation in PowerShell blocks and uppercase snake case for configuration keys such as `REVIEW_LOOP_MAX`.
+Keep Markdown instructions direct, imperative, and consistent with the existing Russian terminology. Preserve YAML frontmatter as the first bytes of agent files; files must be UTF-8 without BOM. Use lowercase snake_case for agent names and files (`knowledge_curator.md`) and the `cc-<action>.cmd` pattern for launchers. Use four-space indentation in PowerShell blocks and uppercase snake case for configuration keys such as `REVIEW_LOOP_MAX`. `.cmd` launchers must use Windows (CRLF) line endings; this is enforced by `.gitattributes` (`*.cmd text eol=crlf`), so a plain checkout is always correct — do not hand-fix line endings per file or per contributor.
 
 Do not edit generated coder variants independently. Change `agents/coder.template.md` or the variant metadata in `generate-coders.ps1`, regenerate, and review all three outputs.
 
