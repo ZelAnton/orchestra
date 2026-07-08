@@ -31,6 +31,32 @@ if exist "%~dp0..\generate-coders.cmd" (
 )
 
 chcp 65001 >nul
+
+rem Validate agent .md invariants (frontmatter starts at byte 0, UTF-8 without BOM,
+rem required name/description fields, name matches filename, snake_case) before
+rem mirroring, so a broken agent file is flagged loudly instead of being silently
+rem copied into the mirror where it would fail at load time. Skipped when running
+rem from the ~/.claude/scripts mirror instead - only launchers\*.cmd get mirrored
+rem there, so tools\validate-agents.ps1 has nothing to check against in that copy.
+rem Non-fatal by design, matching the coder-drift warning above: a violation is
+rem printed clearly but does not abort the sync.
+rem NOTE: uses "if errorlevel N", not "if %ERRORLEVEL%==N" - inside a parenthesized
+rem block cmd pre-expands %ERRORLEVEL% once at parse time (before "where pwsh" runs),
+rem so that form would always see a stale value here; "if errorlevel N" is a live
+rem check and works correctly at any nesting depth (same reasoning as the existing
+rem "if errorlevel 1" checks elsewhere in this file).
+if exist "%~dp0..\tools\validate-agents.ps1" (
+  where pwsh >nul 2>nul
+  if errorlevel 1 (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\tools\validate-agents.ps1"
+  ) else (
+    pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\tools\validate-agents.ps1"
+  )
+  if errorlevel 1 (
+    echo Warning: agent .md files violate invariants ^(see list above^). Fix before relying on the mirror.
+  )
+)
+
 rem Sync agent definitions from this folder (%~dp0..) into the mirror
 rem %USERPROFILE%\.claude\agents\, which is where "claude --agent" actually loads them.
 rem Without this step, edits to the .md files here do NOT take effect at runtime.
