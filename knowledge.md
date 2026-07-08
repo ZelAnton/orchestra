@@ -70,8 +70,7 @@ workspace, коммитит результаты листовых агентов
 - `coder_codex.md` и `reviewer_codex.md` — тонкие адаптеры `codex exec` с обязательным
   fallback на Claude. Codex-coder поддерживает реализацию, `R-` и при
   `CODEX_CIFIX=on` точечный Режим 3, но не интеграционные `F-`. Codex-reviewer работает
-  read-only. Внимание: строка `description` в frontmatter `coder_codex.md` устарела и
-  ошибочно отрицает Режим 3; актуальны тело файла, `processor.md` и `config.example.md`.
+  read-only.
 
 ### Наполнение очереди и знания
 
