@@ -41,8 +41,13 @@ task, the level used, reviewer, review-cycle count (first-pass finds vs. fix-cyc
 finds), diff size, and outcome (`merged=<SHA>`, `quarantined=<reason> (попытка=N)`,
 or escalated). It also records how many admission waves the cohort took and why
 admission closed (`COHORT_SIZE`, `COHORT_MAX_AGE`, `очередь-пуста`, or
-`только-конфликты-с-готовыми`), plus push/CI outcome and any rejected planner
-candidates.
+`только-конфликты-с-готовыми` — the remaining queue candidates only overlap the
+domain of tasks already at a terminal-for-admission state, so no further top-up is
+possible this cohort), plus push/CI outcome and any rejected planner candidates. Don't
+confuse this with `только-конфликты-с-активными`, which you will *not* see here: it's
+a transient per-round state (a candidate overlaps a still-active task's domain and may
+unblock later in the same cohort) that keeps admission open rather than closing it, so
+it never appears as an admission-close reason.
 
 If Claude Code isn't running at all and you want a fuller live view (or to resume
 work), see §6 and `launchers/cc-resume.cmd`.
