@@ -24,22 +24,34 @@ mkdir -p ".work"
 # Look for a template next to launchers/ first (repo checkout layout: this file lives in
 # launchers/, the *.example.md one level up at the repo root), then alongside this script
 # (mirror layout in ~/.claude/scripts, where cc-sync.sh mirrors the templates flat next to
-# the *.sh files). Prints the resolved path, or nothing if neither exists.
+# the *.sh files). On success prints the resolved path and returns 0. On failure prints
+# nothing and returns a code the caller maps to a distinct cause (task T-056): 1 = a
+# directory of that name shadows the template (the ~/.claude/scripts mirror is corrupted),
+# 2 = the template is genuinely absent. `[ -f ]` already skips a directory, but without
+# this split cc-config.sh could only say a vague "missing?" - the same class of misleading
+# diagnostic cc-config.cmd suffers from - instead of naming the corrupted-mirror cause.
 find_template() {
   if [ -f "$SCRIPT_DIR/../$1" ]; then
     printf '%s\n' "$SCRIPT_DIR/../$1"
+    return 0
   elif [ -f "$SCRIPT_DIR/$1" ]; then
     printf '%s\n' "$SCRIPT_DIR/$1"
+    return 0
+  elif [ -d "$SCRIPT_DIR/../$1" ] || [ -d "$SCRIPT_DIR/$1" ]; then
+    return 1
   fi
+  return 2
 }
 
 # --- config.md (seed only the marked block) ---
 if [ -f ".work/config.md" ]; then
   echo ".work/config.md already exists - leaving it unchanged."
 else
-  TEMPLATE="$(find_template config.example.md)"
-  if [ -z "$TEMPLATE" ]; then
-    echo "Failed to create .work/config.md (config.example.md missing next to launchers?)."
+  TEMPLATE="$(find_template config.example.md)"; template_rc=$?
+  if [ "$template_rc" -eq 1 ]; then
+    echo "Failed to create .work/config.md (config.example.md exists but is a directory, not a file - the ~/.claude/scripts mirror is corrupted; run cc-sync to repair it)."
+  elif [ "$template_rc" -ne 0 ]; then
+    echo "Failed to create .work/config.md (config.example.md not found next to launchers or in the mirror - run cc-sync, or check your checkout)."
   else
     # Extract only the lines strictly between the seed markers (both markers excluded).
     seed="$(awk '
@@ -48,7 +60,7 @@ else
       f
     ' "$TEMPLATE")"
     if [ -z "$seed" ]; then
-      echo "Failed to create .work/config.md (seed markers not found in config.example.md?)."
+      echo "Failed to create .work/config.md (config.example.md is a file but has no 'config.md seed start/end' block to copy)."
     else
       printf '%s\n' "$seed" > ".work/config.md"
       echo "Created .work/config.md from config.example.md - edit it for this project."
@@ -60,13 +72,15 @@ fi
 if [ -f ".work/constraints.md" ]; then
   echo ".work/constraints.md already exists - leaving it unchanged."
 else
-  TEMPLATE="$(find_template constraints.example.md)"
-  if [ -z "$TEMPLATE" ]; then
-    echo "Failed to create .work/constraints.md (constraints.example.md missing next to launchers?)."
+  TEMPLATE="$(find_template constraints.example.md)"; template_rc=$?
+  if [ "$template_rc" -eq 1 ]; then
+    echo "Failed to create .work/constraints.md (constraints.example.md exists but is a directory, not a file - the ~/.claude/scripts mirror is corrupted; run cc-sync to repair it)."
+  elif [ "$template_rc" -ne 0 ]; then
+    echo "Failed to create .work/constraints.md (constraints.example.md not found next to launchers or in the mirror - run cc-sync, or check your checkout)."
   elif cp -f "$TEMPLATE" ".work/constraints.md"; then
     echo "Created .work/constraints.md from constraints.example.md - edit it for this project."
   else
-    echo "Failed to create .work/constraints.md."
+    echo "Failed to create .work/constraints.md (copy failed - is .work writable?)."
   fi
 fi
 

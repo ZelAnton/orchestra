@@ -48,13 +48,34 @@ goto :eof
 :seed_config
 set "CC_CONFIG_TEMPLATE=%~dp0..\config.example.md"
 if not exist "%CC_CONFIG_TEMPLATE%" set "CC_CONFIG_TEMPLATE=%~dp0config.example.md"
+rem Distinguish three causes so the diagnostic is never misleading (task T-056):
+rem  (a) the template is truly absent;
+rem  (b) the template PATH exists but is a directory, not a file - cmd.exe "exist" does not
+rem      tell files from directories, so without this check the code would fall through to
+rem      the PowerShell call, which throws deep inside [System.IO.File]::ReadAllLines and
+rem      leaks a raw .NET stack trace, and then wrongly blames missing seed markers;
+rem  (c) the template is a real file - defer to PowerShell, which distinguishes markers-not
+rem      -found from a read/write error via distinct exit codes below.
 if not exist "%CC_CONFIG_TEMPLATE%" (
-  echo Failed to create .work\config.md ^(config.example.md missing next to launchers?^).
+  echo Failed to create .work\config.md ^(config.example.md not found next to launchers or in the mirror - run cc-sync, or check your checkout^).
   goto :eof
 )
-%CC_PS_EXE% -NoProfile -Command "$ErrorActionPreference='Stop'; $c=[System.IO.File]::ReadAllLines('%CC_CONFIG_TEMPLATE%', [System.Text.Encoding]::UTF8); $s=($c | Select-String -Pattern '^# >>> config\.md seed start' | Select-Object -First 1).LineNumber; $e=($c | Select-String -Pattern '^# <<< config\.md seed end' | Select-Object -First 1).LineNumber; if (-not $s -or -not $e -or $e -le $s) { exit 1 }; [System.IO.File]::WriteAllLines('.work\config.md', $c[$s..($e-2)], (New-Object System.Text.UTF8Encoding($false)))"
-if errorlevel 1 (
-  echo Failed to create .work\config.md ^(seed markers not found in config.example.md?^).
+if exist "%CC_CONFIG_TEMPLATE%\" (
+  echo Failed to create .work\config.md ^(config.example.md exists but is a directory, not a file - the ~/.claude/scripts mirror is corrupted; run cc-sync from the repo checkout to repair it^).
+  goto :eof
+)
+rem Wrap the PowerShell body in try/catch so a .NET exception - unreadable file, locked
+rem .work, etc. - never leaks its ParentContainsErrorRecordException trace to stderr on top
+rem of this script's own diagnostic. Exit codes: 0 created; 2 seed markers not found; 3 an
+rem exception was caught; any other non-zero is an unexpected PowerShell failure. Residual
+rem stderr is discarded ^(2^>nul^) so only the cmd-side message below is ever shown.
+%CC_PS_EXE% -NoProfile -Command "try { $ErrorActionPreference='Stop'; $c=[System.IO.File]::ReadAllLines('%CC_CONFIG_TEMPLATE%', [System.Text.Encoding]::UTF8); $s=($c | Select-String -Pattern '^# >>> config\.md seed start' | Select-Object -First 1).LineNumber; $e=($c | Select-String -Pattern '^# <<< config\.md seed end' | Select-Object -First 1).LineNumber; if (-not $s -or -not $e -or $e -le $s) { exit 2 }; [System.IO.File]::WriteAllLines('.work\config.md', $c[$s..($e-2)], (New-Object System.Text.UTF8Encoding($false))); exit 0 } catch { exit 3 }" 2>nul
+if errorlevel 3 (
+  echo Failed to create .work\config.md ^(reading config.example.md or writing .work\config.md raised an error - is the template unreadable or .work not writable?^).
+) else if errorlevel 2 (
+  echo Failed to create .work\config.md ^(config.example.md is a file but has no "config.md seed start/end" block to copy^).
+) else if errorlevel 1 (
+  echo Failed to create .work\config.md ^(unexpected PowerShell error^).
 ) else (
   echo Created .work\config.md from config.example.md - edit it for this project.
 )
@@ -63,13 +84,23 @@ goto :eof
 :seed_constraints
 set "CC_CONSTRAINTS_TEMPLATE=%~dp0..\constraints.example.md"
 if not exist "%CC_CONSTRAINTS_TEMPLATE%" set "CC_CONSTRAINTS_TEMPLATE=%~dp0constraints.example.md"
+rem Same three-cause distinction as :seed_config (task T-056): (a) template absent;
+rem (b) template PATH is a directory, not a file; (c) template is a real file - defer to
+rem PowerShell. constraints.md copies the WHOLE file, so there is no seed-marker case - the
+rem PowerShell body returns 0 on success or 3 on a caught exception.
 if not exist "%CC_CONSTRAINTS_TEMPLATE%" (
-  echo Failed to create .work\constraints.md ^(constraints.example.md missing next to launchers?^).
+  echo Failed to create .work\constraints.md ^(constraints.example.md not found next to launchers or in the mirror - run cc-sync, or check your checkout^).
   goto :eof
 )
-%CC_PS_EXE% -NoProfile -Command "$ErrorActionPreference='Stop'; $t=[System.IO.File]::ReadAllText('%CC_CONSTRAINTS_TEMPLATE%', [System.Text.Encoding]::UTF8); [System.IO.File]::WriteAllText('.work\constraints.md', $t, (New-Object System.Text.UTF8Encoding($false)))"
-if errorlevel 1 (
-  echo Failed to create .work\constraints.md.
+if exist "%CC_CONSTRAINTS_TEMPLATE%\" (
+  echo Failed to create .work\constraints.md ^(constraints.example.md exists but is a directory, not a file - the ~/.claude/scripts mirror is corrupted; run cc-sync from the repo checkout to repair it^).
+  goto :eof
+)
+%CC_PS_EXE% -NoProfile -Command "try { $ErrorActionPreference='Stop'; $t=[System.IO.File]::ReadAllText('%CC_CONSTRAINTS_TEMPLATE%', [System.Text.Encoding]::UTF8); [System.IO.File]::WriteAllText('.work\constraints.md', $t, (New-Object System.Text.UTF8Encoding($false))); exit 0 } catch { exit 3 }" 2>nul
+if errorlevel 3 (
+  echo Failed to create .work\constraints.md ^(reading constraints.example.md or writing .work\constraints.md raised an error - is the template unreadable or .work not writable?^).
+) else if errorlevel 1 (
+  echo Failed to create .work\constraints.md ^(unexpected PowerShell error^).
 ) else (
   echo Created .work\constraints.md from constraints.example.md - edit it for this project.
 )

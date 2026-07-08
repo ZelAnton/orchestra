@@ -38,6 +38,27 @@ AGENTS_SRC="$REPO_ROOT/agents"
 AGENTS_DIR="$HOME/.claude/agents"
 SCRIPTS_DIR="$HOME/.claude/scripts"
 
+# Copy $1 onto $2, healing the "mirror entry is a directory, not a file" corruption that
+# every copy step below is otherwise vulnerable to: with a plain `cp -f`, if the destination
+# path is already a directory, POSIX cp does NOT refuse - it copies the source INSIDE that
+# directory under its own basename (e.g. .../config.example.md/config.example.md), returns
+# success, and the caller prints a false "Synced". This is the POSIX twin of the robocopy
+# code-4 masking guarded in cc-sync.cmd (task T-056). An EMPTY such directory is a stale
+# husk: rmdir removes it (rmdir only ever succeeds on an empty directory) and the copy
+# proceeds as usual. A NON-EMPTY one may hold real data, so it is reported as an explicit,
+# path-named failure and left untouched - never a false "Synced". Returns 0 on a real copy,
+# non-zero otherwise. Unlike cc-sync.cmd, this guard covers the agent/launcher loops too:
+# each of those is a per-file `cp -f` with exactly the same directory-shadowing exposure.
+mirror_file() {
+  if [ -d "$2" ]; then
+    if ! rmdir "$2" 2>/dev/null; then
+      echo "Sync failed: \"$2\" is a non-empty directory blocking this mirror - inspect and remove it by hand, then re-run cc-sync."
+      return 1
+    fi
+  fi
+  cp -f "$1" "$2"
+}
+
 # 1) Mirror agent *.md from agents/ into ~/.claude/agents. Documentation lives in the
 #    repo root (AGENTS.md, knowledge.md, README.md, config.example.md, plans/), NOT in
 #    agents/, so the old growing documentation-exclusion list is gone. Same reduced
@@ -54,7 +75,7 @@ for f in "$AGENTS_SRC"/*.md; do
   case "$n" in
     coder.template.md|reviewer.template.md) continue ;;
   esac
-  if cp -f "$f" "$AGENTS_DIR/$n"; then
+  if mirror_file "$f" "$AGENTS_DIR/$n"; then
     agent_count=$((agent_count + 1))
   else
     sync_failed=1
@@ -74,7 +95,7 @@ sync_failed=0
 for f in "$SCRIPT_DIR"/*.sh; do
   [ -f "$f" ] || continue
   n="$(basename "$f")"
-  if cp -f "$f" "$SCRIPTS_DIR/$n"; then
+  if mirror_file "$f" "$SCRIPTS_DIR/$n"; then
     chmod +x "$SCRIPTS_DIR/$n" 2>/dev/null || true
     launcher_count=$((launcher_count + 1))
   else
@@ -91,7 +112,7 @@ fi
 #    scripts/, so that cc-config.sh (run from the mirror, off PATH) can find its
 #    templates via its own dir.
 if [ -f "$REPO_ROOT/config.example.md" ]; then
-  if cp -f "$REPO_ROOT/config.example.md" "$SCRIPTS_DIR/config.example.md"; then
+  if mirror_file "$REPO_ROOT/config.example.md" "$SCRIPTS_DIR/config.example.md"; then
     echo "Synced config.example.md -> $SCRIPTS_DIR"
   else
     echo "Sync failed: could not copy config.example.md."
@@ -99,7 +120,7 @@ if [ -f "$REPO_ROOT/config.example.md" ]; then
 fi
 
 if [ -f "$REPO_ROOT/constraints.example.md" ]; then
-  if cp -f "$REPO_ROOT/constraints.example.md" "$SCRIPTS_DIR/constraints.example.md"; then
+  if mirror_file "$REPO_ROOT/constraints.example.md" "$SCRIPTS_DIR/constraints.example.md"; then
     echo "Synced constraints.example.md -> $SCRIPTS_DIR"
   else
     echo "Sync failed: could not copy constraints.example.md."

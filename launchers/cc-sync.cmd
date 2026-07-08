@@ -15,6 +15,11 @@ set "IS_REPO_CHECKOUT="
 if exist "%~dp0..\generate-coders.cmd" set "IS_REPO_CHECKOUT=1"
 if exist "%~dp0..\agents\coder.template.md" set "IS_REPO_CHECKOUT=1"
 
+rem Capture this script's own directory for the :mirror_template subroutine below: inside a
+rem "call :label" subroutine, %~dp0 is not a reliable way to reach the repo root, so snapshot
+rem it here in the top-level scope where it is unambiguous and reuse it from the subroutine.
+set "CC_SCRIPT_DIR=%~dp0"
+
 rem If this copy of cc-sync.cmd lives in the actual repo checkout - generate-coders.cmd
 rem sits one level up in the repo root and resolves the templates under agents\
 rem (agents\coder.template.md/agents\reviewer.template.md) - regenerate the
@@ -130,9 +135,18 @@ rem the descriptive comments were deliberately kept above "if defined (" here an
 rem parenthetical asides were rewritten with "-" instead of literal "(" ")".
 if defined IS_REPO_CHECKOUT (
   robocopy "%~dp0..\agents" "%USERPROFILE%\.claude\agents" *.md /XF coder.template.md reviewer.template.md /NJH /NJS /NDL /NFL
-  rem robocopy exit codes 0-7 mean success; 8+ is a real error.
+  rem robocopy exit codes 0-7 mean success; 8+ is a real error. Bit 4 - codes 4 through 7 -
+  rem flags a file/directory MISMATCH: e.g. a source *.md whose destination name is already
+  rem a subdirectory in the mirror. That stays under the 8 threshold, so it must be caught
+  rem separately or the block would print a false "Synced" - the same masking class T-056
+  rem fixes for the single-file templates below. Here the collision is surfaced for manual
+  rem cleanup rather than self-healed: a wildcard mirror cannot tell which specific name
+  rem collided without enumerating every source file, and unlike a lone template a shadowing
+  rem subdirectory here is far less plausible than the observed config.example.md husk.
   if errorlevel 8 (
     echo Sync failed: robocopy returned an error code.
+  ) else if errorlevel 4 (
+    echo Sync warning: robocopy reported a name/directory mismatch mirroring agents - a name under "%USERPROFILE%\.claude\agents" is a directory shadowing a same-named agent .md; remove it by hand, then re-run cc-sync.
   ) else (
     echo Synced agent definitions -^> "%USERPROFILE%\.claude\agents"
   )
@@ -140,23 +154,50 @@ if defined IS_REPO_CHECKOUT (
   robocopy "%~dp0." "%USERPROFILE%\.claude\scripts" *.cmd /NJH /NJS /NDL /NFL
   if errorlevel 8 (
     echo Sync failed: robocopy returned an error code.
+  ) else if errorlevel 4 (
+    echo Sync warning: robocopy reported a name/directory mismatch mirroring launchers - a name under "%USERPROFILE%\.claude\scripts" is a directory shadowing a same-named launcher; remove it by hand, then re-run cc-sync.
   ) else (
     echo Synced launcher scripts -^> "%USERPROFILE%\.claude\scripts"
   )
 
-  robocopy "%~dp0.." "%USERPROFILE%\.claude\scripts" config.example.md /NJH /NJS /NDL /NFL
-  if errorlevel 8 (
-    echo Sync failed: robocopy returned an error code.
-  ) else (
-    echo Synced config.example.md -^> "%USERPROFILE%\.claude\scripts"
-  )
-
-  robocopy "%~dp0.." "%USERPROFILE%\.claude\scripts" constraints.example.md /NJH /NJS /NDL /NFL
-  if errorlevel 8 (
-    echo Sync failed: robocopy returned an error code.
-  ) else (
-    echo Synced constraints.example.md -^> "%USERPROFILE%\.claude\scripts"
-  )
+  rem config.example.md and constraints.example.md are mirrored as single named files whose
+  rem destination path is meant to be a FILE. If a previous corruption left a directory of
+  rem that exact name in the mirror, robocopy returns code 4 - below the 8 threshold - and
+  rem leaves the directory in place while the block would otherwise print a false "Synced".
+  rem :mirror_template guards each one: an empty such directory is removed and the copy runs
+  rem as usual; a non-empty one fails the step explicitly - no false "Synced" either way.
+  call :mirror_template config.example.md
+  call :mirror_template constraints.example.md
 ) else (
   echo Skipping agent/launcher/config mirroring - not running from a repository checkout ^(mirror detected^); run cc-sync from the repo checkout instead.
 )
+
+goto :eof
+
+:mirror_template
+rem %~1 = template file name to mirror from the repo root into %USERPROFILE%\.claude\scripts.
+rem Guards the "destination is a directory, not a file" corruption before robocopy runs.
+rem robocopy would otherwise return code 4 - a mismatch, below this script's errorlevel-8
+rem error threshold - and leave the directory untouched while the caller falsely printed
+rem "Synced". An EMPTY such directory is a stale husk: rmdir removes it and the copy proceeds
+rem as usual. A NON-EMPTY one may hold real data, so rmdir fails, the directory stays, and
+rem the step fails loudly - never a false "Synced".
+setlocal
+set "CC_DEST_DIR=%USERPROFILE%\.claude\scripts"
+set "CC_DEST=%CC_DEST_DIR%\%~1"
+if exist "%CC_DEST%\" (
+  rmdir "%CC_DEST%" 2>nul
+  if exist "%CC_DEST%\" (
+    echo Sync failed: "%CC_DEST%" is a directory blocking the %~1 mirror and could not be auto-removed - it is non-empty or locked; inspect and remove it by hand, then re-run cc-sync.
+    endlocal
+    goto :eof
+  )
+)
+robocopy "%CC_SCRIPT_DIR%.." "%CC_DEST_DIR%" "%~1" /NJH /NJS /NDL /NFL
+if errorlevel 8 (
+  echo Sync failed: robocopy returned an error code mirroring %~1.
+) else (
+  echo Synced %~1 -^> "%CC_DEST_DIR%"
+)
+endlocal
+goto :eof
