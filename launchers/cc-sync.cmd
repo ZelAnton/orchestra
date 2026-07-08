@@ -35,6 +35,19 @@ rem commands); running it under the default codepage first avoids that entirely.
 if defined IS_REPO_CHECKOUT (
   if exist "%~dp0..\generate-coders.cmd" (
     call "%~dp0..\generate-coders.cmd"
+    rem Abort before the robocopy mirroring below if regeneration itself failed - do not
+    rem mirror possibly stale or partially written coder*.md files. This is distinct from
+    rem the informational drift check right below: that one covers a successful
+    rem regeneration whose output differs from what is committed - T-011, intentionally
+    rem non-fatal - this one covers the regeneration command itself failing to run.
+    rem NOTE: uses "if errorlevel N", not "if %ERRORLEVEL%==N" - inside a parenthesized
+    rem block cmd pre-expands %ERRORLEVEL% once at parse time, so that form would always
+    rem see a stale value here; "if errorlevel N" is a live check (same reasoning as the
+    rem existing "if errorlevel 1" checks elsewhere in this file).
+    if errorlevel 1 (
+      echo Error: generate-coders.cmd failed. Aborting sync before mirroring agents.
+      exit /b 1
+    )
     rem Detect whether that regeneration actually changed anything, i.e. whether the
     rem committed coder*.md files were stale or drifted before this run. This check
     rem is informational only: the files on disk are already correct after the call
