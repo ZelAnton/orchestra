@@ -99,6 +99,7 @@ workspace, коммитит результаты листовых агентов
 | `.work/Github_Sync.md` | таблица соответствия GitHub issues/PR и задач очереди; ведёт `github_sync` |
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
 | `.work/orchestrator.lock` | защита от двух processor одновременно |
+| `.work/PAUSE` | kill switch: при наличии processor штатно останавливается на границе фазы/раунда (освобождает lock, состояние подхватит Фаза 0); ставит/снимает `cc-pause`/`cc-unpause` |
 | `.work/batch.md` | append-only манифест текущей когорты (строки волн приёма дописываются, не переписываются) |
 | `.work/cohort_state.md` | состояние роллинг-приёма когорты (открыт/закрыт, волна, счётчики) |
 | `.work/tasks/<T-ID>/task.md` | дескриптор и критерии от planner |
