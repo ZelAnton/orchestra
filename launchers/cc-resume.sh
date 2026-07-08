@@ -12,4 +12,8 @@
 # WARNING: --continue picks up the MOST RECENT Claude Code session in this directory,
 # whatever it is. Do not run other cc-* launchers or an interactive claude between
 # the crash and cc-resume - otherwise --continue resumes their session, not processor.
-exec claude --agent processor --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+# --allowedTools "Bash(codex exec:*)": pre-granted session permission for the codex
+# adapters to launch codex (same as cc-processor.sh) - otherwise the auto-mode classifier
+# rejects codex mid-run on resume. It sits BEFORE --permission-mode (the variadic flag
+# must not swallow the following tokens). --permission-mode auto and --continue unchanged.
+exec claude --agent processor --allowedTools "Bash(codex exec:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."

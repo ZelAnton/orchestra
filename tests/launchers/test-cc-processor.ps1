@@ -22,6 +22,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
+            '--allowedTools', 'Bash(codex exec:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -45,8 +46,8 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         Assert-Equal 0 $result.ExitCode '[--model value] exit code'
 
         $args = Get-CapturedArgs $captureFile
-        Assert-True ($args.Count -ge 6) '[--model value] enough tokens captured'
-        Assert-ArrayEqual @('--agent', 'processor', '--model', 'opus-9000', '--permission-mode', $expectedMode) $args[0..5] '[--model value] --model must precede --permission-mode with its value forwarded'
+        Assert-True ($args.Count -ge 8) '[--model value] enough tokens captured'
+        Assert-ArrayEqual @('--agent', 'processor', '--model', 'opus-9000', '--allowedTools', 'Bash(codex exec:*)', '--permission-mode', $expectedMode) $args[0..7] '[--model value] --model must precede --permission-mode with its value forwarded'
     }
     finally {
         Remove-Sandbox $paths
@@ -67,6 +68,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
+            '--allowedTools', 'Bash(codex exec:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -93,6 +95,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
             '--agent', 'processor',
             '--model', 'foo',
             '--verbose', '--extra-flag',
+            '--allowedTools', 'Bash(codex exec:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -121,6 +124,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
+            '--allowedTools', 'Bash(codex exec:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )

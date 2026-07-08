@@ -13,4 +13,8 @@ rem
 rem ВНИМАНИЕ: --continue подхватывает САМУЮ ПОСЛЕДНЮЮ сессию Claude Code в этом каталоге,
 rem какой бы она ни была. Не запускай между падением и cc-resume другие cc-* лаунчеры
 rem или интерактивный claude — иначе --continue возобновит их сессию, а не processor.
-claude --agent processor --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+rem --allowedTools "Bash(codex exec:*)": предвыданный сессионный грант на запуск codex
+rem адаптерами (как в cc-processor.cmd) — иначе classifier auto-режима отклонит codex
+rem посреди возобновлённого прогона. Стоит перед флагом permission-mode (вариативный флаг
+rem не должен поглотить следующие токены). Режим auto и --continue сохранены.
+claude --agent processor --allowedTools "Bash(codex exec:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."

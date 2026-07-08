@@ -20,6 +20,7 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
         $expectedMode = Get-ExpectedPermissionMode 'cc-resume.cmd'
         $expected = @(
             '--agent', 'processor',
+            '--allowedTools', 'Bash(codex exec:*)',
             '--permission-mode', $expectedMode,
             '--continue',
             "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."

@@ -44,4 +44,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+# --allowedTools "Bash(codex exec:*)": pre-granted session permission for the codex
+# adapters (coder_codex/reviewer_codex) to launch codex. Running this launcher IS the
+# user's consent; without it the auto-mode classifier rejects `codex exec … ` mid-run as
+# "launching an autonomous agent" (see agents/coder_codex.md). The grant matches by the
+# literal command-string prefix, so the adapters invoke codex as a command that starts
+# with exactly `codex exec`. It sits BEFORE --permission-mode: --allowedTools is variadic
+# and, with no following flag to stop it, would swallow the positional prompt.
+# --permission-mode auto is kept unchanged.
+exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
