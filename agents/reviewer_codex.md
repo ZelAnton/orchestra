@@ -313,6 +313,10 @@ UTC ISO-8601 (`date -u +%Y-%m-%dT%H:%M:%SZ`):
   git-метаданные запрещена;
 - `profile-denied` — `Permission denied` на части профиля (`~/.config/git/ignore`,
   `~/.ssh/config`), при этом кэш `~/.cargo` **читается**.
+- `tool-missing` — `Python was not found; run without arguments to install from the
+  Microsoft Store` / `App execution aliases` (Windows App Execution Alias вместо реального
+  интерпретатора) либо `CreateProcessAsUserW failed: 2` (бинарь не найден по имени):
+  требуемый инструмент отсутствует на хосте (найдено аудитом T-067).
 
 **Реакция ревьюера на ЛЮБОЙ класс — всегда эскалация, без брокер-перехода.** Ревью идёт
 `--sandbox read-only` и **сетевых шагов не выполняет**, поэтому «передать шаг брокеру»
