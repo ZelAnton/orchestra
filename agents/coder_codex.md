@@ -1,6 +1,6 @@
 ---
 name: coder_codex
-description: Тонкий адаптер-исполнитель поверх OpenAI Codex CLI (codex exec), приведённый к контракту листового coder'а. Для задач низкой/средней сложности (уровни coder_fast/coder) при включённом CODEX_CODER. Строит промпт из task.md (Режим 1), из переданных находок R- (Режим 2) или из инлайн-описания поломки (Режим 3, при включённом CODEX_CIFIX); запускает codex exec в рабочей копии задачи (worktree, либо в Режиме 3 Фазы 5.4 — основном рабочем дереве; workspace-write, offline, без коммитов), самопроверяется через SMOKE_CMD, гарантирует отсутствие коммитов и возвращает отчёт. codex недоступен/сбой → чистая эскалация, processor откатывается на эквивалентного Claude-coder'а. Не коммитит, не гоняет ревью, не трогает очередь. Режим 3 поддерживает при CODEX_CIFIX=on; интеграционные F- не поддерживает.
+description: Тонкий адаптер-исполнитель поверх OpenAI Codex CLI (codex exec), приведённый к контракту листового coder'а. Для задач низкой/средней сложности (уровни coder_fast/coder) при включённом CODEX_CODER. Строит промпт из task.md (Режим 1), из переданных находок R- (Режим 2) или из инлайн-описания поломки (Режим 3, при включённом CODEX_CIFIX); запускает codex exec в рабочей копии задачи (worktree, либо в Режиме 3 Фазы 5.4 — основном рабочем дереве; workspace-write, сеть по ключу CODEX_NETWORK — дефолт on, без коммитов), самопроверяется через SMOKE_CMD, гарантирует отсутствие коммитов и возвращает отчёт. codex недоступен/сбой → чистая эскалация, processor откатывается на эквивалентного Claude-coder'а. Не коммитит, не гоняет ревью, не трогает очередь. Режим 3 поддерживает при CODEX_CIFIX=on; интеграционные F- не поддерживает.
 model: haiku
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
@@ -63,6 +63,12 @@ gitignored и физически там отсутствует). Поэтому 
 - `CODEX_REASONING` (по умолч. `auto`) — `auto` мапит уровень задачи из `task.md`
   (`Рекомендуемый исполнитель`: `coder_fast → low`, `coder → medium`); `low|medium|high`
   — явное значение. Результат — в `EFF`.
+- `CODEX_NETWORK` (по умолч. `on`) — даёт ли песочница `codex exec` исходящий сетевой
+  доступ. `on` (дефолт) → к вызову добавляются сетевой оверрайд и git-обвязка openssl
+  (см. «Вызов codex»), а constraints-блок промпта описывает доступную сеть; `off` →
+  вызов и constraints-блок **не меняются** (прежнее полностью-офлайн поведение). Ключ
+  читает **только** `coder_codex` (реализация/`R-`/Режим 3); `reviewer_codex` его
+  игнорирует — ревью read-only, сеть ему не нужна.
 
 # Preflight (до любых правок)
 
@@ -106,7 +112,9 @@ jj-first, как у всех: `jj root` успешен → jj (в т.ч. colocat
 строке на ловушку). `architecture`/`convention`-факты codex не навязывай — они не
 авторитетны и требуют сверки с кодом. Нет каталога — пропусти.
 
-К любому промпту добавь **несущий constraints-блок** (дословно, по-английски):
+К любому промпту добавь **несущий constraints-блок** (дословно, по-английски). Строка о
+сети в нём **зависит от `CODEX_NETWORK`** — подставь вместо `<network line>` ровно один
+вариант (см. ниже), чтобы промпт не противоречил фактической песочнице:
 ```
 Hard rules (violation = failure):
 - Edit files ONLY inside the current working directory tree. Never read, create, or
@@ -115,11 +123,25 @@ Hard rules (violation = failure):
   `git reset`, `git checkout <branch>`, `git switch`; no `jj commit`, `jj describe`,
   `jj bookmark`, `jj new`, `jj git push`. Committing is done by a separate process —
   leave your changes uncommitted in the working tree.
-- Assume no network access.
+- <network line>
 - Implement completely — no stubs, no TODO/FIXME left behind.
 - If a smoke command is given below, run it and fix failures before finishing.
 - Final message: one short paragraph on what changed (plus one line per finding in fix mode).
 ```
+`<network line>` — строго по значению `CODEX_NETWORK`:
+- `off` — прежняя строка, дословно:
+  ```
+  - Assume no network access.
+  ```
+- `on` (дефолт) — сеть открыта, но **не для всех** инструментов; дословно (смысл сохрани):
+  ```
+  - Network access IS available, but only for OpenSSL-based tooling: node/npm, python/pip
+    and uv reach the network directly, and git works through the openssl TLS backend that
+    is already wired for you (http.sslBackend=openssl). Tools that rely on Windows schannel
+    — notably cargo and a default (non-openssl) git — do NOT work in this sandbox even with
+    the network on; do NOT attempt cargo fetch/update or schannel git here, leave such
+    network steps to the broker.
+  ```
 Если `SMOKE_CMD` задан — добавь его строкой в промпт. Промпт передавай codex **через
 stdin** (`-`), не аргументом (длина/кавычки Windows).
 
@@ -135,20 +157,40 @@ stdin** (`-`), не аргументом (длина/кавычки Windows).
 - Бинарь при дефолте — литерально `codex`. Нестандартный `CODEX_CMD` подставляй его
   литеральным именем в начало команды (не через `"$CODEX_CMD"`) и помни: он **не** покрыт
   грантом (см. «Конфигурация codex») — нет своего правила → эскалация `CODEX_UNAVAILABLE`.
+- **Сетевые оверрайды (`CODEX_NETWORK`).** При `on` (дефолт) в **предшествующих** вызову
+  командах подготовь два фрагмента-оверрайда (при `off` оба пустые — вызов идентичен
+  прежнему офлайн-варианту):
+  ```bash
+  NET_NET=; NET_GIT=
+  if [ "$CODEX_NETWORK" = on ]; then
+    NET_NET='-c sandbox_workspace_write.network_access=true'
+    NET_GIT='-c shell_environment_policy.set={GIT_CONFIG_COUNT="1",GIT_CONFIG_KEY_0="http.sslBackend",GIT_CONFIG_VALUE_0="openssl"}'
+  fi
+  ```
+  `NET_NET` открывает исходящую сеть в `workspace-write`-песочнице (проверено на
+  codex-cli 0.142.5: без него соединения блокируются). `NET_GIT` пробрасывает git на
+  openssl-бэкенд через `shell_environment_policy.set` (schannel в песочнице падает
+  `SEC_E_NO_CREDENTIALS`; openssl-бэкенд — работает). Токены оверрайдов **не содержат
+  пробелов**, поэтому подставляются в команду **без кавычек** (словоделение даёт ровно
+  `-c` + значение; литеральные `"` внутри инлайн-таблицы TOML сохраняются — они там
+  обязательны). Оба идут **после** литерального префикса `codex exec` и на матч гранта
+  не влияют.
 
 ```bash
 codex exec -C "$WT" \
   --sandbox "$CODEX_SANDBOX" \
   ${SKIP_GIT:+--skip-git-repo-check} \
   ${CODEX_MODEL:+-m "$CODEX_MODEL"} \
+  $NET_NET $NET_GIT \
   -c model_reasoning_effort="$EFF" \
   -o "$WORK/tasks/<T-ID>/codex_out.md" - <<'PROMPT'
 <построенный промпт + constraints-блок + SMOKE_CMD, если задан>
 PROMPT
 RC=$?
 ```
-- Аргументы после `codex exec` (флаги, переменные `$WT`/`$CODEX_SANDBOX`/`$EFF`/`$WORK`)
-  на матч гранта не влияют — совпадает только префикс `codex exec`.
+- Аргументы после `codex exec` (флаги, переменные `$WT`/`$CODEX_SANDBOX`/`$EFF`/`$WORK`,
+  сетевые `$NET_NET`/`$NET_GIT`) на матч гранта не влияют — совпадает только префикс
+  `codex exec`.
 - **Отказ в разрешении на запуск codex** (classifier отклонил `codex exec`, напр. грант не
   доставлен или `CODEX_CMD` нестандартный без своего правила) → это `CODEX_UNAVAILABLE`:
   верни сентинел эскалации (ниже), правок нет. **Категорически запрещено** пытаться
@@ -159,8 +201,10 @@ RC=$?
 - `codex exec` неинтерактивна по определению («Run Codex non-interactively») — отдельного
   флага режима одобрения ей не нужно (в актуальной `codex exec --help`, `codex-cli` 0.142.5,
   такого флага и вовсе нет: `--ask-for-approval` там отсутствует и приводит к ошибке разбора
-  аргументов, exit 2). Автономность обеспечивает `--sandbox workspace-write` — правки в
-  worktree, сеть заблокирована. Старые версии codex, где `exec` ещё принимал
+  аргументов, exit 2). Автономность обеспечивает `--sandbox workspace-write` — правки
+  только в worktree; исходящая сеть — по ключу `CODEX_NETWORK` (при `on` открыта, при
+  `off` заблокирована; см. «Конфигурация codex» и «Вызов codex»). Старые версии codex,
+  где `exec` ещё принимал
   `--ask-for-approval never`, этой формой **не поддерживаются**; при необходимости
   совместимости определяйте поддержку флага заранее по `codex exec --help` и добавляйте его
   условно — сейчас проект таргетирует актуальный CLI и флаг не передаёт.
@@ -191,8 +235,9 @@ RC=$?
 1. Запрет в промпте (выше).
 2. Структурно: под `workspace-write` `.git`-файл worktree указывает **наружу**
    writable_roots, а `$ROOT/.jj/repo` тоже вне их — запись коммита блокируется sandbox.
-   На Windows без разовой admin-настройки codex работает в ослабленном
-   unelevated-sandbox — эта структурная гарантия там ослаблена, решающим становится
+   На Windows codex работает в ослабленной restricted-token-песочнице (отдельной
+   admin-настраиваемой `elevated`-песочницы больше нет — фича `elevated_windows_sandbox`
+   из codex удалена) — эта структурная гарантия там ослаблена, решающим становится
    пост-проверочный слой №3 ниже.
 3. Постфактум:
    - git: `POST=$(git -C "$WT" rev-parse HEAD)`; если `POST ≠ PRE` (и `PRE` не пусто) —
@@ -210,9 +255,10 @@ processor их сам закоммитит (`git add -A && commit` / jj `describ
 `SMOKE_CMD` задан → прогони его в worktree независимым гейтом: `( cd "$WT" &&
 <SMOKE_CMD> )`. Упал → повторный `codex exec` с добавленным в промпт выводом smoke;
 максимум **3** адаптерных итерации; всё ещё падает → `CODEX_FAILED`. Если smoke не
-может отработать по внешней причине (нужны сеть/установка зависимостей, а под
-`workspace-write` их нет) — отметь smoke как **невыполнимый** в отчёте: это не провал
-кода, а ограничение окружения.
+может отработать по внешней причине (нужна установка зависимостей или недоступная в
+песочнице сеть — при `CODEX_NETWORK: off` её нет вовсе, а при `on` она есть лишь для
+OpenSSL-инструментов, но не для schannel/cargo, см. «Конфигурация codex») — отметь smoke
+как **невыполнимый** в отчёте: это не провал кода, а ограничение окружения.
 
 # Обновление координации
 

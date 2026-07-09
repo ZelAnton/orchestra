@@ -76,6 +76,20 @@ workspace, коммитит результаты листовых агентов
   fallback на Claude. Codex-coder поддерживает реализацию, `R-` и при
   `CODEX_CIFIX=on` точечный Режим 3, но не интеграционные `F-`. Codex-reviewer работает
   read-only.
+- **`CODEX_NETWORK` (дефолт `on`) — сеть в песочнице `coder_codex`.** При `on` `coder_codex`
+  добавляет к вызову (после литерального префикса `codex exec`, не ломая грант) оверрайд
+  `-c sandbox_workspace_write.network_access=true` (проверено на codex-cli 0.142.5: без него
+  в `workspace-write` исходящие соединения блокируются) и пробрасывает git на openssl-бэкенд
+  через `-c shell_environment_policy.set={GIT_CONFIG_COUNT="1",GIT_CONFIG_KEY_0="http.sslBackend",GIT_CONFIG_VALUE_0="openssl"}`;
+  constraints-блок промпта при этом описывает доступную сеть. При `off` вызов и промпт
+  полностью офлайновые (прежнее поведение). Ключ читает **только** `coder_codex`;
+  `reviewer_codex` всегда `--sandbox read-only` и сеть игнорирует. TLS-матрица Windows
+  (песочница = restricted token, schannel не работает — `SEC_E_NO_CREDENTIALS`, и
+  `sandbox_permissions=["disk-full-read-access"]` не спасает: ограничение на уровне LSA):
+  node/npm, python/pip, uv — работают напрямую (OpenSSL/rustls); git — только с
+  `http.sslBackend=openssl`; cargo (libcurl+schannel) не работает даже с сетью → его сетевые
+  шаги идут через брокер (T-063). На Windows отдельной admin-настраиваемой `elevated`-песочницы
+  больше нет (фича `elevated_windows_sandbox` из codex удалена) — всегда restricted-token-режим.
 - **Разрешение на запуск codex — предвыдаётся, а не выпрашивается по ходу.** В auto-режиме
   classifier Claude Code отклоняет автономную форму `codex exec … --sandbox workspace-write`
   как «запуск автономного агента», причём посреди прогона. Поэтому launcher'ы

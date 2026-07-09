@@ -52,6 +52,7 @@ REVIEWER_TIERING: true
 # CODEX_MODEL: gpt-5-codex     # пусто → модель из ~/.codex/config.toml
 # CODEX_REASONING: auto        # auto | low | medium | high
 # CODEX_SANDBOX: workspace-write
+# CODEX_NETWORK: on            # сеть в песочнице coder_codex: on (по умолч.) | off
 # CODEX_CMD: codex
 # <<< config.md seed end <<<
 ```
@@ -83,6 +84,7 @@ REVIEWER_TIERING: true
 | `CODEX_MODEL` | не задано (дефолт codex) |
 | `CODEX_REASONING` | auto |
 | `CODEX_SANDBOX` | workspace-write |
+| `CODEX_NETWORK` | on |
 | `CODEX_CMD` | codex |
 
 ## Что означает каждый ключ
@@ -380,9 +382,35 @@ $env:CODEX_REVIEWER = 'fast+std'
 - `CODEX_REASONING` — усилие рассуждения (`model_reasoning_effort`): `auto` (реализация:
   `coder_fast→low`, `coder→medium`; ревью: `→medium`) | `low` | `medium` | `high`.
 - `CODEX_SANDBOX` — песочница codex для `coder_codex` (`--sandbox`). `workspace-write`
-  (рекоменд.): правки в рабочем дереве, сеть заблокирована. `reviewer_codex` всегда
-  работает в `read-only` (ревью не мутирует код). На Windows `elevated`-песочница требует
-  разовой admin-настройки; иначе — `unelevated`-фолбэк (см. cc-doctor).
+  (рекоменд.): правки в рабочем дереве; исходящая сеть — по ключу `CODEX_NETWORK` (ниже).
+  `reviewer_codex` всегда работает в `read-only` (ревью не мутирует код). На Windows codex
+  исполняется в ослабленной restricted-token-песочнице; отдельной admin-настраиваемой
+  `elevated`-песочницы больше нет — фича `elevated_windows_sandbox` из codex удалена.
+- `CODEX_NETWORK` — исходящий сетевой доступ песочницы `coder_codex`: `on` (по умолч.) |
+  `off`. Ключ читает **только** `coder_codex` (реализация/`R-`/Режим 3); `reviewer_codex`
+  его игнорирует (ревью read-only, сеть не нужна).
+  - `on` (дефолт) — `coder_codex` добавляет к вызову `codex exec` оверрайд
+    `-c sandbox_workspace_write.network_access=true` (проверено на codex-cli 0.142.5: без
+    него исходящие соединения блокируются) и пробрасывает git на openssl-бэкенд через
+    `-c shell_environment_policy.set={GIT_CONFIG_COUNT="1",GIT_CONFIG_KEY_0="http.sslBackend",GIT_CONFIG_VALUE_0="openssl"}`;
+    constraints-блок промпта при этом описывает доступную сеть. Серия целенаправленно
+    делает сетевые задачи (обновление зависимостей, регенерация lock-файлов, скачивание
+    ресурсов) штатными для codex, а не отдаёт их Claude.
+  - `off` — вызов и constraints-блок промпта не меняются: полностью офлайн-песочница
+    (строгая изоляция для тех, кому она нужна).
+  - **Проверенная TLS-матрица Windows** (песочница = restricted token; schannel в ней не
+    работает — `AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`; опция
+    `sandbox_permissions=["disk-full-read-access"]` НЕ помогает — ограничение на уровне
+    LSA, не файлов):
+    - node/npm (свой OpenSSL) — работает напрямую (проверено, HTTPS 200);
+    - python/pip, uv (OpenSSL/rustls) — тот же класс, ожидаемо работают;
+    - git — работает **только** с `http.sslBackend=openssl` (адаптер пробрасывает его
+      автоматически при `on`); дефолтный schannel-бэкенд падает;
+    - cargo (libcurl+schannel, без переключения бэкенда) — в песочнице НЕ работает даже с
+      сетью; его сетевые шаги идут через брокер (T-063), не в песочнице.
+  - **Риск.** `on` — дефолт, ослабляющий изоляцию: песочница `coder_codex` получает
+    исходящий сетевой доступ, и codex во время реализации задачи может обращаться к
+    произвольным внешним хостам. Кому нужна строгая офлайн-изоляция — ставит `off`.
 - `CODEX_CMD` — бинарь/команда codex (если не в PATH или через обёртку). Предвыданный
   сессионный грант launcher'ов покрывает только дефолт `codex` (форма `Bash(codex exec:*)`);
   нестандартное значение требует **собственного** allow-правила (см. «Разрешение на запуск
