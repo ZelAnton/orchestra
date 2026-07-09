@@ -138,7 +138,7 @@ stdin** (`-`), не аргументом (длина/кавычки Windows).
 
 ```bash
 codex exec -C "$WT" \
-  --sandbox "$CODEX_SANDBOX" --ask-for-approval never \
+  --sandbox "$CODEX_SANDBOX" \
   ${SKIP_GIT:+--skip-git-repo-check} \
   ${CODEX_MODEL:+-m "$CODEX_MODEL"} \
   -c model_reasoning_effort="$EFF" \
@@ -156,8 +156,14 @@ RC=$?
   никак иначе не расширяй собственные полномочия — согласие выдаётся пользователем заранее
   через launchers, а не адаптером во время прогона.
 - codex сам берёт аутентификацию из `~/.codex` — **никаких** ключей в команде/окружении.
-- `--ask-for-approval never` — автономно; `--sandbox workspace-write` — правки в
-  worktree, сеть заблокирована.
+- `codex exec` неинтерактивна по определению («Run Codex non-interactively») — отдельного
+  флага режима одобрения ей не нужно (в актуальной `codex exec --help`, `codex-cli` 0.142.5,
+  такого флага и вовсе нет: `--ask-for-approval` там отсутствует и приводит к ошибке разбора
+  аргументов, exit 2). Автономность обеспечивает `--sandbox workspace-write` — правки в
+  worktree, сеть заблокирована. Старые версии codex, где `exec` ещё принимал
+  `--ask-for-approval never`, этой формой **не поддерживаются**; при необходимости
+  совместимости определяйте поддержку флага заранее по `codex exec --help` и добавляйте его
+  условно — сейчас проект таргетирует актуальный CLI и флаг не передаёт.
 - **Чистый jj (нет `.git` в `WT`)**: установи `SKIP_GIT=1` — иначе codex откажется
   работать вне git-репозитория; версионный контроль здесь обеспечивает jj. В git/
   colocated — не нужно.

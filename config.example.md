@@ -290,10 +290,16 @@ Claude. Адаптерам **запрещено** править `.claude/settin
 allow-правило `codex exec` в `.claude/settings.local.json` целевого репозитория (проверяет
 `cc-doctor` и Фаза 1.1 processor'а). Если конкретная версия Claude Code всё же отклонит эту
 форму несмотря на allow-правило — запасной путь: PreToolUse-хук, возвращающий `allow` для
-валидированной формы (`codex exec` c `--sandbox read-only|workspace-write` и
-`--ask-for-approval never`, без `danger-full-access`). В текущей конфигурации хук **не
-задействован**: основной механизм — сессионный грант launcher'ов плюс постоянное правило
-`cc-config`.
+валидированной формы (`codex exec` c `--sandbox read-only|workspace-write`, без
+`danger-full-access`). В текущей конфигурации хук **не задействован**: основной механизм —
+сессионный грант launcher'ов плюс постоянное правило `cc-config`.
+
+**Флаг `--ask-for-approval`.** Актуальная `codex exec` (`codex-cli` 0.142.5) этот флаг не
+принимает — вызов с ним падает на разборе аргументов (`error: unexpected argument
+'--ask-for-approval' found`, exit 2) ещё до работы. Адаптеры (`coder_codex`/`reviewer_codex`)
+его **не передают**: `codex exec` неинтерактивна по определению, отдельный флаг режима
+одобрения ей не требуется. Старые версии codex, где `exec` ещё принимал этот флаг, текущей
+формой вызова не поддерживаются.
 
 **Что можно делегировать:**
 - **Реализация и `R-`-фиксы** (`coder_codex`, ключ `CODEX_CODER`) — задачи низкой/средней
