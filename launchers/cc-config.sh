@@ -8,12 +8,14 @@
 #     (headings/prose/tables are never copied).
 #   - constraints.md: the WHOLE constraints.example.md (the entire document IS the policy
 #     content - there is no seed block to slice, unlike config.md).
-#   - .claude/settings.local.json: merges (never replaces) an allow-rule
-#     "Bash(codex exec *)" into permissions.allow so coder_codex/reviewer_codex are not
-#     blocked by Claude Code's auto-mode permission classifier. Idempotent (no duplicate
-#     on re-run). This is the ONLY sanctioned point where the rule is written - the
-#     orchestrator and its subagents never write it; seeding it here means the operator
-#     running this launcher is the one granting the permission.
+#   - .claude/settings.local.json: created with the canonical Codex exec-grant allow-list
+#     (permissions.allow) only when the file does not exist yet. An EXISTING file is never
+#     modified or merged into - this launcher only reports which canonical rule(s) are
+#     missing from it, so the operator can add them by hand (task T-058: auto-merging into
+#     an existing, operator-owned permissions file risked silently widening it). This is
+#     the ONLY sanctioned point where the rule is created from scratch - the orchestrator
+#     and its subagents never write it; seeding it here means the operator running this
+#     launcher is the one granting the permission.
 
 # Directory of this script (works whether run from a repo checkout or the ~/.claude/scripts
 # mirror).
@@ -84,42 +86,53 @@ else
   fi
 fi
 
-# --- .claude/settings.local.json (merge in an allow-rule for autonomous `codex exec`) ---
-# Idempotent: leaves the file unchanged if any allow entry already covers "codex exec".
-# Merges (never wholesale-overwrites) an existing file. Uses jq when available (proper
-# JSON handling); a missing file is created from a fixed template (no parser needed); if
-# the file exists but jq is absent, the file is left untouched and the operator is told
-# to add the rule by hand rather than risk corrupting JSON with text tools. Only the
-# operator (by running this launcher) ever writes this rule; the orchestrator/subagents
-# never do.
-CODEX_RULE='Bash(codex exec *)'
+# --- .claude/settings.local.json (create-only; never merge into an existing file) ---
+# Canonical Codex exec-grant allow-list (single source of truth - task T-058; keep
+# byte-identical to launchers/cc-config.cmd's $rules and to the hint text printed by
+# launchers/cc-doctor.cmd/.sh; documented in config.example.md under "Codex-агенты" /
+# "Разрешение на запуск codex"). Currently one rule.
+# If the file does not exist yet, create it with this list (no parser needed - a fixed
+# template). If it already exists, it is NEVER modified or merged into (task T-058
+# changed this from the prior jq-based auto-merge) - instead, print which of the
+# canonical rule(s) are missing from it (plain grep -F substring search, no JSON
+# parser needed for a read-only check) so the operator can add them by hand. Only the
+# operator (by running this launcher) ever writes this rule from scratch; the
+# orchestrator/subagents never do.
+CODEX_ALLOW_RULES=('Bash(codex exec *)')
 if [ -f ".claude/settings.local.json" ]; then
-  # Idempotency pre-check that needs no jq: "codex exec" only ever appears here as such
-  # an allow-rule, so its presence means the file already grants it.
-  if grep -q 'codex exec' ".claude/settings.local.json" 2>/dev/null; then
-    echo "OK   .claude/settings.local.json already allows codex exec - unchanged."
-  elif command -v jq >/dev/null 2>&1; then
-    if jq --arg r "$CODEX_RULE" \
-         '.permissions = (.permissions // {}) | .permissions.allow = ((.permissions.allow // []) + [$r])' \
-         ".claude/settings.local.json" > ".claude/settings.local.json.tmp" 2>/dev/null \
-       && mv -f ".claude/settings.local.json.tmp" ".claude/settings.local.json"; then
-      echo "Added allow-rule Bash(codex exec *) to .claude/settings.local.json (lets coder_codex/reviewer_codex run codex exec autonomously)."
-    else
-      rm -f ".claude/settings.local.json.tmp" 2>/dev/null
-      echo "SKIP could not update .claude/settings.local.json with jq - add this allow-rule by hand (permissions.allow): Bash(codex exec *)"
+  missing=()
+  for r in "${CODEX_ALLOW_RULES[@]}"; do
+    if ! grep -qF -- "$r" ".claude/settings.local.json" 2>/dev/null; then
+      missing+=("$r")
     fi
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    echo "OK   .claude/settings.local.json already allows codex exec - left unchanged."
   else
-    echo "SKIP jq not found and .claude/settings.local.json already exists - add this allow-rule by hand (permissions.allow): Bash(codex exec *)"
+    echo ".claude/settings.local.json already exists - left unchanged (never auto-merged). Missing allow-rule(s) - add by hand to permissions.allow:"
+    for m in "${missing[@]}"; do
+      echo "  - $m"
+    done
   fi
 else
   mkdir -p ".claude"
-  printf '%s\n' \
-    '{' \
-    '  "permissions": {' \
-    '    "allow": [' \
-    '      "Bash(codex exec *)"' \
-    '    ]' \
-    '  }' \
-    '}' > ".claude/settings.local.json"
-  echo "Created .claude/settings.local.json with allow-rule Bash(codex exec *) (lets coder_codex/reviewer_codex run codex exec autonomously)."
+  {
+    echo '{'
+    echo '  "permissions": {'
+    echo '    "allow": ['
+    last=$((${#CODEX_ALLOW_RULES[@]} - 1))
+    i=0
+    for r in "${CODEX_ALLOW_RULES[@]}"; do
+      if [ "$i" -lt "$last" ]; then
+        printf '      "%s",\n' "$r"
+      else
+        printf '      "%s"\n' "$r"
+      fi
+      i=$((i + 1))
+    done
+    echo '    ]'
+    echo '  }'
+    echo '}'
+  } > ".claude/settings.local.json"
+  echo "Created .claude/settings.local.json with allow-rule(s): ${CODEX_ALLOW_RULES[*]} (lets coder_codex/reviewer_codex run codex exec autonomously)."
 fi
