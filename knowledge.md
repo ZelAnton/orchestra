@@ -90,6 +90,27 @@ workspace, коммитит результаты листовых агентов
   `http.sslBackend=openssl`; cargo (libcurl+schannel) не работает даже с сетью → его сетевые
   шаги идут через брокер (T-063). На Windows отдельной admin-настраиваемой `elevated`-песочницы
   больше нет (фича `elevated_windows_sandbox` из codex удалена) — всегда restricted-token-режим.
+- **Классификация средовых сбоев codex (`ENV_LIMIT`, T-062).** Часть провалов `codex exec`
+  — не качество правок, а ограничения песочницы, которые повторный прогон не лечит; поэтому
+  `coder_codex`/`reviewer_codex` распознают их сигнатуры **первой же** итерацией (не «в лоб»
+  до лимита 3) и реагируют по классу. Классы и сигнатуры (эмпирически проверены на
+  codex-cli 0.142.5 / Windows, restricted-token-песочница; перечень расширяемый, уточняется
+  аудитом T-067): `network` (`Failed to connect` / `Could not resolve host` / ошибки registry
+  crates.io·npm·PyPI — сеть закрыта, `CODEX_NETWORK: off`); `tls-schannel`
+  (`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` — cargo и дефолтный git
+  на schannel); `vcs-write` (`Unable to create … index.lock: Permission denied` — запись в
+  git-метаданные запрещена всегда, часть гарантии «без коммитов»); `profile-denied`
+  (`Permission denied` на части профиля `~/.config/git/ignore`·`~/.ssh/config`, при этом кэш
+  `~/.cargo` читается). Реакция: в `coder_codex` для `network`/`tls-schannel` — передать
+  сетевой шаг **брокеру** (интеграционная точка T-063; сам брокер T-062 не реализует), а при
+  недоступном/выключенном брокере — немедленная эскалация с классом; для `vcs-write`/
+  `profile-denied`/неизвестного — немедленная эскалация без брокера. В `reviewer_codex`
+  (read-only, без сетевых шагов) на любой класс — **всегда** эскалация без брокера. Сентинел
+  обратно совместим: префикс `ЭСКАЛАЦИЯ codex: CODEX_FAILED` не меняется (processor
+  распознаёт его без правок), класс лишь дописывается в причину —
+  `CODEX_FAILED — ENV_LIMIT/<класс>: <кратко>`; в отчёте `ENV_LIMIT/<класс>` = «среда не
+  позволяет», обычный `CODEX_FAILED` = «codex не справился». Несредовые (логика/качество)
+  сбои идут прежним циклом до 3 итераций. Маршрутизация по сетевому признаку — предмет T-064.
 - **Разрешение на запуск codex — предвыдаётся, а не выпрашивается по ходу.** В auto-режиме
   classifier Claude Code отклоняет автономную форму `codex exec … --sandbox workspace-write`
   как «запуск автономного агента», причём посреди прогона. Поэтому launcher'ы
