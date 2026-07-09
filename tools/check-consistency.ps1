@@ -115,14 +115,16 @@ if ($defaultKeys.Count -eq 0) {
 }
 
 # Tokens that match the UPPER_SNAKE_CASE shape but are NOT config keys: derived/local
-# shell variables, adapter escalation sentinels, plan/doc filenames referenced in caps,
-# git-config-via-environment variable names and a Windows schannel error code quoted
-# verbatim inside the codex adapter's network-override snippet, and the naming-convention
-# term itself. Reviewed by hand against current repo content; extend this list if a
-# genuinely new non-key token starts matching.
+# shell variables, adapter escalation sentinels, failure-classification label terms (e.g.
+# ENV_LIMIT, used in sentinel messages like "CODEX_FAILED — ENV_LIMIT/<class>: <detail>"
+# and as a section-heading reference, not a .work/config.md key), plan/doc filenames
+# referenced in caps, git-config-via-environment variable names and a Windows schannel
+# error code quoted verbatim inside the codex adapter's network-override snippet, and the
+# naming-convention term itself. Reviewed by hand against current repo content; extend this
+# list if a genuinely new non-key token starts matching.
 $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CODEX_FAILED', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
-        'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
+        'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
         'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'UPPER_SNAKE_CASE'
     ), [StringComparer]::Ordinal)
@@ -262,9 +264,12 @@ Get-ChildItem -Path $RepoRoot -Recurse -File | ForEach-Object {
 # Known non-table filenames that are intentionally NOT individual rows in knowledge.md's
 # runtime-artifact table: KB shard files summarized under the single `.work/knowledge/`
 # row (INDEX.md, learnings.md), per-invocation Codex scratch output (not durable
-# coordination state), and an external spec file outside `.work/` entirely.
+# coordination state), an external spec file outside `.work/` entirely, and literal
+# example filenames quoted from third-party tool error messages (e.g. git's index.lock in
+# an ENV_LIMIT vcs-write error signature) rather than Orchestra's own runtime state.
 $knownNonArtifact = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
-        'INDEX.md', 'learnings.md', 'codex_out.md', 'codex_review_out.md', 'Tasks_Queue_Format.md'
+        'INDEX.md', 'learnings.md', 'codex_out.md', 'codex_review_out.md', 'Tasks_Queue_Format.md',
+        'index.lock'
     ), [StringComparer]::Ordinal)
 
 $filenamePattern = '(?<![.\w])[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*\.(?:md|lock)\b'
