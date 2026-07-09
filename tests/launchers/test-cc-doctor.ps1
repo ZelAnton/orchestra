@@ -1,9 +1,12 @@
 # Verifies launchers/cc-doctor.cmd: reports codex binary presence/absence,
 # reflects CODEX_* keys from .work\config.md (including the CODEX_CMD
-# override), reports KB status, and (task T-058) audits the Codex exec-grant
+# override), reports KB status, (task T-058) audits the Codex exec-grant
 # allow-rule: WARN with a precise hint when CODEX_CODER/CODEX_REVIEWER
 # routing is on and no grant is found; OK when a grant is found; OK (no WARN)
-# when routing is off even without a grant. Read-only, never calls claude.
+# when routing is off even without a grant, and (task T-070) classifies the
+# Windows Codex sandbox profile (~\.codex\config.toml's [windows] sandbox) and
+# approval_policy for the safe/dangerous/missing/corrupted-config cases. Read-
+# only, never calls claude.
 #
 # Note: the sandboxed copy of cc-doctor.cmd carries one cosmetic string
 # substitution (see common.ps1's $LauncherContentFixups) to work around a
@@ -11,6 +14,16 @@
 # not affect any of the behavior asserted below. See common.ps1 for details.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+
+# Mirrors cc-doctor.cmd's own elevation check exactly, so the "dangerous
+# combination" scenario below (task T-070) asserts the correct branch
+# regardless of whether the machine actually running this test suite happens
+# to have an elevated launcher process (uncommon, but not guaranteed absent -
+# e.g. some CI runners execute as an administrative account).
+function Test-IsElevated {
+    $wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    return $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
 
 Invoke-Test -Name 'cc-doctor.cmd' -Body {
     # --- Scenario 1: codex not on PATH, no .work\config.md -> defaults -----
@@ -121,6 +134,108 @@ Invoke-Test -Name 'cc-doctor.cmd' -Body {
         }
         Assert-Equal 0 $result.ExitCode '[env fallback] exit code'
         Assert-Contains $result.Output 'CODEX_CODER      = fast (env)' '[env fallback] CODEX_CODER must be read from the environment and labeled as such'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 4 (task T-070): safe Windows sandbox profile - [windows]
+    # sandbox = "unelevated" is confirmed (T-068) to actually isolate, and
+    # approval_policy = "never" is confirmed to return a model error instead
+    # of escalating a sandbox denial into an unsandboxed run. USERPROFILE is
+    # redirected to the sandbox root for this call only (restored by
+    # Invoke-Launcher's finally block) so the check reads a fully controlled
+    # ~\.codex\config.toml instead of whatever happens to exist on the real
+    # machine running this suite.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $codexDir = Join-Path $paths.Root '.codex'
+        New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+        @(
+            'approval_policy = "never"'
+            '[windows]'
+            'sandbox = "unelevated"'
+        ) -join "`n" | Set-Content -LiteralPath (Join-Path $codexDir 'config.toml') -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[windows sandbox: safe] exit code'
+        Assert-Contains $result.Output 'OK   windows sandbox profile: unelevated' '[windows sandbox: safe] must report the unelevated profile as OK'
+        Assert-Contains $result.Output 'OK   approval_policy: never' '[windows sandbox: safe] must report approval_policy = never as OK'
+        Assert-True ($result.Output -notlike '*FAIL windows sandbox*') '[windows sandbox: safe] must not FAIL'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 5 (task T-070): dangerous combination - [windows] sandbox =
+    # "elevated" together with this (normally unelevated) launcher process is
+    # confirmed (T-067/T-068) to make Codex's elevated sandbox spawn fail
+    # (CreateProcessAsUserW: Access is denied) and silently fall back to an
+    # unsandboxed run. The expected severity depends on whether this test
+    # process itself happens to be elevated (see Test-IsElevated above).
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $codexDir = Join-Path $paths.Root '.codex'
+        New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+        @(
+            '[windows]'
+            'sandbox = "elevated"'
+        ) -join "`n" | Set-Content -LiteralPath (Join-Path $codexDir 'config.toml') -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[windows sandbox: dangerous] exit code'
+        if (Test-IsElevated) {
+            Assert-Contains $result.Output 'WARN windows sandbox profile: elevated, and this process is currently elevated' '[windows sandbox: dangerous, elevated test process] must WARN, not silently pass'
+        } else {
+            Assert-Contains $result.Output 'FAIL windows sandbox profile: elevated, but this launcher process is NOT elevated' '[windows sandbox: dangerous] must FAIL and name the CreateProcessAsUserW failure mode'
+            Assert-Contains $result.Output 'Codex silently reruns the command WITHOUT any sandbox' '[windows sandbox: dangerous] must state the silent unsandboxed fallback explicitly'
+            Assert-Contains $result.Output 'sandbox = unelevated' '[windows sandbox: dangerous] must offer a concrete config-only fix'
+        }
+        Assert-Contains $result.Output 'WARN approval_policy: not set' '[windows sandbox: dangerous] approval_policy is unset in this config and must WARN'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 6 (task T-070): absent config.toml - cannot verify the
+    # Windows sandbox profile at all; must WARN, not silently say nothing and
+    # not crash.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[windows sandbox: missing config] exit code'
+        Assert-Contains $result.Output 'WARN windows sandbox profile:' '[windows sandbox: missing config] must print a WARN line for the sandbox profile'
+        Assert-Contains $result.Output 'sandbox not set, or config.toml missing/unreadable' '[windows sandbox: missing config] must WARN that it cannot verify isolation'
+        Assert-Contains $result.Output 'WARN approval_policy: not set' '[windows sandbox: missing config] approval_policy must also WARN as not set'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 7 (task T-070): present but corrupted/unparseable
+    # config.toml (recognized section, garbled values) - must not crash and
+    # must fall back to the "cannot verify" WARN for both the sandbox profile
+    # and approval_policy, naming the unrecognized value.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $codexDir = Join-Path $paths.Root '.codex'
+        New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+        @(
+            'approval_policy = totally-bogus'
+            '[windows]'
+            'sandbox = totally-bogus'
+        ) -join "`n" | Set-Content -LiteralPath (Join-Path $codexDir 'config.toml') -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[windows sandbox: corrupted config] exit code'
+        Assert-Contains $result.Output 'WARN windows sandbox profile: unrecognized' '[windows sandbox: corrupted config] must WARN about an unrecognized sandbox value'
+        Assert-Contains $result.Output 'sandbox value (totally-bogus)' '[windows sandbox: corrupted config] must show the unrecognized value'
+        Assert-Contains $result.Output 'WARN approval_policy: totally-bogus' '[windows sandbox: corrupted config] approval_policy must WARN with the unrecognized value shown'
     }
     finally {
         Remove-Sandbox $paths

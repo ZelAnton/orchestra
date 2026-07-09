@@ -117,6 +117,21 @@ else
   echo "  .work/knowledge absent (KB empty or off)"
 fi
 
+# == Windows sandbox profile & approval policy (task T-070) ==================
+# cc-doctor.cmd classifies Codex's Windows-only [windows] sandbox profile
+# (~/.codex/config.toml) against this launcher process's own elevation, plus
+# the effective approval_policy - see the matching block there for the full
+# rationale (T-067/T-068: an "elevated" profile combined with an unelevated
+# launcher process makes Codex's sandbox spawn fail and silently fall back to
+# running fully unsandboxed). Neither concept (Windows process elevation, nor
+# a Windows-only config.toml sandbox mode) exists on POSIX, so this check is
+# not applicable here; it is not silently dropped, so a reader of cc-doctor.sh
+# output does not mistake the absence of any sandbox-profile line for "nothing
+# to check".
+echo
+echo "== Windows sandbox profile & approval policy =="
+echo "N/A  windows sandbox profile: not applicable on POSIX (Windows-only Codex config; run cc-doctor.cmd on Windows for this check)"
+
 # == Block 2: task queue & configuration =====================================
 echo
 echo "== Preflight readiness audit: task queue & configuration =="
