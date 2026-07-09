@@ -16,4 +16,8 @@
 # adapters to launch codex (same as cc-processor.sh) - otherwise the auto-mode classifier
 # rejects codex mid-run on resume. It sits BEFORE --permission-mode (the variadic flag
 # must not swallow the following tokens). --permission-mode auto and --continue unchanged.
+# CC_CODEX_EXEC_GRANT="codex exec": the same single launcher->processor contract as in
+# cc-processor.sh - an explicit signal of the already-issued session grant that the
+# Phase 1.1 gate and cc-doctor read; with it, no persistent allow-rule is required.
+export CC_CODEX_EXEC_GRANT="codex exec"
 exec claude --agent processor --allowedTools "Bash(codex exec:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."

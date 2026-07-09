@@ -54,8 +54,9 @@ fi
 # eff_codex KEY - effective value of CODEX_CODER/CODEX_REVIEWER: config.md wins, then
 # the OS environment variable of the same name (trimmed); matches cc-doctor.cmd's
 # EffCodex helper and the config.md-then-env fallback used by the "Effective CODEX_*"
-# block below. Used only to gate the exec-permission WARN (task T-058): a WARN is
-# noise when Codex routing is off, since no grant is needed in that case.
+# block below. CODEX_CIFIX has NO env fallback (config.md only), mirroring processor.md's
+# Phase 1.1 resolve. Used to gate the exec-permission classification (task T-071): the
+# gate is only relevant when Codex routing is on for at least one route.
 eff_codex() {
   val="$(get_cfg "$1")"
   if [ -z "$val" ]; then
@@ -66,26 +67,57 @@ eff_codex() {
   fi
   printf '%s' "$val"
 }
+# Effective CODEX_CMD (config.md only) determines the actual command the adapters run
+# ("<CODEX_CMD> exec ...") and therefore which allow-rule / session grant actually covers
+# it - a non-canonical CODEX_CMD is NOT covered by the canonical `codex exec` grant
+# (task T-071, custom-command criterion).
+codexCmd="$(get_cfg CODEX_CMD)"
+[ -n "$codexCmd" ] || codexCmd="codex"
+cmdPrefix="$codexCmd exec"
+# Routing is on if ANY of CODEX_CODER / CODEX_REVIEWER (config-or-env) or CODEX_CIFIX
+# (config only) is set to something other than off - the union of all three Codex routes
+# (implementation / review / CI-fixes), matching processor.md's Phase 1.1 gate.
 ccEff="$(eff_codex CODEX_CODER)"
 crEff="$(eff_codex CODEX_REVIEWER)"
+cfEff="$(get_cfg CODEX_CIFIX)"
 codexRoutingOn=0
-if { [ -n "$ccEff" ] && [ "$ccEff" != "off" ]; } || { [ -n "$crEff" ] && [ "$crEff" != "off" ]; }; then
+if { [ -n "$ccEff" ] && [ "$ccEff" != "off" ]; } || { [ -n "$crEff" ] && [ "$crEff" != "off" ]; } || { [ -n "$cfEff" ] && [ "$cfEff" != "off" ]; }; then
   codexRoutingOn=1
 fi
-# Claude Code allow-rule for autonomous `codex exec` - a simple substring search across
-# the project/user settings files (same "text search for codex exec" heuristic the
-# processor gate uses); without the rule the auto-mode classifier blocks coder_codex/
-# reviewer_codex and they escalate to Claude.
+# Session grant: the same launcher->processor contract the Phase 1.1 gate honors.
+# cc-processor/cc-resume, when they pre-grant --allowedTools "Bash(codex exec:*)", also
+# export CC_CODEX_EXEC_GRANT="codex exec"; a session whose granted prefix covers the
+# actual command prefix needs no persistent settings allow-rule.
+sessionGrant=0
+if [ -n "${CC_CODEX_EXEC_GRANT:-}" ]; then
+  case "$cmdPrefix" in
+    "$CC_CODEX_EXEC_GRANT"*) sessionGrant=1 ;;
+  esac
+fi
+# Static settings check (only meaningful when no covering session grant): inspect ONLY
+# the permissions.allow array of each settings file for an entry containing the actual
+# command prefix. Matches in permissions.deny, hooks, comments or free text must NOT
+# count (task T-071). No jq dependency: flatten the file and isolate the allow array span
+# (the [ ... ] right after the "allow" key; allow entries are strings with no literal ']').
 permrule=0
 for sf in ".claude/settings.local.json" ".claude/settings.json" "$HOME/.claude/settings.json"; do
-  if [ -f "$sf" ] && grep -q 'codex exec' "$sf" 2>/dev/null; then permrule=1; fi
+  [ -f "$sf" ] || continue
+  allow_arr="$(tr '\n' ' ' < "$sf" 2>/dev/null | sed -n 's/.*"allow"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p')"
+  [ -n "$allow_arr" ] || continue
+  case "$allow_arr" in
+    *"$cmdPrefix"*) permrule=1 ;;
+  esac
 done
-if [ "$permrule" -eq 1 ]; then
-  echo "OK   exec permission: allow-rule for codex exec present in Claude Code settings"
-elif [ "$codexRoutingOn" -eq 1 ]; then
-  echo "WARN exec permission: NOT found -> CODEX_CODER/CODEX_REVIEWER routing is on, so the auto-mode classifier blocks autonomous codex exec without it; run cc-config (creates .claude/settings.local.json with the canonical allow-rule Bash(codex exec *) if absent, else lists what is missing) or add the allow-rule by hand (permissions.allow: Bash(codex exec *)) to .claude/settings.local.json or .claude/settings.json, else coder_codex/reviewer_codex escalate to Claude"
+if [ "$codexRoutingOn" -eq 0 ]; then
+  echo "OK   exec permission: not found, but not required right now - CODEX_CODER, CODEX_REVIEWER and CODEX_CIFIX are all off"
+elif [ "$sessionGrant" -eq 1 ]; then
+  echo "OK   exec permission: session grant present (CC_CODEX_EXEC_GRANT covers the $cmdPrefix command prefix) - no persistent settings allow-rule required for this session"
+elif [ "$permrule" -eq 1 ]; then
+  echo "OK   exec permission: allow-rule for $cmdPrefix present in Claude Code settings (permissions.allow)"
+elif [ "$codexCmd" != "codex" ]; then
+  echo "WARN exec permission: CODEX_CMD is non-canonical ($codexCmd) -> the launcher session grant and cc-config canonical rule cover only codex exec, not $cmdPrefix; add an allow-rule Bash($cmdPrefix *) to .claude/settings.local.json (or .claude/settings.json), or set CODEX_CMD to codex, else coder_codex/reviewer_codex escalate to Claude"
 else
-  echo "OK   exec permission: not found, but not required right now - CODEX_CODER and CODEX_REVIEWER are both off"
+  echo "WARN exec permission: NOT found -> CODEX_CODER/CODEX_REVIEWER/CODEX_CIFIX routing is on, so the auto-mode classifier blocks autonomous codex exec without it; run cc-config (creates .claude/settings.local.json with the canonical allow-rule Bash(codex exec *) if absent, else lists what is missing) or add the allow-rule by hand (permissions.allow: Bash(codex exec *)) to .claude/settings.local.json or .claude/settings.json, else coder_codex/reviewer_codex escalate to Claude"
 fi
 echo
 echo "== Effective CODEX_* (.work/config.md; CODEX_CODER/CODEX_REVIEWER fall back to env; blank = default) =="

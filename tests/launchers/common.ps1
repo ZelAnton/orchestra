@@ -167,7 +167,12 @@ function Install-ConfigExample {
 
 # Shared PowerShell helper dropped into the sandbox bin\ dir. It writes each
 # received positional argument to $env:FAKE_ARGS_FILE (one per line, in
-# order) and exits with $env:FAKE_EXIT_CODE (default 0).
+# order) and exits with $env:FAKE_EXIT_CODE (default 0). When $env:FAKE_ENV_FILE
+# is set it additionally records the CC_CODEX_EXEC_GRANT environment variable the
+# fake `claude` process inherited (as "CC_CODEX_EXEC_GRANT=<value>", empty if
+# unset) so tests can assert that the launcher exported the session-grant signal
+# into claude's environment (task T-071). Guarded by FAKE_ENV_FILE so existing
+# tests that do not set it are unaffected.
 $script:CaptureArgsScript = @'
 $dest = $env:FAKE_ARGS_FILE
 if ($dest) {
@@ -176,6 +181,10 @@ if ($dest) {
     } else {
         Set-Content -LiteralPath $dest -Value @() -Encoding utf8
     }
+}
+$envDest = $env:FAKE_ENV_FILE
+if ($envDest) {
+    Set-Content -LiteralPath $envDest -Value ("CC_CODEX_EXEC_GRANT=" + $env:CC_CODEX_EXEC_GRANT) -Encoding utf8
 }
 $code = 0
 if ($env:FAKE_EXIT_CODE) { $code = [int]$env:FAKE_EXIT_CODE }
@@ -338,6 +347,29 @@ function Get-ExpectedPermissionMode {
         return $m.Groups[1].Value
     }
     throw "Could not find --permission-mode in $LauncherName"
+}
+
+# Reads the CC_CODEX_EXEC_GRANT value a launcher's source sets (cmd: `set
+# "CC_CODEX_EXEC_GRANT=..."`, sh: `export CC_CODEX_EXEC_GRANT="..."`), so the
+# session-grant tests verify the launcher forwards whatever value its source
+# currently specifies instead of hardcoding a literal (mirrors
+# Get-ExpectedPermissionMode). Returns $null if the launcher sets no such var.
+function Get-ExpectedGrant {
+    param([Parameter(Mandatory)] [string] $LauncherName)
+    $src = Get-Content -LiteralPath (Join-Path $script:LaunchersDir $LauncherName) -Raw
+    $m = [regex]::Match($src, 'CC_CODEX_EXEC_GRANT=(?:")?([^"\r\n]*?)(?:")?\s*[\r\n]')
+    if ($m.Success) { return $m.Groups[1].Value.Trim() }
+    return $null
+}
+
+# Reads back the "CC_CODEX_EXEC_GRANT=<value>" line the fake claude recorded into
+# $FAKE_ENV_FILE (see $script:CaptureArgsScript), returning just the <value>.
+function Get-CapturedGrant {
+    param([Parameter(Mandatory)] [string] $EnvFile)
+    if (-not (Test-Path -LiteralPath $EnvFile)) { return $null }
+    $line = (Get-Content -LiteralPath $EnvFile -Encoding utf8 | Select-Object -First 1)
+    if ($null -eq $line) { return '' }
+    return ($line -replace '^CC_CODEX_EXEC_GRANT=', '')
 }
 
 function Assert-True {
