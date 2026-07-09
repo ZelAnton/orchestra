@@ -95,7 +95,9 @@ workspace, коммитит результаты листовых агентов
   `coder_codex`/`reviewer_codex` распознают их сигнатуры **первой же** итерацией (не «в лоб»
   до лимита 3) и реагируют по классу. Классы и сигнатуры (эмпирически проверены на
   codex-cli 0.142.5 / Windows, restricted-token-песочница; перечень расширяемый, уточняется
-  аудитом T-067): `network` (`Failed to connect` / `Could not resolve host` / ошибки registry
+  аудитом T-067): `sandbox-init` (`CreateProcessAsUserW failed: 5` — отказ поднять
+  restricted-token песочницу; исполнять команду вне неё запрещено — fail-closed, T-069);
+  `network` (`Failed to connect` / `Could not resolve host` / ошибки registry
   crates.io·npm·PyPI — сеть закрыта, `CODEX_NETWORK: off`); `tls-schannel`
   (`schannel: AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS` — cargo и дефолтный git
   на schannel); `vcs-write` (`Unable to create … index.lock: Permission denied` — запись в
@@ -112,6 +114,23 @@ workspace, коммитит результаты листовых агентов
   `CODEX_FAILED — ENV_LIMIT/<класс>: <кратко>`; в отчёте `ENV_LIMIT/<класс>` = «среда не
   позволяет», обычный `CODEX_FAILED` = «codex не справился». Несредовые (логика/качество)
   сбои идут прежним циклом до 3 итераций.
+- **Fail-closed при отказе инициализации песочницы codex (T-069).** На Windows
+  restricted-token-песочница codex **структурной** изоляции записи не гарантирует, а при её
+  сбое запуска (`CreateProcessAsUserW failed: 5`, доступ запрещён) неинтерактивный `codex exec`
+  под дефолтной `approval_policy` (`on-request`/`on-failure`) мог бы молча продолжить
+  выполнение **без** изоляции (fail-open, подтверждено архивом T-067/T-068). Закрыто двумя
+  мерами в обоих адаптерах: (1) на **каждом** вызове пинится Orchestra-фиксируемая политика
+  `-c approval_policy=never` (config-оверрайд, не CLI-флаг — `--ask-for-approval` `codex exec`
+  0.142.5 не принимает; значение **не** зависит от пользовательского `~/.codex/config.toml`),
+  под ней codex не повышает режим исполнения вне песочницы; (2) сигнатура отказа песочницы —
+  новый ENV_LIMIT-класс `sandbox-init` — распознаётся первой же итерацией и ведёт к
+  немедленной эскалации `CODEX_FAILED — ENV_LIMIT/sandbox-init` **до любых правок** (без
+  брокера/ретрая: единственный «обход» отказа песочницы — исполнение без изоляции, а его и
+  закрываем). `coder_codex` при этом не оставляет изменений в рабочей копии (откат как при
+  любом `CODEX_FAILED`), `reviewer_codex` не трогает `review.md`; сентинел обратно совместим
+  (префикс `CODEX_FAILED` не меняется), processor штатно откатывается на Claude. `error 5`
+  (отказ песочницы, эскалируем) не путать с `error 2` (файл не найден — восстановимо, вызов
+  абсолютным путём работает). Контрактный тест — `tools/check-codex-sandbox-guard.ps1`.
 - **Защита `reviewer_codex` от негабаритного diff (T-066).** Инструкция «большой diff
   вставляй как есть» рискует молчаливой обрезкой контекста на стороне codex на крупных
   задачах (генерация кода, массовые переименования, vendoring) — обрезка дала бы формально
