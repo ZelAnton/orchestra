@@ -116,11 +116,15 @@ if ($defaultKeys.Count -eq 0) {
 
 # Tokens that match the UPPER_SNAKE_CASE shape but are NOT config keys: derived/local
 # shell variables, adapter escalation sentinels, plan/doc filenames referenced in caps,
-# and the naming-convention term itself. Reviewed by hand against current repo content;
-# extend this list if a genuinely new non-key token starts matching.
+# git-config-via-environment variable names and a Windows schannel error code quoted
+# verbatim inside the codex adapter's network-override snippet, and the naming-convention
+# term itself. Reviewed by hand against current repo content; extend this list if a
+# genuinely new non-key token starts matching.
 $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CODEX_FAILED', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
-        'LOOP_ORCHESTRA_ROADMAP', 'OBSERVABILITY_PLATFORM_PLAN', 'SKIP_GIT', 'UPPER_SNAKE_CASE'
+        'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
+        'LOOP_ORCHESTRA_ROADMAP', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
+        'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'UPPER_SNAKE_CASE'
     ), [StringComparer]::Ordinal)
 
 $keyPattern = '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'
