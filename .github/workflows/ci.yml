@@ -93,6 +93,26 @@ jobs:
             Write-Warning "tools/check-codex-sandbox-guard.ps1 not found yet (see T-069) - skipping Codex sandbox guard check."
           }
 
+      - name: Check reviewer_codex clean-pass / SUMMARY-R gate contract
+        # Runs tests/test-reviewer-codex-gate.ps1 (added by T-074), a reference
+        # implementation of the "clean pass" / SUMMARY-R gate rules described in
+        # agents/reviewer_codex.md, exercised against fake codex output covering
+        # partial-success (skipped/duplicated RECHECK), a failing second required
+        # pass, a missing RECHECK that a later retry recovers from, a
+        # contradictory mixed NEW/NEW:none output, and a fully clean pass
+        # sequence that reaches SUMMARY-R.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path .\tests\test-reviewer-codex-gate.ps1) {
+            .\tests\test-reviewer-codex-gate.ps1
+            if ($LASTEXITCODE -ne 0) {
+              exit 1
+            }
+          } else {
+            Write-Warning "tests/test-reviewer-codex-gate.ps1 not found yet (see T-074) - skipping reviewer_codex gate contract check."
+          }
+
       - name: Run launcher tests
         # Runs tests/launchers/run-all.ps1 (added by T-018), the single entry
         # point that exercises every launchers/cc-*.cmd in an isolated temporary
