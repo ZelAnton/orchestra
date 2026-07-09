@@ -1,6 +1,9 @@
 # Verifies launchers/cc-doctor.cmd: reports codex binary presence/absence,
 # reflects CODEX_* keys from .work\config.md (including the CODEX_CMD
-# override), and reports KB status. Read-only, never calls claude.
+# override), reports KB status, and (task T-058) audits the Codex exec-grant
+# allow-rule: WARN with a precise hint when CODEX_CODER/CODEX_REVIEWER
+# routing is on and no grant is found; OK when a grant is found; OK (no WARN)
+# when routing is off even without a grant. Read-only, never calls claude.
 #
 # Note: the sandboxed copy of cc-doctor.cmd carries one cosmetic string
 # substitution (see common.ps1's $LauncherContentFixups) to work around a
@@ -15,13 +18,58 @@ Invoke-Test -Name 'cc-doctor.cmd' -Body {
     try {
         Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
 
-        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -MinimalPath
+        # Explicitly clear CODEX_CODER/CODEX_REVIEWER: this scenario asserts the
+        # "routing off" path, which must not be flaky depending on whatever the
+        # ambient shell environment happens to have set for real Codex usage.
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -MinimalPath -EnvVars @{ CODEX_CODER = ''; CODEX_REVIEWER = '' }
         Assert-Equal 0 $result.ExitCode '[no codex, no config] exit code'
         Assert-Contains $result.Output 'NOT FOUND' '[no codex, no config] must report codex missing'
         Assert-Contains $result.Output 'coder_codex will escalate to Claude' '[no codex, no config] must explain the fallback'
         Assert-Contains $result.Output '== KB status' '[no codex, no config] KB status header must print'
         Assert-Contains $result.Output 'KB = off (default)' '[no codex, no config] KB must default to off'
         Assert-Contains $result.Output '.work\knowledge absent' '[no codex, no config] must report absent knowledge dir'
+        Assert-Contains $result.Output 'OK   exec permission: not found, but not required' '[no codex, no config] no grant + routing off must be OK, not WARN'
+        Assert-True ($result.Output -notlike '*WARN exec permission*') '[no codex, no config] must not WARN when CODEX_CODER/CODEX_REVIEWER are both off'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 1b: Codex routing is on (CODEX_CODER) but no exec-grant
+    # exists anywhere -> WARN with a precise hint (task T-058).
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Value 'CODEX_CODER: fast' -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd'
+        Assert-Equal 0 $result.ExitCode '[routing on, no grant] exit code'
+        Assert-Contains $result.Output 'WARN exec permission: NOT found' '[routing on, no grant] must WARN'
+        Assert-Contains $result.Output 'Bash(codex exec *)' '[routing on, no grant] WARN must name the missing rule'
+        Assert-Contains $result.Output 'cc-config' '[routing on, no grant] WARN must point at cc-config'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 1c: Codex routing is on and the exec-grant is present in
+    # .claude/settings.local.json -> OK, no WARN (task T-058).
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Value 'CODEX_REVIEWER: fast+std' -Encoding utf8
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $claudeDir 'settings.local.json') -Value '{"permissions":{"allow":["Bash(codex exec *)"]}}' -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd'
+        Assert-Equal 0 $result.ExitCode '[routing on, grant present] exit code'
+        Assert-Contains $result.Output 'OK   exec permission: allow-rule for codex exec present' '[routing on, grant present] must report OK'
+        Assert-True ($result.Output -notlike '*WARN exec permission*') '[routing on, grant present] must not WARN once a grant exists'
     }
     finally {
         Remove-Sandbox $paths

@@ -51,6 +51,27 @@ if [ -f "$HOME/.codex/auth.json" ]; then
 else
   echo "auth         : NOT found -> run: codex login"
 fi
+# eff_codex KEY - effective value of CODEX_CODER/CODEX_REVIEWER: config.md wins, then
+# the OS environment variable of the same name (trimmed); matches cc-doctor.cmd's
+# EffCodex helper and the config.md-then-env fallback used by the "Effective CODEX_*"
+# block below. Used only to gate the exec-permission WARN (task T-058): a WARN is
+# noise when Codex routing is off, since no grant is needed in that case.
+eff_codex() {
+  val="$(get_cfg "$1")"
+  if [ -z "$val" ]; then
+    ev="$(eval "printf '%s' \"\${$1:-}\"")"
+    if [ -n "$ev" ]; then
+      val="$(printf '%s' "$ev" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    fi
+  fi
+  printf '%s' "$val"
+}
+ccEff="$(eff_codex CODEX_CODER)"
+crEff="$(eff_codex CODEX_REVIEWER)"
+codexRoutingOn=0
+if { [ -n "$ccEff" ] && [ "$ccEff" != "off" ]; } || { [ -n "$crEff" ] && [ "$crEff" != "off" ]; }; then
+  codexRoutingOn=1
+fi
 # Claude Code allow-rule for autonomous `codex exec` - a simple substring search across
 # the project/user settings files (same "text search for codex exec" heuristic the
 # processor gate uses); without the rule the auto-mode classifier blocks coder_codex/
@@ -60,9 +81,11 @@ for sf in ".claude/settings.local.json" ".claude/settings.json" "$HOME/.claude/s
   if [ -f "$sf" ] && grep -q 'codex exec' "$sf" 2>/dev/null; then permrule=1; fi
 done
 if [ "$permrule" -eq 1 ]; then
-  echo "exec permission: allow-rule for codex exec present in Claude Code settings"
+  echo "OK   exec permission: allow-rule for codex exec present in Claude Code settings"
+elif [ "$codexRoutingOn" -eq 1 ]; then
+  echo "WARN exec permission: NOT found -> CODEX_CODER/CODEX_REVIEWER routing is on, so the auto-mode classifier blocks autonomous codex exec without it; run cc-config (creates .claude/settings.local.json with the canonical allow-rule Bash(codex exec *) if absent, else lists what is missing) or add the allow-rule by hand (permissions.allow: Bash(codex exec *)) to .claude/settings.local.json or .claude/settings.json, else coder_codex/reviewer_codex escalate to Claude"
 else
-  echo "exec permission: NOT found -> auto-mode classifier blocks autonomous codex exec; run cc-config (seeds Bash(codex exec *)) or add the allow-rule manually, else coder_codex/reviewer_codex escalate to Claude"
+  echo "OK   exec permission: not found, but not required right now - CODEX_CODER and CODEX_REVIEWER are both off"
 fi
 echo
 echo "== Effective CODEX_* (.work/config.md; CODEX_CODER/CODEX_REVIEWER fall back to env; blank = default) =="
