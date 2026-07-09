@@ -72,6 +72,27 @@ jobs:
             Write-Warning "tools/check-consistency.ps1 not found yet (see T-017) - skipping consistency check."
           }
 
+      - name: Check Codex sandbox fail-closed contract
+        # Runs tools/check-codex-sandbox-guard.ps1 (added by T-069), which asserts
+        # that both Codex adapters (agents/coder_codex.md, agents/reviewer_codex.md)
+        # pin the fail-closed approval policy (-c approval_policy=never) on the codex
+        # exec invocation and document sandbox-init failure escalation
+        # (CreateProcessAsUserW failed: 5 -> ENV_LIMIT/sandbox-init) instead of a
+        # fail-open unsandboxed fallback, and that config.example.md / knowledge.md
+        # describe the same guarantee. Until the script lands this step is skipped
+        # with an explicit warning rather than failing the build.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path .\tools\check-codex-sandbox-guard.ps1) {
+            .\tools\check-codex-sandbox-guard.ps1
+            if ($LASTEXITCODE -ne 0) {
+              exit 1
+            }
+          } else {
+            Write-Warning "tools/check-codex-sandbox-guard.ps1 not found yet (see T-069) - skipping Codex sandbox guard check."
+          }
+
       - name: Run launcher tests
         # Runs tests/launchers/run-all.ps1 (added by T-018), the single entry
         # point that exercises every launchers/cc-*.cmd in an isolated temporary
