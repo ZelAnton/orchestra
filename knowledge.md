@@ -76,6 +76,26 @@ workspace, коммитит результаты листовых агентов
   fallback на Claude. Codex-coder поддерживает реализацию, `R-` и при
   `CODEX_CIFIX=on` точечный Режим 3, но не интеграционные `F-`. Codex-reviewer работает
   read-only.
+- **Единый исполняемый runtime `tools/codex-runtime.ps1` (T-075).** Механическая часть
+  протокола обоих адаптеров вынесена из Markdown-инструкций в тестируемый кросс-платформенный
+  pwsh-скрипт (по образцу `tools/queue-tx.ps1`): **безопасная сборка argv** нормализованной
+  формы `codex exec` (массив аргументов, без строковой конкатенации/`Invoke-Expression` —
+  иммунитет к shell-инъекции), приём промпта через stdin, раздельный захват stdout/stderr/RC,
+  fail-closed пин `-c approval_policy=never` (T-069) и, только у coder при `--network on`,
+  оверрайды сети T-063, **классификация отказов** (`ENV_LIMIT`-таблица T-062/T-067,
+  расширяемая), **порог негабаритного diff** (T-074, дефолт 4000), **проверка «чистого
+  прогона»** reviewer-вывода (RECHECK/NEW), **валидация брокер-команд** по allowlist (T-063),
+  **гарантия отсутствия коммитов** (`guard-commit`, git soft-reset, никогда `--hard`) и
+  **безопасная очистка только своей рабочей копии** (`cleanup`; в основном дереве Фазы 5.4 —
+  `--main-tree`, никогда `git clean -fd`, `.work/` не трогается), плюс маппинг сентинелов
+  `ЭСКАЛАЦИЯ codex: …`. Оба адаптера зовут его коротким стабильным контрактом (команды
+  `run`/`build-argv`/`classify`/`check-diff`/`validate-reviewer`/`broker-validate`/
+  `guard-commit`/`cleanup`/`map-sentinel`) — **один** источник сборки команды, без двух
+  расходящихся вариантов. Публичное поведение (сентинелы, «нет коммитов от codex»,
+  нормализованный `codex exec`, форматы `codex_out.md`/`codex_review_out.md`) сохранено.
+  Детерминированные тесты с fake `codex` — `tests/test-codex-runtime.ps1` (в CI
+  `.github/workflows/ci.yml`, шаг «Check Codex runtime behaviour»); написаны переносимо и
+  готовы к POSIX-прогону.
 - **`CODEX_NETWORK` (дефолт `on`) — сеть в песочнице `coder_codex`.** При `on` `coder_codex`
   добавляет к вызову (после литерального префикса `codex exec`, не ломая грант) оверрайд
   `-c sandbox_workspace_write.network_access=true` (проверено на codex-cli 0.142.5: без него
