@@ -409,17 +409,69 @@ function Get-RequiredCiChecks {
 }
 
 # Deterministic fingerprint of the change set a decision is scoped to: sha256 over the
-# SORTED, normalized ('/'-separated, deduped) relative path list. Any added/removed/renamed
-# affected path flips it, so a decision issued against one change set does not silently
-# carry over to a different one (approval staleness / gate re-scope).
+# SORTED, normalized ('/'-separated, deduped) relative path list, each path bound to its
+# CONTENT hash. Two things flip it, so a decision issued against one change set never
+# silently carries over to a different one (approval staleness / gate re-scope):
+#   * adding / removing / renaming an affected path (the path SET changes), and
+#   * an IN-PLACE edit to an already-listed file (its content hash changes) - the exact
+#     replay hole R-01 flagged: same paths, different bytes must NOT reuse an approval.
+# Content is read relative to $Root (the working copy that holds the affected code) with
+# line endings normalized to LF, so a benign eol re-materialization (jj/git checkout does
+# not apply CRLF filters uniformly in this repo) does not spuriously expire a decision while
+# any real code change does. A listed path absent under $Root (deleted) contributes a fixed
+# marker, so a deletion also flips the fingerprint. When $Root is empty the content
+# component degrades to a fixed marker (path-only) - callers that need code-change
+# sensitivity MUST supply a root (Resolve-Fingerprint enforces this; it is the fail-closed
+# default so the pre-R-01 path-only semantics can never silently return).
 function Get-DiffFingerprint {
-    param([string[]]$Paths)
+    param([string[]]$Paths, [string]$Root = '')
     $norm = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
     foreach ($p in $Paths) {
         if ([string]::IsNullOrWhiteSpace($p)) { continue }
         [void]$norm.Add((ConvertTo-NormalizedRelPath $p))
     }
-    return (Get-Sha256Hex (($norm) -join "`n"))
+    $entries = [System.Collections.Generic.List[string]]::new()
+    foreach ($rel in $norm) {
+        # NUL-separate path from its content token so no path/content pair can be confused
+        # with another (a path cannot contain a NUL, keeping the encoding unambiguous).
+        $entries.Add($rel + "`0" + (Get-PathContentToken $rel $Root))
+    }
+    return (Get-Sha256Hex (($entries) -join "`n"))
+}
+
+# Content-identity token for one affected path used by Get-DiffFingerprint: lowercase hex
+# sha256 of the file's bytes with CRLF/CR normalized to LF (encoding-agnostic, eol-stable),
+# or a fixed marker when no root is available / the file is absent / unreadable. Markers are
+# angle-bracketed so they can never collide with a real 64-hex content hash.
+function Get-PathContentToken {
+    param([string]$RelPath, [string]$Root)
+    if ([string]::IsNullOrWhiteSpace($Root)) { return '<no-root>' }
+    $full = Join-Path $Root $RelPath
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return '<absent>' }
+    try { $bytes = [System.IO.File]::ReadAllBytes($full) } catch { return '<unreadable>' }
+    $lf = ConvertTo-LfBytes $bytes
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $h = $sha.ComputeHash($lf) } finally { $sha.Dispose() }
+    return (-join ($h | ForEach-Object { $_.ToString('x2') }))
+}
+
+# Byte-level CRLF/lone-CR -> LF normalization (no text decoding, so it is safe for any
+# encoding and never corrupts change detection). Keeps the content hash stable across an
+# eol re-materialization while still reflecting every real byte change.
+function ConvertTo-LfBytes {
+    param([byte[]]$Bytes)
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return , ([byte[]]@()) }
+    $out = [System.Collections.Generic.List[byte]]::new($Bytes.Length)
+    for ($i = 0; $i -lt $Bytes.Length; $i++) {
+        $b = $Bytes[$i]
+        if ($b -eq 0x0D) {
+            $out.Add([byte]0x0A)
+            if ($i + 1 -lt $Bytes.Length -and $Bytes[$i + 1] -eq 0x0A) { $i++ }  # swallow the LF of a CRLF pair
+        } else {
+            $out.Add($b)
+        }
+    }
+    return , $out.ToArray()
 }
 
 # Snapshot hash of the policy in force at decision time: sha256 over the schema version +

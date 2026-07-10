@@ -758,7 +758,22 @@ function Resolve-Fingerprint {
     if ($opts.ContainsKey('fingerprint') -and -not [string]::IsNullOrEmpty([string]$opts['fingerprint'])) { return [string]$opts['fingerprint'] }
     $changed = Get-ChangedPaths
     if ($changed.Count -eq 0) { Fail 2 "approval needs --fingerprint <hex> or --paths-from/--path (the affected change set)" }
-    return (Get-DiffFingerprint $changed)
+    # Deriving the fingerprint from a path list binds each path to its CONTENT, so an in-place
+    # edit of an already-listed file expires the decision (R-01). That requires a root to read
+    # the affected files from; refuse rather than silently fall back to the weak path-only
+    # fingerprint (fail-closed: a missing root must not let a stale approval look fresh).
+    $root = Require-FingerprintRoot
+    return (Get-DiffFingerprint $changed $root)
+}
+function Require-FingerprintRoot {
+    if ($opts.ContainsKey('root') -and -not [string]::IsNullOrEmpty([string]$opts['root'])) {
+        $r = [string]$opts['root']
+        if (-not (Test-Path -LiteralPath $r -PathType Container)) {
+            Fail 2 "--root '$r' is not an existing directory (needed to bind affected-file content into the diff fingerprint)"
+        }
+        return $r
+    }
+    Fail 2 "a diff fingerprint from --paths-from/--path needs --root <working copy holding the affected code> so the decision binds file CONTENT, not just path names (or pass a precomputed --fingerprint)"
 }
 function Resolve-PolicyHash {
     if ($opts.ContainsKey('policy-hash') -and -not [string]::IsNullOrEmpty([string]$opts['policy-hash'])) { return [string]$opts['policy-hash'] }

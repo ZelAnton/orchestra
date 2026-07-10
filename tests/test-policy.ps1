@@ -508,14 +508,24 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     $sb = New-Sandbox
     $work = Join-Path $sb '.work'
     Write-Utf8 (Join-Path $work 'constraints.md') "## Запрещённые пути (denylist)`n`n**Активные ограничения**:`n`n- ``infra/**```n"
+    # The affected code lives in a working copy ($sb is the --root); the fingerprint binds
+    # each listed path to its CONTENT read from there (R-01), so an in-place edit expires it.
+    New-Item -ItemType Directory -Force -Path (Join-Path $sb 'src') | Out-Null
+    Write-Utf8 (Join-Path $sb 'src/app.js') "console.log('v1');`n"
+    Write-Utf8 (Join-Path $sb 'src/lib.js') "export const x = 1;`n"
     $changed = Join-Path $sb 'changed.txt'
     Write-Utf8 $changed "src/app.js`nsrc/lib.js`n"
 
     function AP { param([string[]]$Extra) return (Invoke-Policy $Extra) }
     function APJson { param($R) return ($R.Out.Trim() | ConvertFrom-Json) }
 
-    # request creates a persistent artifact with a one-time id, diff fingerprint + policy snapshot
+    # a diff fingerprint from a path list requires --root (fail-closed: never silently fall
+    # back to the pre-R-01 path-only fingerprint that ignored file content)
     $r = AP @('approval-request', '--work', $work, '--task', 'T-045', '--reason', 'policy-bypass', '--paths-from', $changed, '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json')
+    Assert-Exit $r 2 'approval-request: --paths-from without --root is refused (needs content root)'
+
+    # request creates a persistent artifact with a one-time id, diff fingerprint + policy snapshot
+    $r = AP @('approval-request', '--work', $work, '--task', 'T-045', '--reason', 'policy-bypass', '--root', $sb, '--paths-from', $changed, '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json')
     Assert-Exit $r 0 'approval-request: creates a request'
     $req = APJson $r
     $id = $req.id
@@ -525,12 +535,12 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-True (Test-Path -LiteralPath (Join-Path $work "approvals/$id.json")) 'approval-request: persists the artifact'
 
     # resume of the SAME request (same subject+reason+fingerprint+policy) reuses it, no duplicate
-    $r2 = AP @('approval-request', '--work', $work, '--task', 'T-045', '--reason', 'policy-bypass', '--paths-from', $changed, '--now', '2026-01-01T00:05:00Z', '--json')
+    $r2 = AP @('approval-request', '--work', $work, '--task', 'T-045', '--reason', 'policy-bypass', '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:05:00Z', '--json')
     Assert-Equal $id (APJson $r2).id 'approval-request: idempotent on resume (same id)'
     Assert-Equal 'existing' (APJson $r2).state 'approval-request: resume returns the existing request, not a new one'
 
     # before a decision: status is pending (exit 12), never a default approval
-    $r = AP @('approval-status', '--work', $work, '--id', $id, '--paths-from', $changed, '--now', '2026-01-01T00:10:00Z', '--json')
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:10:00Z', '--json')
     Assert-Exit $r 12 'approval-status: undecided within deadline -> pending'
     Assert-Equal 'pending' (APJson $r).verdict 'approval-status: verdict pending'
 
@@ -542,16 +552,30 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 11 'approval: a one-time id cannot be decided twice'
 
     # status: approved + fingerprint/policy unchanged -> approved (exit 0)
-    $r = AP @('approval-status', '--work', $work, '--id', $id, '--paths-from', $changed, '--now', '2026-01-01T00:30:00Z', '--json')
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:30:00Z', '--json')
     Assert-Exit $r 0 'approval-status: fresh approval -> approved'
     Assert-Equal 'approved' (APJson $r).verdict 'approval-status: verdict approved'
 
-    # STALE: after the affected code changes (fingerprint differs), the approval expires
+    # eol re-materialization only (LF -> CRLF) must NOT expire the approval - content is
+    # normalized before hashing, so a benign eol churn stays fresh (avoids false-stale).
+    Write-Utf8 (Join-Path $sb 'src/app.js') "console.log('v1');`r`n"
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:30:30Z', '--json')
+    Assert-Exit $r 0 'approval-status: eol-only change stays fresh (content normalized)'
+    Write-Utf8 (Join-Path $sb 'src/app.js') "console.log('v1');`n"   # restore LF for the next checks
+
+    # STALE (path set): adding an affected path (content of the listed files unchanged) expires it
     $changed2 = Join-Path $sb 'changed2.txt'
     Write-Utf8 $changed2 "src/app.js`nsrc/lib.js`nsrc/new.js`n"
-    $r = AP @('approval-status', '--work', $work, '--id', $id, '--paths-from', $changed2, '--now', '2026-01-01T00:31:00Z', '--json')
-    Assert-Exit $r 11 'approval-status: changed code -> stale (fail-closed)'
-    Assert-Equal 'expired-stale' (APJson $r).verdict 'approval-status: verdict expired-stale'
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--root', $sb, '--paths-from', $changed2, '--now', '2026-01-01T00:31:00Z', '--json')
+    Assert-Exit $r 11 'approval-status: added affected path -> stale (fail-closed)'
+    Assert-Equal 'expired-stale' (APJson $r).verdict 'approval-status: verdict expired-stale (path set)'
+
+    # STALE (R-01: in-place content edit): the SAME path set but different bytes must expire the
+    # approval - an approval granted under one code must never be reused for other content.
+    Write-Utf8 (Join-Path $sb 'src/app.js') "console.log('v2 - not reviewed');`n"
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:32:00Z', '--json')
+    Assert-Exit $r 11 'approval-status: in-place content edit (same paths) -> stale (R-01 replay closed)'
+    Assert-Equal 'expired-stale' (APJson $r).verdict 'approval-status: verdict expired-stale (content edit)'
 
     # reject path: a separate subject rejected is terminal (exit 11)
     $r = AP @('approval-request', '--work', $work, '--task', 'T-046', '--reason', 'human-review', '--fingerprint', 'aa', '--policy-hash', 'bb', '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json')
