@@ -163,6 +163,22 @@ workspace, коммитит результаты листовых агентов
   `reviewer_codex` всегда принудительно read-only. Копии не расходятся — стережёт
   контрактный тест `tools/check-codex-config-guard.ps1` (та же архитектура «hardcode +
   guard», что и allowlist ключей в `tools/check-consistency.ps1`, класс 4).
+- **Исполняемая граница policy/config (T-084).** Единый versioned schema source
+  `tools/policy-schema.ps1` (`Get-OrchestraSchema`) описывает и `config.md` (типы, defaults,
+  enum/range, env-precedence, чувствительность), и разделы политики `constraints.md`. CLI
+  `tools/policy.ps1` (companion `state-tx.ps1`/`queue-tx.ps1`) исполняет: `validate-config`
+  (fail-closed — неизвестный/дублирующийся/невалидный ключ это ошибка, а не тихий default),
+  `validate-policy`, `migrate` (перенос старого `config.md` на схему без потери
+  значений/комментариев, append-only), `guard-path` (гард destructive-операций: реальная
+  канонизация пути по symlink/junction, корень/объект/leaf, id задачи/батча, VCS-регистрация
+  worktree, отказ на `..`/escape/подмену), `check-paths` (фактические пути против denylist
+  после каждого возврата исполнителя и перед commit/merge/publication) и `check-publish`
+  (allowed branch/remote + push/merge policy как технический precondition, не текстовый
+  отчёт). processor встраивает эти вызовы в Фазы 1.5/5.3, merger — в свой merge-self-check.
+  Список ключей и Codex-enum'ы схемы **машинно-сверяются** с `config.example.md`
+  (`tools/check-consistency.ps1`, класс 5), а та — с обоими `cc-doctor` (класс 4): `cc-doctor`
+  держит копию хардкодом (mirror-совместимость), но со схемой разойтись не может. Тесты —
+  `tests/test-policy.ps1`.
 - **Защита `reviewer_codex` от негабаритного diff (T-066).** Инструкция «большой diff
   вставляй как есть» рискует молчаливой обрезкой контекста на стороне codex на крупных
   задачах (генерация кода, массовые переименования, vendoring) — обрезка дала бы формально

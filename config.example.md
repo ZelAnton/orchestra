@@ -226,6 +226,22 @@ supervised-режим по риску этот файл пока не реали
 (denylist, push/merge policy, обязательные проверки, пороги, пометка human-review
 категорий) и происхождение категорий риска. См. `plans/LOOP_ORCHESTRA_ROADMAP.md`.
 
+**Единый источник и исполняемая граница (T-084).** И этот `config.md`, и политику
+`constraints.md` описывает один versioned schema source — `tools/policy-schema.ps1` (типы,
+defaults, enum/range, env-precedence, чувствительность, разделы политики). Его исполняет CLI
+`tools/policy.ps1` (companion `state-tx.ps1`/`queue-tx.ps1`): `validate-config` (fail-closed:
+неизвестный/дублирующийся/невалидный ключ — ошибка, а не тихий default), `validate-policy`,
+`migrate` (перенос старого `config.md` на текущую схему без потери значений/комментариев),
+`guard-path` (гард destructive-операций: канонизация пути, корень/объект/leaf, id
+задачи/батча, VCS-связь, защита от `..`/symlink/junction/подмены worktree), `check-paths`
+(фактические изменённые пути против denylist после каждого возврата исполнителя и перед
+commit/merge/publication) и `check-publish` (allowed branch/remote + push/merge policy как
+технический precondition). Список ключей и множества значений Codex-ключей в этом файле,
+allow-список `cc-doctor` и валидация processor'а — **машинно-сверяемые копии** этой схемы
+(`tools/check-consistency.ps1`, Class 4/5), а не независимые источники: расхождение валит
+smoke-гейт. `cc-doctor` держит свою копию хардкодом намеренно — он работает и вне репозитория
+(mirror в `~/.claude/scripts`, где `tools/` недоступен), — но разойтись со схемой не может.
+
 ## База знаний проекта (KB)
 
 `KB: on` включает единую базу знаний в `.work/knowledge/` (шарды `architecture/`/

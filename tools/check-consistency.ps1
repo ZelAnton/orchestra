@@ -369,11 +369,92 @@ foreach ($srcName in $doctorSources.Keys) {
 }
 
 # =============================================================================
+# Class 5 — versioned schema source (tools/policy-schema.ps1) vs config.example.md
+# =============================================================================
+#
+# tools/policy-schema.ps1 is the single, versioned schema source that describes every
+# config key and the policy sections (task T-084); tools/policy.ps1 (the executable policy
+# boundary) and cc-config/cc-doctor's validators derive from it. To keep documentation and
+# the validators synchronized with that one source, this check machine-guarantees that the
+# schema's config-key NAMES equal config.example.md's defaults table (bidirectional), and
+# that the six value-constrained Codex keys carry the same allowed value SETS as the
+# "Допустимые значения Codex-ключей" validation table. Because that defaults table is in
+# turn checked equal to both cc-doctor allowlists (Class 4), a schema change not mirrored
+# into config.example.md - and thence cc-doctor - fails here. cc-doctor keeps its own
+# hardcoded copy (it must run when mirrored standalone into ~/.claude/scripts, where tools/
+# is absent) yet cannot drift from this schema.
+
+$SchemaFile = Join-Path $PSScriptRoot 'policy-schema.ps1'
+if (-not (Test-Path -LiteralPath $SchemaFile)) {
+    Write-Error "Required reference file not found: $SchemaFile"
+    exit 2
+}
+try { . $SchemaFile } catch { Write-Error "Could not load the schema source $SchemaFile : $($_.Exception.Message)"; exit 2 }
+$schema = $null
+try { $schema = Get-OrchestraSchema } catch { Write-Error "Get-OrchestraSchema failed in $SchemaFile : $($_.Exception.Message)"; exit 2 }
+if (-not $schema -or -not $schema.config -or $schema.config.Count -eq 0) {
+    Write-Error "Schema $SchemaFile has no config keys - format may have changed"
+    exit 2
+}
+
+$schemaKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($k in $schema.config) { [void]$schemaKeys.Add([string]$k.name) }
+
+foreach ($k in $schemaKeys) {
+    if (-not $defaultKeys.Contains($k)) {
+        Add-Finding -FileRef 'tools/policy-schema.ps1' -Check 'schema-config' `
+            -Detail "'$k' is a schema config key but missing from the defaults table in config.example.md"
+    }
+}
+foreach ($k in $defaultKeys) {
+    if (-not $schemaKeys.Contains($k)) {
+        Add-Finding -FileRef 'tools/policy-schema.ps1' -Check 'schema-config' `
+            -Detail "'$k' is in the config.example.md defaults table but missing from the schema (tools/policy-schema.ps1)"
+    }
+}
+
+# Codex validation-table enum sets vs the schema's enums (order-insensitive). Enum options
+# inside the allowed-values cell are separated by an escaped pipe (' \| '), so split each
+# row on UNESCAPED pipes to isolate the columns, then take the backtick tokens.
+$valEnum = [ordered]@{}
+$inVal = $false
+foreach ($line in $configLines) {
+    if ($line -match '^###\s+Допустимые значения Codex') { $inVal = $true; continue }
+    if ($inVal -and $line -match '^#{1,3}\s') { break }
+    if ($inVal -and $line -match '^\|\s*`CODEX_') {
+        $cells = [regex]::Split($line, '(?<!\\)\|') | ForEach-Object { $_.Trim() }
+        if ($cells.Count -ge 4) {
+            $keyM = [regex]::Match($cells[1], '`(CODEX_[A-Z]+)`')
+            if ($keyM.Success) {
+                $vals = @([regex]::Matches($cells[2], '`([^`]+)`') | ForEach-Object { $_.Groups[1].Value })
+                $valEnum[$keyM.Groups[1].Value] = ($vals | Sort-Object)
+            }
+        }
+    }
+}
+if ($valEnum.Count -eq 0) {
+    Write-Error "Could not parse the Codex validation table ('### Допустимые значения Codex...') in $ConfigFile - format may have changed"
+    exit 2
+}
+foreach ($ck in $valEnum.Keys) {
+    $desc = $schema.config | Where-Object { $_.name -eq $ck } | Select-Object -First 1
+    if (-not $desc) {
+        Add-Finding -FileRef 'tools/policy-schema.ps1' -Check 'schema-codex-enum' -Detail "validation-table key '$ck' has no schema descriptor"
+        continue
+    }
+    $schemaVals = @($desc.enum | Sort-Object)
+    if (($valEnum[$ck] -join ',') -ne ($schemaVals -join ',')) {
+        Add-Finding -FileRef 'tools/policy-schema.ps1' -Check 'schema-codex-enum' `
+            -Detail "'$ck' allowed set differs: schema [$($schemaVals -join ' | ')] vs config.example.md validation table [$($valEnum[$ck] -join ' | ')]"
+    }
+}
+
+# =============================================================================
 # Report
 # =============================================================================
 
 if ($findings.Count -eq 0) {
-    Write-Host "OK - no cross-agent contract inconsistencies found (config keys, processor phases, runtime artifacts)."
+    Write-Host "OK - no cross-agent contract inconsistencies found (config keys, processor phases, runtime artifacts, policy schema)."
     exit 0
 }
 

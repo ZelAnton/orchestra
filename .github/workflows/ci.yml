@@ -158,6 +158,30 @@ jobs:
             Write-Warning "tests/test-codex-runtime.ps1 not found yet (see T-075) - skipping Codex runtime behaviour check."
           }
 
+      - name: Check executable policy boundary
+        # Runs tests/test-policy.ps1 (added by T-084), which drives the executable
+        # policy/config boundary tools/policy.ps1 (built on the single schema source
+        # tools/policy-schema.ps1) and asserts: schema-driven fail-closed config
+        # validation, append-only migration that never loses a value/comment and
+        # refuses unknown/duplicate/invalid fields, the destructive-operation runtime
+        # guard (path canonicalisation following symlinks/junctions, root/object/leaf
+        # containment, worktree substitution and '..'/link-escape rejection, VCS
+        # registration), denylist reconciliation of the actual changed paths
+        # (rename/case) and the allowed-branch/remote/push precondition. Until the
+        # script lands this step is skipped with an explicit warning rather than
+        # failing the build.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path .\tests\test-policy.ps1) {
+            .\tests\test-policy.ps1
+            if ($LASTEXITCODE -ne 0) {
+              exit 1
+            }
+          } else {
+            Write-Warning "tests/test-policy.ps1 not found yet (see T-084) - skipping executable policy boundary check."
+          }
+
       - name: Run launcher tests
         # Runs tests/launchers/run-all.ps1 (added by T-018), the single entry
         # point that exercises every launchers/cc-*.cmd in an isolated temporary
