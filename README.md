@@ -93,16 +93,24 @@ It mirrors:
   `constraints.example.md` alongside them so `cc-config` can find its templates
   from the mirror.
 
-Neither variant purges other agents already present in the mirror. On Windows, if a
-template-generated coder or reviewer variant (`agents/coder.md`, `agents/coder_fast.md`,
-`agents/coder_deep.md`, `agents/reviewer.md`, `agents/reviewer_std.md`) has drifted from
-`agents/coder.template.md`/`agents/reviewer.template.md`, `cc-sync.cmd` regenerates it
-before mirroring; the POSIX `cc-sync.sh` mirrors the committed coder/reviewer variants
-as-is (the regeneration and agent-invariant checks are Windows-only PowerShell
-steps — if you change `agents/coder.template.md` or `agents/reviewer.template.md`,
-regenerate the variants with `generate-coders` on a machine with PowerShell before
-syncing). Re-run the sync launcher after editing any agent definition or launcher —
-otherwise Claude keeps using the previously mirrored copy.
+Both launchers are thin wrappers around one cross-platform engine,
+`tools/sync-runtime.ps1` (run under PowerShell 7 — `pwsh` — on both Windows and
+macOS/Linux), so the two platforms mirror identically. Before mirroring, the runtime
+regenerates any template-generated coder/reviewer variant (`agents/coder.md`,
+`agents/coder_fast.md`, `agents/coder_deep.md`, `agents/reviewer.md`,
+`agents/reviewer_std.md`) that has drifted from `agents/coder.template.md` /
+`agents/reviewer.template.md`, and validates the agent `.md` invariants — on **both**
+platforms, no longer Windows-only. (The POSIX launcher therefore now requires `pwsh`
+on `PATH`; install it from <https://aka.ms/powershell> if it is missing.)
+
+Mirroring is transactional: files are published through a staging area with a
+journal-backed rollback, so an interruption mid-publish is rolled back to the exact
+prior state rather than leaving a half-applied mirror. The runtime keeps a manifest
+(`~/.claude/.orchestra-sync-manifest.json`) of the files it manages; on a later sync it
+prunes only entries it previously wrote that are no longer sourced (a renamed/deleted
+agent or launcher). Files it never wrote — other agents you added to the mirror by hand
+— are never touched. Re-run the sync launcher after editing any agent definition or
+launcher, otherwise Claude keeps using the previously mirrored copy.
 
 ## Quick start in a target project
 

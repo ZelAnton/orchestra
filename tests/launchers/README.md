@@ -63,3 +63,13 @@ launcher is a thin, low-risk wrapper around already-standard tools (`git`,
 `robocopy`, the existing `generate-coders` scripts) rather than the kind of
 bespoke argument-parsing logic (`--force-lock`, `--model`, `EXTRA_ARGS`,
 quote handling) this suite targets, it is excluded here.
+
+Since task T-090, `cc-sync.cmd`/`cc-sync.sh` are thin wrappers over one
+cross-platform engine, `tools/sync-runtime.ps1`. The valuable, mutation-bearing
+part — the transactional mirror (staged publish, journal-backed rollback,
+manifest-scoped pruning, directory-vs-file healing) — is covered directly and
+side-effect-free by `test-sync-runtime.ps1`, which drives that runtime as a child
+`pwsh` process against a synthetic repo tree and a throwaway destination root (never
+the real `~/.claude`). Because the runtime is a single `pwsh` script, running that
+test under `pwsh` on Windows and on Linux exercises byte-for-byte the same code, so
+its pass/fail result is the cross-platform equivalence proof for sync.
