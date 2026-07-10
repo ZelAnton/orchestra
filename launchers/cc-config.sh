@@ -8,14 +8,20 @@
 #     (headings/prose/tables are never copied).
 #   - constraints.md: the WHOLE constraints.example.md (the entire document IS the policy
 #     content - there is no seed block to slice, unlike config.md).
-#   - .claude/settings.local.json: created with the canonical Codex exec-grant allow-list
-#     (permissions.allow) only when the file does not exist yet. An EXISTING file is never
-#     modified or merged into - this launcher only reports which canonical rule(s) are
-#     missing from it, so the operator can add them by hand (task T-058: auto-merging into
-#     an existing, operator-owned permissions file risked silently widening it). This is
-#     the ONLY sanctioned point where the rule is created from scratch - the orchestrator
-#     and its subagents never write it; seeding it here means the operator running this
-#     launcher is the one granting the permission.
+#   - .claude/settings.local.json: ensures the canonical Codex exec-grant allow-list
+#     (permissions.allow) is present. If the file does not exist it is created with the
+#     list. If it exists but is missing a canonical rule, that rule is MERGED into the
+#     existing permissions.allow array via jq (task T-078): only the missing rule is added,
+#     every other key/allow entry/deny-list/hook is preserved, and the result is written
+#     atomically (temp file + mv). An already-present rule (idempotency substring pre-check)
+#     leaves the file untouched. T-058 had removed the prior jq auto-merge fearing it would
+#     silently widen an operator-owned file; T-078 restores it narrowly (add-only,
+#     operator-run) - running this launcher IS the operator granting the permission, the
+#     same consent that already justifies creating the file from scratch. Degenerate cases
+#     (jq unavailable, invalid JSON, unexpected shape, file not writable) fall back to
+#     printing the exact rule to add by hand - never a silent no-op. This is the ONLY
+#     sanctioned point where the rule is written; the orchestrator and its subagents never
+#     write it.
 
 # Directory of this script (works whether run from a repo checkout or the ~/.claude/scripts
 # mirror).
@@ -86,33 +92,65 @@ else
   fi
 fi
 
-# --- .claude/settings.local.json (create-only; never merge into an existing file) ---
+# --- .claude/settings.local.json (create if absent; else merge the missing rule in) ---
 # Canonical Codex exec-grant allow-list (single source of truth - task T-058; keep
 # byte-identical to launchers/cc-config.cmd's $rules and to the hint text printed by
 # launchers/cc-doctor.cmd/.sh; documented in config.example.md under "Codex-агенты" /
 # "Разрешение на запуск codex"). Currently one rule.
 # If the file does not exist yet, create it with this list (no parser needed - a fixed
-# template). If it already exists, it is NEVER modified or merged into (task T-058
-# changed this from the prior jq-based auto-merge) - instead, print which of the
-# canonical rule(s) are missing from it (plain grep -F substring search, no JSON
-# parser needed for a read-only check) so the operator can add them by hand. Only the
-# operator (by running this launcher) ever writes this rule from scratch; the
-# orchestrator/subagents never do.
+# template). If it already exists but is missing a canonical rule, MERGE that rule into
+# the existing permissions.allow array with jq (task T-078 restored this narrowly -
+# add-only - after T-058 removed the prior jq auto-merge): jq preserves every other key,
+# existing allow entry, deny-list and hook, and the result is written atomically (temp
+# file + mv) so a mid-write failure cannot corrupt the file. The idempotency pre-check is
+# a plain grep -F substring search (same as before): an already-present rule leaves the
+# file byte-for-byte unchanged. Degenerate cases - jq is not installed, the file is not
+# valid JSON, permissions/allow is not the expected shape, or the file cannot be written -
+# fall back to printing the exact rule to add by hand (never a silent no-op). Only the
+# operator (by running this launcher) ever writes this rule; the orchestrator/subagents
+# never do.
 CODEX_ALLOW_RULES=('Bash(codex exec *)')
-if [ -f ".claude/settings.local.json" ]; then
+SETTINGS=".claude/settings.local.json"
+if [ -f "$SETTINGS" ]; then
   missing=()
   for r in "${CODEX_ALLOW_RULES[@]}"; do
-    if ! grep -qF -- "$r" ".claude/settings.local.json" 2>/dev/null; then
+    if ! grep -qF -- "$r" "$SETTINGS" 2>/dev/null; then
       missing+=("$r")
     fi
   done
   if [ "${#missing[@]}" -eq 0 ]; then
     echo "OK   .claude/settings.local.json already allows codex exec - left unchanged."
   else
-    echo ".claude/settings.local.json already exists - left unchanged (never auto-merged). Missing allow-rule(s) - add by hand to permissions.allow:"
-    for m in "${missing[@]}"; do
-      echo "  - $m"
-    done
+    # A canonical rule is missing -> merge it into permissions.allow. Any degenerate case
+    # prints the same "add by hand" fallback (never a silent no-op).
+    print_add_by_hand() {
+      echo "$1"
+      for m in "${missing[@]}"; do
+        echo "  - $m"
+      done
+    }
+    if ! command -v jq >/dev/null 2>&1; then
+      print_add_by_hand ".claude/settings.local.json is missing the allow-rule(s) and jq is not installed - cannot merge automatically; add by hand to permissions.allow:"
+    elif ! jq empty "$SETTINGS" >/dev/null 2>&1; then
+      print_add_by_hand ".claude/settings.local.json exists but is not valid JSON - cannot merge automatically; add the allow-rule(s) by hand to permissions.allow:"
+    else
+      tmp="$SETTINGS.tmp"
+      # Ensure .permissions and .permissions.allow exist (as an object / array), then add
+      # only the rules genuinely absent from the allow array. Input is fed via stdin so the
+      # rules can be passed as jq positional args (--args). A non-object permissions or
+      # non-array allow makes jq error out -> shape fallback below.
+      if jq '.permissions = (.permissions // {}) | .permissions.allow = (.permissions.allow // []) | reduce $ARGS.positional[] as $r (.; if (.permissions.allow | index($r)) then . else .permissions.allow += [$r] end)' --args "${missing[@]}" < "$SETTINGS" > "$tmp" 2>/dev/null; then
+        if mv -f "$tmp" "$SETTINGS" 2>/dev/null; then
+          echo "Merged allow-rule(s) into .claude/settings.local.json permissions.allow: ${missing[*]} (lets coder_codex/reviewer_codex run codex exec autonomously)."
+        else
+          rm -f "$tmp" 2>/dev/null
+          print_add_by_hand ".claude/settings.local.json could not be written (read-only or locked?) - cannot merge automatically; add the allow-rule(s) by hand to permissions.allow:"
+        fi
+      else
+        rm -f "$tmp" 2>/dev/null
+        print_add_by_hand ".claude/settings.local.json exists but its permissions/allow is not the expected shape - cannot merge automatically; add the allow-rule(s) by hand to permissions.allow:"
+      fi
+    fi
   fi
 else
   mkdir -p ".claude"

@@ -2,10 +2,13 @@
 # block of config.example.md when absent, never overwrites an existing
 # .work/config.md, and fails gracefully when no template can be found. Also
 # verifies the .claude/settings.local.json Codex exec-grant allow-list
-# (task T-058): created (with the canonical allow-rule) only when absent;
-# an existing file is never modified, and missing canonical rule(s) are
-# printed instead; a file that already grants codex exec is left unchanged
-# and reported OK. This launcher never calls claude/codex.
+# (tasks T-058/T-078): created with the canonical allow-rule when absent; when
+# the file exists but lacks the rule, the rule is MERGED into permissions.allow
+# add-only (other keys / existing allow entries preserved) and the merge is
+# idempotent on a re-run; a file that already grants codex exec is left unchanged
+# and reported OK; and degenerate cases (invalid JSON, a read-only/unwritable
+# file) leave the file untouched and fall back to printing the rule to add by
+# hand. This launcher never calls claude/codex.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -95,8 +98,10 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Remove-Sandbox $paths
     }
 
-    # --- Scenario 5: .claude/settings.local.json already exists without the
-    # allow-rule -> left completely unchanged; missing rule(s) reported instead.
+    # --- Scenario 5: .claude/settings.local.json exists WITHOUT the allow-rule
+    # (plus an unrelated allow entry and other keys) -> the canonical rule is
+    # MERGED into permissions.allow add-only; every other key / existing entry is
+    # preserved (task T-078 restored the auto-merge that T-058 had removed).
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-config.cmd'
@@ -104,23 +109,28 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         $claudeDir = Join-Path $paths.Project '.claude'
         New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
         $settingsPath = Join-Path $claudeDir 'settings.local.json'
-        $original = '{"permissions":{"allow":["Bash(git status)"]}}'
+        $original = '{"permissions":{"allow":["Bash(git status)"],"deny":["Bash(rm *)"]},"otherKey":true}'
         Set-Content -LiteralPath $settingsPath -Value $original -Encoding utf8 -NoNewline
 
         $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
-        Assert-Equal 0 $result.ExitCode '[settings: existing, missing rule] exit code'
+        Assert-Equal 0 $result.ExitCode '[settings: merge] exit code'
+        Assert-Contains $result.Output 'Merged allow-rule(s) into .claude\settings.local.json' '[settings: merge] must report the rule was merged'
 
-        $settingsContent = Get-Content -LiteralPath $settingsPath -Raw
-        Assert-Equal $original $settingsContent '[settings: existing, missing rule] file must be left byte-for-byte unchanged'
-        Assert-Contains $result.Output 'already exists - left unchanged' '[settings: existing, missing rule] must report the file was not touched'
-        Assert-Contains $result.Output 'Bash(codex exec *)' '[settings: existing, missing rule] must list the missing canonical rule'
+        $merged = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(codex exec *)')) '[settings: merge] canonical rule must be added to permissions.allow'
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(git status)')) '[settings: merge] pre-existing allow entry must be preserved'
+        Assert-True ([bool](@($merged.permissions.deny) -contains 'Bash(rm *)')) '[settings: merge] pre-existing deny entry must be preserved'
+        Assert-Equal $true $merged.otherKey '[settings: merge] unrelated top-level key must be preserved'
+        Assert-Equal 2 (@($merged.permissions.allow).Count) '[settings: merge] allow must have exactly the two rules (no duplication)'
+        # A leftover temp file must never remain after a successful merge.
+        Assert-NoFileExists ($settingsPath + '.tmp') '[settings: merge] no temp file must be left behind'
     }
     finally {
         Remove-Sandbox $paths
     }
 
     # --- Scenario 6: .claude/settings.local.json already exists and already
-    # grants codex exec -> left unchanged, reported OK, no "missing" wording.
+    # grants codex exec -> left unchanged, reported OK, no "merge" wording.
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-config.cmd'
@@ -137,6 +147,134 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         $settingsContent = Get-Content -LiteralPath $settingsPath -Raw
         Assert-Equal $original $settingsContent '[settings: existing, already granted] file must be left byte-for-byte unchanged'
         Assert-Contains $result.Output 'OK   .claude\settings.local.json already allows codex exec' '[settings: existing, already granted] must report OK unchanged'
+        Assert-True ($result.Output -notlike '*Merged*') '[settings: existing, already granted] must not claim a merge happened'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 7: idempotency - running the launcher again after a merge is a
+    # no-op that reports OK and leaves the file byte-for-byte identical.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        $settingsPath = Join-Path $claudeDir 'settings.local.json'
+        Set-Content -LiteralPath $settingsPath -Value '{"permissions":{"allow":["Bash(git status)"]}}' -Encoding utf8 -NoNewline
+
+        $first = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        Assert-Equal 0 $first.ExitCode '[settings: idempotent] first run exit code'
+        Assert-Contains $first.Output 'Merged allow-rule(s)' '[settings: idempotent] first run merges the rule'
+        $afterFirst = Get-Content -LiteralPath $settingsPath -Raw
+
+        $second = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        Assert-Equal 0 $second.ExitCode '[settings: idempotent] second run exit code'
+        Assert-Contains $second.Output 'OK   .claude\settings.local.json already allows codex exec' '[settings: idempotent] second run is a no-op reported OK'
+        $afterSecond = Get-Content -LiteralPath $settingsPath -Raw
+        Assert-Equal $afterFirst $afterSecond '[settings: idempotent] second run must not change the file'
+        $parsed = $afterSecond | ConvertFrom-Json
+        Assert-Equal 2 (@($parsed.permissions.allow).Count) '[settings: idempotent] rule must not be duplicated on re-run'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 8: existing file that is not valid JSON -> cannot merge; the
+    # file is left untouched and the rule to add by hand is printed (no silent
+    # no-op, no clobbering the operator's file).
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        $settingsPath = Join-Path $claudeDir 'settings.local.json'
+        $original = '{ this is not valid json '
+        Set-Content -LiteralPath $settingsPath -Value $original -Encoding utf8 -NoNewline
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        Assert-Equal 0 $result.ExitCode '[settings: invalid json] exit code'
+        $settingsContent = Get-Content -LiteralPath $settingsPath -Raw
+        Assert-Equal $original $settingsContent '[settings: invalid json] file must be left byte-for-byte unchanged'
+        Assert-Contains $result.Output 'not valid JSON' '[settings: invalid json] must report the file is not valid JSON'
+        Assert-Contains $result.Output 'Bash(codex exec *)' '[settings: invalid json] must print the rule to add by hand'
+        Assert-True ($result.Output -notlike '*Merged*') '[settings: invalid json] must not claim a merge happened'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 9: existing valid file missing the rule but marked read-only ->
+    # the merge cannot be written; the file is left untouched and the fallback
+    # instruction is printed (write failure is not a silent no-op).
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        $settingsPath = Join-Path $claudeDir 'settings.local.json'
+        $original = '{"permissions":{"allow":["Bash(git status)"]}}'
+        Set-Content -LiteralPath $settingsPath -Value $original -Encoding utf8 -NoNewline
+        Set-ItemProperty -LiteralPath $settingsPath -Name IsReadOnly -Value $true
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        # Clear the read-only bit right away so cleanup (and the read below) work
+        # regardless of whether any assertion throws.
+        Set-ItemProperty -LiteralPath $settingsPath -Name IsReadOnly -Value $false
+
+        Assert-Equal 0 $result.ExitCode '[settings: read-only] exit code'
+        $settingsContent = Get-Content -LiteralPath $settingsPath -Raw
+        Assert-Equal $original $settingsContent '[settings: read-only] file must be left byte-for-byte unchanged'
+        Assert-Contains $result.Output 'could not be written' '[settings: read-only] must report the file could not be written'
+        Assert-Contains $result.Output 'Bash(codex exec *)' '[settings: read-only] must print the rule to add by hand'
+        Assert-NoFileExists ($settingsPath + '.tmp') '[settings: read-only] no temp file must be left behind'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 10: existing file is an empty JSON object {} -> permissions and
+    # permissions.allow are created and the rule is merged in.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        $settingsPath = Join-Path $claudeDir 'settings.local.json'
+        Set-Content -LiteralPath $settingsPath -Value '{}' -Encoding utf8 -NoNewline
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        Assert-Equal 0 $result.ExitCode '[settings: empty object] exit code'
+        Assert-Contains $result.Output 'Merged allow-rule(s)' '[settings: empty object] must report the rule was merged'
+        $merged = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(codex exec *)')) '[settings: empty object] rule must be present under permissions.allow'
+        Assert-Equal 1 (@($merged.permissions.allow).Count) '[settings: empty object] allow must contain exactly the one rule'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 11: existing file has a permissions object but no allow key
+    # (only a deny list) -> allow is created, the rule merged in, deny preserved.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        $settingsPath = Join-Path $claudeDir 'settings.local.json'
+        Set-Content -LiteralPath $settingsPath -Value '{"permissions":{"deny":["Bash(rm *)"]}}' -Encoding utf8 -NoNewline
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        Assert-Equal 0 $result.ExitCode '[settings: no allow key] exit code'
+        Assert-Contains $result.Output 'Merged allow-rule(s)' '[settings: no allow key] must report the rule was merged'
+        $merged = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(codex exec *)')) '[settings: no allow key] rule must be added under a new permissions.allow'
+        Assert-True ([bool](@($merged.permissions.deny) -contains 'Bash(rm *)')) '[settings: no allow key] pre-existing deny list must be preserved'
     }
     finally {
         Remove-Sandbox $paths
