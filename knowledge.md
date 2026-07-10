@@ -330,7 +330,10 @@ workspace, коммитит результаты листовых агентов
 | `.work/Github_Sync.md` | таблица соответствия GitHub issues/PR и задач очереди; ведёт `github_sync` |
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
 | `.work/constraints.md` | человекочитаемая политика ограничений проекта (denylist путей, ветки/remotes, push/merge policy, обязательные проверки, пороги, human-review категории); шаблон — `constraints.example.md`, сеет `cc-config`; читают processor/planner/coder/reviewer, нет файла — деградация без ошибок |
-| `.work/orchestrator.lock` | защита от двух processor одновременно |
+| `.work/orchestrator.lock` | аренда владельца прогона (каталог; защита от двух processor одновременно). Содержит `lease.json` — запись аренды (owner/session id, корень, host, heartbeat, TTL, pid+время создания как доказательство живости, поколение); ведётся через `tools/state-tx.ps1`, см. `docs/queue_contract.md`, §14-§16 |
+| `.work/orchestrator.lock/lease.json` | запись аренды (`schema: orchestra/lease@1`); мутируется только транзакционно через `tools/state-tx.ps1` (acquire/heartbeat/release/takeover) |
+| `.work/state-tx.lock` | краткоживущий атомарный лок мутации control plane (аренда/поколение состояния); держит `state-tx.ps1` на время одной транзакции; отдельный от `orchestrator.lock` и `queue-tx.lock` |
+| `.work/control_state.json` | счётчик поколения control plane (state-плоскостной аналог `queue_state.json`) для CAS мутаций состояния когорты/задачи; ведёт `tools/state-tx.ps1` |
 | `.work/PAUSE` | kill switch: при наличии processor штатно останавливается на границе фазы/раунда (освобождает lock, состояние подхватит Фаза 0); ставит/снимает `cc-pause`/`cc-unpause` |
 | `.work/batch.md` | append-only манифест текущей когорты (строки волн приёма дописываются, не переписываются) |
 | `.work/cohort_state.md` | состояние роллинг-приёма когорты (открыт/закрыт, волна, счётчики) |
@@ -360,7 +363,17 @@ workspace, коммитит результаты листовых агентов
 - Maker/checker должны быть независимы. Если Codex реализовал задачу, Claude её ревьюит.
 - `R-NN` относятся к одной задаче, `F-NN` — к интеграции всего батча.
 - В основном дереве точечный CI-фикс коммитится явным списком файлов, не `git add -A`.
-- `--force-lock` допустим только после проверки, что прежний processor действительно умер.
+- **Аренда владельца (`.work/orchestrator.lock`) мутируется только через `tools/state-tx.ps1`**
+  (acquire/heartbeat/release/takeover, атомарный лок `state-tx.lock` + owner_id + поколение +
+  heartbeat/TTL/pid-живость): это механизм синхронизации «один processor», допускающий
+  безопасный takeover устаревшей аренды и адресный resume без второго управляющего цикла.
+  Продлить/снять аренду может только её владелец (owner_id) — безусловный `rm -rf` каталога в
+  обход owner-check не вводите (снял бы чужую свежую аренду после takeover, см.
+  `docs/queue_contract.md`, §15). Переходы состояния задачи/когорты/интеграции сверяйте
+  `state-tx check-transition` перед атомарной записью (§13).
+- `--force-lock` (операторский force-takeover) допустим только после проверки, что прежний
+  processor действительно умер; безопасный авто-takeover — лишь при доказанном stale
+  (pid мёртв/переиспользован или heartbeat за пределами TTL).
 - YAML frontmatter обязан начинаться с первого байта; агентские Markdown-файлы хранятся
   как UTF-8 без BOM.
 - Каждая логическая попытка `coder_codex`/`reviewer_codex` в пер-таск Фазе 2 завершает

@@ -153,17 +153,22 @@ see §5.
 
 ## 5. `--force-lock`: when it's safe, and what you're risking
 
-`processor` takes an exclusive lock at `.work/orchestrator.lock` (a directory, not a
-PID file — there's nothing to check liveness against except the `host`/`started`
-fields it writes into `.work/orchestrator.lock/info`) and holds it for the entire
-run. `launchers/cc-processor.cmd --force-lock` deletes that directory before
-starting, bypassing the check.
+`processor` takes an exclusive **ownership lease** at `.work/orchestrator.lock` (a
+directory whose `lease.json` record carries owner/session id, project root, host, a
+heartbeat, a TTL, and — when available — a local liveness proof (pid + that process's
+creation time); see `docs/queue_contract.md`, §14) and holds it for the entire run,
+renewing the heartbeat on phase/round boundaries. Normally you do **not** need
+`--force-lock`: a `processor` starting against a lease it can prove is **stale** (the
+holder pid is gone or reused, or the heartbeat is past its TTL) takes it over safely on
+its own. `launchers/cc-processor.cmd --force-lock` deletes the lease directory before
+starting — an **operator force-takeover** for the cases the automatic staleness check
+can't decide on its own (e.g. the holder appears alive but you know it is not).
 
 **Only use it after you've confirmed the previous `processor` run is actually dead**
 — e.g. its Claude Code session/terminal is gone, and there's no other machine or
-window that could still be mid-run against the same `.work/`. A stale lock (old
-`started` timestamp, obviously) is the normal, expected case after a crash or a
-manually killed session.
+window that could still be mid-run against the same `.work/`. A stale lease (old
+heartbeat / a pid that is no longer running) is the normal, expected case after a
+crash or a manually killed session, and is handled automatically without the flag.
 
 **What you're risking if you're wrong**: if another `processor` instance genuinely is
 still running and you force past the lock, you get two orchestrators mutating the
@@ -176,12 +181,15 @@ branch, or a lost journal entry. If you're unsure, it's cheaper to wait and chec
 start a run?) than to force it.
 
 Note that resuming your **own** interrupted session doesn't need `--force-lock` at
-all: `launchers/cc-resume.cmd` reuses `claude --continue`, and `processor`'s own
-recovery logic (its system prompt's Фаза 0) already reuses a lock left by its own
-prior, interrupted run (matching `host`, no other instance running) without you
-doing anything. Reach for `--force-lock` only when the lock was left by a session
-that is confirmed gone and `cc-resume` isn't applicable (e.g. you're starting a
-fresh session rather than continuing the old one).
+all: `launchers/cc-resume.cmd` does an **addressed** resume — it uses `claude
+--continue` only when an addressed `processor` lease for this project exists
+(`.work/orchestrator.lock/lease.json` with `role=processor`), otherwise it does an
+explicit cold recovery from scratch — and `processor`'s own recovery logic (its system
+prompt's Фаза 0) re-adopts its own stale lease (matching role/root, holder not live)
+via a safe takeover without you doing anything. Reach for `--force-lock` only when the
+lease was left by a session that is confirmed gone but still looks live to the
+automatic check (e.g. a hung process), or when you're deliberately starting a fresh
+session rather than continuing the old one.
 
 ## 6. Cleaning up orphaned worktrees
 

@@ -3,8 +3,11 @@
 # Processes the .work/Tasks_Queue.md queue in parallel batches end to end.
 #
 # Optional flags (any order, before the remaining arguments):
-#   --force-lock     remove .work/orchestrator.lock before starting - only if you are
-#                    sure the previous processor is no longer running.
+#   --force-lock     operator force-takeover of the lease: remove the lease directory
+#                    .work/orchestrator.lock (with its lease.json) before starting -
+#                    only if you are sure the previous processor is no longer running.
+#                    A safe auto-takeover (on a provably stale lease) needs no flag;
+#                    --force-lock is the explicit operator confirmation.
 #   --model <name>   override the agent model (if supported by your claude version -
 #                    check `claude --help`; the --agent + --model combination is not
 #                    100% documented).

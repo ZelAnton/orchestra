@@ -12,6 +12,13 @@
 # WARNING: --continue picks up the MOST RECENT Claude Code session in this directory,
 # whatever it is. Do not run other cc-* launchers or an interactive claude between
 # the crash and cc-resume - otherwise --continue resumes their session, not processor.
+# So this resume is ADDRESSED: --continue is used only when an addressed processor
+# lease for this project exists (.work/orchestrator.lock/lease.json with role=processor
+# - the lease living under this directory's .work addresses the root; the role is
+# checked here). Without it, we do an EXPLICIT cold recovery (Фаза 0 from scratch, no
+# --continue) rather than resuming an arbitrary last session. The precise root/owner
+# match is done by processor's Фаза 0 via tools/state-tx.ps1 verify (see
+# docs/queue_contract.md, §16).
 # --allowedTools "Bash(codex exec:*)": pre-granted session permission for the codex
 # adapters to launch codex (same as cc-processor.sh) - otherwise the auto-mode classifier
 # rejects codex mid-run on resume. It sits BEFORE --permission-mode (the variadic flag
@@ -20,4 +27,14 @@
 # cc-processor.sh - an explicit signal of the already-issued session grant that the
 # Phase 1.1 gate and cc-doctor read; with it, no persistent allow-rule is required.
 export CC_CODEX_EXEC_GRANT="codex exec"
-exec claude --agent processor --allowedTools "Bash(codex exec:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+
+# Addressed check: an addressed processor lease exists only if the lease file is
+# present AND carries role=processor. The role line's spacing differs between
+# PowerShell 7 ("role": ) and 5.1 ("role":  ), so a spacing-tolerant regex is used.
+LEASE=".work/orchestrator.lock/lease.json"
+if [ -f "$LEASE" ] && grep -Eq '"role"[[:space:]]*:[[:space:]]*"processor"' "$LEASE"; then
+  exec claude --agent processor --allowedTools "Bash(codex exec:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+else
+  echo "No addressed processor lease (.work/orchestrator.lock/lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session."
+  exec claude --agent processor --allowedTools "Bash(codex exec:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+fi
