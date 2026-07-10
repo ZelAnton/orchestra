@@ -58,7 +58,7 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
         Assert-Equal 2 $result.ExitCode '[addressed] exit code must be forwarded from claude'
 
         $captured = Get-CapturedArgs $captureFile
-        $flags = @('--agent', 'processor', '--allowedTools', 'Bash(codex exec:*)', '--permission-mode', $expectedMode, '--continue')
+        $flags = @('--agent', 'processor', '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', '--permission-mode', $expectedMode, '--continue')
         Assert-Equal ($flags.Count + 1) $captured.Count '[addressed] flags + one prompt arg'
         Assert-ArrayEqual $flags $captured[0..($flags.Count - 1)] '[addressed] flag list, ending in --continue'
         Assert-True ($captured[$flags.Count] -match '^Continue processing \.work/Tasks_Queue\.md from where you left off') '[addressed] resume prompt'
@@ -86,7 +86,7 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
         Assert-Equal 0 $result.ExitCode '[cold] exit code forwarded'
 
         $captured = Get-CapturedArgs $captureFile
-        $flags = @('--agent', 'processor', '--allowedTools', 'Bash(codex exec:*)', '--permission-mode', $expectedMode)
+        $flags = @('--agent', 'processor', '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', '--permission-mode', $expectedMode)
         Assert-Equal ($flags.Count + 1) $captured.Count '[cold] flags + one prompt arg, no --continue'
         Assert-ArrayEqual $flags $captured[0..($flags.Count - 1)] '[cold] flag list has no --continue'
         Assert-True (-not ($captured -contains '--continue')) '[cold] --continue absent'

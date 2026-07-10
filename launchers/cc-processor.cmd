@@ -54,21 +54,34 @@ shift
 goto :parse
 
 :run
-rem --allowedTools "Bash(codex exec:*)": предвыданный сессионный грант на запуск codex
+rem --allowedTools (грант): предвыданный сессионный грант на автономный запуск codex
 rem адаптерами (coder_codex/reviewer_codex). Запуск launcher'а пользователем и есть
-rem выдача согласия; без него classifier auto-режима отклоняет `codex exec … ` посреди
-rem прогона как «запуск автономного агента» (см. agents\coder_codex.md). Грант — по
-rem литеральному префиксу строки команды, поэтому адаптеры зовут codex командой,
-rem начинающейся ровно с `codex exec`. Флаг стоит перед флагом permission-mode:
-rem --allowedTools вариативен и без следующего флага-ограничителя поглотил бы промпт.
-rem Режим auto сохранён без изменений.
+rem выдача согласия; без покрывающего гранта classifier auto-режима отклоняет вызов
+rem посреди прогона как «запуск автономного агента» (см. agents\coder_codex.md). Передаём
+rem два префиксных гранта (правило матчится по литеральному началу Bash-строки команды):
+rem   Bash(pwsh -File tools/codex-runtime.ps1:*) — строка, которую РЕАЛЬНО исполняет
+rem     Bash-инструмент. Адаптеры больше не зовут `codex exec` голой Bash-командой, а гонят
+rem     codex через runtime-обёртку `pwsh -File tools/codex-runtime.ps1 <run|guard-commit|
+rem     cleanup|classify|check-diff|validate-reviewer|broker-validate|map-sentinel> ...`,
+rem     поэтому один этот префикс покрывает все подкоманды runtime. Сам `codex exec`
+rem     runtime порождает дочерним процессом (.NET ProcessStartInfo) и через permission-гейт
+rem     Bash он НЕ проходит — грант только на `Bash(codex exec:*)` оставил бы каждый вызов
+rem     адаптера заблокированным (исправление находки ревью R-01).
+rem   Bash(codex exec:*) — сохранён как канонический якорь codex-автономии, который называет
+rem     CC_CODEX_EXEC_GRANT и от которого отталкиваются гейт Фазы 1.1 / cc-doctor / правило
+rem     cc-config в settings; безвреден, когда codex не зовётся голой Bash-командой напрямую.
+rem Гранты стоят перед флагом permission-mode: --allowedTools вариативен и без следующего
+rem флага-ограничителя поглотил бы промпт. Режим auto сохранён без изменений.
 rem
-rem CC_CODEX_EXEC_GRANT="codex exec": явный, проверяемый признак того, что сессионный
-rem грант на автономный `codex exec` уже выдан выше через --allowedTools. Это единый
-rem контракт launcher->processor (тот же признак читают Фаза 1.1 processor.md и
-rem cc-doctor): значение — гранованный префикс команды. Получив его, permission-гейт
-rem Фазы 1.1 не требует дублирующего постоянного allow-правила в settings-файлах и не
-rem запускает статический поиск заново. Внутри setlocal — переменная видна дочернему
-rem процессу claude и не утекает в окружение вызывающей оболочки.
+rem CC_CODEX_EXEC_GRANT="codex exec": явный, проверяемый признак того, что сессия выше
+rem предвыдала автономный codex через --allowedTools. Это единый контракт
+rem launcher->processor (тот же признак читают Фаза 1.1 processor.md и cc-doctor): значение
+rem — канонический гранованный префикс codex-команды, который эти читатели сверяют с
+rem префиксом команды адаптеров `<CODEX_CMD> exec`, поэтому оно остаётся `codex exec` (НЕ
+rem переводи его на pwsh-обёртку — иначе эта префиксная сверка перестанет совпадать и гейт
+rem Фазы 1.1 откажется открывать когорту). Получив его, гейт Фазы 1.1 не требует
+rem дублирующего постоянного allow-правила в settings-файлах и не запускает статический
+rem поиск заново. Внутри setlocal — переменная видна дочернему процессу claude и не утекает
+rem в окружение вызывающей оболочки.
 set "CC_CODEX_EXEC_GRANT=codex exec"
-claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."

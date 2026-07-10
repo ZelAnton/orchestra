@@ -135,6 +135,29 @@ jobs:
             Write-Warning "tests/test-reviewer-codex-gate.ps1 not found yet (see T-074) - skipping reviewer_codex gate contract check."
           }
 
+      - name: Check Codex runtime behaviour
+        # Runs tests/test-codex-runtime.ps1 (added by T-075), which drives the
+        # executable Codex adapter runtime tools/codex-runtime.ps1 against a fake
+        # `codex` stub and asserts the mechanical protocol the adapters delegate to
+        # it: safe argv construction (no shell injection), prompt-on-stdin +
+        # separate stdout/stderr/RC capture, timeout, permission/availability
+        # refusal (CODEX_UNAVAILABLE), sandbox-init failure (ENV_LIMIT/sandbox-init),
+        # the dependency-broker allowlist, reviewer output / oversized-diff
+        # validation, the no-commit guard and own-worktree cleanup, and
+        # failure-class -> escalation-sentinel mapping. Until the script lands this
+        # step is skipped with an explicit warning rather than failing the build.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (Test-Path .\tests\test-codex-runtime.ps1) {
+            .\tests\test-codex-runtime.ps1
+            if ($LASTEXITCODE -ne 0) {
+              exit 1
+            }
+          } else {
+            Write-Warning "tests/test-codex-runtime.ps1 not found yet (see T-075) - skipping Codex runtime behaviour check."
+          }
+
       - name: Run launcher tests
         # Runs tests/launchers/run-all.ps1 (added by T-018), the single entry
         # point that exercises every launchers/cc-*.cmd in an isolated temporary

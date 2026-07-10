@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # POSIX counterpart of cc-doctor.cmd. Read-only preflight/readiness audit for the
-# optional Codex executor (binary, auth, and the Claude Code allow-rule for autonomous
-# `codex exec`) and the target project's orchestration state. Makes NO changes to any
+# optional Codex executor (binary, auth, and the Claude Code allow-rule for the autonomous
+# codex runtime wrapper `pwsh -File tools/codex-runtime.ps1`) and the target project's
+# orchestration state. Makes NO changes to any
 # file (not even a stuck orchestrator.lock or an orphaned worktree - it only reports on
 # them). Implemented with plain POSIX shell + grep/sed/awk, no PowerShell. Run from the
 # project root.
@@ -67,13 +68,18 @@ eff_codex() {
   fi
   printf '%s' "$val"
 }
-# Effective CODEX_CMD (config.md only) determines the actual command the adapters run
-# ("<CODEX_CMD> exec ...") and therefore which allow-rule / session grant actually covers
-# it - a non-canonical CODEX_CMD is NOT covered by the canonical `codex exec` grant
-# (task T-071, custom-command criterion).
+# Since task T-075 the adapters do NOT run `<CODEX_CMD> exec` as a bare Bash command:
+# they drive codex through the runtime wrapper `pwsh -File tools/codex-runtime.ps1 ...`,
+# which spawns the real `codex exec` as a child process (past the Bash permission gate).
+# So the allow-rule that must actually be present in settings is the one covering the
+# runtime wrapper (runtimeRule below); it covers every runtime subcommand and every
+# CODEX_CMD (a non-default CODEX_CMD is just a `--codex-cmd` argument to the wrapper, not
+# a separate Bash command). cmdPrefix ("<CODEX_CMD> exec") is kept only for the launcher
+# session-grant comparison below (CC_CODEX_EXEC_GRANT names the `codex exec` anchor).
 codexCmd="$(get_cfg CODEX_CMD)"
 [ -n "$codexCmd" ] || codexCmd="codex"
 cmdPrefix="$codexCmd exec"
+runtimeRule="pwsh -File tools/codex-runtime.ps1"
 # Routing is on if ANY of CODEX_CODER / CODEX_REVIEWER (config-or-env) or CODEX_CIFIX
 # (config only) is set to something other than off - the union of all three Codex routes
 # (implementation / review / CI-fixes), matching processor.md's Phase 1.1 gate.
@@ -85,9 +91,11 @@ if { [ -n "$ccEff" ] && [ "$ccEff" != "off" ]; } || { [ -n "$crEff" ] && [ "$crE
   codexRoutingOn=1
 fi
 # Session grant: the same launcher->processor contract the Phase 1.1 gate honors.
-# cc-processor/cc-resume, when they pre-grant --allowedTools "Bash(codex exec:*)", also
-# export CC_CODEX_EXEC_GRANT="codex exec"; a session whose granted prefix covers the
-# actual command prefix needs no persistent settings allow-rule.
+# cc-processor/cc-resume pre-grant BOTH --allowedTools "Bash(codex exec:*)" and
+# "Bash(pwsh -File tools/codex-runtime.ps1:*)" (the latter is what actually covers the
+# runtime command) and export CC_CODEX_EXEC_GRANT="codex exec" as the launcher-session
+# marker; a session carrying that marker (its granted anchor covers the codex sub-command
+# prefix) needs no persistent settings allow-rule for this session.
 sessionGrant=0
 if [ -n "${CC_CODEX_EXEC_GRANT:-}" ]; then
   case "$cmdPrefix" in
@@ -96,16 +104,20 @@ if [ -n "${CC_CODEX_EXEC_GRANT:-}" ]; then
 fi
 # Static settings check (only meaningful when no covering session grant): inspect ONLY
 # the permissions.allow array of each settings file for an entry containing the actual
-# command prefix. Matches in permissions.deny, hooks, comments or free text must NOT
-# count (task T-071). No jq dependency: flatten the file and isolate the allow array span
-# (the [ ... ] right after the "allow" key; allow entries are strings with no literal ']').
+# runtime-wrapper command prefix (runtimeRule). The substring `pwsh -File
+# tools/codex-runtime.ps1` matches both the settings space form
+# `Bash(pwsh -File tools/codex-runtime.ps1 *)` and the launcher colon form
+# `Bash(pwsh -File tools/codex-runtime.ps1:*)`. Matches in permissions.deny, hooks,
+# comments or free text must NOT count (task T-071). No jq dependency: flatten the file
+# and isolate the allow array span (the [ ... ] right after the "allow" key; allow
+# entries are strings with no literal ']').
 permrule=0
 for sf in ".claude/settings.local.json" ".claude/settings.json" "$HOME/.claude/settings.json"; do
   [ -f "$sf" ] || continue
   allow_arr="$(tr '\n' ' ' < "$sf" 2>/dev/null | sed -n 's/.*"allow"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p')"
   [ -n "$allow_arr" ] || continue
   case "$allow_arr" in
-    *"$cmdPrefix"*) permrule=1 ;;
+    *"$runtimeRule"*) permrule=1 ;;
   esac
 done
 if [ "$codexRoutingOn" -eq 0 ]; then
@@ -113,11 +125,9 @@ if [ "$codexRoutingOn" -eq 0 ]; then
 elif [ "$sessionGrant" -eq 1 ]; then
   echo "OK   exec permission: session grant present (CC_CODEX_EXEC_GRANT covers the $cmdPrefix command prefix) - no persistent settings allow-rule required for this session"
 elif [ "$permrule" -eq 1 ]; then
-  echo "OK   exec permission: allow-rule for $cmdPrefix present in Claude Code settings (permissions.allow)"
-elif [ "$codexCmd" != "codex" ]; then
-  echo "WARN exec permission: CODEX_CMD is non-canonical ($codexCmd) -> the launcher session grant and cc-config canonical rule cover only codex exec, not $cmdPrefix; add an allow-rule Bash($cmdPrefix *) to .claude/settings.local.json (or .claude/settings.json), or set CODEX_CMD to codex, else coder_codex/reviewer_codex escalate to Claude"
+  echo "OK   exec permission: allow-rule for the codex runtime ($runtimeRule) present in Claude Code settings (permissions.allow)"
 else
-  echo "WARN exec permission: NOT found -> CODEX_CODER/CODEX_REVIEWER/CODEX_CIFIX routing is on, so the auto-mode classifier blocks autonomous codex exec without it; run cc-config (creates .claude/settings.local.json with the canonical allow-rule Bash(codex exec *) if absent, else lists what is missing) or add the allow-rule by hand (permissions.allow: Bash(codex exec *)) to .claude/settings.local.json or .claude/settings.json, else coder_codex/reviewer_codex escalate to Claude"
+  echo "WARN exec permission: NOT found -> CODEX_CODER/CODEX_REVIEWER/CODEX_CIFIX routing is on, so the auto-mode classifier blocks the autonomous codex runtime without it; run cc-config (seeds .claude/settings.local.json with the canonical allow-rules Bash(pwsh -File tools/codex-runtime.ps1 *) and Bash(codex exec *) if absent, else lists what is missing) or add the allow-rule by hand (permissions.allow: Bash(pwsh -File tools/codex-runtime.ps1 *)) to .claude/settings.local.json or .claude/settings.json, else coder_codex/reviewer_codex escalate to Claude"
 fi
 echo
 echo "== Effective CODEX_* (.work/config.md; CODEX_CODER/CODEX_REVIEWER fall back to env; blank = default) =="

@@ -22,7 +22,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
-            '--allowedTools', 'Bash(codex exec:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -46,8 +46,8 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         Assert-Equal 0 $result.ExitCode '[--model value] exit code'
 
         $args = Get-CapturedArgs $captureFile
-        Assert-True ($args.Count -ge 8) '[--model value] enough tokens captured'
-        Assert-ArrayEqual @('--agent', 'processor', '--model', 'opus-9000', '--allowedTools', 'Bash(codex exec:*)', '--permission-mode', $expectedMode) $args[0..7] '[--model value] --model must precede --permission-mode with its value forwarded'
+        Assert-True ($args.Count -ge 9) '[--model value] enough tokens captured'
+        Assert-ArrayEqual @('--agent', 'processor', '--model', 'opus-9000', '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', '--permission-mode', $expectedMode) $args[0..8] '[--model value] --model must precede --permission-mode with its value forwarded'
     }
     finally {
         Remove-Sandbox $paths
@@ -68,7 +68,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
-            '--allowedTools', 'Bash(codex exec:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -95,7 +95,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
             '--agent', 'processor',
             '--model', 'foo',
             '--verbose', '--extra-flag',
-            '--allowedTools', 'Bash(codex exec:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -124,7 +124,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
-            '--allowedTools', 'Bash(codex exec:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -155,8 +155,10 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
     # --- Scenario 7 (task T-071): the launcher exports CC_CODEX_EXEC_GRANT
     # into claude's environment - the explicit, verifiable session-grant signal
     # the processor's Phase 1.1 gate reads instead of requiring a persistent
-    # settings allow-rule. Its value is the granted command prefix ("codex exec"),
-    # matching the --allowedTools "Bash(codex exec:*)" grant on the same line.
+    # settings allow-rule. Its value is the canonical granted codex command prefix
+    # ("codex exec"), which the Phase 1.1 gate / cc-doctor compare against the
+    # adapters' "<CODEX_CMD> exec" prefix; the actually-executed Bash string is the
+    # runtime wrapper, granted separately via "Bash(pwsh -File tools/codex-runtime.ps1:*)".
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
@@ -179,9 +181,14 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         Assert-Equal 'codex exec' $expectedGrant '[session grant] launcher source must set CC_CODEX_EXEC_GRANT=codex exec'
         Assert-Equal $expectedGrant (Get-CapturedGrant $envFile) '[session grant] claude must inherit CC_CODEX_EXEC_GRANT with the launcher-set value'
 
-        # The session-grant env signal is in ADDITION to the --allowedTools grant,
-        # not a replacement: both must still be present on the claude command line.
-        Assert-True ((Get-CapturedArgs $captureFile) -contains 'Bash(codex exec:*)') '[session grant] --allowedTools "Bash(codex exec:*)" must still be forwarded'
+        # The session-grant env signal is in ADDITION to the --allowedTools grants,
+        # not a replacement: both allow-rules must still be present on the claude
+        # command line. The pwsh runtime-wrapper grant is the one that actually
+        # unblocks the adapters' Bash call (review finding R-01); the codex exec grant
+        # is retained as the canonical anchor CC_CODEX_EXEC_GRANT names.
+        $capturedArgs = Get-CapturedArgs $captureFile
+        Assert-True ($capturedArgs -contains 'Bash(codex exec:*)') '[session grant] --allowedTools "Bash(codex exec:*)" must still be forwarded'
+        Assert-True ($capturedArgs -contains 'Bash(pwsh -File tools/codex-runtime.ps1:*)') '[session grant] --allowedTools "Bash(pwsh -File tools/codex-runtime.ps1:*)" (the actually-executed runtime wrapper) must be forwarded'
     }
     finally {
         Remove-Sandbox $paths

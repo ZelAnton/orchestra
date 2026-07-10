@@ -47,20 +47,34 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# --allowedTools "Bash(codex exec:*)": pre-granted session permission for the codex
-# adapters (coder_codex/reviewer_codex) to launch codex. Running this launcher IS the
-# user's consent; without it the auto-mode classifier rejects `codex exec … ` mid-run as
-# "launching an autonomous agent" (see agents/coder_codex.md). The grant matches by the
-# literal command-string prefix, so the adapters invoke codex as a command that starts
-# with exactly `codex exec`. It sits BEFORE --permission-mode: --allowedTools is variadic
-# and, with no following flag to stop it, would swallow the positional prompt.
-# --permission-mode auto is kept unchanged.
+# --allowedTools grants: pre-granted session permission for the codex adapters
+# (coder_codex/reviewer_codex) to run codex autonomously. Running this launcher IS the
+# user's consent; without a covering grant the auto-mode classifier rejects the call
+# mid-run as "launching an autonomous agent" (see agents/coder_codex.md). Two prefix
+# grants are passed (allow-rules match by the literal Bash command-string prefix):
+#   Bash(pwsh -File tools/codex-runtime.ps1:*) - the string the Bash tool ACTUALLY runs.
+#     The adapters no longer invoke `codex exec` as a bare Bash command; they drive codex
+#     through the runtime wrapper `pwsh -File tools/codex-runtime.ps1 <run|guard-commit|
+#     cleanup|classify|check-diff|validate-reviewer|broker-validate|map-sentinel> ...`, so
+#     this single prefix covers every runtime subcommand. `codex exec` itself is spawned by
+#     the runtime as a child process (.NET ProcessStartInfo) and never passes through the
+#     Bash permission gate - hence granting only `Bash(codex exec:*)` would leave every
+#     adapter call blocked (fixed here, review finding R-01).
+#   Bash(codex exec:*) - retained as the canonical codex-autonomy anchor that
+#     CC_CODEX_EXEC_GRANT names and that the Phase 1.1 gate / cc-doctor / cc-config settings
+#     rule still key off; harmless when codex is not invoked as a bare Bash command directly.
+# The grants sit BEFORE --permission-mode: --allowedTools is variadic and, with no
+# following flag to stop it, would swallow the positional prompt. --permission-mode auto is
+# kept unchanged.
 #
-# CC_CODEX_EXEC_GRANT="codex exec": an explicit, verifiable signal that the session grant
-# for autonomous `codex exec` was already issued above via --allowedTools. This is the
-# single launcher->processor contract (Phase 1.1 of processor.md and cc-doctor read the
-# same variable): its value is the granted command prefix. With it present, the Phase 1.1
-# permission gate needs no duplicate persistent allow-rule in the settings files and does
-# not re-run the static search.
+# CC_CODEX_EXEC_GRANT="codex exec": an explicit, verifiable signal that this session
+# pre-granted autonomous codex above via --allowedTools. This is the single
+# launcher->processor contract (Phase 1.1 of processor.md and cc-doctor read the same
+# variable): its value is the canonical granted codex command prefix, which those readers
+# compare against the adapters' `<CODEX_CMD> exec` command prefix - so it stays "codex exec"
+# (do NOT retarget it to the pwsh wrapper, or that prefix check would stop matching and the
+# Phase 1.1 gate would refuse to open the cohort). With it present, the Phase 1.1 gate needs
+# no duplicate persistent allow-rule in the settings files and does not re-run the static
+# search.
 export CC_CODEX_EXEC_GRANT="codex exec"
-exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
