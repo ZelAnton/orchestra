@@ -1,0 +1,25 @@
+[package]
+name = "orchestra-engine-spike"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.74"
+description = "T-097 Stage 1 de-risking spike: spawn and supervise ONE claude leaf-agent call and ONE codex exec call OUTSIDE Claude Code, with a deadline, maxTurns, structured-output capture and per-invocation permission handling. Proves (or disproves) the subagent spawn/supervise environment (intent doc risk R1) before any headless engine is built."
+license = "MIT"
+publish = false
+
+# Dependency-free ON PURPOSE: a de-risking spike must build offline, instantly, and
+# without a registry so the smoke gate / CI stay green with no network at build time.
+# The PRODUCTION engine should adopt the Rust line's `processkit` crate (kill-on-drop
+# Job Object / cgroup v2 / process group) and `serde_json` for robust stream-json parse
+# instead of the spike-grade primitives here (see README.md "Spike outcome").
+
+[lib]
+name = "orchestra_engine_spike"
+path = "src/lib.rs"
+
+[[bin]]
+name = "orchestra-engine-spike"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2

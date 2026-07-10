@@ -1,1 +1,4 @@
 .work/
+# Rust build output for the engine spike (engine/, task T-097). Source, Cargo.toml and
+# Cargo.lock are tracked; only the compiled target/ tree is ignored.
+engine/target/
