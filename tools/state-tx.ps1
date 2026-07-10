@@ -66,6 +66,7 @@
       16  lease role mismatch (verify / addressed takeover guard)
       17  own lease but stale (verify: resume should re-adopt / cold-recover)
       18  corrupt / invalid lease record
+      19  a non-structured (legacy/degraded mkdir) lock holds the directory
 
 .EXAMPLE
     pwsh -File tools/state-tx.ps1 acquire   --work /abs/.work --root /abs --role processor --pid 12345
@@ -74,7 +75,7 @@
     pwsh -File tools/state-tx.ps1 takeover  --work /abs/.work --root /abs --role processor --require-root /abs
     pwsh -File tools/state-tx.ps1 release   --work /abs/.work --owner <id>
     pwsh -File tools/state-tx.ps1 status    --work /abs/.work --json
-    pwsh -File tools/state-tx.ps1 check-transition --kind task --from working --to ready
+    pwsh -File tools/state-tx.ps1 check-transition --kind task --from working --to in-review
 #>
 
 Set-StrictMode -Version Latest
@@ -251,16 +252,38 @@ function Get-Liveness {
 # --------------------------------------------------------------------------
 function Read-Lease {
     param($Paths)
-    if (-not (Test-Path -LiteralPath $Paths.Lease)) { return [pscustomobject]@{ Present = $false; Valid = $false; Lease = $null; Error = $null } }
-    $raw = Read-TextOrEmpty $Paths.Lease
-    if ([string]::IsNullOrWhiteSpace($raw)) { return [pscustomobject]@{ Present = $true; Valid = $false; Lease = $null; Error = 'empty lease file' } }
-    $obj = $null
-    try { $obj = $raw | ConvertFrom-Json } catch { return [pscustomobject]@{ Present = $true; Valid = $false; Lease = $null; Error = 'unparseable JSON' } }
-    foreach ($f in @('role', 'owner_id', 'root', 'host', 'heartbeat', 'ttl_seconds', 'generation')) {
-        if (-not (Lease-HasProp $obj $f)) { return [pscustomobject]@{ Present = $true; Valid = $false; Lease = $obj; Error = "missing field '$f'" } }
+    if (-not (Test-Path -LiteralPath $Paths.Lease)) {
+        # No structured lease file. The lock DIRECTORY may still be held by a legacy /
+        # degraded mkdir-lock: the fallback path (used when pwsh is unavailable) does a
+        # bare `mkdir orchestrator.lock` and writes an `info` file, NOT a lease.json.
+        # The lease and the legacy lock share the *same* directory, so a lock dir that
+        # carries foreign content (anything other than this tool's own lease.json or its
+        # lease.json.tmp write-staging file) must be reported as OCCUPIED, not as "no
+        # lease": otherwise acquire would silently write a fresh lease.json into a
+        # directory a live degraded processor is holding and produce two control loops
+        # (T-079 R-02). An empty dir, or one holding only our own lease.json.tmp left by
+        # a crash between temp-write and rename, is a recoverable state-tx artifact
+        # (see the after-dir-create / before-rename fault stages), not a foreign lock,
+        # so it stays "no lease" and acquire may recover it.
+        if (Test-Path -LiteralPath $Paths.LockDir) {
+            $foreign = @(Get-ChildItem -LiteralPath $Paths.LockDir -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ne 'lease.json' -and $_.Name -ne 'lease.json.tmp' })
+            if ($foreign.Count -gt 0) {
+                $names = (($foreign | ForEach-Object { $_.Name }) -join ', ')
+                return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $true; Lease = $null; Error = "lock directory held by a non-structured (legacy/degraded mkdir) lock: contains '$names' but no lease.json" }
+            }
+        }
+        return [pscustomobject]@{ Present = $false; Valid = $false; Legacy = $false; Lease = $null; Error = $null }
     }
-    try { [void](Parse-Utc $obj.heartbeat) } catch { return [pscustomobject]@{ Present = $true; Valid = $false; Lease = $obj; Error = 'unparseable heartbeat timestamp' } }
-    return [pscustomobject]@{ Present = $true; Valid = $true; Lease = $obj; Error = $null }
+    $raw = Read-TextOrEmpty $Paths.Lease
+    if ([string]::IsNullOrWhiteSpace($raw)) { return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $null; Error = 'empty lease file' } }
+    $obj = $null
+    try { $obj = $raw | ConvertFrom-Json } catch { return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $null; Error = 'unparseable JSON' } }
+    foreach ($f in @('role', 'owner_id', 'root', 'host', 'heartbeat', 'ttl_seconds', 'generation')) {
+        if (-not (Lease-HasProp $obj $f)) { return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $obj; Error = "missing field '$f'" } }
+    }
+    try { [void](Parse-Utc $obj.heartbeat) } catch { return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $obj; Error = 'unparseable heartbeat timestamp' } }
+    return [pscustomobject]@{ Present = $true; Valid = $true; Legacy = $false; Lease = $obj; Error = $null }
 }
 function Write-Lease {
     param($Paths, $Rec)
@@ -306,7 +329,7 @@ function Set-ControlGeneration {
 $script:Transitions = @{
     task        = @{
         'not-started' = @('working')
-        'working'     = @('in-review', 'ready', 'escalated', 'conflict')
+        'working'     = @('in-review', 'escalated', 'conflict')
         'in-review'   = @('in-review', 'working', 'ready', 'escalated', 'conflict')
         'ready'       = @('merged', 'conflict', 'escalated')
         'merged'      = @('published', 'conflict')
@@ -353,7 +376,10 @@ function Invoke-Acquire {
         $prevOwner = $null
         $baseGen = 0
         if ($existing.Present) {
-            if (-not $existing.Valid) {
+            if ($existing.Legacy) {
+                if (-not $force) { Fail 19 "$($existing.Error); a non-pwsh (degraded) processor may still be live - refuse to $Mode without --force (resolve the legacy lock or confirm the degraded run is dead)" }
+                # --force: operator confirmed the degraded run is dead; overwrite it.
+            } elseif (-not $existing.Valid) {
                 if (-not $force) { Fail 18 "existing lease is corrupt ($($existing.Error)); refuse to $Mode without --force" }
                 # --force: overwrite the corrupt record.
             } else {
@@ -409,6 +435,7 @@ function Cmd-Heartbeat {
     try {
         $existing = Read-Lease $paths
         if (-not $existing.Present) { Fail 12 "no lease to renew at $($paths.Lease)" }
+        if ($existing.Legacy) { Fail 19 "$($existing.Error); cannot heartbeat a lock you do not structurally own" }
         if (-not $existing.Valid) { Fail 18 "lease is corrupt ($($existing.Error)); cannot renew" }
         $L = $existing.Lease
         if ($L.owner_id -ne $owner) { Fail 13 "not the owner: lease owned by '$($L.owner_id)', you presented '$owner'" }
@@ -447,7 +474,10 @@ function Cmd-Release {
     try {
         $existing = Read-Lease $paths
         if (-not $existing.Present) { Write-Output 'not-held'; return }  # idempotent
-        if (-not $existing.Valid) {
+        if ($existing.Legacy) {
+            if (-not $force) { Fail 19 "$($existing.Error); use --force to remove it" }
+            # --force: fall through and remove the legacy lock dir.
+        } elseif (-not $existing.Valid) {
             if (-not $force) { Fail 18 "lease is corrupt ($($existing.Error)); use --force to remove it" }
         } else {
             $L = $existing.Lease
@@ -468,6 +498,7 @@ function Cmd-Verify {
     $paths = Resolve-Paths
     $existing = Read-Lease $paths
     if (-not $existing.Present) { Write-Output 'no-lease'; exit 14 }
+    if ($existing.Legacy) { Write-Output "legacy-lock ($($existing.Error))"; exit 19 }
     if (-not $existing.Valid) { Write-Output "corrupt-lease ($($existing.Error))"; exit 18 }
     $L = $existing.Lease
     if ($opts.ContainsKey('require-root') -and $L.root -ne [string](Opt 'require-root')) {
@@ -491,6 +522,11 @@ function Cmd-Status {
         if ([bool](Opt 'json' $false)) { Write-Output (@{ present = $false } | ConvertTo-Json -Compress) }
         else { Write-Output 'no-lease' }
         exit 14
+    }
+    if ($existing.Legacy) {
+        if ([bool](Opt 'json' $false)) { Write-Output (@{ present = $true; valid = $false; legacy = $true; error = $existing.Error } | ConvertTo-Json -Compress) }
+        else { Write-Output "legacy-lock ($($existing.Error))" }
+        exit 19
     }
     if (-not $existing.Valid) {
         if ([bool](Opt 'json' $false)) { Write-Output (@{ present = $true; valid = $false; error = $existing.Error } | ConvertTo-Json -Compress) }

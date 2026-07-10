@@ -300,8 +300,12 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
             $r = Run-Tool @('check-transition', '--kind', $t[0], '--from', $t[1], '--to', $t[2])
             Assert-Equal 0 $r.ExitCode "[trans] legal $($t[0]) $($t[1]) -> $($t[2]) accepted"
         }
+        # `working -> ready` is a review SKIP: the canonical task lifecycle is
+        # `working -> in-review -> ready` (queue_contract.md 13.1), so the guard must
+        # reject it - the doc is the source of truth (T-079 R-01).
         foreach ($t in @(
                 @('task', 'done', 'working'), @('task', 'not-started', 'ready'),
+                @('task', 'working', 'ready'),
                 @('task', 'published', 'working'), @('cohort', 'closed', 'open'),
                 @('integration', 'cleaned', 'in-progress'))) {
             $r = Run-Tool @('check-transition', '--kind', $t[0], '--from', $t[1], '--to', $t[2])
@@ -339,10 +343,46 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
             $owner = Get-Owner $r
             $r = Run-Tool @('heartbeat', '--work', $W, '--owner', $owner) -Host $h
             Assert-Equal 0 $r.ExitCode "[host:$h] heartbeat exit"
-            $r = Run-Tool @('check-transition', '--kind', 'task', '--from', 'working', '--to', 'ready') -Host $h
+            $r = Run-Tool @('check-transition', '--kind', 'task', '--from', 'working', '--to', 'in-review') -Host $h
             Assert-Equal 0 $r.ExitCode "[host:$h] check-transition exit"
             $r = Run-Tool @('release', '--work', $W, '--owner', $owner) -Host $h
             Assert-Equal 0 $r.ExitCode "[host:$h] release exit"
         } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
+    # --- Scenario 14: legacy / degraded mkdir-lock is not silently overwritten -
+    # The degraded fallback (no pwsh) holds the SAME orchestrator.lock directory with a
+    # bare `mkdir` + `info` file (no lease.json). state-tx must treat that as OCCUPIED,
+    # not "no lease" - otherwise it would write a fresh lease.json over a possibly-live
+    # degraded processor and spawn a second control loop (T-079 R-02).
+    $W = New-Work
+    try {
+        $lockDir = Join-Path $W 'orchestrator.lock'
+        New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $lockDir 'info') -Value "host=oldbox`nstarted=2020-01-01T00:00:00Z" -Encoding ascii
+
+        $r = Run-Tool @('status', '--work', $W)
+        Assert-Equal 19 $r.ExitCode '[legacy] status on a legacy mkdir-lock reports 19'
+        Assert-Match $r.Output 'legacy-lock' '[legacy] status names the legacy lock'
+        $r = Run-Tool @('verify', '--work', $W, '--require-root', $ROOT, '--require-role', 'processor')
+        Assert-Equal 19 $r.ExitCode '[legacy] verify does not adopt a legacy lock as own session (19)'
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT)
+        Assert-Equal 19 $r.ExitCode '[legacy] acquire refuses to write a lease over a legacy lock (19)'
+        Assert-True ($null -eq (Read-Lease $W)) '[legacy] acquire did NOT silently write lease.json over the legacy lock'
+
+        # An operator who has confirmed the degraded run is dead can --force over it.
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--force')
+        Assert-Equal 0 $r.ExitCode '[legacy] --force acquires over a legacy lock'
+        Assert-True ($null -ne (Read-Lease $W)) '[legacy] a structured lease exists after the forced acquire'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 15: an empty lock dir (a state-tx crash artifact, not a foreign
+    # lock) stays recoverable: acquire may adopt it rather than reporting it occupied.
+    $W = New-Work
+    try {
+        New-Item -ItemType Directory -Force -Path (Join-Path $W 'orchestrator.lock') | Out-Null
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT)
+        Assert-Equal 0 $r.ExitCode '[legacy] an EMPTY lock dir is a recoverable artifact, not a legacy lock'
+        Assert-Equal 1 ([int](Read-Lease $W).generation) '[legacy] recovered acquire produced generation 1'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }
