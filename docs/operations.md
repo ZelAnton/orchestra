@@ -141,12 +141,25 @@ reports the outcome. You need to step in when:
   wasn't available or no run was found for the pushed commit in time. Check your CI
   provider directly; if it's actually red, fix it manually (`processor` has already
   moved on to the next batch by this point, it won't come back to this on its own).
-- **A push was rejected because main diverged** ("main разошёлся с базой батча …" /
-  "push отклонён, main на remote разошёлся"): `processor` deliberately does not
-  auto-rebase here. It keeps the integration branch/worktree around for you to
-  inspect (`.work/worktrees/_integration`, `integration/<B-id>`); reconcile by hand
-  (rebase/merge as appropriate for your repo) and push yourself, or ask a fresh
-  `processor` run to pick a new base once main is stable.
+- **main diverged during the batch** (`processor` reports "main разошёлся с базой
+  батча … — требуется ручное вмешательство" — but note: **only after auto-resolution
+  is exhausted**). `processor` no longer stops at the first sign of divergence. If
+  `main` (locally, at the ff-merge) or `origin/main` (on push) moved out from under a
+  batch — an out-of-band writer committing/pushing to the trunk while the batch was
+  in flight, which the ownership lease can *detect* but not *prevent* — `processor`
+  auto-resolves without you: it fetches, re-anchors the integration branch on top of
+  the new tip, re-runs the integration review (Phases 5.1/5.2) on the resulting tree,
+  and republishes as a genuine fast-forward — **never** `--force`, never dropping the
+  moved-in commit or the batch's merged work, and never publishing the un-re-reviewed
+  combination. It falls back to the manual "требуется ручное вмешательство" halt only
+  after `INTEGRATION_LOOP_MAX` re-anchor attempts — i.e. an external writer moving the
+  trunk faster than re-integration can converge, or a foreign change the re-verification
+  cannot reconcile with the batch. In that residual case it keeps the integration
+  branch/worktree around (`.work/worktrees/_integration`, `integration/<B-id>`);
+  reconcile by hand and push, or ask a fresh `processor` run to pick a new base once
+  main is stable. The proactive habit that avoids this entirely: **don't commit or push
+  to `main` while a batch is running** — that is exactly the situation this recovers
+  from, and avoiding it keeps publication a trivial fast-forward.
 
 In every case, avoid running a second `processor` while you're doing manual repair —
 see §5.

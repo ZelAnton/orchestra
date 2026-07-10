@@ -279,7 +279,13 @@ function Vcs-Integrate {
         # the kept branches is content-identical to the last clean trial and stable.
         $finalParents = @('main') + @($kept | ForEach-Object { "task/$_" })
         Invoke-Jj $Fx (@('new') + $finalParents + @('-m', "integration $BatchId")) | Out-Null
-        Invoke-Jj $Fx @('bookmark', 'create', $integ, '-r', '@') | Out-Null
+        # `bookmark set --allow-backwards` (create-or-move, incl. the sideways move a re-anchor
+        # needs), not `create`, so a re-anchor (a second Vcs-Integrate for the same batch onto a
+        # moved main - the diverge scenario) re-points the existing integration bookmark instead
+        # of failing on an already-created name (jj also refuses a sideways `set` without the
+        # flag). This mirrors the git path's self-clean (branch -D before re-add) and is identical
+        # to `create` on the first, bookmark-absent call.
+        Invoke-Jj $Fx @('bookmark', 'set', $integ, '-r', '@', '--allow-backwards') | Out-Null
         Invoke-Jj $Fx @('new', $integ, '-m', 'wc') | Out-Null
     }
     return [pscustomobject]@{ Clean = ($rejected.Count -eq 0); Integrated = @($kept); Rejected = @($rejected) }
@@ -296,6 +302,60 @@ function Vcs-Publish {
     } else {
         Invoke-Jj $Fx @('bookmark', 'set', 'main', '-r', $integ) | Out-Null
     }
+}
+
+# An OUT-OF-BAND writer advances the trunk (main) directly - modelling an operator or another
+# tool committing to main WHILE a batch is in flight, the one thing the ownership lease can
+# detect but not prevent (it coordinates processors, not arbitrary git writers). Rewrites $Line
+# of the trunk file to a fixed token and lands it on main. Used by the diverge scenario to make
+# a batch's already-built integration branch no longer a fast-forward of main.
+function Vcs-CommitOnMain {
+    param($Fx, [int]$Line, [string]$Token)
+    $repo = $Fx.Repo
+    $f = Join-Path $repo $script:TrunkFile
+    if ($Fx.Vcs -eq 'git') {
+        # the primary worktree is checked out on main; edit + commit lands directly on main.
+        $lines = @(Get-Content -LiteralPath $f)
+        $lines[$Line - 1] = "l$Line-$Token"
+        Write-Text $f (($lines -join "`n") + "`n")
+        Invoke-Bin 'git' @('-C', $repo, 'add', '-A') | Out-Null
+        $c = Invoke-Bin 'git' @('-C', $repo, 'commit', '-q', '-m', "out-of-band $Token")
+        if ($c.ExitCode -ne 0) { Fail 4 "out-of-band main commit failed: $($c.Err)" }
+    } else {
+        Invoke-Jj $Fx @('new', 'main', '-m', "out-of-band $Token") | Out-Null
+        $lines = @(Get-Content -LiteralPath $f)
+        $lines[$Line - 1] = "l$Line-$Token"
+        Write-Text $f (($lines -join "`n") + "`n")
+        Invoke-Jj $Fx @('bookmark', 'set', 'main', '-r', '@') | Out-Null
+        Invoke-Jj $Fx @('new', 'main', '-m', 'wc') | Out-Null   # detach @ from the new main tip
+    }
+}
+
+# Read-only probe: is the trunk (main) an ANCESTOR of integration/<B-id>, i.e. would publishing
+# it be a genuine fast-forward? A stale integration built before main moved is NOT (divergence,
+# the Phase 5.3 stop point); a re-anchored one built off the current main tip IS. Never mutates.
+function Vcs-IsFfPossible {
+    param($Fx, [string]$BatchId)
+    $integ = "integration/$BatchId"
+    if ($Fx.Vcs -eq 'git') {
+        return ((Invoke-Bin 'git' @('-C', $Fx.Repo, 'merge-base', '--is-ancestor', 'main', $integ)).ExitCode -eq 0)
+    } else {
+        # main is an ancestor of integration iff the revset (main & ::integration) is non-empty.
+        return (-not [string]::IsNullOrWhiteSpace((Invoke-Jj $Fx @('log', '--no-graph', '-r', "main & ::$integ", '-T', 'commit_id')).Out))
+    }
+}
+
+# Content of $Line (1-based) of the trunk file at the main tip - to assert that publication
+# preserved BOTH an out-of-band commit AND the batch's work (no --force, no silent loss).
+function Vcs-TrunkLine {
+    param($Fx, [int]$Line)
+    if ($Fx.Vcs -eq 'git') {
+        $blob = (Invoke-Bin 'git' @('-C', $Fx.Repo, 'show', "main:$($script:TrunkFile)")).Out
+    } else {
+        $blob = (Invoke-Jj $Fx @('file', 'show', '-r', 'main', $script:TrunkFile)).Out
+    }
+    $lines = @($blob -split "`n")
+    if ($Line -le $lines.Count) { return $lines[$Line - 1] } else { return '' }
 }
 
 # Deterministic content fingerprint of the trunk tip (path=sha256 for each tracked file).
@@ -605,7 +665,7 @@ function Seed-Task {
 # transition steps, so any of them can be run with any --fault target it exercises.
 # ==========================================================================
 $script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-    'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')
+    'diverge', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')
 
 function Scenario-Clean {
     param($Fx)
@@ -656,6 +716,55 @@ function Scenario-Checks {
     Step-Archive $Fx $t1
     Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":1,"quarantined":0,"escalated":0}')
     return [pscustomobject]@{ Outcome = 'published'; Notes = 'required-check gate passed, 1 task published' }
+}
+
+function Scenario-Diverge {
+    param($Fx)
+    # T-098: main DIVERGES from BASE mid-batch. After the batch has integrated but BEFORE it
+    # publishes, an out-of-band writer advances the trunk (an operator/other tool committing to
+    # main while the batch is in flight - the lease detects, but cannot prevent, this). The first
+    # ff-publish would now fail (main is no longer BASE). The safe auto-resolution is NOT a manual
+    # halt but: RE-ANCHOR the integration on top of the new main tip, RE-VERIFY (the required-check
+    # gate runs for real on the resulting tree), and republish as a GENUINE fast-forward - never
+    # --force, never dropping the moved-in commit or the batch's merged work, never publishing the
+    # un-re-reviewed combination. This models both Phase 5.3 stop points: the local ff failure here,
+    # and the remote push rejection (the same recipe, re-anchored onto origin/main after a fetch).
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'diverge one'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 2 'A'
+    Lifecycle-Task $Fx $t1
+    # first integration, built off BASE (== the current main tip at this point).
+    $integ1 = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ1.Clean) { Fail 4 'diverge: first integration unexpectedly conflicted' }
+    # an out-of-band writer moves main out from under the batch (a different line -> no textual
+    # conflict with the task; the danger is a lost commit / a non-ff, not a merge conflict).
+    Vcs-CommitOnMain $Fx 4 'X'
+    # DIVERGENCE DETECTED: the stale integration is no longer a fast-forward of main.
+    if (Vcs-IsFfPossible $Fx $Fx.BatchId) { Fail 4 'diverge: stale integration should NOT be ff after main moved (divergence undetected)' }
+    # SAFE AUTO-RESOLUTION - re-anchor the integration onto the NEW main tip (a second integrate
+    # off the moved main), instead of halting for a manual rebase.
+    $integ2 = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ2.Clean) { Fail 4 'diverge: re-anchored integration unexpectedly conflicted (auto-resolution must carry the batch onto the new main)' }
+    # RE-VERIFICATION IS REAL, not skipped: the required-check gate runs on the re-anchored tree
+    # before publishing (otherwise the un-re-reviewed batch+out-of-band combination would ship).
+    $chk = Invoke-Bin $script:PsHost @('-NoProfile', '-Command', 'exit 0')
+    if ($chk.ExitCode -ne 0) { Fail 4 'diverge: re-verification check failed after re-anchor' }
+    # publication is now a GENUINE fast-forward by construction (integration branched off main).
+    if (-not (Vcs-IsFfPossible $Fx $Fx.BatchId)) { Fail 4 'diverge: re-anchored integration must be a clean ff of main' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{"reanchored":true}')
+    Vcs-Publish $Fx $Fx.BatchId
+    # NO WORK LOST: the trunk now carries BOTH the out-of-band commit AND the batch's task work.
+    $l4 = Vcs-TrunkLine $Fx 4
+    if ($l4 -ne 'l4-X') { Fail 4 "diverge: the out-of-band main commit was lost on publish (line 4 = '$l4', expected 'l4-X')" }
+    $l2 = Vcs-TrunkLine $Fx 2
+    if ($l2 -ne 'l2-A') { Fail 4 "diverge: the batch's task work was lost on publish (line 2 = '$l2', expected 'l2-A')" }
+    Step-PublishTask $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":false,"reanchored":true}')
+    Step-Archive $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":1,"quarantined":0,"escalated":0}')
+    return [pscustomobject]@{ Outcome = 'published'; Notes = 'main diverged mid-batch -> re-anchored + re-verified + published as a true ff (no force, no loss)' }
 }
 
 function Scenario-Deps {
@@ -1019,6 +1128,7 @@ function Invoke-Scenario {
         'publish'          { return (Scenario-Publish $Fx) }
         'resume'           { return (Scenario-Resume $Fx) }
         'checks'           { return (Scenario-Checks $Fx) }
+        'diverge'          { return (Scenario-Diverge $Fx) }
         'deps'             { return (Scenario-Deps $Fx) }
         'conflict'         { return (Scenario-Conflict $Fx) }
         'quarantine'       { return (Scenario-Quarantine $Fx) }

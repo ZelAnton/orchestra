@@ -20,6 +20,10 @@
       * list-scenarios / list-faults expose the documented scenario and fault sets.
       * git: clean (publication), conflict (partial: one published, one quarantined) and
         policy (escalation halt) each reach their expected terminal outcome.
+      * git: diverge (T-098) - main moved out from under the batch after integration but before
+        publish is auto-resolved by re-anchoring the integration onto the new tip and
+        re-verifying, then published as a true fast-forward (no --force, no lost work), with a
+        fault spot-check confirming the recovery still converges.
       * a fault injected after a critical transition converges to the SAME fingerprint as
         the uninterrupted run of that scenario (crash-recovery equivalence), and the fault
         actually fired.
@@ -86,7 +90,7 @@ Write-Host 'harness fast matrix: this spawns many child transaction-tool process
     $ls = Invoke-Harness @('list-scenarios')
     Assert-Exit $ls 0 'list-scenarios rc=0'
     foreach ($s in @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-            'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')) {
+            'diverge', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')) {
         Assert-Contains $ls.Out $s "list-scenarios includes '$s'"
     }
     $lf = Invoke-Harness @('list-faults')
@@ -116,6 +120,24 @@ if (-not $hasGit) {
 
     $policy = Run-Scenario 'git' 'policy'
     if ($policy) { Assert-Equal 'escalated' $policy.outcome 'policy git -> escalated (safe halt)' }
+
+    # ---- main diverged mid-batch (T-098): safe auto-resolution, not a manual halt -----------
+    # main is moved out from under the batch after integration but before publish; processor
+    # must re-anchor the integration onto the new tip, RE-VERIFY, and republish as a true ff -
+    # never --force, never losing the moved-in commit or the batch's work (the scenario's own
+    # internal assertions enforce the no-loss / genuine-ff invariants; a violation exits != 0).
+    $diverge = Run-Scenario 'git' 'diverge'
+    if ($diverge) {
+        Assert-Equal 'published' $diverge.outcome 'diverge git -> published (main moved mid-batch; re-anchored + re-verified; published as a true ff)'
+        Assert-Contains $diverge.archive 'T-101' 'diverge git archived T-101 after the safe auto-resolution'
+        Assert-True (-not [string]::IsNullOrEmpty($diverge.fingerprint)) 'diverge git yields a fingerprint'
+        # crash-recovery equivalence: a fault during the diverge scenario still converges.
+        $divFaulted = Run-Scenario 'git' 'diverge' 'integrate:before-write'
+        if ($divFaulted) {
+            Assert-True ([bool]$divFaulted.fault_fired) 'diverge injected fault fired'
+            Assert-Equal $diverge.fingerprint $divFaulted.fingerprint 'diverge faulted-then-recovered run converges to the SAME fingerprint as the clean run'
+        }
+    }
 
     # ---- crash-recovery equivalence spot check (policy is the cheapest scenario) --------
     if ($policy) {
