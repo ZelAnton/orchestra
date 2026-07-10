@@ -15,6 +15,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   validate:
@@ -174,4 +175,75 @@ jobs:
             exit 1
           }
           & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Check execution supervisor
+        # tests/test-supervisor.ps1 (T-093): drives tools/supervisor.ps1 - the four-way
+        # stop classification (ok / timeout / cancelled / crash / error) with distinct exit
+        # codes, the deadline + child-process-tree kill, the cooperative-cancel checkpoint
+        # (lease-compatible), the output-volume cap, the privacy of the durable verdict, the
+        # supervise retry loop and the cohort budget. Deterministic and offline.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-supervisor.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Run resilience harness (fast matrix)
+        # tests/test-harness.ps1 (T-093): the FAST, mandatory slice of the end-to-end
+        # resilience matrix - drives tools/harness.ps1 through a few representative cohort
+        # scenarios (clean publication, conflict quarantine, policy escalation) plus one
+        # fault-injection crash-recovery equivalence spot-check, on git (jj self-skips when
+        # absent). The exhaustive fault cross-product is the SEPARATE, time-limited,
+        # non-blocking crash-matrix job below - not this gate.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-harness.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  crash-matrix:
+    name: Extended crash matrix (non-blocking)
+    # The fuller fault-injection enumeration over tools/harness.ps1 is deliberately
+    # expensive (each cohort scenario spawns many child transaction-tool processes), so it
+    # runs SEPARATELY from the mandatory `validate` gate: it never runs on a pull request
+    # (so it cannot block a PR merge) and is bounded by an explicit timeout. It surfaces a
+    # crash-recovery divergence on pushes to main and on manual dispatch. Branch protection
+    # requires `validate`, not this job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run the extended crash matrix (git, all fault points)
+        # tests/test-harness-crashmatrix.ps1 (T-093): for every scenario and every documented
+        # fault-injection point, assert the faulted-then-recovered run converges to the SAME
+        # final fingerprint as the uninterrupted run. Scoped on git to the terminal-outcome
+        # archetypes (publication / merge-conflict quarantine / bounded-requeue escalation /
+        # policy escalation / required-check gate) so the sweep completes within the timeout
+        # above; deps' transitions are a subset of clean's (and covered clean by the fast
+        # matrix), publish/resume are clean-equivalent aliases, and jj self-skips when absent.
+        # The full set on both backends is available locally / via workflow_dispatch by
+        # dropping the --scenarios filter.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-harness-crashmatrix.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p --vcs git --scenarios "clean,conflict,quarantine,policy,checks"
           if ($LASTEXITCODE -ne 0) { exit 1 }

@@ -130,7 +130,7 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 25 $schema.config.Count 'schema has 25 config keys'
+    Assert-Equal 29 $schema.config.Count 'schema has 29 config keys'
 }.Invoke()
 
 # =============================================================================
