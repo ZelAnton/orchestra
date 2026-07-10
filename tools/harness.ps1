@@ -30,9 +30,14 @@
     repair, the quarantine counter): it exercises them end-to-end, composed.
 
     Everything is fully hermetic: the fixture is a fresh repo under the OS temp dir,
-    isolated `user.name`/`user.email` are set locally, there is NO network and NO real
-    remote/push (publication is a local ff-merge into the fixture's own trunk bookmark/
-    branch). Nothing here touches the repository the harness itself lives in.
+    isolated `user.name`/`user.email` are set locally, and there is NO network. Most
+    scenarios never push (publication is a local ff-merge into the fixture's own trunk
+    bookmark/branch); the one exception is the `diverge-push` scenario (T-098/R-03), which
+    adds a disposable *filesystem* bare remote under the same temp dir - still offline, no
+    network - specifically to exercise the remote push-rejection Phase 5.3 stop point and
+    the Phase 0.4 crash-recovery discriminator (local-main vs origin-main ancestry) that
+    the never-pushed scenarios structurally cannot reach. Nothing here touches the
+    repository the harness itself lives in.
 
     The "final-state fingerprint" is deliberately timestamp- and event-id-independent (it
     hashes the deduplicated set of event *identities* - type + entity + transition - not the
@@ -665,7 +670,7 @@ function Seed-Task {
 # transition steps, so any of them can be run with any --fault target it exercises.
 # ==========================================================================
 $script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-    'diverge', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')
+    'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')
 
 function Scenario-Clean {
     param($Fx)
@@ -727,8 +732,11 @@ function Scenario-Diverge {
     # halt but: RE-ANCHOR the integration on top of the new main tip, RE-VERIFY (the required-check
     # gate runs for real on the resulting tree), and republish as a GENUINE fast-forward - never
     # --force, never dropping the moved-in commit or the batch's merged work, never publishing the
-    # un-re-reviewed combination. This models both Phase 5.3 stop points: the local ff failure here,
-    # and the remote push rejection (the same recipe, re-anchored onto origin/main after a fetch).
+    # un-re-reviewed combination. This models the LOCAL ff-failure stop point of Phase 5.3 (offline,
+    # never-pushed). The OTHER stop point - a remote push REJECTION - and the ff->push crash window
+    # (T-098/R-03: a hard crash after the local ff but before the confirmed push, which must NOT be
+    # mis-recovered as an already-published batch) are covered by the separate `diverge-push`
+    # scenario, which runs against a real (filesystem) remote.
     $t1 = 'T-101'
     Seed-Task $Fx $t1 'diverge one'
     Step-Lease $Fx
@@ -765,6 +773,114 @@ function Scenario-Diverge {
     Step-Archive $Fx $t1
     Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":1,"quarantined":0,"escalated":0}')
     return [pscustomobject]@{ Outcome = 'published'; Notes = 'main diverged mid-batch -> re-anchored + re-verified + published as a true ff (no force, no loss)' }
+}
+
+function Scenario-DivergePush {
+    param($Fx)
+    # T-098 / R-03: the REMOTE push-rejection stop point of Phase 5.3, plus the ff->push CRASH
+    # WINDOW that the offline `diverge` scenario structurally cannot reach. Unlike every other
+    # scenario this one uses a disposable FILESYSTEM bare remote (still offline, no network) so
+    # publication is a real `git push`, not just a local ff. It reproduces the exact state R-03 is
+    # about: the batch has been ff-merged into the LOCAL main, but the push has NOT been confirmed
+    # (a hard crash - or a rejected push - in the window between the local ff and the confirmed
+    # push), while an out-of-band writer has advanced origin/main. In that window the tasks are
+    # still `слита` and publication is NOT yet pinned.
+    #
+    # The crux R-03 asserts (and the fix in agents/processor.md Phase 0.4 depends on): the recovery
+    # discriminator MUST test ancestry against origin/main, NOT the LOCAL main. Against the local
+    # main the stale (pre-push) batch already looks "уже влита" - a FALSE POSITIVE that the old
+    # Phase 0.4 used and that would archive an un-pushed batch as done (silent loss); against
+    # origin/main it correctly reads as NOT-yet-published -> re-anchor/re-push. This scenario
+    # asserts the two readings DIFFER, then drives the safe recovery (reset the LOCAL main to
+    # origin/main - never a force-push to the remote - re-anchor, re-verify, re-push as a genuine
+    # ff) and proves no work is lost and the remote history is never force-moved.
+    #
+    # The Phase 0.4 BRANCH SELECTION itself is processor prose (an LLM decision, not a transaction
+    # tool), so the harness verifies the MECHANICAL PREMISE that makes that prose sound - the
+    # ancestry discriminator, the no-force reset-to-origin, and the no-loss re-push - which is
+    # VCS-backend-independent; hence git-only here (jj self-skips, like the binary-absent skips).
+    if ($Fx.Vcs -ne 'git') { Fail 3 'diverge-push models git-remote push mechanics; not run on jj (see scenario notes)' }
+    $repo = $Fx.Repo
+    $t1 = 'T-101'
+
+    # --- a disposable FILESYSTEM bare remote; push the base to origin/main (offline) --------------
+    $bare = Join-Path $Fx.Root 'origin.git'
+    if ((Invoke-Bin 'git' @('init', '--bare', '-q', '-b', 'main', $bare)).ExitCode -ne 0) { Fail 3 'diverge-push: bare remote init failed' }
+    Invoke-Bin 'git' @('-C', $repo, 'remote', 'add', 'origin', $bare) | Out-Null
+    if ((Invoke-Bin 'git' @('-C', $repo, 'push', '-q', 'origin', 'main')).ExitCode -ne 0) { Fail 4 'diverge-push: base push to origin failed' }
+
+    Seed-Task $Fx $t1 'diverge-push one'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 2 'A'
+    Lifecycle-Task $Fx $t1
+
+    # integration built off BASE (== origin/main == local main here), then the LOCAL ff: local main
+    # now carries the batch, but NOTHING has been pushed. This IS the ff->push window (tasks слита).
+    $integ1 = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ1.Clean) { Fail 4 'diverge-push: first integration unexpectedly conflicted' }
+    Vcs-Publish $Fx $Fx.BatchId   # LOCAL ff-merge only; publication NOT pinned, push still pending
+
+    # an out-of-band writer advances origin/main from a SECOND clone (a different line -> a genuine
+    # non-ff divergence on the REMOTE, not a merge conflict): this is what makes the pending push a
+    # rejection and the local ff a not-yet-published state.
+    $other = Join-Path $Fx.Root 'otherclone'
+    if ((Invoke-Bin 'git' @('clone', '-q', '-b', 'main', $bare, $other)).ExitCode -ne 0) { Fail 4 'diverge-push: out-of-band clone failed' }
+    Invoke-Bin 'git' @('-C', $other, 'config', 'user.email', 't@example.invalid') | Out-Null
+    Invoke-Bin 'git' @('-C', $other, 'config', 'user.name', 'Other') | Out-Null
+    Invoke-Bin 'git' @('-C', $other, 'config', 'commit.gpgsign', 'false') | Out-Null
+    $of = Join-Path $other $script:TrunkFile
+    $olines = @(Get-Content -LiteralPath $of); $olines[3] = 'l4-X'; Write-Text $of (($olines -join "`n") + "`n")
+    Invoke-Bin 'git' @('-C', $other, 'add', '-A') | Out-Null
+    Invoke-Bin 'git' @('-C', $other, 'commit', '-q', '-m', 'out-of-band X') | Out-Null
+    if ((Invoke-Bin 'git' @('-C', $other, 'push', '-q', 'origin', 'main')).ExitCode -ne 0) { Fail 4 'diverge-push: out-of-band push failed' }
+    Invoke-Bin 'git' @('-C', $repo, 'fetch', '-q', 'origin') | Out-Null
+
+    # ---- R-03 DISCRIMINATOR (the whole point). Against the LOCAL main the un-pushed batch already
+    #      looks published (the FALSE POSITIVE the old Phase 0.4 used -> would archive an un-pushed
+    #      batch); against origin/main it correctly reads as NOT published. The two MUST differ,
+    #      else recovery could not tell a pinned publication from a local-ff-only window.
+    $ancLocal  = (Invoke-Bin 'git' @('-C', $repo, 'merge-base', '--is-ancestor', "integration/$($Fx.BatchId)", 'main')).ExitCode -eq 0
+    $ancOrigin = (Invoke-Bin 'git' @('-C', $repo, 'merge-base', '--is-ancestor', "integration/$($Fx.BatchId)", 'origin/main')).ExitCode -eq 0
+    if (-not $ancLocal) { Fail 4 'diverge-push: local ff should make integration an ancestor of the LOCAL main (window premise broken)' }
+    if ($ancOrigin) { Fail 4 'diverge-push: an un-pushed batch must NOT be an ancestor of origin/main - the origin-anchored recovery test is exactly what prevents mis-archiving it' }
+
+    # the pending push is REJECTED (non-ff): origin/main diverged. Never force it.
+    $pushTry = Invoke-Bin 'git' @('-C', $repo, 'push', 'origin', 'main')
+    if ($pushTry.ExitCode -eq 0) { Fail 4 'diverge-push: push should have been REJECTED (origin/main diverged) but succeeded' }
+
+    # ---- SAFE RECOVERY: reset the LOCAL main to origin/main (drops only the un-pinned local ff -
+    #      NOT a force-push; the remote history is untouched), re-anchor, re-verify, re-push as a ff.
+    $remoteBefore = (Invoke-Bin 'git' @('-C', $bare, 'rev-parse', 'main')).Out.Trim()
+    Invoke-Bin 'git' @('-C', $repo, 'reset', '--hard', 'origin/main') | Out-Null
+    $localAfterReset = (Invoke-Bin 'git' @('-C', $repo, 'rev-parse', 'main')).Out.Trim()
+    $originAfterReset = (Invoke-Bin 'git' @('-C', $repo, 'rev-parse', 'origin/main')).Out.Trim()
+    if ($localAfterReset -ne $originAfterReset) { Fail 4 'diverge-push: reset --hard origin/main must bring the LOCAL main to the remote tip' }
+    if ((Invoke-Bin 'git' @('-C', $bare, 'rev-parse', 'main')).Out.Trim() -ne $remoteBefore) { Fail 4 'diverge-push: the remote must NOT move during a reset-to-origin recovery (that would be a force-push)' }
+
+    $integ2 = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ2.Clean) { Fail 4 'diverge-push: re-anchored integration unexpectedly conflicted' }
+    $chk = Invoke-Bin $script:PsHost @('-NoProfile', '-Command', 'exit 0')   # REAL re-verification before re-publish
+    if ($chk.ExitCode -ne 0) { Fail 4 'diverge-push: re-verification check failed after re-anchor' }
+    if (-not (Vcs-IsFfPossible $Fx $Fx.BatchId)) { Fail 4 'diverge-push: re-anchored integration must be a clean ff of the local main' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{"reanchored":true,"push":"rejected"}')
+    Vcs-Publish $Fx $Fx.BatchId   # local ff onto the re-anchored main
+    $pushFinal = Invoke-Bin 'git' @('-C', $repo, 'push', 'origin', 'main')   # now a genuine fast-forward
+    if ($pushFinal.ExitCode -ne 0) { Fail 4 "diverge-push: the re-anchored publish push should be a clean ff but was rejected: $([string]$pushFinal.Err)" }
+
+    # ---- NO LOSS + NO FORCE on the remote: origin/main now carries BOTH the out-of-band commit AND
+    #      the batch's work, and the out-of-band commit is still an ANCESTOR of the final remote tip.
+    Invoke-Bin 'git' @('-C', $repo, 'fetch', '-q', 'origin') | Out-Null
+    $remoteTrunk = (Invoke-Bin 'git' @('-C', $bare, 'show', "main:$($script:TrunkFile)")).Out -split "`n"
+    if ($remoteTrunk[3] -ne 'l4-X') { Fail 4 "diverge-push: the out-of-band commit was lost on the remote (line 4 = '$($remoteTrunk[3])', expected 'l4-X')" }
+    if ($remoteTrunk[1] -ne 'l2-A') { Fail 4 "diverge-push: the batch work was lost on the remote (line 2 = '$($remoteTrunk[1])', expected 'l2-A')" }
+    if ((Invoke-Bin 'git' @('-C', $repo, 'merge-base', '--is-ancestor', $remoteBefore, 'origin/main')).ExitCode -ne 0) { Fail 4 'diverge-push: the out-of-band remote commit must remain an ancestor of the final origin/main (no force-clobber)' }
+
+    Step-PublishTask $Fx $t1   # publication is NOW irreversible (push confirmed) - only now pin it
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":true,"reanchored":true}')
+    Step-Archive $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":1,"quarantined":0,"escalated":0}')
+    return [pscustomobject]@{ Outcome = 'published'; Notes = 'push rejected on diverged origin -> reset local to origin (no force) -> re-anchored + re-verified + re-pushed as a true ff (no loss)' }
 }
 
 function Scenario-Deps {
@@ -1129,6 +1245,7 @@ function Invoke-Scenario {
         'resume'           { return (Scenario-Resume $Fx) }
         'checks'           { return (Scenario-Checks $Fx) }
         'diverge'          { return (Scenario-Diverge $Fx) }
+        'diverge-push'     { return (Scenario-DivergePush $Fx) }
         'deps'             { return (Scenario-Deps $Fx) }
         'conflict'         { return (Scenario-Conflict $Fx) }
         'quarantine'       { return (Scenario-Quarantine $Fx) }

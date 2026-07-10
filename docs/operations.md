@@ -151,7 +151,11 @@ reports the outcome. You need to step in when:
   the new tip, re-runs the integration review (Phases 5.1/5.2) on the resulting tree,
   and republishes as a genuine fast-forward — **never** `--force`, never dropping the
   moved-in commit or the batch's merged work, and never publishing the un-re-reviewed
-  combination. It falls back to the manual "требуется ручное вмешательство" halt only
+  combination. This holds across a crash too: a `processor` that restarts after the
+  local ff-merge but before the push is confirmed treats the batch as *not yet
+  published* (its recovery keys "already published" off `origin/main`, not the local
+  `main`), so it re-publishes — re-running the CI gate — rather than mis-archiving an
+  un-pushed batch as done. It falls back to the manual "требуется ручное вмешательство" halt only
   after `INTEGRATION_LOOP_MAX` re-anchor attempts — i.e. an external writer moving the
   trunk faster than re-integration can converge, or a foreign change the re-verification
   cannot reconcile with the batch. In that residual case it keeps the integration

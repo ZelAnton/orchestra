@@ -24,6 +24,12 @@
         publish is auto-resolved by re-anchoring the integration onto the new tip and
         re-verifying, then published as a true fast-forward (no --force, no lost work), with a
         fault spot-check confirming the recovery still converges.
+      * git: diverge-push (T-098/R-03) - over a real (filesystem, still offline) remote: the batch
+        is ff-merged into the LOCAL main but the push is not confirmed and origin/main diverged.
+        The recovery discriminator reads the un-pushed batch as an ancestor of the LOCAL main
+        (the false positive the old Phase 0.4 used) but NOT of origin/main; recovery resets the
+        local main to origin/main (never a force-push), re-anchors, re-verifies and re-pushes as a
+        genuine ff with no lost work - with a ff->push-window fault spot-check confirming convergence.
       * a fault injected after a critical transition converges to the SAME fingerprint as
         the uninterrupted run of that scenario (crash-recovery equivalence), and the fault
         actually fired.
@@ -90,7 +96,7 @@ Write-Host 'harness fast matrix: this spawns many child transaction-tool process
     $ls = Invoke-Harness @('list-scenarios')
     Assert-Exit $ls 0 'list-scenarios rc=0'
     foreach ($s in @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-            'diverge', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')) {
+            'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')) {
         Assert-Contains $ls.Out $s "list-scenarios includes '$s'"
     }
     $lf = Invoke-Harness @('list-faults')
@@ -136,6 +142,26 @@ if (-not $hasGit) {
         if ($divFaulted) {
             Assert-True ([bool]$divFaulted.fault_fired) 'diverge injected fault fired'
             Assert-Equal $diverge.fingerprint $divFaulted.fingerprint 'diverge faulted-then-recovered run converges to the SAME fingerprint as the clean run'
+        }
+    }
+
+    # ---- remote push rejection + ff->push crash window (T-098/R-03) -------------------------------
+    # A REAL (filesystem, still offline) remote: the batch is ff-merged into the LOCAL main but the
+    # push is not confirmed, and origin/main has diverged. The scenario's own internal assertions
+    # enforce the R-03 crux (a violation exits != 0): the recovery discriminator must read the
+    # un-pushed batch as an ancestor of the LOCAL main (the false positive the old Phase 0.4 used)
+    # but NOT of origin/main; recovery resets the local main to origin/main (never a force-push to
+    # the remote), re-anchors, re-verifies and re-pushes as a genuine ff with no lost work.
+    $divPush = Run-Scenario 'git' 'diverge-push'
+    if ($divPush) {
+        Assert-Equal 'published' $divPush.outcome 'diverge-push git -> published (push rejected on diverged origin; reset-to-origin + re-anchor + re-verify + re-push, no force, no loss)'
+        Assert-Contains $divPush.archive 'T-101' 'diverge-push git archived T-101 only after the confirmed re-push'
+        Assert-True (-not [string]::IsNullOrEmpty($divPush.fingerprint)) 'diverge-push git yields a fingerprint'
+        # a fault in the ff->push crash window still converges to the clean run.
+        $divPushFaulted = Run-Scenario 'git' 'diverge-push' 'publish:before-write'
+        if ($divPushFaulted) {
+            Assert-True ([bool]$divPushFaulted.fault_fired) 'diverge-push injected fault fired'
+            Assert-Equal $divPush.fingerprint $divPushFaulted.fingerprint 'diverge-push faulted-then-recovered run converges to the SAME fingerprint as the clean run'
         }
     }
 
