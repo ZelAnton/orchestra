@@ -119,13 +119,15 @@ if ($defaultKeys.Count -eq 0) {
 # ENV_LIMIT, used in sentinel messages like "CODEX_FAILED — ENV_LIMIT/<class>: <detail>"
 # and as a section-heading reference, not a .work/config.md key), the codex->broker
 # network-request protocol token (NEED_NET, emitted by codex as "NEED_NET: <command>" for
-# the coder_codex dependency broker, not a .work/config.md key), plan/doc filenames
-# referenced in caps, git-config-via-environment variable names and a Windows schannel
-# error code quoted verbatim inside the codex adapter's network-override snippet, and the
-# naming-convention term itself. Reviewed by hand against current repo content; extend this
-# list if a genuinely new non-key token starts matching.
+# the coder_codex dependency broker, not a .work/config.md key), the launcher->processor
+# session-grant signal (CC_CODEX_EXEC_GRANT, exported by cc-processor/cc-resume and read by
+# the Phase 1.1 gate / cc-doctor as an environment variable, not a .work/config.md key -
+# task T-071), plan/doc filenames referenced in caps, git-config-via-environment variable
+# names and a Windows schannel error code quoted verbatim inside the codex adapter's
+# network-override snippet, and the naming-convention term itself. Reviewed by hand against
+# current repo content; extend this list if a genuinely new non-key token starts matching.
 $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
-        'CODEX_FAILED', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
+        'CC_CODEX_EXEC_GRANT', 'CODEX_FAILED', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
         'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
         'OTHER_FAILURE', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
