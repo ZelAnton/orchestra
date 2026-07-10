@@ -335,6 +335,13 @@ workspace, коммитит результаты листовых агентов
 - `--force-lock` допустим только после проверки, что прежний processor действительно умер.
 - YAML frontmatter обязан начинаться с первого байта; агентские Markdown-файлы хранятся
   как UTF-8 без BOM.
+- Каждая логическая попытка `coder_codex`/`reviewer_codex` в пер-таск Фазе 2 завершает
+  безопасное событие `codex.attempt`: стабильный ключ `(task_id, role, mode,
+  attempt_number)` отображается в UUIDv5, а временная reservation в `task.md` делает
+  append идемпотентным на resume. Payload хранит только timing/effective config/RC и
+  машинный outcome-класс — без prompt, diff, вывода, env, credentials и абсолютных путей.
+  `status.md` показывает дедуплицированный running total текущей когорты, `journal.md` —
+  итог батча; сбои всей этой телеметрии никогда не меняют control-flow.
 
 ## Быстрая проверка изменений
 

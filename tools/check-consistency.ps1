@@ -126,9 +126,10 @@ if ($defaultKeys.Count -eq 0) {
 # list if a genuinely new non-key token starts matching.
 $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CODEX_FAILED', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
-        'DIFF_TOO_LARGE', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
+        'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
-        'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'UPPER_SNAKE_CASE'
+        'OTHER_FAILURE', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
+        'UPPER_SNAKE_CASE'
     ), [StringComparer]::Ordinal)
 
 $keyPattern = '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'
