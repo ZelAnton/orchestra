@@ -604,7 +604,8 @@ function Seed-Task {
 # Scenarios. Each returns @{ Outcome; Notes }. All share the same instrumented
 # transition steps, so any of them can be run with any --fault target it exercises.
 # ==========================================================================
-$script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume')
+$script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
+    'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')
 
 function Scenario-Clean {
     param($Fx)
@@ -781,18 +782,255 @@ function Scenario-Policy {
     return [pscustomobject]@{ Outcome = 'escalated'; Notes = 'policy denylist hit -> safe escalation halt' }
 }
 
+# --------------------------------------------------------------------------
+# Publish-gate (T-095) helpers: drive the REAL tools/policy.ps1 check-gate /
+# approval-* verbs deterministically (fixed sha, elapsed, deadline, now) so a
+# faulted-then-recovered run reaches the same logical end state as a clean run.
+# --------------------------------------------------------------------------
+$script:CiChecksName = 'ci_runs.jsonl'
+function Set-CiConstraints {
+    param($Fx, [string[]]$Checks)
+    $body = "## Обязательные CI-проверки публикации`n`n**Активные ограничения**:`n`n"
+    foreach ($c in $Checks) { $body += "- ``$c```n" }
+    Write-Text (Join-Path $Fx.Work 'constraints.md') $body
+}
+function Write-CiRuns {
+    param($Fx, [object[]]$Runs)
+    $lines = foreach ($r in $Runs) { ($r | ConvertTo-Json -Compress) }
+    Write-Text (Join-Path $Fx.Work $script:CiChecksName) (($lines -join "`n") + "`n")
+}
+function Assert-Gate {
+    param($Fx, [string]$Sha, [int]$Elapsed, [int]$ExpectExit, [string]$ExpectVerdict)
+    $checks = Join-Path $Fx.Work $script:CiChecksName
+    $r = Invoke-Tool $script:Policy @('check-gate', '--work', $Fx.Work, '--sha', $Sha, '--checks-from', $checks, '--elapsed-sec', "$Elapsed", '--deadline-sec', '600', '--backoff-sec', '30', '--json')
+    if ($r.ExitCode -ne $ExpectExit) { Fail 4 "check-gate expected exit $ExpectExit at elapsed=$Elapsed, got $($r.ExitCode): $([string]$r.Out)$([string]$r.Err)" }
+    $v = ''
+    try { $v = ([string]$r.Out).Trim() | ConvertFrom-Json | ForEach-Object { $_.verdict } } catch { }
+    if ($v -ne $ExpectVerdict) { Fail 4 "check-gate expected verdict '$ExpectVerdict', got '$v'" }
+}
+# Runs an approval verb; returns the parsed JSON object (for --json calls) or $null.
+function Approval {
+    param($Fx, [string[]]$ApArgs, [int]$ExpectExit)
+    # policy.ps1 expects <command> first; inject --work right after it.
+    $full = @($ApArgs[0], '--work', $Fx.Work)
+    if ($ApArgs.Count -gt 1) { $full += $ApArgs[1..($ApArgs.Count - 1)] }
+    $r = Invoke-Tool $script:Policy $full
+    if ($r.ExitCode -ne $ExpectExit) { Fail 4 "approval $($ApArgs[0]) expected exit $ExpectExit, got $($r.ExitCode): $([string]$r.Out)$([string]$r.Err)" }
+    $o = $null
+    try { $o = ([string]$r.Out).Trim() | ConvertFrom-Json } catch { }
+    return $o
+}
+# Escalate a task through the real queue transaction and mark its descriptor (mirrors the
+# policy scenario's safe-halt bookkeeping) - the terminal state for a denied publish gate.
+function Halt-Escalate {
+    param($Fx, [string]$TaskId, [string]$Reason)
+    $esc = Invoke-Tool $script:QueueTx @('escalate', '--work', $Fx.Work, '--id', $TaskId, '--reason', $Reason)
+    if ($esc.ExitCode -ne 0) { Fail 4 "escalate $TaskId failed: $($esc.Err)" }
+    Set-Descriptor $Fx $TaskId 'эскалирована'
+}
+
+function Scenario-CiDelayed {
+    param($Fx)
+    # Like checks, but the required CI SET has TWO checks and the watcher must WAIT through a
+    # pending poll before the WHOLE set is green - it never finishes on the first green run.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'ci-delayed one'
+    Set-CiConstraints $Fx @('validate', 'crash-matrix')
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'C'
+    Lifecycle-Task $Fx $t1
+    $integ = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ.Clean) { Fail 4 'ci-delayed unexpectedly conflicted' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{}')
+    $sha = 'sha-' + $Fx.BatchId
+    # poll 1: crash-matrix still in progress -> wait (do not publish on the first green run)
+    Write-CiRuns $Fx @(
+        @{ name = 'validate'; head_sha = $sha; status = 'completed'; conclusion = 'success' },
+        @{ name = 'crash-matrix'; head_sha = $sha; status = 'in_progress'; conclusion = '' })
+    Assert-Gate $Fx $sha 10 10 'wait'
+    # poll 2: whole set green -> ready
+    Write-CiRuns $Fx @(
+        @{ name = 'validate'; head_sha = $sha; status = 'completed'; conclusion = 'success' },
+        @{ name = 'crash-matrix'; head_sha = $sha; status = 'completed'; conclusion = 'success' })
+    Assert-Gate $Fx $sha 40 0 'ready'
+    Vcs-Publish $Fx $Fx.BatchId
+    Step-PublishTask $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":false,"ci":"confirmed"}')
+    Step-Archive $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":1,"quarantined":0,"escalated":0}')
+    return [pscustomobject]@{ Outcome = 'published'; Notes = 'delayed multi-check CI gate waited the whole set, then published' }
+}
+
+function Scenario-CiRerun {
+    param($Fx)
+    # A required check is RED first, then re-run GREEN (higher run_id wins). The gate must bind
+    # to the SHA and honour the rerun conclusion, not the first (failed) run.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'ci-rerun one'
+    Set-CiConstraints $Fx @('validate')
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'R'
+    Lifecycle-Task $Fx $t1
+    $integ = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ.Clean) { Fail 4 'ci-rerun unexpectedly conflicted' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{}')
+    $sha = 'sha-' + $Fx.BatchId
+    # first run failed
+    Write-CiRuns $Fx @(@{ name = 'validate'; head_sha = $sha; status = 'completed'; conclusion = 'failure'; run_id = 1 })
+    Assert-Gate $Fx $sha 10 9 'failed'
+    # rerun green (latest run wins) -> ready
+    Write-CiRuns $Fx @(
+        @{ name = 'validate'; head_sha = $sha; status = 'completed'; conclusion = 'failure'; run_id = 1 },
+        @{ name = 'validate'; head_sha = $sha; status = 'completed'; conclusion = 'success'; run_id = 2 })
+    Assert-Gate $Fx $sha 60 0 'ready'
+    Vcs-Publish $Fx $Fx.BatchId
+    Step-PublishTask $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":false,"ci":"confirmed"}')
+    Step-Archive $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":1,"quarantined":0,"escalated":0}')
+    return [pscustomobject]@{ Outcome = 'published'; Notes = 'red check re-run to green (latest run wins), then published' }
+}
+
+function Scenario-CiOutage {
+    param($Fx)
+    # CI never reports for the pushed SHA within the deadline (outage). The gate is fail-closed:
+    # the batch is ff-merged (publication already happened) but the task is NOT archived - it
+    # stays 'опубликована', its recovery artifacts are kept, and the degradation is recorded
+    # both as a journal note and as the cohort.published `ci` field.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'ci-outage one'
+    Set-CiConstraints $Fx @('validate', 'crash-matrix')
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'O'
+    Lifecycle-Task $Fx $t1
+    $integ = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ.Clean) { Fail 4 'ci-outage unexpectedly conflicted' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{}')
+    $sha = 'sha-' + $Fx.BatchId
+    Write-CiRuns $Fx @()   # no runs ever appear
+    Assert-Gate $Fx $sha 10 10 'wait'        # within deadline -> keep waiting
+    Assert-Gate $Fx $sha 601 9 'timeout'     # past the 600s deadline -> fail-closed
+    Vcs-Publish $Fx $Fx.BatchId
+    Step-PublishTask $Fx $t1
+    # degradation reflected in BOTH the journal and the outbox (ci field), NOT silently.
+    Write-Text (Join-Path $Fx.Work 'journal.md') "# journal`n- [$($Fx.BatchId)] CI не подтверждён за дедлайн - задачи не заархивированы (ручная проверка)`n"
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":false,"ci":"unconfirmed-degraded"}')
+    # deliberately DO NOT archive: the task remains 'опубликована' (not 'выполнена').
+    return [pscustomobject]@{ Outcome = 'ci-unconfirmed'; Notes = 'CI outage past deadline: fail-closed, published-but-not-archived, degradation recorded' }
+}
+
+function Scenario-Approve {
+    param($Fx)
+    # A publish that needs human sign-off (policy-bypass category): a one-time approval request
+    # is issued, the operator APPROVES, approval-status confirms it fresh, publication proceeds.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'approve one'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'A'
+    Lifecycle-Task $Fx $t1
+    $fp = 'fp-' + $t1; $ph = 'ph-1'
+    $req = Approval $Fx @('approval-request', '--task', $t1, '--reason', 'policy-bypass', '--fingerprint', $fp, '--policy-hash', $ph, '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json') 0
+    if (-not $req -or -not $req.id) { Fail 4 'approve: no approval id issued' }
+    $id = [string]$req.id
+    # resume idempotency: the same request reuses the same id (no duplicate)
+    $req2 = Approval $Fx @('approval-request', '--task', $t1, '--reason', 'policy-bypass', '--fingerprint', $fp, '--policy-hash', $ph, '--now', '2026-01-01T00:01:00Z', '--json') 0
+    if ([string]$req2.id -ne $id) { Fail 4 'approve: request not idempotent on resume' }
+    Approval $Fx @('approval-approve', '--id', $id, '--by', 'operator', '--now', '2026-01-01T00:10:00Z') 0 | Out-Null
+    Approval $Fx @('approval-status', '--id', $id, '--fingerprint', $fp, '--policy-hash', $ph, '--now', '2026-01-01T00:20:00Z', '--json') 0 | Out-Null
+    $integ = Vcs-Integrate $Fx @($t1) $Fx.BatchId
+    if (-not $integ.Clean) { Fail 4 'approve unexpectedly conflicted' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{}')
+    Vcs-Publish $Fx $Fx.BatchId
+    Step-PublishTask $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":false,"ci":"disabled"}')
+    Step-Archive $Fx $t1
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":1,"quarantined":0,"escalated":0}')
+    return [pscustomobject]@{ Outcome = 'published'; Notes = 'one-time approval granted -> published' }
+}
+
+function Scenario-Reject {
+    param($Fx)
+    # The operator REJECTS the approval: the dependent task is not published; it is escalated
+    # (a safe, diagnosable halt), like a policy denial.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'reject one'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'J'
+    Step-Capture $Fx $t1
+    Step-ToReview $Fx $t1
+    $req = Approval $Fx @('approval-request', '--task', $t1, '--reason', 'policy-bypass', '--fingerprint', 'fp-r', '--policy-hash', 'ph-r', '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json') 0
+    $id = [string]$req.id
+    Approval $Fx @('approval-reject', '--id', $id, '--by', 'operator', '--now', '2026-01-01T00:05:00Z') 11 | Out-Null
+    Approval $Fx @('approval-status', '--id', $id, '--fingerprint', 'fp-r', '--policy-hash', 'ph-r', '--now', '2026-01-01T00:06:00Z', '--json') 11 | Out-Null
+    Halt-Escalate $Fx $t1 'approval отклонён оператором'
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":0,"quarantined":0,"escalated":1}')
+    return [pscustomobject]@{ Outcome = 'escalated'; Notes = 'approval rejected -> task escalated (not published)' }
+}
+
+function Scenario-ApprovalTimeout {
+    param($Fx)
+    # No operator decision arrives by the deadline: fail-closed rejection (never a default
+    # approval); the task is escalated, not published.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'approval-timeout one'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'T'
+    Step-Capture $Fx $t1
+    Step-ToReview $Fx $t1
+    $req = Approval $Fx @('approval-request', '--task', $t1, '--reason', 'human-review', '--fingerprint', 'fp-t', '--policy-hash', 'ph-t', '--deadline-sec', '60', '--now', '2026-01-01T00:00:00Z', '--json') 0
+    $id = [string]$req.id
+    Approval $Fx @('approval-status', '--id', $id, '--fingerprint', 'fp-t', '--policy-hash', 'ph-t', '--now', '2026-01-01T01:00:00Z', '--json') 11 | Out-Null
+    Halt-Escalate $Fx $t1 'approval не получен к дедлайну (fail-closed)'
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":0,"quarantined":0,"escalated":1}')
+    return [pscustomobject]@{ Outcome = 'escalated'; Notes = 'approval deadline passed with no answer -> fail-closed escalation' }
+}
+
+function Scenario-ApprovalStale {
+    param($Fx)
+    # The operator approved, but the affected code then changed (fingerprint differs): the
+    # decision expires (stale) and must NOT be reused - the task is not published.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'approval-stale one'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'S'
+    Step-Capture $Fx $t1
+    Step-ToReview $Fx $t1
+    $req = Approval $Fx @('approval-request', '--task', $t1, '--reason', 'force-lock', '--fingerprint', 'fp-old', '--policy-hash', 'ph-s', '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json') 0
+    $id = [string]$req.id
+    Approval $Fx @('approval-approve', '--id', $id, '--by', 'operator', '--now', '2026-01-01T00:10:00Z') 0 | Out-Null
+    # code changed after approval -> current fingerprint differs -> stale (fail-closed)
+    Approval $Fx @('approval-status', '--id', $id, '--fingerprint', 'fp-new', '--policy-hash', 'ph-s', '--now', '2026-01-01T00:20:00Z', '--json') 11 | Out-Null
+    Halt-Escalate $Fx $t1 'approval устарел (код изменился после одобрения)'
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":0,"quarantined":0,"escalated":1}')
+    return [pscustomobject]@{ Outcome = 'escalated'; Notes = 'approval went stale after a code change -> not reused, escalated' }
+}
+
 function Invoke-Scenario {
     param($Fx, [string]$Name)
     switch ($Name) {
-        'clean'      { return (Scenario-Clean $Fx) }
-        'publish'    { return (Scenario-Publish $Fx) }
-        'resume'     { return (Scenario-Resume $Fx) }
-        'checks'     { return (Scenario-Checks $Fx) }
-        'deps'       { return (Scenario-Deps $Fx) }
-        'conflict'   { return (Scenario-Conflict $Fx) }
-        'quarantine' { return (Scenario-Quarantine $Fx) }
-        'policy'     { return (Scenario-Policy $Fx) }
-        default      { Fail 2 "unknown scenario '$Name' (valid: $($script:Scenarios -join ', '))" }
+        'clean'            { return (Scenario-Clean $Fx) }
+        'publish'          { return (Scenario-Publish $Fx) }
+        'resume'           { return (Scenario-Resume $Fx) }
+        'checks'           { return (Scenario-Checks $Fx) }
+        'deps'             { return (Scenario-Deps $Fx) }
+        'conflict'         { return (Scenario-Conflict $Fx) }
+        'quarantine'       { return (Scenario-Quarantine $Fx) }
+        'policy'           { return (Scenario-Policy $Fx) }
+        'ci-delayed'       { return (Scenario-CiDelayed $Fx) }
+        'ci-rerun'         { return (Scenario-CiRerun $Fx) }
+        'ci-outage'        { return (Scenario-CiOutage $Fx) }
+        'approve'          { return (Scenario-Approve $Fx) }
+        'reject'           { return (Scenario-Reject $Fx) }
+        'approval-timeout' { return (Scenario-ApprovalTimeout $Fx) }
+        'approval-stale'   { return (Scenario-ApprovalStale $Fx) }
+        default            { Fail 2 "unknown scenario '$Name' (valid: $($script:Scenarios -join ', '))" }
     }
 }
 

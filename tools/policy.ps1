@@ -44,13 +44,37 @@
                          technical precondition instead of a trusted text report. Exit 8 if
                          the target branch/remote is not permitted or push is policy-blocked.
 
+      check-gate       - the publish CI gate (T-095) as a fail-closed decision instead of a
+                         trusted "verify manually" note. Given the EXACT pushed --sha and the
+                         observed check runs, it binds only to that SHA, requires the WHOLE
+                         set of required checks (from policy) to be green, and treats an
+                         absent / not-yet-complete / cancelled / red / past-deadline result as
+                         NOT ready (never a silent pass). Exit 9 = fail-closed (red or timed
+                         out); exit 10 = still pending within the deadline (keep waiting a
+                         backoff); exit 0 = ready (or no required checks configured).
+
+      approval-request / approval-approve / approval-reject / approval-status
+                       - the one-time human-approval gate (T-095) for the categories that
+                         cannot be reduced to a mechanical check (mandatory human review,
+                         force-lock, policy bypass). `approval-request` persists an artifact
+                         (subject task/batch, reason, diff fingerprint, policy snapshot,
+                         deadline, one-time id) idempotently - a resume of the SAME request
+                         (same subject+fingerprint+policy) reuses it, never a duplicate.
+                         approve/reject consume the id EXACTLY once (a spent id is refused).
+                         `approval-status` is the consumer: it re-derives the CURRENT
+                         fingerprint/policy and reports `approved` only when a fresh approve is
+                         still valid; a decision goes stale (exit 11) once the affected code or
+                         constraints.md/policy-schema changes, and no answer by the deadline is
+                         a fail-closed rejection (exit 11), never a default approval. Exit 12 =
+                         pending (awaiting the operator).
+
     Degradation without errors: a missing .work/constraints.md, or an empty section, means
     "no constraint" - the corresponding check returns OK, exactly as the roles behaved before
     the policy was executable.
 
 .NOTES
     Exit codes:
-      0   success / check passed
+      0   success / check passed / gate ready / approval granted
       2   usage / argument error
       3   config validation failure (unknown / duplicate / invalid key)
       4   policy (constraints) structural validation failure
@@ -58,6 +82,12 @@
       6   path guard rejection (escape / link / substitution / bad id / VCS mismatch)
       7   denylist hit (a changed path is on the denylist)
       8   publish-target rejection (branch/remote not allowed, or push policy-blocked)
+      9   publish gate fail-closed: a required check is red/cancelled, or the required set is
+          still incomplete at the deadline (outage) - do NOT publish/archive
+      10  publish gate: required checks still pending WITHIN the deadline - keep waiting a backoff
+      11  approval not granted: rejected, expired (no answer by deadline), or stale (affected
+          code/policy changed since issuance) - fail-closed, do NOT proceed
+      12  approval pending: a fresh request is awaiting the operator's decision
 
     Runs under PowerShell 7. All emitted text is ASCII/UTF-8 (no BOM).
 
@@ -67,6 +97,10 @@
     pwsh -File tools/policy.ps1 guard-path --root /abs --work /abs/.work --object worktree --task T-045 --path /abs/.work/worktrees/T-045
     pwsh -File tools/policy.ps1 check-paths --root /abs --work /abs/.work --paths-from changed.txt
     pwsh -File tools/policy.ps1 check-publish --work /abs/.work --branch main --remote origin
+    pwsh -File tools/policy.ps1 check-gate --work /abs/.work --sha <fullsha> --checks-from runs.jsonl --elapsed-sec 120 --json
+    pwsh -File tools/policy.ps1 approval-request --work /abs/.work --task T-045 --reason policy-bypass --paths-from changed.txt --json
+    pwsh -File tools/policy.ps1 approval-approve --work /abs/.work --id <apr-id> --by operator
+    pwsh -File tools/policy.ps1 approval-status  --work /abs/.work --id <apr-id> --paths-from changed.txt --json
 #>
 
 Set-StrictMode -Version Latest
@@ -98,6 +132,9 @@ for ($i = 1; $i -lt $args.Count; $i++) {
 
 function Fail { param([int]$Code, [string]$Message) throw ('PLCERR|' + $Code + '|' + $Message) }
 function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default } }
+# Human-readable status line - suppressed under --json so a machine consumer gets ONLY the
+# JSON object on stdout (the JSON emitters below print the machine form when --json is set).
+function Say { param([string]$Message) if (-not [bool](Opt 'json' $false)) { Write-Output $Message } }
 function Require-Opt {
     param([string]$Name)
     if (-not $opts.ContainsKey($Name) -or [string]::IsNullOrEmpty([string]$opts[$Name])) { Fail 2 "missing required option --$Name" }
@@ -528,20 +565,402 @@ function Get-PublishTargets {
     return , $vals.ToArray()
 }
 
+# ==========================================================================
+# check-gate  (publish CI gate: fail-closed, SHA-bound, whole-set)
+# ==========================================================================
+
+# Read an int config value from .work/config.md (or --config), falling back to the schema
+# default when the key is unset/absent/invalid. Deadline/backoff are OPERATIONAL tuning, so
+# they live in config.md (like CALL_DEADLINE_SEC), while WHICH checks are required is a
+# security decision that lives in constraints.md.
+function Get-ConfigInt {
+    param([string]$Name, [int]$SchemaDefault)
+    $file = ''
+    if ($opts.ContainsKey('config') -and -not [string]::IsNullOrEmpty([string]$opts['config'])) { $file = [string]$opts['config'] }
+    elseif ($opts.ContainsKey('work') -and -not [string]::IsNullOrEmpty([string]$opts['work'])) { $file = Join-Path ([string]$opts['work']) 'config.md' }
+    if ($file -and (Test-Path -LiteralPath $file)) {
+        foreach ($e in (ConvertFrom-ConfigText (Read-Lines $file))) {
+            if ($e.Kind -eq 'key' -and $e.Key -eq $Name -and $e.Value -match '^-?\d+$') { return [int]$e.Value }
+        }
+    }
+    return $SchemaDefault
+}
+
+# Safe JSON property probe under StrictMode.
+function JProp { param($Obj, [string]$Name) if ($null -ne $Obj -and $null -ne $Obj.PSObject.Properties[$Name]) { return [string]$Obj.$Name } else { return '' } }
+
+# Parse the observed check runs from --checks-from <file> (a JSON array, or one JSON object
+# per line) and/or --checks-json <json>. Each record: name, head_sha, status, conclusion,
+# run_id (all optional but name is required to be useful).
+function Get-ObservedChecks {
+    $recs = [System.Collections.Generic.List[object]]::new()
+    $texts = [System.Collections.Generic.List[string]]::new()
+    if ($opts.ContainsKey('checks-json') -and -not [string]::IsNullOrEmpty([string]$opts['checks-json'])) {
+        $texts.Add([string]$opts['checks-json'])
+    }
+    if ($opts.ContainsKey('checks-from') -and -not [string]::IsNullOrEmpty([string]$opts['checks-from'])) {
+        $cf = [string]$opts['checks-from']
+        if (-not (Test-Path -LiteralPath $cf)) { Fail 2 "--checks-from file not found: $cf" }
+        $raw = (Get-Content -LiteralPath $cf -Encoding utf8 -Raw)
+        $whole = $null
+        try { $whole = $raw | ConvertFrom-Json } catch { $whole = $null }
+        if ($null -ne $whole) {
+            foreach ($o in @($whole)) { $recs.Add($o) }
+        } else {
+            foreach ($ln in ($raw -split "`n")) {
+                $t = $ln.Trim(); if ($t -eq '') { continue }
+                $texts.Add($t)
+            }
+        }
+    }
+    foreach ($t in $texts) {
+        $o = $null
+        try { $o = $t | ConvertFrom-Json } catch { Fail 2 "check record is not valid JSON: $t" }
+        foreach ($e in @($o)) { $recs.Add($e) }
+    }
+    return , $recs.ToArray()
+}
+
+function Cmd-CheckGate {
+    $sha = Require-Opt 'sha'
+    $elapsed = 0
+    if ($opts.ContainsKey('elapsed-sec')) { if ([string]$opts['elapsed-sec'] -notmatch '^\d+$') { Fail 2 "--elapsed-sec must be a non-negative integer" }; $elapsed = [int]$opts['elapsed-sec'] }
+    $deadline = if ($opts.ContainsKey('deadline-sec') -and [string]$opts['deadline-sec'] -match '^\d+$') { [int]$opts['deadline-sec'] } else { Get-ConfigInt 'PUBLISH_CI_DEADLINE_SEC' 1800 }
+    $backoff  = if ($opts.ContainsKey('backoff-sec') -and [string]$opts['backoff-sec'] -match '^\d+$') { [int]$opts['backoff-sec'] } else { Get-ConfigInt 'PUBLISH_CI_BACKOFF_SEC' 30 }
+
+    $required = @()
+    $policyFile = Resolve-PolicyFileOrNull
+    if ($policyFile) { $lines = Read-Lines $policyFile; if ($null -ne $lines) { $required = Get-RequiredCiChecks $lines } }
+
+    if ($required.Count -eq 0) {
+        Write-Gate 'no-required-checks' $sha @() @() @() @() $deadline $backoff $elapsed 0
+        Say "OK   no required CI checks configured in policy - publish CI gate degrades to CI_WATCH default (nothing to enforce)"
+        return
+    }
+
+    # Bind to the EXACT pushed SHA: a check record counts only when its head_sha equals --sha
+    # (a record without a head_sha cannot be confirmed bound and is ignored). This is the
+    # guard against "first run wins" - a run for another commit never satisfies the gate.
+    $observed = Get-ObservedChecks
+    $cmp = Get-PathComparer
+    $byName = @{}
+    foreach ($rec in $observed) {
+        $rsha = JProp $rec 'head_sha'
+        if ($rsha -eq '' -or -not [string]::Equals($rsha, $sha, $cmp)) { continue }
+        $name = JProp $rec 'name'
+        if ($name -eq '') { continue }
+        if (-not $byName.ContainsKey($name)) { $byName[$name] = [System.Collections.Generic.List[object]]::new() }
+        $byName[$name].Add($rec)
+    }
+
+    $green = [System.Collections.Generic.List[string]]::new()
+    $red = [System.Collections.Generic.List[string]]::new()
+    $pending = [System.Collections.Generic.List[string]]::new()
+    $missing = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in $required) {
+        if (-not $byName.ContainsKey($name)) { $missing.Add($name); continue }
+        # Latest run wins (rerun of a failed check): pick the max run_id when present, else the
+        # last record in input order.
+        $recsForName = $byName[$name]
+        $pick = $recsForName[$recsForName.Count - 1]
+        $best = -1
+        foreach ($rec in $recsForName) {
+            $rid = JProp $rec 'run_id'
+            if ($rid -match '^\d+$' -and [int]$rid -ge $best) { $best = [int]$rid; $pick = $rec }
+        }
+        $cls = Get-CiCheckClass (JProp $pick 'status') (JProp $pick 'conclusion')
+        switch ($cls) {
+            'green'   { $green.Add($name) }
+            'red'     { $red.Add($name) }
+            default   { $pending.Add($name) }
+        }
+    }
+
+    $incomplete = $pending.Count + $missing.Count
+    if ($red.Count -gt 0) {
+        Write-Gate 'failed' $sha $green $red $pending $missing $deadline $backoff $elapsed 0
+        Say "DENY publish CI gate fail-closed: required check(s) not green: $(( $red.ToArray() ) -join ', ')"
+        Fail 9 "publish gate: $($red.Count) required check(s) red/cancelled at sha $sha"
+    }
+    if ($incomplete -eq 0) {
+        Write-Gate 'ready' $sha $green $red $pending $missing $deadline $backoff $elapsed 0
+        Say "OK   publish CI gate: all $($required.Count) required check(s) green at sha $sha"
+        return
+    }
+    if ($elapsed -ge $deadline) {
+        Write-Gate 'timeout' $sha $green $red $pending $missing $deadline $backoff $elapsed 0
+        Say "DENY publish CI gate fail-closed: $incomplete required check(s) still not green after deadline ${deadline}s (missing: $(( $missing.ToArray() ) -join ', '); pending: $(( $pending.ToArray() ) -join ', '))"
+        Fail 9 "publish gate: required CI incomplete at deadline (${elapsed}s >= ${deadline}s)"
+    }
+    Write-Gate 'wait' $sha $green $red $pending $missing $deadline $backoff $elapsed $backoff
+    Say "WAIT publish CI gate: $incomplete required check(s) not green yet (elapsed ${elapsed}s < deadline ${deadline}s); retry after ${backoff}s"
+    Fail 10 "publish gate: required CI still pending within the deadline"
+}
+
+function Write-Gate {
+    param([string]$Verdict, [string]$Sha, $Green, $Red, $Pending, $Missing, [int]$Deadline, [int]$Backoff, [int]$Elapsed, [int]$NextBackoff)
+    if (-not [bool](Opt 'json' $false)) { return }
+    $out = [ordered]@{
+        verdict         = $Verdict
+        sha             = $Sha
+        green           = @($Green)
+        red             = @($Red)
+        pending         = @($Pending)
+        missing         = @($Missing)
+        deadline_sec    = $Deadline
+        backoff_sec     = $Backoff
+        elapsed_sec     = $Elapsed
+        next_backoff_sec = $NextBackoff
+        remaining_sec   = [Math]::Max(0, $Deadline - $Elapsed)
+    }
+    Write-Output ($out | ConvertTo-Json -Depth 6 -Compress)
+}
+
+# ==========================================================================
+# approval-*  (one-time human-approval gate: request / approve / reject / status)
+# ==========================================================================
+function Get-ApprovalDir {
+    $work = ''
+    if ($opts.ContainsKey('dir') -and -not [string]::IsNullOrEmpty([string]$opts['dir'])) { return [string]$opts['dir'] }
+    if ($opts.ContainsKey('work') -and -not [string]::IsNullOrEmpty([string]$opts['work'])) { $work = [string]$opts['work'] }
+    else { Fail 2 "provide --work <.work dir> or --dir <approvals dir>" }
+    return (Join-Path $work 'approvals')
+}
+function Write-JsonAtomic {
+    param([string]$Path, $Obj)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Force -Path $dir }
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $tmp = "$Path.tmp"
+    [System.IO.File]::WriteAllText($tmp, (($Obj | ConvertTo-Json -Depth 8) + "`n"), $enc)
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+function Read-ApprovalById {
+    param([string]$Id)
+    $p = Join-Path (Get-ApprovalDir) ($Id + '.json')
+    if (-not (Test-Path -LiteralPath $p)) { return $null }
+    try { return ((Get-Content -LiteralPath $p -Raw -Encoding utf8) | ConvertFrom-Json) } catch { Fail 3 "approval artifact $p is unreadable" }
+}
+
+# Subject key + deterministic one-time id. A resume with the SAME subject+reason+fingerprint+
+# policy recomputes the SAME id, so the request is never duplicated; ANY change to the
+# affected paths (fingerprint) or the policy snapshot yields a DIFFERENT id - i.e. the old
+# decision no longer applies to the new change set (staleness by construction).
+function Get-ApprovalSubject {
+    $t = [string](Opt 'task' '')
+    $b = [string](Opt 'batch' '')
+    if ($t -eq '' -and $b -eq '') { Fail 2 "approval needs --task <T-ID> and/or --batch <B-ID>" }
+    if ($t -and -not (Test-TaskId $t)) { Fail 2 "malformed --task '$t'" }
+    if ($b -and -not (Test-BatchId $b)) { Fail 2 "malformed --batch '$b'" }
+    return "task:$t|batch:$b"
+}
+function Resolve-Fingerprint {
+    if ($opts.ContainsKey('fingerprint') -and -not [string]::IsNullOrEmpty([string]$opts['fingerprint'])) { return [string]$opts['fingerprint'] }
+    $changed = Get-ChangedPaths
+    if ($changed.Count -eq 0) { Fail 2 "approval needs --fingerprint <hex> or --paths-from/--path (the affected change set)" }
+    return (Get-DiffFingerprint $changed)
+}
+function Resolve-PolicyHash {
+    if ($opts.ContainsKey('policy-hash') -and -not [string]::IsNullOrEmpty([string]$opts['policy-hash'])) { return [string]$opts['policy-hash'] }
+    $policyFile = Resolve-PolicyFileOrNull
+    $text = $null
+    if ($policyFile -and (Test-Path -LiteralPath $policyFile)) { $text = (Get-Content -LiteralPath $policyFile -Raw -Encoding utf8) }
+    return (Get-PolicySnapshotHash $text)
+}
+function Get-ApprovalNow {
+    if ($opts.ContainsKey('now') -and -not [string]::IsNullOrEmpty([string]$opts['now'])) {
+        try { return [System.DateTimeOffset]::Parse([string]$opts['now'], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime } catch { Fail 2 "--now '$($opts['now'])' is not a parseable UTC time" }
+    }
+    return [DateTime]::UtcNow
+}
+function Format-Utc { param([datetime]$T) return $T.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+
+function Cmd-ApprovalRequest {
+    $subject = Get-ApprovalSubject
+    $reason = [string](Opt 'reason' '')
+    if ($reason -eq '') { Fail 2 "approval-request needs --reason <category> (e.g. human-review, force-lock, policy-bypass)" }
+    $fp = Resolve-Fingerprint
+    $ph = Resolve-PolicyHash
+    $id = 'apr-' + (Get-Sha256Hex "$subject|$reason|$fp|$ph").Substring(0, 32)
+
+    $existing = Read-ApprovalById $id
+    if ($null -ne $existing) {
+        # Idempotent: the SAME request already exists (open OR decided). Never recreate it -
+        # a resume of the same gate reuses the same one-time id and its decision, if any.
+        Emit-Approval $existing 'existing'
+        return
+    }
+    $now = Get-ApprovalNow
+    $deadlineSec = if ($opts.ContainsKey('deadline-sec') -and [string]$opts['deadline-sec'] -match '^\d+$') { [int]$opts['deadline-sec'] } else { Get-ConfigInt 'APPROVAL_DEADLINE_SEC' 86400 }
+    $rec = [ordered]@{
+        schema      = 'orchestra/approval@1'
+        id          = $id
+        subject     = $subject
+        task        = [string](Opt 'task' '')
+        batch       = [string](Opt 'batch' '')
+        reason      = $reason
+        fingerprint = $fp
+        policy_hash = $ph
+        created_at  = (Format-Utc $now)
+        deadline    = (Format-Utc ($now.AddSeconds($deadlineSec)))
+        decision    = ''
+        decided_by  = ''
+        decided_at  = ''
+        note        = ''
+    }
+    Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
+    Emit-Approval ([pscustomobject]$rec) 'created'
+}
+
+function Cmd-ApprovalDecide {
+    param([string]$Decision)
+    $id = Require-Opt 'id'
+    $by = Require-Opt 'by'
+    $rec = Read-ApprovalById $id
+    if ($null -eq $rec) { Fail 2 "no approval request with id '$id'" }
+    $prior = JProp $rec 'decision'
+    if ($prior -ne '') {
+        Fail 11 "approval id '$id' is already $prior by '$(JProp $rec 'decided_by')' at $(JProp $rec 'decided_at') - a one-time id cannot be decided twice"
+    }
+    $now = Get-ApprovalNow
+    $deadline = JProp $rec 'deadline'
+    if ($deadline -ne '') {
+        try { $dl = [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime } catch { $dl = [DateTime]::MaxValue }
+        if ($now -gt $dl) { Fail 11 "approval id '$id' expired at $deadline (no answer by the deadline is a fail-closed rejection); issue a fresh request" }
+    }
+    $rec.decision = $Decision
+    $rec.decided_by = $by
+    $rec.decided_at = (Format-Utc $now)
+    $rec.note = [string](Opt 'note' '')
+    Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
+    Emit-Approval $rec "decided-$Decision"
+    if ($Decision -eq 'reject') { Fail 11 "approval id '$id' rejected by '$by'" }
+}
+
+function Cmd-ApprovalStatus {
+    # Locate the request: by --id, or re-derive the deterministic id from the CURRENT
+    # subject/reason/fingerprint/policy (the natural resume path - the same inputs rebuild the
+    # same id). Then judge freshness against the CURRENT fingerprint/policy and the clock.
+    $curFp = ''
+    $curPh = ''
+    $id = [string](Opt 'id' '')
+    if ($id -eq '') {
+        $subject = Get-ApprovalSubject
+        $reason = [string](Opt 'reason' '')
+        if ($reason -eq '') { Fail 2 "approval-status needs --id, or --task/--batch + --reason (+ fingerprint) to locate the request" }
+        $curFp = Resolve-Fingerprint
+        $curPh = Resolve-PolicyHash
+        $id = 'apr-' + (Get-Sha256Hex "$subject|$reason|$curFp|$curPh").Substring(0, 32)
+    }
+    $rec = Read-ApprovalById $id
+    if ($null -eq $rec) {
+        Write-ApprovalStatus 'none' $id $null $false $false
+        Say "NONE no approval request '$id' on file - one must be requested (fail-closed: not approved)"
+        Fail 11 "no approval request '$id'"
+    }
+    # Freshness: recompute current fingerprint/policy when the inputs are available, else fall
+    # back to explicit --fingerprint/--policy-hash; when neither is given, freshness is unknown
+    # and treated conservatively as fresh==true only if it matches the stored values trivially.
+    if ($curFp -eq '') { if ($opts.ContainsKey('fingerprint') -or $opts.ContainsKey('paths-from') -or $opts.ContainsKey('path')) { $curFp = Resolve-Fingerprint } }
+    if ($curPh -eq '') { if ($opts.ContainsKey('policy-hash') -or $opts.ContainsKey('policy') -or $opts.ContainsKey('work')) { $curPh = Resolve-PolicyHash } }
+    $storedFp = JProp $rec 'fingerprint'
+    $storedPh = JProp $rec 'policy_hash'
+    $fpFresh = ($curFp -eq '' -or [string]::Equals($curFp, $storedFp, [System.StringComparison]::OrdinalIgnoreCase))
+    $phFresh = ($curPh -eq '' -or [string]::Equals($curPh, $storedPh, [System.StringComparison]::OrdinalIgnoreCase))
+    $fresh = ($fpFresh -and $phFresh)
+    $decision = JProp $rec 'decision'
+    $now = Get-ApprovalNow
+    $deadline = JProp $rec 'deadline'
+    $pastDeadline = $false
+    if ($deadline -ne '') { try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { } }
+
+    if ($decision -eq 'approve') {
+        if (-not $fresh) {
+            Write-ApprovalStatus 'expired-stale' $id $rec $fresh $pastDeadline
+            Say "STALE approval '$id' granted but the affected code/policy changed since issuance - decision expired (fail-closed); re-request"
+            Fail 11 "approval '$id' is stale (affected code/policy changed after approval)"
+        }
+        Write-ApprovalStatus 'approved' $id $rec $fresh $pastDeadline
+        Say "OK   approval '$id' granted by '$(JProp $rec 'decided_by')' and still valid (fingerprint+policy unchanged)"
+        return
+    }
+    if ($decision -eq 'reject') {
+        Write-ApprovalStatus 'rejected' $id $rec $fresh $pastDeadline
+        Say "DENY approval '$id' was rejected by '$(JProp $rec 'decided_by')' (terminal)"
+        Fail 11 "approval '$id' rejected"
+    }
+    # undecided (open)
+    if (-not $fresh) {
+        Write-ApprovalStatus 'superseded' $id $rec $fresh $pastDeadline
+        Say "STALE open approval '$id' is against an outdated change set/policy - re-request against the current one"
+        Fail 11 "open approval '$id' superseded (affected code/policy changed)"
+    }
+    if ($pastDeadline) {
+        Write-ApprovalStatus 'expired-timeout' $id $rec $fresh $pastDeadline
+        Say "DENY approval '$id' received no decision by its deadline $deadline (fail-closed: treated as rejection)"
+        Fail 11 "approval '$id' expired without a decision (fail-closed rejection)"
+    }
+    Write-ApprovalStatus 'pending' $id $rec $fresh $pastDeadline
+    Say "WAIT approval '$id' is pending the operator's decision (deadline $deadline)"
+    Fail 12 "approval '$id' pending"
+}
+
+function Emit-Approval {
+    param($Rec, [string]$State)
+    if ([bool](Opt 'json' $false)) {
+        $out = [ordered]@{
+            state       = $State
+            id          = JProp $Rec 'id'
+            subject     = JProp $Rec 'subject'
+            reason      = JProp $Rec 'reason'
+            fingerprint = JProp $Rec 'fingerprint'
+            policy_hash = JProp $Rec 'policy_hash'
+            created_at  = JProp $Rec 'created_at'
+            deadline    = JProp $Rec 'deadline'
+            decision    = JProp $Rec 'decision'
+            decided_by  = JProp $Rec 'decided_by'
+        }
+        Write-Output ($out | ConvertTo-Json -Depth 6 -Compress)
+    } else {
+        Write-Output "approval $State id=$(JProp $Rec 'id') subject=$(JProp $Rec 'subject') reason=$(JProp $Rec 'reason') decision=$(JProp $Rec 'decision')"
+    }
+}
+function Write-ApprovalStatus {
+    param([string]$Verdict, [string]$Id, $Rec, [bool]$Fresh, [bool]$PastDeadline)
+    if (-not [bool](Opt 'json' $false)) { return }
+    $out = [ordered]@{
+        verdict       = $Verdict
+        id            = $Id
+        fresh         = $Fresh
+        past_deadline = $PastDeadline
+        subject       = if ($Rec) { JProp $Rec 'subject' } else { '' }
+        reason        = if ($Rec) { JProp $Rec 'reason' } else { '' }
+        decision      = if ($Rec) { JProp $Rec 'decision' } else { '' }
+        decided_by    = if ($Rec) { JProp $Rec 'decided_by' } else { '' }
+        deadline      = if ($Rec) { JProp $Rec 'deadline' } else { '' }
+    }
+    Write-Output ($out | ConvertTo-Json -Depth 6 -Compress)
+}
+
 # --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
 try {
     switch ($Command) {
-        'schema'          { Cmd-Schema }
-        'validate-config' { Cmd-ValidateConfig }
-        'validate-policy' { Cmd-ValidatePolicy }
-        'migrate'         { Cmd-Migrate }
-        'guard-path'      { Cmd-GuardPath }
-        'check-paths'     { Cmd-CheckPaths }
-        'check-publish'   { Cmd-CheckPublish }
+        'schema'           { Cmd-Schema }
+        'validate-config'  { Cmd-ValidateConfig }
+        'validate-policy'  { Cmd-ValidatePolicy }
+        'migrate'          { Cmd-Migrate }
+        'guard-path'       { Cmd-GuardPath }
+        'check-paths'      { Cmd-CheckPaths }
+        'check-publish'    { Cmd-CheckPublish }
+        'check-gate'       { Cmd-CheckGate }
+        'approval-request' { Cmd-ApprovalRequest }
+        'approval-approve' { Cmd-ApprovalDecide 'approve' }
+        'approval-reject'  { Cmd-ApprovalDecide 'reject' }
+        'approval-status'  { Cmd-ApprovalStatus }
         default {
-            Fail 2 "unknown command '$Command'. Valid: schema, validate-config, validate-policy, migrate, guard-path, check-paths, check-publish"
+            Fail 2 "unknown command '$Command'. Valid: schema, validate-config, validate-policy, migrate, guard-path, check-paths, check-publish, check-gate, approval-request, approval-approve, approval-reject, approval-status"
         }
     }
 } catch {

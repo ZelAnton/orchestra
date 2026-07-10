@@ -130,7 +130,13 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 29 $schema.config.Count 'schema has 29 config keys'
+    Assert-Equal 32 $schema.config.Count 'schema has 32 config keys'
+
+    # T-095: the publish-gate tuning keys and the CI-required-checks policy section exist.
+    foreach ($k in @('PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC')) {
+        Assert-True ([bool]($schema.config | Where-Object { $_.name -eq $k })) "schema has publish-gate key $k"
+    }
+    Assert-True ([bool]($schema.policy | Where-Object { $_.id -eq 'publish-ci' })) 'schema has the publish-ci policy section'
 }.Invoke()
 
 # =============================================================================
@@ -419,6 +425,158 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 0 'check-paths: no constraints.md -> allowed (degradation without errors)'
     $r = Invoke-Policy @('validate-policy', '--work', (Join-Path $bare '.work'))
     Assert-Exit $r 0 'validate-policy: no file -> OK (not in force)'
+}.Invoke()
+
+# =============================================================================
+# 10. check-gate (T-095): the fail-closed, SHA-bound, whole-set publish CI gate
+# =============================================================================
+{
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+    $constraints = Join-Path $work 'constraints.md'
+    Write-Utf8 $constraints @'
+## Обязательные CI-проверки публикации
+
+**Активные ограничения** (по умолчанию пусто):
+
+- `validate`
+- `crash-matrix`
+
+**Пример** (ориентир, не применяется):
+
+- `example-only`
+'@
+    $sha = '0123456789abcdef0123456789abcdef01234567'
+    $checks = Join-Path $sb 'runs.jsonl'
+
+    function CG { param([string[]]$Extra) return (Invoke-Policy (@('check-gate', '--work', $work, '--sha', $sha, '--json') + $Extra)) }
+    function CGJson { param($R) return ($R.Out.Trim() | ConvertFrom-Json) }
+
+    # all required green at THIS sha -> ready (exit 0)
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10')
+    Assert-Exit $r 0 'check-gate: all required green -> ready'
+    Assert-Equal 'ready' (CGJson $r).verdict 'check-gate: verdict ready'
+
+    # one required still in_progress WITHIN the deadline -> wait (exit 10)
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"in_progress`",`"conclusion`":`"`"}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10', '--deadline-sec', '600', '--backoff-sec', '30')
+    Assert-Exit $r 10 'check-gate: pending within deadline -> wait'
+    $j = CGJson $r
+    Assert-Equal 'wait' $j.verdict 'check-gate: verdict wait'
+    Assert-Equal 30 $j.next_backoff_sec 'check-gate: wait reports the backoff'
+    Assert-True ($j.pending -contains 'crash-matrix') 'check-gate: names the pending check'
+
+    # deadline exceeded with an incomplete set (outage) -> timeout, fail-closed (exit 9)
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '601', '--deadline-sec', '600')
+    Assert-Exit $r 9 'check-gate: incomplete at deadline -> timeout fail-closed'
+    Assert-Equal 'timeout' (CGJson $r).verdict 'check-gate: verdict timeout'
+
+    # a required check red -> fail-closed (exit 9), never a silent pass
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"failure`"}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10')
+    Assert-Exit $r 9 'check-gate: red required check -> fail-closed'
+    Assert-True ((CGJson $r).red -contains 'validate') 'check-gate: names the red check'
+
+    # cancelled counts as red (fail-closed), not a pass
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"cancelled`"}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10')
+    Assert-Exit $r 9 'check-gate: cancelled required check -> fail-closed'
+
+    # runs for ANOTHER sha never satisfy the gate (SHA binding: no "first run wins")
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`",`"status`":`"completed`",`"conclusion`":`"success`"}`n{`"name`":`"crash-matrix`",`"head_sha`":`"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`",`"status`":`"completed`",`"conclusion`":`"success`"}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10', '--deadline-sec', '600')
+    Assert-Exit $r 10 'check-gate: green runs for another sha do not satisfy the gate (still pending)'
+    Assert-Equal 2 (CGJson $r).missing.Count 'check-gate: other-sha runs count as missing'
+
+    # rerun: a required check first failed then re-ran green (higher run_id wins) -> ready
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"failure`",`"run_id`":11}`n{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":22}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":5}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10')
+    Assert-Exit $r 0 'check-gate: rerun of a failed check to green (latest run wins) -> ready'
+
+    # no required-checks section at all -> degrade to OK (CI_WATCH governs)
+    $bare = New-Sandbox
+    $r = Invoke-Policy @('check-gate', '--work', (Join-Path $bare '.work'), '--sha', $sha, '--json')
+    Assert-Exit $r 0 'check-gate: no required checks -> degrade to OK'
+    Assert-Equal 'no-required-checks' ($r.Out.Trim() | ConvertFrom-Json).verdict 'check-gate: degraded verdict'
+}.Invoke()
+
+# =============================================================================
+# 11. approval-* (T-095): one-time human-approval gate lifecycle
+# =============================================================================
+{
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+    Write-Utf8 (Join-Path $work 'constraints.md') "## Запрещённые пути (denylist)`n`n**Активные ограничения**:`n`n- ``infra/**```n"
+    $changed = Join-Path $sb 'changed.txt'
+    Write-Utf8 $changed "src/app.js`nsrc/lib.js`n"
+
+    function AP { param([string[]]$Extra) return (Invoke-Policy $Extra) }
+    function APJson { param($R) return ($R.Out.Trim() | ConvertFrom-Json) }
+
+    # request creates a persistent artifact with a one-time id, diff fingerprint + policy snapshot
+    $r = AP @('approval-request', '--work', $work, '--task', 'T-045', '--reason', 'policy-bypass', '--paths-from', $changed, '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json')
+    Assert-Exit $r 0 'approval-request: creates a request'
+    $req = APJson $r
+    $id = $req.id
+    Assert-True ($id -like 'apr-*') 'approval-request: yields a one-time id'
+    Assert-True (-not [string]::IsNullOrEmpty($req.fingerprint)) 'approval-request: carries a diff fingerprint'
+    Assert-True (-not [string]::IsNullOrEmpty($req.policy_hash)) 'approval-request: carries a policy snapshot hash'
+    Assert-True (Test-Path -LiteralPath (Join-Path $work "approvals/$id.json")) 'approval-request: persists the artifact'
+
+    # resume of the SAME request (same subject+reason+fingerprint+policy) reuses it, no duplicate
+    $r2 = AP @('approval-request', '--work', $work, '--task', 'T-045', '--reason', 'policy-bypass', '--paths-from', $changed, '--now', '2026-01-01T00:05:00Z', '--json')
+    Assert-Equal $id (APJson $r2).id 'approval-request: idempotent on resume (same id)'
+    Assert-Equal 'existing' (APJson $r2).state 'approval-request: resume returns the existing request, not a new one'
+
+    # before a decision: status is pending (exit 12), never a default approval
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--paths-from', $changed, '--now', '2026-01-01T00:10:00Z', '--json')
+    Assert-Exit $r 12 'approval-status: undecided within deadline -> pending'
+    Assert-Equal 'pending' (APJson $r).verdict 'approval-status: verdict pending'
+
+    # approve consumes the id
+    $r = AP @('approval-approve', '--work', $work, '--id', $id, '--by', 'operator', '--now', '2026-01-01T00:20:00Z')
+    Assert-Exit $r 0 'approval-approve: operator approves'
+    # a SECOND decision on the same id is refused (one-time consume)
+    $r = AP @('approval-reject', '--work', $work, '--id', $id, '--by', 'operator', '--now', '2026-01-01T00:21:00Z')
+    Assert-Exit $r 11 'approval: a one-time id cannot be decided twice'
+
+    # status: approved + fingerprint/policy unchanged -> approved (exit 0)
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--paths-from', $changed, '--now', '2026-01-01T00:30:00Z', '--json')
+    Assert-Exit $r 0 'approval-status: fresh approval -> approved'
+    Assert-Equal 'approved' (APJson $r).verdict 'approval-status: verdict approved'
+
+    # STALE: after the affected code changes (fingerprint differs), the approval expires
+    $changed2 = Join-Path $sb 'changed2.txt'
+    Write-Utf8 $changed2 "src/app.js`nsrc/lib.js`nsrc/new.js`n"
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--paths-from', $changed2, '--now', '2026-01-01T00:31:00Z', '--json')
+    Assert-Exit $r 11 'approval-status: changed code -> stale (fail-closed)'
+    Assert-Equal 'expired-stale' (APJson $r).verdict 'approval-status: verdict expired-stale'
+
+    # reject path: a separate subject rejected is terminal (exit 11)
+    $r = AP @('approval-request', '--work', $work, '--task', 'T-046', '--reason', 'human-review', '--fingerprint', 'aa', '--policy-hash', 'bb', '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json')
+    $idR = (APJson $r).id
+    $r = AP @('approval-reject', '--work', $work, '--id', $idR, '--by', 'operator', '--now', '2026-01-01T00:05:00Z')
+    Assert-Exit $r 11 'approval-reject: rejection returns fail-closed'
+    $r = AP @('approval-status', '--work', $work, '--id', $idR, '--fingerprint', 'aa', '--policy-hash', 'bb', '--now', '2026-01-01T00:06:00Z', '--json')
+    Assert-Exit $r 11 'approval-status: rejected is terminal'
+    Assert-Equal 'rejected' (APJson $r).verdict 'approval-status: verdict rejected'
+
+    # TIMEOUT: no answer by the deadline is a fail-closed rejection, not a default approval
+    $r = AP @('approval-request', '--work', $work, '--batch', 'B-20260101T000000Z', '--reason', 'force-lock', '--fingerprint', 'cc', '--policy-hash', 'dd', '--deadline-sec', '60', '--now', '2026-01-01T00:00:00Z', '--json')
+    $idT = (APJson $r).id
+    $r = AP @('approval-status', '--work', $work, '--id', $idT, '--fingerprint', 'cc', '--policy-hash', 'dd', '--now', '2026-01-01T01:00:00Z', '--json')
+    Assert-Exit $r 11 'approval-status: no decision by deadline -> fail-closed'
+    Assert-Equal 'expired-timeout' (APJson $r).verdict 'approval-status: verdict expired-timeout'
+    # an operator cannot approve an already-expired request
+    $r = AP @('approval-approve', '--work', $work, '--id', $idT, '--by', 'operator', '--now', '2026-01-01T01:01:00Z')
+    Assert-Exit $r 11 'approval-approve: cannot approve a request past its deadline'
+
+    # INDEPENDENCE: approving one subject does not decide an unrelated open request
+    $r = AP @('approval-request', '--work', $work, '--task', 'T-099', '--reason', 'policy-bypass', '--fingerprint', 'ee', '--policy-hash', 'ff', '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json')
+    $idI = (APJson $r).id
+    $r = AP @('approval-status', '--work', $work, '--id', $idI, '--fingerprint', 'ee', '--policy-hash', 'ff', '--now', '2026-01-01T00:10:00Z', '--json')
+    Assert-Exit $r 12 'approval-status: an unrelated subject stays pending (independent, not blocked by another approval)'
 }.Invoke()
 
 # =============================================================================

@@ -94,6 +94,9 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'SMOKE_CMD'               'string' 'unset'                            -Sensitivity 'medium')
         (New-ConfigKey 'PUSH'                    'bool'   'true'                             -Sensitivity 'high')
         (New-ConfigKey 'CI_WATCH'                'bool'   'true'                             -Sensitivity 'medium')
+        (New-ConfigKey 'PUBLISH_CI_DEADLINE_SEC' 'int'    '1800'                             -Min 1  -Sensitivity 'high')
+        (New-ConfigKey 'PUBLISH_CI_BACKOFF_SEC'  'int'    '30'                               -Min 1  -Sensitivity 'medium')
+        (New-ConfigKey 'APPROVAL_DEADLINE_SEC'   'int'    '86400'                            -Min 1  -Sensitivity 'high')
         (New-ConfigKey 'REVIEWER_TIERING'        'bool'   'true')
         (New-ConfigKey 'MAIN_BRANCH'             'string' 'autodetect'                       -Sensitivity 'high')
         (New-ConfigKey 'EVENTS_OUTBOX'           'enum'   'on'     -Enum @('on', 'off'))
@@ -127,6 +130,7 @@ function Get-SchemaPolicySections {
         (New-PolicySection 'branches-remotes' 'publish-target'     'Разрешённые ветки и remotes'           $true)
         (New-PolicySection 'push-merge'       'push-merge-policy'  'Push/merge policy'                     $true)
         (New-PolicySection 'required-checks'  'required-commands'  'Обязательные проверки'                 $true)
+        (New-PolicySection 'publish-ci'       'ci-required-checks' 'Обязательные CI-проверки публикации'   $true)
         (New-PolicySection 'size-thresholds'  'size-thresholds'    'Пороги размера изменений'              $true)
         (New-PolicySection 'human-review'     'human-review'       'Категории обязательного human review'  $false)
     )
@@ -367,3 +371,81 @@ function Test-GlobMatch {
 # ============================================================================
 function Test-TaskId  { param([string]$Id) return ($Id -eq '_integration' -or $Id -match '^T-\d+$') }
 function Test-BatchId { param([string]$Id) return ($Id -match '^B-\d{8}T\d{6}Z$') }
+
+# ============================================================================
+# Publish gate (T-095): required CI checks, diff fingerprint, policy snapshot.
+# Shared primitives for tools/policy.ps1's check-gate / approval-* verbs so the
+# fingerprint/snapshot definitions are one source both the runtime guard and the
+# tests derive from.
+# ============================================================================
+
+# Lowercase hex SHA-256 of a UTF-8 string. The single hashing primitive the diff
+# fingerprint and the policy snapshot are built from (stable across OS/host).
+function Get-Sha256Hex {
+    param([string]$Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes([string]$Text); $h = $sha.ComputeHash($bytes) }
+    finally { $sha.Dispose() }
+    return (-join ($h | ForEach-Object { $_.ToString('x2') }))
+}
+
+# The required CI check NAMES the publish gate must see green before publishing.
+# Read from the ACTIVE bullets of the 'Обязательные CI-проверки публикации' policy
+# section: each bullet is a `code`-quoted or bare check name (the forge's check/context
+# name). An empty/absent section => no CI-check requirement (degradation without errors).
+function Get-RequiredCiChecks {
+    param([string[]]$Lines)
+    $checks = [System.Collections.Generic.List[string]]::new()
+    foreach ($b in (Get-PolicyActiveBullets $Lines 'Обязательные CI-проверки публикации')) {
+        $codeToks = [regex]::Matches($b, '`([^`]+)`')
+        if ($codeToks.Count -gt 0) {
+            foreach ($t in $codeToks) { $checks.Add($t.Groups[1].Value.Trim()) }
+        } else {
+            $t = ($b -replace '\(.*?\)', '').Trim().Trim(',').Trim()
+            if ($t) { $checks.Add($t) }
+        }
+    }
+    return , $checks.ToArray()
+}
+
+# Deterministic fingerprint of the change set a decision is scoped to: sha256 over the
+# SORTED, normalized ('/'-separated, deduped) relative path list. Any added/removed/renamed
+# affected path flips it, so a decision issued against one change set does not silently
+# carry over to a different one (approval staleness / gate re-scope).
+function Get-DiffFingerprint {
+    param([string[]]$Paths)
+    $norm = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($p in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        [void]$norm.Add((ConvertTo-NormalizedRelPath $p))
+    }
+    return (Get-Sha256Hex (($norm) -join "`n"))
+}
+
+# Snapshot hash of the policy in force at decision time: sha256 over the schema version +
+# the verbatim constraints.md text (or the empty marker when absent). Changing the denylist,
+# the CI-check set, the schema, etc. after a request flips it, expiring a stale decision.
+function Get-PolicySnapshotHash {
+    param([string]$ConstraintsText)
+    $ver = (Get-OrchestraSchema).version
+    $body = if ($null -eq $ConstraintsText) { '<none>' } else { [string]$ConstraintsText }
+    return (Get-Sha256Hex ($ver + "`n" + $body))
+}
+
+# Normalize a forge check conclusion to the gate's three outcome classes. Fail-closed:
+# ONLY an explicit success counts as green; anything else terminal is red; anything not yet
+# concluded (or an unknown/blank conclusion on a not-completed run) is pending.
+#   'green'   -> satisfied
+#   'red'     -> a required result is failed/cancelled/timed_out/... (fail-closed: block)
+#   'pending' -> queued/in_progress/no-conclusion-yet (keep waiting within the deadline)
+function Get-CiCheckClass {
+    param([string]$Status, [string]$Conclusion)
+    $st = ([string]$Status).Trim().ToLowerInvariant()
+    $cc = ([string]$Conclusion).Trim().ToLowerInvariant()
+    if ($st -and $st -ne 'completed') { return 'pending' }   # queued / in_progress / waiting
+    switch ($cc) {
+        'success'   { return 'green' }
+        ''          { return 'pending' }   # completed but no conclusion reported yet
+        default     { return 'red' }       # failure/cancelled/timed_out/action_required/stale/neutral/skipped/...
+    }
+}

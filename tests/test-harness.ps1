@@ -85,7 +85,8 @@ Write-Host 'harness fast matrix: this spawns many child transaction-tool process
 {
     $ls = Invoke-Harness @('list-scenarios')
     Assert-Exit $ls 0 'list-scenarios rc=0'
-    foreach ($s in @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume')) {
+    foreach ($s in @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
+            'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')) {
         Assert-Contains $ls.Out $s "list-scenarios includes '$s'"
     }
     $lf = Invoke-Harness @('list-faults')
@@ -122,6 +123,44 @@ if (-not $hasGit) {
         if ($faulted) {
             Assert-True ([bool]$faulted.fault_fired) 'the injected fault actually fired'
             Assert-Equal $policy.fingerprint $faulted.fingerprint 'faulted-then-recovered run converges to the SAME fingerprint as the clean run'
+        }
+    }
+
+    # ---- publish gate (T-095): CI gate + one-time approval scenarios --------------------
+    $ciDelayed = Run-Scenario 'git' 'ci-delayed'
+    if ($ciDelayed) {
+        Assert-Equal 'published' $ciDelayed.outcome 'ci-delayed -> published (waited the whole required set, not the first green run)'
+        Assert-Contains $ciDelayed.archive 'T-101' 'ci-delayed archived T-101 after the full CI set went green'
+    }
+    $ciRerun = Run-Scenario 'git' 'ci-rerun'
+    if ($ciRerun) { Assert-Equal 'published' $ciRerun.outcome 'ci-rerun -> published (red check re-run to green)' }
+
+    $ciOutage = Run-Scenario 'git' 'ci-outage'
+    if ($ciOutage) {
+        Assert-Equal 'ci-unconfirmed' $ciOutage.outcome 'ci-outage -> ci-unconfirmed (fail-closed at the deadline)'
+        # fail-closed: the task is NOT archived while required CI is unconfirmed.
+        Assert-True ($ciOutage.archive -notmatch 'done:T-101') 'ci-outage: task NOT archived as done while CI is unconfirmed'
+        Assert-Contains $ciOutage.archive 'T-101=опубликована' 'ci-outage: task held at published (recovery artifacts kept), not выполнена'
+    }
+
+    $approve = Run-Scenario 'git' 'approve'
+    if ($approve) {
+        Assert-Equal 'published' $approve.outcome 'approve -> published (one-time approval granted)'
+        Assert-Contains $approve.archive 'T-101' 'approve archived T-101 after the operator approved'
+    }
+    $reject = Run-Scenario 'git' 'reject'
+    if ($reject) { Assert-Equal 'escalated' $reject.outcome 'reject -> escalated (not published)' }
+    $aTimeout = Run-Scenario 'git' 'approval-timeout'
+    if ($aTimeout) { Assert-Equal 'escalated' $aTimeout.outcome 'approval-timeout -> escalated (no answer by deadline = fail-closed)' }
+    $aStale = Run-Scenario 'git' 'approval-stale'
+    if ($aStale) { Assert-Equal 'escalated' $aStale.outcome 'approval-stale -> escalated (decision expired after code change)' }
+
+    # a fault injected into a new scenario also converges to the clean fingerprint.
+    if ($ciDelayed) {
+        $ciFaulted = Run-Scenario 'git' 'ci-delayed' 'to-review:before-write'
+        if ($ciFaulted) {
+            Assert-True ([bool]$ciFaulted.fault_fired) 'ci-delayed injected fault fired'
+            Assert-Equal $ciDelayed.fingerprint $ciFaulted.fingerprint 'ci-delayed faulted run converges to the clean fingerprint'
         }
     }
 }

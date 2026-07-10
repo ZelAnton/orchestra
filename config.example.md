@@ -39,6 +39,12 @@ QUARANTINE_MAX_ATTEMPTS: 3
 # SMOKE_CMD: npm test   # пример; по умолчанию smoke не запускается
 PUSH: true
 CI_WATCH: true
+# --- Гейт публикации: ожидание обязательных CI-проверок (Фаза 5.4; см. ниже) ---
+# PUBLISH_CI_DEADLINE_SEC: 1800  # сколько ждать полного набора обязательных CI-проверок,
+                                 #   прежде чем fail-closed (не публиковать/не архивировать)
+# PUBLISH_CI_BACKOFF_SEC: 30     # пауза между опросами CI в цикле ожидания
+# APPROVAL_DEADLINE_SEC: 86400   # срок действия запроса на human approval; нет ответа к
+                                 #   дедлайну = отказ (fail-closed), не одобрение по умолчанию
 REVIEWER_TIERING: true
 # MAIN_BRANCH: main      # по умолчанию — автоопределение (см. ниже)
 # --- Событийный outbox (.work/events.jsonl) ---
@@ -83,6 +89,9 @@ REVIEWER_TIERING: true
 | `SMOKE_CMD` | не задано (smoke не запускается) |
 | `PUSH` | true |
 | `CI_WATCH` | true |
+| `PUBLISH_CI_DEADLINE_SEC` | 1800 |
+| `PUBLISH_CI_BACKOFF_SEC` | 30 |
+| `APPROVAL_DEADLINE_SEC` | 86400 |
 | `REVIEWER_TIERING` | true |
 | `MAIN_BRANCH` | автоопределение |
 | `EVENTS_OUTBOX` | on |
@@ -162,6 +171,17 @@ REVIEWER_TIERING: true
   публикуется.
 - `CI_WATCH` — `false` пропускает ожидание CI даже если push выполнен (полезно,
   если CI настроен, но не хочется ждать в автоматическом прогоне).
+- `PUBLISH_CI_DEADLINE_SEC` — сколько секунд processor ждёт полного набора обязательных
+  CI-проверок публикации (Фаза 5.4), прежде чем считать ожидание истёкшим и **не**
+  публиковать/архивировать (fail-closed). Набор обязательных проверок задаётся политикой
+  `.work/constraints.md` (раздел «Обязательные CI-проверки публикации»); дедлайн — только
+  тайминг ожидания. По умолчанию 1800 (30 минут).
+- `PUBLISH_CI_BACKOFF_SEC` — пауза между опросами CI-проверок в цикле ожидания Фазы 5.4.
+  По умолчанию 30 секунд.
+- `APPROVAL_DEADLINE_SEC` — срок действия запроса на человеческое подтверждение
+  (`tools/policy.ps1 approval-request`: обязательный human review, force-lock, policy
+  bypass). Нет ответа оператора к дедлайну = **отказ** (fail-closed), не одобрение по
+  умолчанию. По умолчанию 86400 (24 часа).
 - `REVIEWER_TIERING` — `false` отключает тиринг ревью (см. reviewer_std.md) и
   всегда использует полный `reviewer` (opus/high) независимо от уровня
   исполнителя задачи. Включено по умолчанию — экономит существенную часть
