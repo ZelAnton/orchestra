@@ -5,7 +5,12 @@
 # routing is on and no grant is found; OK when a grant is found; OK (no WARN)
 # when routing is off even without a grant, and (task T-070) classifies the
 # Windows Codex sandbox profile (~\.codex\config.toml's [windows] sandbox) and
-# approval_policy for the safe/dangerous/missing/corrupted-config cases. Read-
+# approval_policy for the safe/dangerous/missing/corrupted-config cases.
+# (task T-071) additionally covers the reconciled permission classification:
+# session-only (CC_CODEX_EXEC_GRANT covers the command, no settings rule),
+# deny-only (a codex exec match only in permissions.deny must not count),
+# CI-fix-only (CODEX_CIFIX=on alone keeps the gate active), and custom CODEX_CMD
+# with/without a matching allow-rule (no false OK off the canonical rule). Read-
 # only, never calls claude.
 #
 # Note: the sandboxed copy of cc-doctor.cmd carries one cosmetic string
@@ -57,7 +62,11 @@ Invoke-Test -Name 'cc-doctor.cmd' -Body {
         New-Item -ItemType Directory -Force -Path $workDir | Out-Null
         Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Value 'CODEX_CODER: fast' -Encoding utf8
 
-        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd'
+        # Clear the ambient session-grant signal so this asserts the static-settings
+        # path (routing on, no grant anywhere -> WARN), not a session-grant OK.
+        # USERPROFILE is redirected to the sandbox so the machine's real
+        # ~/.claude/settings.json cannot inject a stray allow-rule into the search.
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ CC_CODEX_EXEC_GRANT = ''; USERPROFILE = $paths.Root }
         Assert-Equal 0 $result.ExitCode '[routing on, no grant] exit code'
         Assert-Contains $result.Output 'WARN exec permission: NOT found' '[routing on, no grant] must WARN'
         Assert-Contains $result.Output 'Bash(codex exec *)' '[routing on, no grant] WARN must name the missing rule'
@@ -79,7 +88,10 @@ Invoke-Test -Name 'cc-doctor.cmd' -Body {
         New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
         Set-Content -LiteralPath (Join-Path $claudeDir 'settings.local.json') -Value '{"permissions":{"allow":["Bash(codex exec *)"]}}' -Encoding utf8
 
-        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd'
+        # Clear the ambient session-grant signal so this asserts the static-settings
+        # allow-rule path specifically, not a session-grant OK. USERPROFILE is
+        # redirected so only the project settings.local.json created here is read.
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ CC_CODEX_EXEC_GRANT = ''; USERPROFILE = $paths.Root }
         Assert-Equal 0 $result.ExitCode '[routing on, grant present] exit code'
         Assert-Contains $result.Output 'OK   exec permission: allow-rule for codex exec present' '[routing on, grant present] must report OK'
         Assert-True ($result.Output -notlike '*WARN exec permission*') '[routing on, grant present] must not WARN once a grant exists'
@@ -240,6 +252,121 @@ Invoke-Test -Name 'cc-doctor.cmd' -Body {
         Assert-Contains $result.Output 'WARN windows sandbox profile: unrecognized' '[windows sandbox: corrupted config] must WARN about an unrecognized sandbox value'
         Assert-Contains $result.Output 'sandbox value (totally-bogus)' '[windows sandbox: corrupted config] must show the unrecognized value'
         Assert-Contains $result.Output 'WARN approval_policy: totally-bogus' '[windows sandbox: corrupted config] approval_policy must WARN with the unrecognized value shown'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 8 (task T-071): session-only - Codex routing is on and the
+    # session carries the launcher grant signal (CC_CODEX_EXEC_GRANT covers the
+    # command), with NO persistent settings allow-rule anywhere -> OK via session
+    # grant, no WARN. This is the exact case the pre-T-071 gate would falsely block.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Value 'CODEX_CODER: fast' -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ CC_CODEX_EXEC_GRANT = 'codex exec'; USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[session-only] exit code'
+        Assert-Contains $result.Output 'OK   exec permission: session grant present' '[session-only] must report OK via the session grant, not require a settings rule'
+        Assert-True ($result.Output -notlike '*WARN exec permission*') '[session-only] must not WARN when the session grant covers the command'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 9 (task T-071): deny-only - `codex exec` appears ONLY in
+    # permissions.deny (plus an unrelated allow entry), with routing on and no
+    # session grant. The strict permissions.allow-only parse must NOT treat the
+    # deny match as a grant -> stays a WARN, never a false OK.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Value 'CODEX_CODER: fast' -Encoding utf8
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $claudeDir 'settings.local.json') -Value '{"permissions":{"deny":["Bash(codex exec *)"],"allow":["Read(*)"]}}' -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ CC_CODEX_EXEC_GRANT = ''; USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[deny-only] exit code'
+        Assert-Contains $result.Output 'WARN exec permission: NOT found' '[deny-only] a codex exec match in permissions.deny must NOT be accepted as a grant'
+        Assert-True ($result.Output -notlike '*OK   exec permission: allow-rule*') '[deny-only] must not falsely report an allow-rule OK from a deny match'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 10 (task T-071): CI-fix-only - only CODEX_CIFIX is on;
+    # CODEX_CODER and CODEX_REVIEWER are off. The gate necessity is the union of
+    # all three routes, so it must still be active (WARN when no grant), not
+    # skipped as "all off". CODEX_CODER/CODEX_REVIEWER are cleared in the env so
+    # the ambient machine's real Codex settings cannot make this flaky.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Value 'CODEX_CIFIX: on' -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{
+            CODEX_CODER         = ''
+            CODEX_REVIEWER      = ''
+            CC_CODEX_EXEC_GRANT = ''
+            USERPROFILE         = $paths.Root
+        }
+        Assert-Equal 0 $result.ExitCode '[CI-fix-only] exit code'
+        Assert-Contains $result.Output 'WARN exec permission: NOT found' '[CI-fix-only] CODEX_CIFIX=on alone must keep the gate active (WARN when no grant)'
+        Assert-True ($result.Output -notlike '*not found, but not required*') '[CI-fix-only] must NOT treat routing as off when only CODEX_CIFIX is on'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 11 (task T-071): custom command, no matching rule - CODEX_CMD is
+    # non-canonical and the ONLY settings rule is the canonical `codex exec`, which
+    # does not cover `<CODEX_CMD> exec`. The gate must NOT emit a false OK off the
+    # canonical rule; it must WARN with a precise, command-specific hint.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        @('CODEX_CODER: fast', 'CODEX_CMD: my-codex') -join "`n" | Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Encoding utf8
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $claudeDir 'settings.local.json') -Value '{"permissions":{"allow":["Bash(codex exec *)"]}}' -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ CC_CODEX_EXEC_GRANT = ''; USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[custom cmd, no match] exit code'
+        Assert-Contains $result.Output 'WARN exec permission: CODEX_CMD is non-canonical (my-codex)' '[custom cmd, no match] must WARN naming the non-canonical command'
+        Assert-Contains $result.Output 'Bash(my-codex exec *)' '[custom cmd, no match] hint must name the rule matching the actual command prefix'
+        Assert-True ($result.Output -notlike '*OK   exec permission: allow-rule*') '[custom cmd, no match] canonical codex exec rule must NOT yield a false OK'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 12 (task T-071): custom command WITH the matching rule - the
+    # settings allow-rule matches the actual `<CODEX_CMD> exec` prefix, so the gate
+    # correctly reports OK for the custom command.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        @('CODEX_CODER: fast', 'CODEX_CMD: my-codex') -join "`n" | Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Encoding utf8
+        $claudeDir = Join-Path $paths.Project '.claude'
+        New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $claudeDir 'settings.local.json') -Value '{"permissions":{"allow":["Bash(my-codex exec *)"]}}' -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ CC_CODEX_EXEC_GRANT = ''; USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[custom cmd, matching rule] exit code'
+        Assert-Contains $result.Output 'OK   exec permission: allow-rule for my-codex exec present' '[custom cmd, matching rule] must report OK for the actual command prefix'
+        Assert-True ($result.Output -notlike '*WARN exec permission*') '[custom cmd, matching rule] must not WARN when the matching rule exists'
     }
     finally {
         Remove-Sandbox $paths

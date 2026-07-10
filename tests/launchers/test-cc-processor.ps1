@@ -151,4 +151,39 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
     finally {
         Remove-Sandbox $paths
     }
+
+    # --- Scenario 7 (task T-071): the launcher exports CC_CODEX_EXEC_GRANT
+    # into claude's environment - the explicit, verifiable session-grant signal
+    # the processor's Phase 1.1 gate reads instead of requiring a persistent
+    # settings allow-rule. Its value is the granted command prefix ("codex exec"),
+    # matching the --allowedTools "Bash(codex exec:*)" grant on the same line.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
+        Install-FakeClaude -Paths $paths
+        $captureFile = Join-Path $paths.Root 'claude-args.txt'
+        $envFile = Join-Path $paths.Root 'claude-env.txt'
+
+        # Deliberately clear CC_CODEX_EXEC_GRANT in the ambient env first so the
+        # captured value can only come from the launcher itself, not from whatever
+        # the machine running the tests happens to have set.
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -EnvVars @{
+            FAKE_ARGS_FILE      = $captureFile
+            FAKE_ENV_FILE       = $envFile
+            FAKE_EXIT_CODE      = '0'
+            CC_CODEX_EXEC_GRANT = ''
+        }
+        Assert-Equal 0 $result.ExitCode '[session grant] exit code'
+
+        $expectedGrant = Get-ExpectedGrant 'cc-processor.cmd'
+        Assert-Equal 'codex exec' $expectedGrant '[session grant] launcher source must set CC_CODEX_EXEC_GRANT=codex exec'
+        Assert-Equal $expectedGrant (Get-CapturedGrant $envFile) '[session grant] claude must inherit CC_CODEX_EXEC_GRANT with the launcher-set value'
+
+        # The session-grant env signal is in ADDITION to the --allowedTools grant,
+        # not a replacement: both must still be present on the claude command line.
+        Assert-True ((Get-CapturedArgs $captureFile) -contains 'Bash(codex exec:*)') '[session grant] --allowedTools "Bash(codex exec:*)" must still be forwarded'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }
