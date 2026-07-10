@@ -52,4 +52,12 @@ done
 # with exactly `codex exec`. It sits BEFORE --permission-mode: --allowedTools is variadic
 # and, with no following flag to stop it, would swallow the positional prompt.
 # --permission-mode auto is kept unchanged.
+#
+# CC_CODEX_EXEC_GRANT="codex exec": an explicit, verifiable signal that the session grant
+# for autonomous `codex exec` was already issued above via --allowedTools. This is the
+# single launcher->processor contract (Phase 1.1 of processor.md and cc-doctor read the
+# same variable): its value is the granted command prefix. With it present, the Phase 1.1
+# permission gate needs no duplicate persistent allow-rule in the settings files and does
+# not re-run the static search.
+export CC_CODEX_EXEC_GRANT="codex exec"
 exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
