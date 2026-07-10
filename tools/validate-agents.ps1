@@ -18,8 +18,9 @@
 # сканируется). Единственное исключение внутри agents/ — два шаблона генератора
 # (coder.template.md, reviewer.template.md): их frontmatter содержит плейсхолдер
 # "name: {{NAME}}", поэтому под инварианты настоящих агентов они не подпадают. Тот же
-# сокращённый набор исключений используют /XF у launchers\cc-sync.cmd(.sh) и блок
-# "agent-mirror freshness" у launchers\cc-doctor.cmd(.sh); держите все места синхронными.
+# сокращённый набор исключений используют движок зеркалирования tools\sync-runtime.ps1
+# (за которым cc-sync.cmd/.sh) и блок "agent-mirror freshness" в tools\doctor-runtime.ps1
+# (за которым cc-doctor.cmd/.sh); держите все места синхронными.
 
 $ErrorActionPreference = "Stop"
 

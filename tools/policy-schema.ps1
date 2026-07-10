@@ -6,7 +6,7 @@
 
 .DESCRIPTION
     Historically the config keys and their defaults were duplicated as prose across
-    config.example.md, both cc-doctor variants and processor.md, while the policy
+    config.example.md, cc-doctor and processor.md, while the policy
     (.work/constraints.md) was free Markdown that roles only "read". Nothing described
     the two in one machine-readable place, so documentation and validators could drift and
     the policy was never an executable boundary. This file is that one place:
@@ -32,10 +32,10 @@
     config.example.md's "Значения по умолчанию" table (and, for the six value-constrained
     Codex keys, their allowed value sets are checked to equal the "Допустимые значения
     Codex-ключей" table) by tools/check-consistency.ps1 Class 5. Because config.example.md's
-    table is in turn checked to equal both cc-doctor allowlists (Class 4), a change here that
+    table is in turn checked to equal the cc-doctor allowlist (Class 4), a change here that
     is not mirrored into config.example.md - and thence cc-doctor - fails the smoke gate. So
-    cc-doctor keeps its own hardcoded copy (it must run when mirrored standalone into
-    ~/.claude/scripts, where tools/ is absent) yet cannot drift from this schema.
+    cc-doctor's engine (tools/doctor-runtime.ps1) keeps its own hardcoded copy (it must run
+    when mirrored standalone into ~/.claude/scripts) yet cannot drift from this schema.
 
     Runs under PowerShell 7 (pwsh). Get-RealFsPath uses .NET 6+ ResolveLinkTarget for
     symlink/junction resolution; under Windows PowerShell 5.1 that call is unavailable and

@@ -15,6 +15,8 @@
          - agents/*.md  (minus the two generator templates) -> <dest>/agents
          - launchers    (*.cmd on Windows, *.sh on POSIX)    -> <dest>/scripts
          - config.example.md, constraints.example.md         -> <dest>/scripts
+         - tools/doctor-runtime.ps1 (the engine cc-doctor's  -> <dest>/scripts
+           thin wrappers delegate to, so cc-doctor runs from the mirror)
        Publication goes through a staging area and a persisted journal, so an
        error mid-publish (or a hard crash, recovered on the next run) is rolled
        back to the exact prior state - never a partially applied mirror.
@@ -287,6 +289,20 @@ function Get-ManagedPairs {
         }
     }
 
+    # Launcher runtimes: a mirrored launcher that is only a thin wrapper over a
+    # tools/*.ps1 engine needs that engine present next to it to run from the mirror.
+    # cc-doctor.cmd/.sh delegate to tools/doctor-runtime.ps1, and cc-doctor's whole point
+    # is to run from the ~/.claude/scripts mirror against a target project, so the runtime
+    # must travel with it. It is mirrored regardless of the launcher glob (both OSes need
+    # the same single pwsh engine). cc-sync's own runtime is deliberately NOT mirrored:
+    # cc-sync run from a mirror has nothing to sync FROM and is a reported no-op anyway.
+    foreach ($rt in @('doctor-runtime.ps1')) {
+        $src = Join-Path (Join-Path $Repo 'tools') $rt
+        if (Test-Path -LiteralPath $src -PathType Leaf) {
+            $pairs.Add([ordered]@{ Source = $src; Dest = (Join-Path $scriptsDst $rt); Kind = 'runtime' })
+        }
+    }
+
     return $pairs
 }
 
@@ -375,7 +391,7 @@ $tx = New-TxContext -Root $DestinationRoot
 New-Item -ItemType Directory -Force -Path $tx.Stage | Out-Null
 New-Item -ItemType Directory -Force -Path $tx.Backup | Out-Null
 
-$counts = @{ agent = 0; launcher = 0; template = 0 }
+$counts = @{ agent = 0; launcher = 0; template = 0; runtime = 0 }
 $removed = 0
 try {
     foreach ($p in $pairs) {
@@ -406,6 +422,7 @@ $scriptsDst = Join-Path $DestinationRoot 'scripts'
 Write-SyncInfo ("Synced {0} agent definition(s) -> {1}" -f $counts['agent'], $agentsDst)
 Write-SyncInfo ("Synced {0} launcher script(s) -> {1}" -f $counts['launcher'], $scriptsDst)
 Write-SyncInfo ("Synced {0} config template(s) -> {1}" -f $counts['template'], $scriptsDst)
+Write-SyncInfo ("Synced {0} launcher runtime(s) -> {1}" -f $counts['runtime'], $scriptsDst)
 if ($removed -gt 0) {
     Write-SyncInfo ("Removed {0} stale previously-managed mirror entry(ies)." -f $removed)
 }

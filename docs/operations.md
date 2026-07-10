@@ -278,3 +278,54 @@ admission" section ("Роллинг-приём когорты").
 Changes only affect batches started after the edit; nothing needs to be restarted for
 them to take effect on the next `processor` invocation (there is no separate reload
 step).
+
+## 8. The operating toolchain: `cc-sync`, `cc-doctor`, and what CI actually checks
+
+The launchers and their supporting scripts are one **cross-platform operating
+toolchain**: `.cmd` on Windows and `.sh` on macOS/Linux invoke the *same* PowerShell 7
+(`pwsh`) engine, so the two platforms behave identically rather than being two
+hand-mirrored programs that can drift. This is what you can rely on, and how it is
+verified.
+
+**`cc-sync` — installing/refreshing the mirror (transactional).** `cc-sync.cmd`/
+`cc-sync.sh` are thin wrappers over one engine, `tools/sync-runtime.ps1`, which mirrors
+this repo's agent `*.md`, the launchers, `config.example.md` / `constraints.example.md`,
+and the `cc-doctor` engine (`tools/doctor-runtime.ps1`) into your Claude environment
+(`~/.claude`, `%USERPROFILE%\.claude` on Windows). Mirroring is **transactional**: every
+file is published through a staging area with a journal-backed rollback, so an
+interruption mid-publish (or a hard crash, recovered on the next run) is rolled back to
+the exact prior state — you never get a half-applied mirror. The engine keeps a
+**manifest** (`~/.claude/.orchestra-sync-manifest.json`) of the files it manages; on a
+later sync it prunes only entries it previously wrote that are no longer sourced (a
+renamed/deleted agent or launcher), and **never touches files it did not write** (agents
+you added to the mirror by hand are safe). A destination that has been corrupted into an
+empty directory where a file belongs is healed back into the file; a *non-empty*
+directory blocking a file target is refused (it may hold real data) and the whole sync
+rolls back. Re-run `cc-sync` from a checkout after editing any agent/launcher.
+
+**`cc-doctor` — the read-only preflight (unified).** `cc-doctor.cmd`/`cc-doctor.sh` are
+likewise thin wrappers over one engine, `tools/doctor-runtime.ps1`; run it from a target
+project's root for a read-only readiness report (it never changes anything — not even a
+stuck `orchestrator.lock` or an orphaned worktree, it only reports on them). It covers
+the Codex preflight (binary/auth and the autonomous-runtime allow-rule), the effective
+`CODEX_*` values and their fail-closed validation, KB status, the Windows sandbox
+profile (a `N/A` line on POSIX, where the concept does not exist), and the task-queue /
+lock / worktree / main-branch / agent-mirror audit. Because `cc-sync` mirrors the doctor
+engine next to the launchers, `cc-doctor` works the same when run from the `~/.claude`
+mirror as from a checkout. Its `OK`/`WARN`/`FAIL`/`N/A` lines are advisory text — it
+always exits 0.
+
+**CI (what runs automatically, on which OS).** `.github/workflows/ci.yml` runs on every
+push and pull request on a **Windows + Linux matrix** (`windows-latest` and
+`ubuntu-latest`), every step under `pwsh`. On both OSes it: regenerates the
+template-driven `coder`/`reviewer` variants and fails on any drift from the committed
+files; runs the mandatory validators `tools/validate-agents.ps1` and
+`tools/check-consistency.ps1`; runs the Codex sandbox/config guard checks and the
+Codex-runtime / reviewer-gate / policy tests; and runs the launcher test entry point
+`tests/launchers/run-all.ps1`. On Windows that entry point runs the full launcher suite
+(every `cc-*.cmd` test) plus the cross-platform engine tests; on Linux it runs the
+cross-platform engine tests (`test-sync-runtime` / `test-doctor-runtime` /
+`test-generate-coders`), so the unified `sync`/`doctor` runtimes are genuinely exercised
+on Linux too. A **missing** mandatory validator or test entry point is a **hard CI
+failure on that OS**, never a silent skip — the gates only mean something if they
+actually run. If CI is red after a push, see §4.

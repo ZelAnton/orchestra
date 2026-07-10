@@ -70,40 +70,27 @@ function Remove-Sandbox {
 # content and semantics of every line are unchanged; only the CR bytes are
 # added. The corruption is invisible in normal interactive terminal use,
 # which is presumably why it has gone unnoticed so far.
-# cc-doctor.cmd's single powershell -Command line embeds one Cyrillic
-# section-header phrase ("== База знаний (KB; .work\knowledge) ==") deep
-# inside an otherwise very long, all-ASCII one-liner. Unlike the drift
-# described above (which CRLF normalization fixes because it resyncs at
-# every line break), this phrase sits mid-line with no line break to resync
-# on; the same read corruption there does not just print a stray line, it
-# corrupts that one embedded string badly enough that PowerShell's own
-# parser fails on the *entire* -Command argument (a single parse pass over
-# the whole string), so nothing in the script runs at all. Verified this is
-# not fixed by CRLF normalization, a UTF-8 BOM, or pre-setting the real
-# console codepage before spawning cmd.exe - it reproduces regardless.
-# Since this phrase is a cosmetic section header with no bearing on the
-# logic under test (config-key parsing, codex detection, KB entry counts),
-# the sandboxed test copy substitutes an ASCII paraphrase for it so the rest
-# of the script - identical otherwise - can actually run under automated
-# invocation. This never touches the real launcher file.
+# cc-status.cmd embeds a Cyrillic parenthetical message mid-line inside each of its two
+# "else { Write-Host '(...)' }" branches (shown when status.md / journal.md is absent).
+# Unlike the drift the CRLF normalization above fixes (which resyncs at every line
+# break), that phrase sits mid-line with no line break to resync on; the same cmd.exe
+# read corruption there corrupts that one embedded string badly enough that PowerShell's
+# own parser fails on the *entire* -Command argument, so nothing runs. Neither message's
+# exact wording is asserted by the tests, so both occurrences are replaced uniformly with
+# an ASCII placeholder in the sandboxed copy only (never the real launcher).
 #
-# The match is done by regex against the surrounding ASCII (`== ... (KB;
-# .work\knowledge) ==`) rather than by embedding the Cyrillic phrase as a
-# literal in this file's own source: Windows PowerShell 5.1 reads .ps1 files
-# without a BOM using the legacy system ANSI code page, not UTF-8, so a
-# literal non-ASCII string typed directly into this UTF-8-without-BOM file
-# would itself be misread as soon as this file is loaded - the same class of
-# encoding pitfall this whole workaround exists to route around, just one
-# layer up (in the test harness' own source instead of the launcher's).
+# (Historically cc-doctor.cmd needed the same treatment for its embedded Cyrillic KB
+# header; since task T-090 cc-doctor.cmd is a thin wrapper with no embedded non-ASCII, so
+# it no longer needs a fixup and its logic is covered directly by test-doctor-runtime.ps1.)
+#
+# The match is done by regex against the surrounding ASCII rather than by embedding the
+# Cyrillic phrase as a literal in this file's own source: Windows PowerShell 5.1 reads
+# .ps1 files without a BOM using the legacy system ANSI code page, not UTF-8, so a literal
+# non-ASCII string typed directly into this UTF-8-without-BOM file would itself be misread
+# as soon as this file is loaded - the same class of encoding pitfall this whole
+# workaround exists to route around, just one layer up (in the test harness' own source
+# instead of the launcher's).
 $script:LauncherContentFixups = @{
-    'cc-doctor.cmd' = @(
-        , @('== \S+ \S+ \(KB; \.work\\knowledge\) ==', '== KB status (.work\knowledge) ==')
-    )
-    # cc-status.cmd embeds a Cyrillic parenthetical message inside each of its
-    # two "else { Write-Host '(...)' }" branches (shown when status.md /
-    # journal.md is absent). Same class of issue as cc-doctor.cmd above;
-    # neither message's exact wording is asserted by the tests, so both
-    # occurrences are replaced uniformly with an ASCII placeholder.
     'cc-status.cmd' = @(
         , @("Write-Host '\([^)]*\)'", "Write-Host '(no data yet)'")
     )

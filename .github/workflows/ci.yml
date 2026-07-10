@@ -1,17 +1,31 @@
 name: CI
 
 # Runs on every push and every pull request. All checks below are read-only /
-# static (no consuming project's .work/ is touched) and run on windows-latest
-# because the repository's scripts and launchers are PowerShell/.cmd targeting
-# Windows.
+# static (no consuming project's .work/ is touched). Since task T-090 they run on a
+# Windows + Linux matrix (windows-latest AND ubuntu-latest): the launchers and the
+# operating toolchain target both platforms (the cc-sync / cc-doctor engines are one
+# cross-platform pwsh runtime), so both must actually be exercised, not just Windows.
+# Every step runs under pwsh (PowerShell 7), which is preinstalled on both runners.
+#
+# A missing MANDATORY validator or test entry point is a HARD FAILURE on every OS of
+# the matrix, never a silent skip: the whole point of these gates is that they run, so
+# their absence must fail the build rather than pass it quietly. (The old
+# `if (Test-Path) { ... } else { Write-Warning "...skipping..." }` placeholders existed
+# only while those scripts were still being written; they have all landed.)
 on:
   push:
   pull_request:
 
 jobs:
   validate:
-    name: Validate repository
-    runs-on: windows-latest
+    name: Validate repository (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report both platforms independently: a Linux-only or Windows-only break must
+      # still surface rather than cancel its sibling.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -19,16 +33,19 @@ jobs:
       - name: Regenerate agent variants and check for drift
         # Regenerates agents/coder.md / coder_fast.md / coder_deep.md from
         # agents/coder.template.md and agents/reviewer.md / reviewer_std.md from
-        # agents/reviewer.template.md via generate-coders.ps1 (the generator lives in
-        # the repo root; templates and variants under agents/), then fails the build if
-        # the regenerated files differ from what is committed. Mirrors the drift
-        # check already used by launchers/cc-sync.cmd (see T-011): the templates
-        # are the source of truth, and a stale/hand-edited variant must not reach
-        # main unnoticed.
+        # agents/reviewer.template.md via generate-coders.ps1, then fails the build if the
+        # regenerated files differ from what is committed. The templates are the source of
+        # truth, and a stale/hand-edited variant must not reach main unnoticed. Runs on
+        # both OSes: the generator normalizes to LF, so its byte output is identical on
+        # Windows and Linux (test-generate-coders.ps1 proves this).
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          .\generate-coders.ps1
+          if (-not (Test-Path ./generate-coders.ps1)) {
+            Write-Error "MANDATORY generator generate-coders.ps1 is missing on ${{ matrix.os }} - hard CI failure, not a silent skip."
+            exit 1
+          }
+          ./generate-coders.ps1
           git diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md agents/reviewer.md agents/reviewer_std.md
           if ($LASTEXITCODE -ne 0) {
             Write-Error "agents/coder.md / coder_fast.md / coder_deep.md / reviewer.md / reviewer_std.md drifted from their templates (agents/coder.template.md / agents/reviewer.template.md). Run generate-coders.ps1 (or generate-coders.cmd) locally and commit the regenerated files."
@@ -36,166 +53,125 @@ jobs:
           }
 
       - name: Validate agent file format
-        # Runs tools/validate-agents.ps1 (added by T-016), which checks every
-        # agent *.md file for: frontmatter starting at byte 0, UTF-8 without BOM,
-        # required non-empty name/description fields, name matching the
-        # filename, and snake_case naming. Until T-016 lands the script, this
-        # step is skipped with an explicit warning rather than failing the build.
+        # tools/validate-agents.ps1 (T-016): frontmatter at byte 0, UTF-8 without BOM,
+        # required non-empty name/description, name == filename, snake_case naming.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tools\validate-agents.ps1) {
-            .\tools\validate-agents.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tools/validate-agents.ps1 not found yet (see T-016) - skipping agent file validation."
+          $p = "./tools/validate-agents.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY validator $p is missing on ${{ matrix.os }} - a missing mandatory validator is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check cross-agent contract consistency
-        # Runs tools/check-consistency.ps1 (added by T-017), which cross-checks
-        # UPPER_SNAKE_CASE configuration keys against the config.example.md
-        # defaults table, processor phase references against processor.md, and
-        # runtime artifact names against the knowledge.md table. Until T-017
-        # lands the script, this step is skipped with an explicit warning rather
-        # than failing the build.
+        # tools/check-consistency.ps1 (T-017): UPPER_SNAKE_CASE config keys vs
+        # config.example.md, processor phase references vs processor.md, runtime-artifact
+        # names vs knowledge.md, the cc-doctor config-key allowlist (now in
+        # tools/doctor-runtime.ps1) and the policy schema.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tools\check-consistency.ps1) {
-            .\tools\check-consistency.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tools/check-consistency.ps1 not found yet (see T-017) - skipping consistency check."
+          $p = "./tools/check-consistency.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY validator $p is missing on ${{ matrix.os }} - a missing mandatory validator is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check Codex sandbox fail-closed contract
-        # Runs tools/check-codex-sandbox-guard.ps1 (added by T-069), which asserts
-        # that both Codex adapters (agents/coder_codex.md, agents/reviewer_codex.md)
-        # pin the fail-closed approval policy (-c approval_policy=never) on the codex
-        # exec invocation and document sandbox-init failure escalation
-        # (CreateProcessAsUserW failed: 5 -> ENV_LIMIT/sandbox-init) instead of a
-        # fail-open unsandboxed fallback, and that config.example.md / knowledge.md
-        # describe the same guarantee. Until the script lands this step is skipped
-        # with an explicit warning rather than failing the build.
+        # tools/check-codex-sandbox-guard.ps1 (T-069): both Codex adapters pin
+        # -c approval_policy=never and document sandbox-init escalation rather than a
+        # fail-open unsandboxed fallback; config.example.md / knowledge.md say the same.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tools\check-codex-sandbox-guard.ps1) {
-            .\tools\check-codex-sandbox-guard.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tools/check-codex-sandbox-guard.ps1 not found yet (see T-069) - skipping Codex sandbox guard check."
+          $p = "./tools/check-codex-sandbox-guard.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY validator $p is missing on ${{ matrix.os }} - a missing mandatory validator is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check Codex config value validation contract
-        # Runs tools/check-codex-config-guard.ps1 (added by T-072), which asserts
-        # that the allowed value sets and defaults for the six value-constrained
-        # Codex keys (CODEX_CODER/CODEX_REVIEWER/CODEX_CIFIX/CODEX_REASONING/
-        # CODEX_SANDBOX/CODEX_NETWORK) stay identical across config.example.md's
-        # validation table, agents/processor.md's `KEY ∈ {...}` branching, and both
-        # cc-doctor variants (the single-source fail-closed validation contract, so
-        # an invalid value stops the cohort at Phase 1.1 instead of being silently
-        # defaulted). Until the script lands this step is skipped with an explicit
-        # warning rather than failing the build.
+        # tools/check-codex-config-guard.ps1 (T-072): the six value-constrained Codex keys
+        # carry identical allowed sets + defaults across config.example.md,
+        # agents/processor.md and tools/doctor-runtime.ps1 (the unified cc-doctor engine).
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tools\check-codex-config-guard.ps1) {
-            .\tools\check-codex-config-guard.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tools/check-codex-config-guard.ps1 not found yet (see T-072) - skipping Codex config value guard check."
+          $p = "./tools/check-codex-config-guard.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY validator $p is missing on ${{ matrix.os }} - a missing mandatory validator is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check reviewer_codex clean-pass / SUMMARY-R gate contract
-        # Runs tests/test-reviewer-codex-gate.ps1 (added by T-074), a reference
-        # implementation of the "clean pass" / SUMMARY-R gate rules described in
-        # agents/reviewer_codex.md, exercised against fake codex output covering
-        # partial-success (skipped/duplicated RECHECK), a failing second required
-        # pass, a missing RECHECK that a later retry recovers from, a
-        # contradictory mixed NEW/NEW:none output, and a fully clean pass
-        # sequence that reaches SUMMARY-R.
+        # tests/test-reviewer-codex-gate.ps1 (T-074): a reference implementation of the
+        # "clean pass" / SUMMARY-R gate rules described in agents/reviewer_codex.md.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tests\test-reviewer-codex-gate.ps1) {
-            .\tests\test-reviewer-codex-gate.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tests/test-reviewer-codex-gate.ps1 not found yet (see T-074) - skipping reviewer_codex gate contract check."
+          $p = "./tests/test-reviewer-codex-gate.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check Codex runtime behaviour
-        # Runs tests/test-codex-runtime.ps1 (added by T-075), which drives the
-        # executable Codex adapter runtime tools/codex-runtime.ps1 against a fake
-        # `codex` stub and asserts the mechanical protocol the adapters delegate to
-        # it: safe argv construction (no shell injection), prompt-on-stdin +
-        # separate stdout/stderr/RC capture, timeout, permission/availability
-        # refusal (CODEX_UNAVAILABLE), sandbox-init failure (ENV_LIMIT/sandbox-init),
-        # the dependency-broker allowlist, reviewer output / oversized-diff
-        # validation, the no-commit guard and own-worktree cleanup, and
-        # failure-class -> escalation-sentinel mapping. Until the script lands this
-        # step is skipped with an explicit warning rather than failing the build.
+        # tests/test-codex-runtime.ps1 (T-075): drives tools/codex-runtime.ps1 against a
+        # fake codex stub and asserts safe argv construction, stdio/RC capture, timeout,
+        # permission/sandbox-init refusal, the no-commit guard and cleanup.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tests\test-codex-runtime.ps1) {
-            .\tests\test-codex-runtime.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tests/test-codex-runtime.ps1 not found yet (see T-075) - skipping Codex runtime behaviour check."
+          $p = "./tests/test-codex-runtime.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check executable policy boundary
-        # Runs tests/test-policy.ps1 (added by T-084), which drives the executable
-        # policy/config boundary tools/policy.ps1 (built on the single schema source
-        # tools/policy-schema.ps1) and asserts: schema-driven fail-closed config
-        # validation, append-only migration that never loses a value/comment and
-        # refuses unknown/duplicate/invalid fields, the destructive-operation runtime
-        # guard (path canonicalisation following symlinks/junctions, root/object/leaf
-        # containment, worktree substitution and '..'/link-escape rejection, VCS
-        # registration), denylist reconciliation of the actual changed paths
-        # (rename/case) and the allowed-branch/remote/push precondition. Until the
-        # script lands this step is skipped with an explicit warning rather than
-        # failing the build.
+        # tests/test-policy.ps1 (T-084): drives tools/policy.ps1 (on tools/policy-schema.ps1)
+        # - schema-driven fail-closed config validation, append-only migration, the
+        # destructive-op path guard (it self-skips link-escape / VCS sub-cases when the OS
+        # cannot create a link or git is absent), denylist reconciliation and push
+        # preconditions.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tests\test-policy.ps1) {
-            .\tests\test-policy.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tests/test-policy.ps1 not found yet (see T-084) - skipping executable policy boundary check."
+          $p = "./tests/test-policy.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Run launcher tests
-        # Runs tests/launchers/run-all.ps1 (added by T-018), the single entry
-        # point that exercises every launchers/cc-*.cmd in an isolated temporary
-        # sandbox against PATH-stubbed claude/codex binaries. Until T-018 lands
-        # the test suite, this step is skipped with an explicit warning rather
-        # than failing the build.
+      - name: Run launcher / runtime tests
+        # tests/launchers/run-all.ps1 (T-018): the single entry point for the launcher and
+        # runtime tests. On Windows it runs the whole suite (every cc-*.cmd launcher test +
+        # the cross-platform runtime tests); on Linux it runs the `# ci:posix`-marked
+        # cross-platform engine tests (test-sync-runtime / test-doctor-runtime /
+        # test-generate-coders), so the unified sync/doctor pwsh runtimes are actually
+        # exercised on Linux here. Either way it exits non-zero on any failure.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if (Test-Path .\tests\launchers\run-all.ps1) {
-            .\tests\launchers\run-all.ps1
-            if ($LASTEXITCODE -ne 0) {
-              exit 1
-            }
-          } else {
-            Write-Warning "tests/launchers/run-all.ps1 not found yet (see T-018) - skipping launcher tests."
+          $p = "./tests/launchers/run-all.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test entry point $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
           }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }

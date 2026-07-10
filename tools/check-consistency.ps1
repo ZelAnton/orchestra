@@ -307,64 +307,47 @@ foreach ($name in $artifactLocations.Keys) {
 }
 
 # =============================================================================
-# Class 4 — cc-doctor allowlists vs config.example.md defaults table
+# Class 4 — cc-doctor allowlist vs config.example.md defaults table
 # =============================================================================
 #
-# launchers/cc-doctor.cmd and launchers/cc-doctor.sh each hardcode their own
+# tools/doctor-runtime.ps1 (the unified cc-doctor engine; since task T-090 the
+# former cc-doctor.cmd/.sh are thin wrappers that delegate to it) hardcodes an
 # allowlist of recognized .work/config.md keys (used to flag unknown/mistyped
-# keys). Both lists are meant to track the defaults table in config.example.md
-# exactly (task T-043) — this check catches drift between the three without
-# requiring cc-doctor itself to parse config.example.md at runtime (it must
-# keep working when mirrored standalone into ~/.claude/scripts, see the
-# comments in cc-doctor.cmd/.sh).
+# keys). That list is meant to track the defaults table in config.example.md
+# exactly (task T-043) — this check catches drift between the two without
+# requiring cc-doctor to parse config.example.md at runtime (its engine must keep
+# working when mirrored standalone into ~/.claude/scripts, see the comments in
+# tools/doctor-runtime.ps1).
 
-$CcDoctorCmdFile = Join-Path $RepoRoot 'launchers\cc-doctor.cmd'
-$CcDoctorShFile = Join-Path $RepoRoot 'launchers/cc-doctor.sh'
+$DoctorRuntimeFile = Join-Path $RepoRoot 'tools/doctor-runtime.ps1'
 
-foreach ($required in @($CcDoctorCmdFile, $CcDoctorShFile)) {
-    if (-not (Test-Path -LiteralPath $required)) {
-        Write-Error "Required reference file not found: $required"
-        exit 2
-    }
-}
-
-$cmdContent = Get-Content -LiteralPath $CcDoctorCmdFile -Raw -Encoding utf8
-$cmdMatch = [regex]::Match($cmdContent, '\$known\s*=\s*@\(([^)]*)\)')
-if (-not $cmdMatch.Success) {
-    Write-Error "Could not find the `$known=@(...)` allowlist in $CcDoctorCmdFile - format may have changed"
+if (-not (Test-Path -LiteralPath $DoctorRuntimeFile)) {
+    Write-Error "Required reference file not found: $DoctorRuntimeFile"
     exit 2
 }
-$cmdKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-foreach ($m in [regex]::Matches($cmdMatch.Groups[1].Value, "'([A-Za-z0-9_]+)'")) {
-    [void]$cmdKeys.Add($m.Groups[1].Value)
-}
 
-$shContent = Get-Content -LiteralPath $CcDoctorShFile -Raw -Encoding utf8
-$shMatch = [regex]::Match($shContent, 'known="\s*([^"]*?)\s*"')
-if (-not $shMatch.Success) {
-    Write-Error "Could not find the `known=`"...`"` allowlist in $CcDoctorShFile - format may have changed"
+$rtContent = Get-Content -LiteralPath $DoctorRuntimeFile -Raw -Encoding utf8
+$rtMatch = [regex]::Match($rtContent, '\$known\s*=\s*@\(([^)]*)\)')
+if (-not $rtMatch.Success) {
+    Write-Error "Could not find the `$known=@(...)` allowlist in $DoctorRuntimeFile - format may have changed"
     exit 2
 }
-$shKeys = [System.Collections.Generic.HashSet[string]]::new([string[]]($shMatch.Groups[1].Value -split '\s+' | Where-Object { $_ }), [StringComparer]::Ordinal)
-
-$doctorSources = [ordered]@{
-    'launchers/cc-doctor.cmd' = $cmdKeys
-    'launchers/cc-doctor.sh'  = $shKeys
+$doctorKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($m in [regex]::Matches($rtMatch.Groups[1].Value, "'([A-Za-z0-9_]+)'")) {
+    [void]$doctorKeys.Add($m.Groups[1].Value)
 }
 
-foreach ($srcName in $doctorSources.Keys) {
-    $keys = $doctorSources[$srcName]
-    foreach ($key in $keys) {
-        if (-not $defaultKeys.Contains($key)) {
-            Add-Finding -FileRef $srcName -Check 'cc-doctor-allowlist' `
-                -Detail "'$key' is in the allowlist but missing from the defaults table in config.example.md"
-        }
+$srcName = 'tools/doctor-runtime.ps1'
+foreach ($key in $doctorKeys) {
+    if (-not $defaultKeys.Contains($key)) {
+        Add-Finding -FileRef $srcName -Check 'cc-doctor-allowlist' `
+            -Detail "'$key' is in the allowlist but missing from the defaults table in config.example.md"
     }
-    foreach ($key in $defaultKeys) {
-        if (-not $keys.Contains($key)) {
-            Add-Finding -FileRef $srcName -Check 'cc-doctor-allowlist' `
-                -Detail "'$key' is in the defaults table in config.example.md but missing from the allowlist"
-        }
+}
+foreach ($key in $defaultKeys) {
+    if (-not $doctorKeys.Contains($key)) {
+        Add-Finding -FileRef $srcName -Check 'cc-doctor-allowlist' `
+            -Detail "'$key' is in the defaults table in config.example.md but missing from the allowlist"
     }
 }
 
@@ -379,10 +362,10 @@ foreach ($srcName in $doctorSources.Keys) {
 # schema's config-key NAMES equal config.example.md's defaults table (bidirectional), and
 # that the six value-constrained Codex keys carry the same allowed value SETS as the
 # "Допустимые значения Codex-ключей" validation table. Because that defaults table is in
-# turn checked equal to both cc-doctor allowlists (Class 4), a schema change not mirrored
-# into config.example.md - and thence cc-doctor - fails here. cc-doctor keeps its own
-# hardcoded copy (it must run when mirrored standalone into ~/.claude/scripts, where tools/
-# is absent) yet cannot drift from this schema.
+# turn checked equal to the cc-doctor allowlist (Class 4), a schema change not mirrored
+# into config.example.md - and thence cc-doctor - fails here. cc-doctor's engine
+# (tools/doctor-runtime.ps1) keeps its own hardcoded copy (it must run when mirrored
+# standalone into ~/.claude/scripts) yet cannot drift from this schema.
 
 $SchemaFile = Join-Path $PSScriptRoot 'policy-schema.ps1'
 if (-not (Test-Path -LiteralPath $SchemaFile)) {

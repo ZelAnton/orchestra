@@ -63,7 +63,8 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 **Допустимые множества значений Codex-ключей (валидация, fail-closed).** Единый источник —
 таблица «Допустимые значения Codex-ключей» в `config.example.md`; здесь она в компактной
 форме для валидации на Фазе 1.1 (`tools/check-codex-config-guard.ps1` машинно стережёт, что
-эта форма, таблица `config.example.md` и обе версии `cc-doctor` не разошлись):
+эта форма, таблица `config.example.md` и движок `cc-doctor` (`tools/doctor-runtime.ps1`) не
+разошлись):
 `CODEX_CODER` ∈ {off, fast, fast+std}; `CODEX_REVIEWER` ∈ {off, fast, fast+std, deep};
 `CODEX_CIFIX` ∈ {off, on}; `CODEX_REASONING` ∈ {auto, low, medium, high}; `CODEX_SANDBOX` ∈
 {read-only, workspace-write}; `CODEX_NETWORK` ∈ {on, off}. Пустой ключ → его default (для

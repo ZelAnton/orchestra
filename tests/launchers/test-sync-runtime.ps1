@@ -20,6 +20,7 @@
     pwsh -File tests/launchers/test-sync-runtime.ps1
 #>
 
+# ci:posix - cross-platform; run-all.ps1 runs this under pwsh on Linux in CI too.
 $ErrorActionPreference = 'Stop'
 
 $script:Runtime = (Resolve-Path (Join-Path $PSScriptRoot '..\..\tools\sync-runtime.ps1')).Path
@@ -58,6 +59,9 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'launchers\cc-sync.cmd') "@echo off`n"
     Write-File (Join-Path $repo 'launchers\cc-doctor.cmd') "@echo off`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.sh') "#!/usr/bin/env bash`n"
+    # The doctor runtime the thin cc-doctor wrappers delegate to; sync must mirror it
+    # into scripts/ (regardless of the launcher glob) so cc-doctor runs from the mirror.
+    Write-File (Join-Path $repo 'tools\doctor-runtime.ps1') "doctor-rt-v1`n"
     Write-File (Join-Path $repo 'config.example.md') "config-v1`n"
     Write-File (Join-Path $repo 'constraints.example.md') "constraints-v1`n"
     return $repo
@@ -106,12 +110,14 @@ Assert-FileText (Join-Path $dest 'scripts\cc-sync.cmd') "@echo off`n" 'clean: cc
 Assert-True (-not (Test-Path (Join-Path $dest 'scripts\cc-sync.sh'))) 'clean: .sh not mirrored when glob is *.cmd'
 Assert-FileText (Join-Path $dest 'scripts\config.example.md') "config-v1`n" 'clean: config.example.md mirrored'
 Assert-FileText (Join-Path $dest 'scripts\constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored'
+Assert-FileText (Join-Path $dest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored next to the launchers (so cc-doctor runs from the mirror)'
 $manifestPath = Join-Path $dest '.orchestra-sync-manifest.json'
 Assert-True (Test-Path -LiteralPath $manifestPath) 'clean: manifest written'
 if (Test-Path -LiteralPath $manifestPath) {
     $mf = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
     Assert-True (@($mf.managed) -contains 'agents/coder.md') 'clean: manifest lists agents/coder.md'
     Assert-True (@($mf.managed) -contains 'scripts/config.example.md') 'clean: manifest lists scripts/config.example.md'
+    Assert-True (@($mf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: manifest lists scripts/doctor-runtime.ps1'
     Assert-True (-not (@($mf.managed) -contains 'agents/coder.template.md')) 'clean: manifest excludes template'
 }
 

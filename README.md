@@ -91,7 +91,8 @@ It mirrors:
   or `~/.claude/scripts`, which should be on `PATH`) — `launchers\*.cmd` on Windows,
   `launchers/*.sh` on macOS/Linux — plus `config.example.md` and
   `constraints.example.md` alongside them so `cc-config` can find its templates
-  from the mirror.
+  from the mirror, and `tools/doctor-runtime.ps1` (the shared engine the thin
+  `cc-doctor` wrappers delegate to) so `cc-doctor` runs the same from the mirror.
 
 Both launchers are thin wrappers around one cross-platform engine,
 `tools/sync-runtime.ps1` (run under PowerShell 7 — `pwsh` — on both Windows and
@@ -132,7 +133,9 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
 
 Other launchers: `cc-resume` continues an interrupted processor session,
 `cc-status` / `cc-journal` read current/past run state, `cc-doctor` runs a
-read-only Codex/configuration preflight, `cc-audit` and `cc-enhance` run
+read-only Codex/configuration/orchestration preflight (a thin wrapper, like
+`cc-sync`, over one cross-platform `pwsh` engine, `tools/doctor-runtime.ps1`, so
+Windows and macOS/Linux report identically), `cc-audit` and `cc-enhance` run
 `code_auditor` and `enhancement_scout`, and `cc-github` runs `github_sync`.
 
 ## Further reading

@@ -3,7 +3,7 @@
     Guards the single-source fail-closed validation contract for the six
     value-constrained Codex config keys (task T-072): their allowed value sets
     and defaults must stay identical across config.example.md, agents/processor.md,
-    launchers/cc-doctor.cmd and launchers/cc-doctor.sh.
+    and tools/doctor-runtime.ps1 (the unified cc-doctor engine).
 
 .DESCRIPTION
     CODEX_CODER, CODEX_REVIEWER, CODEX_CIFIX, CODEX_REASONING, CODEX_SANDBOX and
@@ -12,12 +12,14 @@
     silently replaced by a default. The single source of truth for those sets and
     defaults is the "Допустимые значения Codex-ключей" table in config.example.md.
 
-    Because cc-doctor must keep working when mirrored standalone into
-    ~/.claude/scripts (where tools/ and config.example.md are absent), it cannot
-    read config.example.md at runtime - it, like processor.md's Phase 1.1 branching,
-    carries its own copy of the allowed sets. This is the same architecture as the
-    config-key allowlist already guarded by tools/check-consistency.ps1 (Class 4,
-    task T-043). This script machine-guarantees that the four copies do not drift:
+    Because cc-doctor must keep working when its engine (tools/doctor-runtime.ps1) is
+    mirrored standalone into ~/.claude/scripts, it does not read config.example.md at
+    runtime - it, like processor.md's Phase 1.1 branching, carries its own copy of the
+    allowed sets ($codexAllowed). Since task T-090 the two former cc-doctor.cmd/.sh
+    copies are unified into that one runtime, so there is a single downstream copy to
+    guard instead of two. This is the same architecture as the config-key allowlist
+    already guarded by tools/check-consistency.ps1 (Class 4, task T-043). This script
+    machine-guarantees that the copies do not drift:
 
       1. config.example.md validation table  - the source of truth (allowed sets
                                                 + per-key defaults).
@@ -25,8 +27,7 @@
                                                 must match the validation table.
       3. agents/processor.md                  - the `KEY ∈ {...}` branching form
                                                 must list the same allowed sets.
-      4. launchers/cc-doctor.cmd              - the $codexAllowed hashtable.
-      5. launchers/cc-doctor.sh               - the codex_allowed() case block.
+      4. tools/doctor-runtime.ps1             - the $codexAllowed hashtable.
 
     Sets are compared order-insensitively; defaults must match exactly and must be
     a member of their own allowed set. On any discrepancy, prints one line per
@@ -34,7 +35,8 @@
     (a required file / table / block is missing or unparseable, i.e. the format
     changed) exits 2 so it is never mistaken for "contract satisfied". Nothing to
     report -> a short summary and exit 0. Same ad-hoc-runnable style as
-    tools/check-consistency.ps1 and tools/check-codex-sandbox-guard.ps1.
+    tools/check-consistency.ps1 and tools/check-codex-sandbox-guard.ps1. Runs
+    identically under pwsh on Windows and Linux (the CI matrix exercises both).
 
 .EXAMPLE
     pwsh -File tools/check-codex-config-guard.ps1
@@ -49,10 +51,9 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $ConfigFile = Join-Path $RepoRoot 'config.example.md'
 $ProcessorFile = Join-Path $RepoRoot 'agents/processor.md'
-$CcDoctorCmdFile = Join-Path $RepoRoot 'launchers/cc-doctor.cmd'
-$CcDoctorShFile = Join-Path $RepoRoot 'launchers/cc-doctor.sh'
+$DoctorRuntimeFile = Join-Path $RepoRoot 'tools/doctor-runtime.ps1'
 
-foreach ($required in @($ConfigFile, $ProcessorFile, $CcDoctorCmdFile, $CcDoctorShFile)) {
+foreach ($required in @($ConfigFile, $ProcessorFile, $DoctorRuntimeFile)) {
     if (-not (Test-Path -LiteralPath $required)) {
         Write-Error "Required reference file not found: $required"
         exit 2
@@ -205,36 +206,23 @@ if ($missingProc.Count -eq $ValidatedKeys.Count) {
 }
 Compare-KeySet -SourceRef 'agents/processor.md' -Truth $specAllowed -Actual $procAllowed
 
-# --- launchers/cc-doctor.cmd: $codexAllowed=[ordered]@{ 'KEY'=@('a','b'); ... } -
-$cmdText = Get-Content -LiteralPath $CcDoctorCmdFile -Raw -Encoding utf8
-if ($cmdText -notmatch '\$codexAllowed\s*=\s*\[ordered\]@\{') {
-    Fail-Structural "Could not find the `$codexAllowed hashtable in $CcDoctorCmdFile - format may have changed"
+# --- tools/doctor-runtime.ps1: $codexAllowed=[ordered]@{ 'KEY'=@('a','b'); ... } -
+$rtText = Get-Content -LiteralPath $DoctorRuntimeFile -Raw -Encoding utf8
+if ($rtText -notmatch '\$codexAllowed\s*=\s*\[ordered\]@\{') {
+    Fail-Structural "Could not find the `$codexAllowed hashtable in $DoctorRuntimeFile - format may have changed"
 }
-$cmdAllowed = @{}
-foreach ($m in [regex]::Matches($cmdText, "'(CODEX_[A-Z]+)'\s*=\s*@\(([^)]*)\)")) {
+$rtAllowed = @{}
+foreach ($m in [regex]::Matches($rtText, "'(CODEX_[A-Z]+)'\s*=\s*@\(([^)]*)\)")) {
     $key = $m.Groups[1].Value
     $vals = @()
     foreach ($vm in [regex]::Matches($m.Groups[2].Value, "'([^']+)'")) { $vals += $vm.Groups[1].Value }
-    if ($vals.Count -gt 0) { $cmdAllowed[$key] = $vals }
+    if ($vals.Count -gt 0) { $rtAllowed[$key] = $vals }
 }
-Compare-KeySet -SourceRef 'launchers/cc-doctor.cmd' -Truth $specAllowed -Actual $cmdAllowed
-
-# --- launchers/cc-doctor.sh: codex_allowed() case: KEY) echo "a b c" ;; -------
-$shText = Get-Content -LiteralPath $CcDoctorShFile -Raw -Encoding utf8
-if ($shText -notmatch 'codex_allowed\s*\(\)\s*\{') {
-    Fail-Structural "Could not find the codex_allowed() function in $CcDoctorShFile - format may have changed"
-}
-$shAllowed = @{}
-foreach ($m in [regex]::Matches($shText, '(CODEX_[A-Z]+)\)\s*echo\s+"([^"]*)"')) {
-    $key = $m.Groups[1].Value
-    $vals = $m.Groups[2].Value -split '\s+' | Where-Object { $_ -ne '' }
-    if ($vals.Count -gt 0) { $shAllowed[$key] = @($vals) }
-}
-Compare-KeySet -SourceRef 'launchers/cc-doctor.sh' -Truth $specAllowed -Actual $shAllowed
+Compare-KeySet -SourceRef 'tools/doctor-runtime.ps1' -Truth $specAllowed -Actual $rtAllowed
 
 # --- Report -----------------------------------------------------------------
 if ($findings.Count -eq 0) {
-    Write-Host "OK - Codex config value contract holds: allowed sets + defaults agree across config.example.md, agents/processor.md, launchers/cc-doctor.cmd and launchers/cc-doctor.sh for $($ValidatedKeys.Count) keys."
+    Write-Host "OK - Codex config value contract holds: allowed sets + defaults agree across config.example.md, agents/processor.md and tools/doctor-runtime.ps1 for $($ValidatedKeys.Count) keys."
     exit 0
 }
 
