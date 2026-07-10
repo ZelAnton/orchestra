@@ -273,6 +273,12 @@ function Invoke-Pipeline {
         [string]$ConstraintsPath,
         [switch]$Defang
     )
+    # Empty input ($null / zero-length) is a normal, valid case (empty issue/PR body,
+    # empty CI log, empty event reason). Read-InputBytes returns byte[0] for it, but an
+    # empty array collapses to $null when captured through the output stream and binds the
+    # [byte[]] parameter as $null, so under StrictMode $Bytes.Length would throw. Normalize
+    # to a real empty array so the whole pipeline degrades to a safe empty result (rc=0).
+    if ($null -eq $Bytes) { $Bytes = [byte[]]::new(0) }
     $report = [ordered]@{
         input_bytes           = $Bytes.Length
         binary                = $false

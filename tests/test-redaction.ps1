@@ -61,20 +61,30 @@ function New-TempFileBytes {
 }
 
 # Runs redaction.ps1 as a child pwsh process; returns @{ ExitCode; Out; Err }.
+# With -UseStdin the child's stdin is redirected: $StdinBytes (possibly none) is written
+# and then stdin is closed (EOF), so an empty stdin can be exercised deterministically.
 function Invoke-Redaction {
-    param([string[]]$ToolArgs)
+    param([string[]]$ToolArgs, [switch]$UseStdin, [byte[]]$StdinBytes = $null)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:PsExe
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    if ($UseStdin) { $psi.RedirectStandardInput = $true }
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
     }
     $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($UseStdin) {
+        if ($StdinBytes -and $StdinBytes.Length -gt 0) {
+            $proc.StandardInput.BaseStream.Write($StdinBytes, 0, $StdinBytes.Length)
+            $proc.StandardInput.BaseStream.Flush()
+        }
+        $proc.StandardInput.Close()
+    }
     $outT = $proc.StandardOutput.ReadToEndAsync()
     $errT = $proc.StandardError.ReadToEndAsync()
     $proc.WaitForExit()
@@ -306,6 +316,48 @@ rm -rf /
     Assert-Exit (Invoke-Redaction @('bogus-cmd')) 2 'unknown command exits 2'
     Assert-Exit (Invoke-Redaction @('redact', '--file', 'C:\no\such\path\nope-xyz.txt')) 3 'missing input file exits 3'
     Assert-Exit (Invoke-Redaction @('redact', '--max-bytes', 'notanumber', '--file', (New-TempFile 'x'))) 2 'bad --max-bytes exits 2'
+}.Invoke()
+
+# =============================================================================
+# 11. empty input (regression, R-01): an empty external body / CI log / event reason is a
+#     normal, valid case (github_sync still wraps an empty issue/PR body; processor still
+#     redacts an empty reason). The unified pipeline must degrade to a safe empty result
+#     with rc=0, never crash. Covers empty --file and empty stdin, for redact and wrap.
+# =============================================================================
+{
+    $empty = New-TempFile ''
+
+    # redact, empty --file: rc=0, empty output (no crash).
+    $r = Invoke-Redaction @('redact', '--file', $empty)
+    Assert-Exit $r 0 'empty --file redact: rc=0'
+    Assert-Equal '' $r.Out 'empty --file redact: output is empty'
+
+    # redact --json, empty --file: input_bytes=0, no redactions, deterministic raw fingerprint.
+    $rj = Invoke-Redaction @('redact', '--file', $empty, '--json')
+    Assert-Exit $rj 0 'empty --file redact --json: rc=0'
+    $j = $rj.Out | ConvertFrom-Json
+    Assert-Equal 0 $j.input_bytes 'empty --file redact --json: input_bytes=0'
+    Assert-Equal 0 $j.total_redactions 'empty --file redact --json: no redactions'
+    Assert-Equal '' $j.output 'empty --file redact --json: output empty'
+    Assert-True ($j.raw_sha256 -match '^[0-9a-f]{8}$') 'empty --file redact --json: raw fingerprint still emitted'
+
+    # wrap, empty --file: rc=0, valid bounded block recording bytes=0.
+    $rw = Invoke-Redaction @('wrap', '--file', $empty, '--source', 'empty-body')
+    Assert-Exit $rw 0 'empty --file wrap: rc=0'
+    Assert-Contains $rw.Out '<<< orchestra:external-data' 'empty --file wrap: provenance header present'
+    Assert-Contains $rw.Out 'bytes=0' 'empty --file wrap: header records bytes=0'
+    Assert-Contains $rw.Out 'redactions=0' 'empty --file wrap: header records redactions=0'
+    Assert-Contains $rw.Out '<<< orchestra:end-external-data >>>' 'empty --file wrap: closing delimiter present'
+
+    # empty stdin (no --file): the tool reads a closed/empty stdin stream; same safe result.
+    $rs = Invoke-Redaction @('redact', '--stdin') -UseStdin
+    Assert-Exit $rs 0 'empty stdin redact: rc=0'
+    Assert-Equal '' $rs.Out 'empty stdin redact: output is empty'
+
+    $rsw = Invoke-Redaction @('wrap', '--stdin', '--source', 'empty-stdin') -UseStdin
+    Assert-Exit $rsw 0 'empty stdin wrap: rc=0'
+    Assert-Contains $rsw.Out 'bytes=0' 'empty stdin wrap: header records bytes=0'
+    Assert-Contains $rsw.Out '<<< orchestra:end-external-data >>>' 'empty stdin wrap: closing delimiter present'
 }.Invoke()
 
 # =============================================================================
