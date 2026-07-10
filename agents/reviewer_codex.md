@@ -88,6 +88,11 @@ codex не читает и не должен трогать `.work/`.
 - `CODEX_REASONING` (по умолч. `auto`) — для ревью `auto` → `medium` (независимо от
   уровня задачи: качество находок важнее скорости); `low|medium|high` — явное значение.
   Результат — в `EFF`.
+- `CODEX_SANDBOX` — **не читаешь**. Ревью read-only по контракту: `--sandbox` всегда
+  литеральный `read-only` (см. «Вызов codex»), **независимо** от значения `CODEX_SANDBOX`
+  (даже `danger-full-access`/`workspace-write` в конфиге ревью не расширяют — это часть
+  fail-closed валидации значений, единый источник — `config.example.md`, «Допустимые
+  значения Codex-ключей»).
 
 # Preflight (до любых действий)
 

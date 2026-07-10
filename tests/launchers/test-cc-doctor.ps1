@@ -10,8 +10,13 @@
 # session-only (CC_CODEX_EXEC_GRANT covers the command, no settings rule),
 # deny-only (a codex exec match only in permissions.deny must not count),
 # CI-fix-only (CODEX_CIFIX=on alone keeps the gate active), and custom CODEX_CMD
-# with/without a matching allow-rule (no false OK off the canonical rule). Read-
-# only, never calls claude.
+# with/without a matching allow-rule (no false OK off the canonical rule).
+# (task T-072) also covers the Codex value validation: an all-valid config
+# reports the all-valid OK line and prints the now-included effective
+# CODEX_NETWORK, and an invalid value for each of the six value-constrained keys
+# (incl. danger-full-access for CODEX_SANDBOX) is classified as a FAIL naming the
+# key/value/allowed set rather than silently defaulted. Read-only, never calls
+# claude.
 #
 # Note: the sandboxed copy of cc-doctor.cmd carries one cosmetic string
 # substitution (see common.ps1's $LauncherContentFixups) to work around a
@@ -370,5 +375,74 @@ Invoke-Test -Name 'cc-doctor.cmd' -Body {
     }
     finally {
         Remove-Sandbox $paths
+    }
+
+    # --- Scenario 13 (task T-072): all six value-constrained Codex keys set to
+    # VALID values -> the new "Codex key value validation" section reports the
+    # all-valid OK line (no FAIL), and the effective-CODEX_* summary now prints
+    # CODEX_NETWORK (previously absent). CODEX_NETWORK is set to its non-default
+    # (off) to prove the summary reflects config.md rather than a hardcoded value.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+        $workDir = Join-Path $paths.Project '.work'
+        New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+        @(
+            'CODEX_CODER: fast+std'
+            'CODEX_REVIEWER: deep'
+            'CODEX_CIFIX: on'
+            'CODEX_REASONING: high'
+            'CODEX_SANDBOX: read-only'
+            'CODEX_NETWORK: off'
+        ) -join "`n" | Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{ CC_CODEX_EXEC_GRANT = ''; USERPROFILE = $paths.Root }
+        Assert-Equal 0 $result.ExitCode '[all valid] exit code'
+        Assert-Contains $result.Output 'OK   Codex key values: all set values are within their allowed sets' '[all valid] must report the all-valid OK line'
+        Assert-True ($result.Output -notlike '*FAIL CODEX_*invalid value*') '[all valid] must not emit any invalid-value FAIL'
+        Assert-True ([regex]::IsMatch($result.Output, 'CODEX_NETWORK\s+=\s+off')) '[all valid] effective summary must now print CODEX_NETWORK from config.md'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 14 (task T-072): an INVALID value for each of the six
+    # value-constrained keys (a typo / wrong variant, incl. danger-full-access
+    # for CODEX_SANDBOX - the security-critical case) must be classified as a
+    # FAIL naming the key, the actual bad value and the allowed set - never
+    # silently replaced by a default (the all-valid OK line must be absent).
+    # CODEX_CODER/CODEX_REVIEWER env is cleared so the ambient machine's real
+    # Codex settings cannot make the config-only cases flaky.
+    $badValues = [ordered]@{
+        'CODEX_CODER'     = @{ Bad = 'fastest';            Allowed = 'off | fast | fast+std' }
+        'CODEX_REVIEWER'  = @{ Bad = 'deeep';              Allowed = 'off | fast | fast+std | deep' }
+        'CODEX_CIFIX'     = @{ Bad = 'yes';                Allowed = 'off | on' }
+        'CODEX_REASONING' = @{ Bad = 'huge';               Allowed = 'auto | low | medium | high' }
+        'CODEX_SANDBOX'   = @{ Bad = 'danger-full-access'; Allowed = 'read-only | workspace-write' }
+        'CODEX_NETWORK'   = @{ Bad = 'enabled';            Allowed = 'on | off' }
+    }
+    foreach ($key in $badValues.Keys) {
+        $paths = New-Sandbox
+        try {
+            Install-Launcher -Paths $paths -Names 'cc-doctor.cmd'
+            $workDir = Join-Path $paths.Project '.work'
+            New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+            $bad = $badValues[$key].Bad
+            Set-Content -LiteralPath (Join-Path $workDir 'config.md') -Value ("{0}: {1}" -f $key, $bad) -Encoding utf8
+
+            $result = Invoke-Launcher -Paths $paths -Name 'cc-doctor.cmd' -EnvVars @{
+                CODEX_CODER         = ''
+                CODEX_REVIEWER      = ''
+                CC_CODEX_EXEC_GRANT = ''
+                USERPROFILE         = $paths.Root
+            }
+            Assert-Equal 0 $result.ExitCode "[invalid $key] exit code"
+            Assert-Contains $result.Output ("FAIL {0}: invalid value '{1}'" -f $key, $bad) "[invalid $key] must FAIL naming the key and the actual bad value"
+            Assert-Contains $result.Output ("allowed: {0}" -f $badValues[$key].Allowed) "[invalid $key] must list the allowed set"
+            Assert-True ($result.Output -notlike '*OK   Codex key values: all set values are within their allowed sets*') "[invalid $key] must not report the all-valid OK line (no silent default substitution)"
+        }
+        finally {
+            Remove-Sandbox $paths
+        }
     }
 }

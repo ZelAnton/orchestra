@@ -121,7 +121,7 @@ else
 fi
 echo
 echo "== Effective CODEX_* (.work/config.md; CODEX_CODER/CODEX_REVIEWER fall back to env; blank = default) =="
-for k in CODEX_CODER CODEX_REVIEWER CODEX_CIFIX CODEX_MODEL CODEX_REASONING CODEX_SANDBOX CODEX_CMD; do
+for k in CODEX_CODER CODEX_REVIEWER CODEX_CIFIX CODEX_MODEL CODEX_REASONING CODEX_SANDBOX CODEX_NETWORK CODEX_CMD; do
   val="$(get_cfg "$k")"
   src=""
   if [ -z "$val" ] && { [ "$k" = "CODEX_CODER" ] || [ "$k" = "CODEX_REVIEWER" ]; }; then
@@ -135,6 +135,57 @@ for k in CODEX_CODER CODEX_REVIEWER CODEX_CIFIX CODEX_MODEL CODEX_REASONING CODE
   [ -n "$val" ] || val="(default)"
   printf '  %-16s = %s%s\n' "$k" "$val" "$src"
 done
+echo
+# == Codex key value validation (task T-072) ==================================
+# Fail-closed classification of the six value-constrained Codex keys against
+# their allowed sets. This allowlist is the launcher-local copy of the single
+# source of truth (config.example.md's "Допустимые значения Codex-ключей" table);
+# tools/check-codex-config-guard.ps1 machine-guarantees it, cc-doctor.cmd's copy
+# and processor.md's branching do not drift apart. Kept hardcoded here (not read
+# from config.example.md at runtime) because cc-doctor must keep working when
+# mirrored standalone into ~/.claude/scripts, where tools/ and config.example.md
+# are not present - the same rationale as the config-key allowlist below. An
+# empty/unset key is NOT an error (it takes its documented default; for
+# CODEX_CODER/CODEX_REVIEWER after the env fallback); only a non-empty value
+# outside the allowed set is flagged. The FAIL wording matches cc-doctor.cmd's
+# by design (task T-072: identical classification across both variants).
+codex_allowed() {
+  case "$1" in
+    CODEX_CODER)     echo "off fast fast+std" ;;
+    CODEX_REVIEWER)  echo "off fast fast+std deep" ;;
+    CODEX_CIFIX)     echo "off on" ;;
+    CODEX_REASONING) echo "auto low medium high" ;;
+    CODEX_SANDBOX)   echo "read-only workspace-write" ;;
+    CODEX_NETWORK)   echo "on off" ;;
+  esac
+}
+echo "== Codex key value validation =="
+codex_invalid=0
+for k in CODEX_CODER CODEX_REVIEWER CODEX_CIFIX CODEX_REASONING CODEX_SANDBOX CODEX_NETWORK; do
+  v="$(get_cfg "$k")"
+  # env fallback applies ONLY to CODEX_CODER/CODEX_REVIEWER (config.md-then-env),
+  # mirroring eff_codex and the "Effective CODEX_*" block above.
+  if [ -z "$v" ] && { [ "$k" = "CODEX_CODER" ] || [ "$k" = "CODEX_REVIEWER" ]; }; then
+    ev="$(eval "printf '%s' \"\${$k:-}\"")"
+    if [ -n "$ev" ]; then
+      v="$(printf '%s' "$ev" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    fi
+  fi
+  [ -n "$v" ] || continue   # empty -> documented default, not an error
+  allowed="$(codex_allowed "$k")"
+  ok=0
+  for a in $allowed; do [ "$v" = "$a" ] && ok=1; done
+  if [ "$ok" -eq 0 ]; then
+    codex_invalid=1
+    pretty="$(printf '%s' "$allowed" | sed 's/ / | /g')"
+    echo "FAIL $k: invalid value '$v' -> allowed: $pretty"
+  fi
+done
+if [ "$codex_invalid" -eq 0 ]; then
+  echo "OK   Codex key values: all set values are within their allowed sets"
+else
+  echo "  -> fix .work/config.md (or the env var) so the cohort is not blocked at Phase 1.1; no silent default is substituted for an invalid value"
+fi
 echo
 echo "== База знаний (KB; .work/knowledge) =="
 kb="$(get_cfg KB)"

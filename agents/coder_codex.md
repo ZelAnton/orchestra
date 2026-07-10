@@ -56,7 +56,16 @@ gitignored и физически там отсутствует). Поэтому 
   собственного allow-правила**, которое эта роль автоматически не выдаёт; при его
   отсутствии classifier откажет и ты штатно эскалируешь `CODEX_UNAVAILABLE` (ниже).
 - `CODEX_MODEL` (по умолч. не задано) — `-m`; пусто → модель из `~/.codex/config.toml`.
-- `CODEX_SANDBOX` (по умолч. `workspace-write`) — `--sandbox`.
+- `CODEX_SANDBOX` (по умолч. `workspace-write`) — `--sandbox`. **Допустимо только
+  `read-only` или `workspace-write`** (единый источник — таблица «Допустимые значения
+  Codex-ключей» в `config.example.md`); значение `danger-full-access` или любое иное,
+  расширяющее запись за пределы рабочей копии задачи, **запрещено** и в `--sandbox` не
+  подставляется. В штатном конвейере processor уже отсеивает такое на Фазе 1.1 (fail-closed,
+  до захвата задач), но **до формирования вызова** сам перепроверь: пустое → default
+  `workspace-write`; непустое вне `{read-only, workspace-write}` → **не** запускай codex,
+  верни `ЭСКАЛАЦИЯ codex: CODEX_UNAVAILABLE — CODEX_SANDBOX invalid: <значение> (allowed:
+  read-only | workspace-write)` (правок нет). Это защищает границу записи, а не только
+  повторяет проверку.
 - `CODEX_CIFIX` (по умолч. `off`) — гейт Режима 3. Тебя на Режим 3 зовёт только
   processor и только при `on`; если позвали с ним `off` — верни эскалацию
   `ЭСКАЛАЦИЯ codex: CODEX_UNAVAILABLE` (неверный вызов), как для F-.
