@@ -81,7 +81,7 @@ fn parse_table_row(line: &str) -> Option<(String, TaskMeta)> {
     if !is_task_id(&id) {
         return None;
     }
-    let cell = |i: usize| cells.get(i).map(|s| s.clone()).filter(|s| !s.is_empty());
+    let cell = |i: usize| cells.get(i).cloned().filter(|s| !s.is_empty());
     Some((
         id,
         TaskMeta {
@@ -122,16 +122,26 @@ mod tests {
     fn parses_updated_and_context_bullets() {
         let s = parse(SAMPLE);
         assert_eq!(s.updated.as_deref(), Some("2026-07-11T11:39:48Z"));
-        assert!(s.context_lines.iter().any(|l| l.contains("Оркестратор: processor")));
+        assert!(s
+            .context_lines
+            .iter()
+            .any(|l| l.contains("Оркестратор: processor")));
         assert!(s.context_lines.iter().any(|l| l.starts_with("Батч:")));
     }
 
     #[test]
     fn parses_task_table_rows_only() {
         let s = parse(SAMPLE);
-        assert_eq!(s.task_meta.len(), 2, "header + separator rows must be skipped");
+        assert_eq!(
+            s.task_meta.len(),
+            2,
+            "header + separator rows must be skipped"
+        );
         let t102 = s.task_meta.get("T-102").expect("T-102");
-        assert_eq!(t102.name.as_deref(), Some("Превратить tui/ в живой обзорный экран"));
+        assert_eq!(
+            t102.name.as_deref(),
+            Some("Превратить tui/ в живой обзорный экран")
+        );
         assert_eq!(t102.agent.as_deref(), Some("coder_deep"));
         assert_eq!(t102.phase.as_deref(), Some("реализация"));
         assert_eq!(t102.branch.as_deref(), Some("task/T-102"));

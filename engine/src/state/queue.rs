@@ -155,10 +155,7 @@ mod tests {
         let e = &parse_queue(QUEUE)[3];
         assert_eq!(e.id, "T-050");
         assert_eq!(e.state, Some(TaskState::Escalated));
-        assert_eq!(
-            e.escalation_reason.as_deref(),
-            Some("INTEGRATION_LOOP_MAX")
-        );
+        assert_eq!(e.escalation_reason.as_deref(), Some("INTEGRATION_LOOP_MAX"));
         assert!(e.prerequisites.is_empty());
     }
 

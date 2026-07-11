@@ -129,8 +129,14 @@ mod tests {
 
     #[test]
     fn positional_and_flag_both_set_work_dir() {
-        assert_eq!(run(&["/srv/repo/.work"]).work_dir, PathBuf::from("/srv/repo/.work"));
-        assert_eq!(run(&["--work", "/x/.work"]).work_dir, PathBuf::from("/x/.work"));
+        assert_eq!(
+            run(&["/srv/repo/.work"]).work_dir,
+            PathBuf::from("/srv/repo/.work")
+        );
+        assert_eq!(
+            run(&["--work", "/x/.work"]).work_dir,
+            PathBuf::from("/x/.work")
+        );
         assert_eq!(run(&["-w", "/y/.work"]).work_dir, PathBuf::from("/y/.work"));
     }
 
@@ -145,7 +151,10 @@ mod tests {
     fn help_and_version_print() {
         assert!(matches!(parse(args(&["--help"])).unwrap(), Cli::Print(_)));
         assert!(matches!(parse(args(&["-h"])).unwrap(), Cli::Print(_)));
-        assert!(matches!(parse(args(&["--version"])).unwrap(), Cli::Print(_)));
+        assert!(matches!(
+            parse(args(&["--version"])).unwrap(),
+            Cli::Print(_)
+        ));
     }
 
     #[test]

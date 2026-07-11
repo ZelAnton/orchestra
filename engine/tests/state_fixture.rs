@@ -70,14 +70,20 @@ fn state_json_reflects_every_source_and_canonical_names() {
 Предпосылки: T-102, T-103\n",
     );
     // Descriptor: authoritative `Статус:` for the captured task.
-    w.write("tasks/T-102/task.md", "# T-102\nСтатус: на ревью\nПредпосылки: T-101\n");
+    w.write(
+        "tasks/T-102/task.md",
+        "# T-102\nСтатус: на ревью\nПредпосылки: T-101\n",
+    );
     // Cohort admission (§13.2).
     w.write(
         "cohort_state.md",
         "# Cohort state — Batch B-1\nНачало когорты: 2026-07-11T11:39:48Z\nПриём: открыт\nВолна: 1\nAdmitted всего: 2\n",
     );
     // Integration join state (§13.3): file present -> in-progress.
-    w.write("integration_state.md", "# int\nРевью-SHA: abc123\nF-циклов: 1\n");
+    w.write(
+        "integration_state.md",
+        "# int\nРевью-SHA: abc123\nF-циклов: 1\n",
+    );
     // Batch manifest.
     w.write(
         "batch.md",
@@ -138,7 +144,10 @@ fn state_idle_when_cohort_integration_batch_absent() {
 #[test]
 fn state_human_readable_default() {
     let w = TmpWork::new();
-    w.write("cohort_state.md", "# Когорта\nПриём: закрыт · причина=COHORT_SIZE\nВолна: 2\n");
+    w.write(
+        "cohort_state.md",
+        "# Когорта\nПриём: закрыт · причина=COHORT_SIZE\nВолна: 2\n",
+    );
     let out = run_state(&w.dir, &[]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success());
@@ -155,7 +164,10 @@ fn state_missing_work_dir_errors() {
         .arg(&missing)
         .output()
         .expect("spawn engine state");
-    assert!(!out.status.success(), "missing work dir should exit nonzero");
+    assert!(
+        !out.status.success(),
+        "missing work dir should exit nonzero"
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("work directory not found"),
         "stderr should explain the missing work dir"

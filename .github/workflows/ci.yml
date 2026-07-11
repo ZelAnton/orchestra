@@ -247,3 +247,98 @@ jobs:
           }
           & $p --vcs git --scenarios "clean,conflict,quarantine,policy,checks"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  engine-tui:
+    name: engine + tui crates (${{ matrix.os }})
+    # Additive job (T-112): builds, tests and lints the engine/ (T-097/T-101/T-111) and
+    # tui/ (T-102) Rust crates. Fully independent of `validate` above - it does not read
+    # or depend on any pwsh tool/launcher/test, and its failure cannot affect `validate`
+    # or vice versa (a separate top-level job). Runs on the same windows-latest +
+    # ubuntu-latest matrix as `validate`, for the same reason (T-090): both are supported
+    # targets, so a Linux-only or Windows-only Rust break must surface independently
+    # rather than being masked by its sibling. `Cargo.lock` is already committed for both
+    # crates (T-097 engine, T-102 tui), so every cargo invocation below is `--locked`: it
+    # builds against the exact committed lockfile and never runs `cargo update`, so the
+    # gate stays offline-safe with respect to dependency resolution (the runner's own
+    # one-time toolchain/registry-index fetch is unrelated and outside this job's control).
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report both platforms independently, exactly like `validate` above.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Rust toolchain
+        # Neither engine/rust-toolchain.toml nor tui/rust-toolchain.toml exists yet (true
+        # as of this job's planning snapshot - see task T-112): both crates build against
+        # whatever stable toolchain the runner image preinstalls (already includes
+        # cargo/rustc/clippy/rustfmt). If a rust-toolchain.toml is added to either crate
+        # later, cargo/rustup pick it up automatically from that crate's working
+        # directory - no workflow change would be needed here.
+        run: |
+          rustc --version
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Build, test and lint the engine crate
+        working-directory: engine
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --locked --all-targets
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Check engine crate advisories (cargo-deny, only if configured)
+        # engine/deny.toml does not exist yet (same planning snapshot as above), so this
+        # step is a SOFT, best-effort check that only runs if a future task adds one - its
+        # absence here is intentionally NOT a failure, unlike the MANDATORY pwsh
+        # validators in `validate` above, which must fail loudly when missing.
+        working-directory: engine
+        if: hashFiles('engine/deny.toml') != ''
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
+            cargo install cargo-deny --locked
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          cargo deny check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build, test and lint the tui crate
+        working-directory: tui
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --locked --all-targets
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Check tui crate advisories (cargo-deny, only if configured)
+        # tui/deny.toml does not exist yet (same planning snapshot as above) - same soft,
+        # best-effort check as the engine crate step above.
+        working-directory: tui
+        if: hashFiles('tui/deny.toml') != ''
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
+            cargo install cargo-deny --locked
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          cargo deny check
+          if ($LASTEXITCODE -ne 0) { exit 1 }

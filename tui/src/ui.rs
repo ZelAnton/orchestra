@@ -14,7 +14,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{AppState, CohortPhase, RecentKind, TaskState};
+use crate::app::{AppState, CohortPhase, InboxPanel, RecentKind, Screen, TaskState};
+use crate::inbox::{BlockedCard, DecisionInbox, EscalatedCard, QuarantineCard};
 
 const RED: Color = Color::Red;
 const YELLOW: Color = Color::Yellow;
@@ -22,7 +23,16 @@ const GREEN: Color = Color::Green;
 const CYAN: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
 
+/// Dispatch to whichever screen is currently active (§6.1 overview / §6.2 Decision Inbox), both
+/// switchable from either side with the `Tab` key (see `main.rs`).
 pub fn render(f: &mut Frame, app: &AppState) {
+    match app.screen {
+        Screen::Overview => render_overview(f, app),
+        Screen::DecisionInbox => render_decision_inbox(f, app),
+    }
+}
+
+fn render_overview(f: &mut Frame, app: &AppState) {
     let root = Layout::vertical([
         Constraint::Length(5), // header (3 content lines inside the border)
         Constraint::Min(3),    // body
@@ -262,22 +272,297 @@ fn render_context(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(para, area);
 }
 
-fn render_footer(f: &mut Frame, area: Rect, _app: &AppState) {
-    let hint = Line::from(vec![
+fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
+    let inbox_count = app.inbox.card_count();
+    let mut spans = vec![
         Span::styled(" q/Esc ", Style::default().fg(CYAN)),
         Span::raw("выход  "),
         Span::styled(" r ", Style::default().fg(CYAN)),
         Span::raw("обновить status.md  "),
+        Span::styled(" Tab ", Style::default().fg(CYAN)),
+        Span::raw("Decision Inbox"),
+    ];
+    if !app.inbox.is_empty() {
+        spans.push(Span::styled(
+            format!("  ⚠ требует внимания: {inbox_count}"),
+            Style::default().fg(RED),
+        ));
+    }
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        " read-only ",
+        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        "— TUI ничего не пишет в .work/",
+        Style::default().fg(DIM),
+    ));
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
+        area,
+    );
+}
+
+// ---- §6.2 Decision Inbox screen -------------------------------------------------------------
+//
+// Only rendering: answers to the §6.2 card questions ("what's needed / why can't the agent
+// decide / what would this unblock / how urgent") are drawn strictly to the extent they are
+// derivable from `AppState::inbox` (built from `engine::state::Snapshot` + `.work/PAUSE`, see
+// `main.rs` / `crate::inbox`) — no command is ever sent from here (approve/pause/resume remain a
+// later task's mandate).
+
+fn render_decision_inbox(f: &mut Frame, app: &AppState) {
+    let root = Layout::vertical([
+        Constraint::Length(if app.inbox.paused { 5 } else { 3 }), // header
+        Constraint::Min(3),                                       // body
+        Constraint::Length(1),                                    // footer
+    ])
+    .split(f.area());
+
+    render_inbox_header(f, root[0], &app.inbox);
+    render_inbox_body(f, root[1], app);
+    render_inbox_footer(f, root[2]);
+}
+
+fn render_inbox_header(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
+    let mut lines: Vec<Line> = vec![Line::from(vec![
+        Span::styled(
+            "Decision Inbox",
+            Style::default().add_modifier(Modifier::BOLD).fg(CYAN),
+        ),
+        Span::raw("   "),
+        Span::styled(
+            format!("эскалировано {}", inbox.escalated.len()),
+            Style::default().fg(if inbox.escalated.is_empty() { DIM } else { RED }),
+        ),
+        Span::raw("  ·  "),
+        Span::styled(
+            format!("карантин {}", inbox.quarantined.len()),
+            Style::default().fg(if inbox.quarantined.is_empty() { DIM } else { YELLOW }),
+        ),
+        Span::raw("  ·  "),
+        Span::styled(
+            format!("заблокировано {}", inbox.blocked.len()),
+            Style::default().fg(if inbox.blocked.is_empty() { DIM } else { YELLOW }),
+        ),
+    ])];
+    if inbox.paused {
+        let mut spans = vec![Span::styled(
+            "ПАУЗА активна (.work/PAUSE) — конвейер не начнёт новую фазу/раунд",
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        )];
+        if let Some(note) = &inbox.pause_note {
+            spans.push(Span::styled(format!("  · {note}"), Style::default().fg(DIM)));
+        }
+        lines.push(Line::from(spans));
+    }
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " control-plane ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(if inbox.paused { RED } else { CYAN })),
+    );
+    f.render_widget(para, area);
+}
+
+/// The Decision Inbox body: either the empty-state message (R-1: distinguishes "nothing at all"
+/// from "no cards, but paused" — the pause banner in the header still demands attention even
+/// with an empty card list) or the three scrollable panels (R-3: each independently focusable
+/// with `←`/`→` and scrollable with `↑`/`↓`, so cards beyond the visible height are reachable
+/// rather than silently clipped).
+fn render_inbox_body(f: &mut Frame, area: Rect, app: &AppState) {
+    let inbox = &app.inbox;
+    if inbox.card_count() == 0 {
+        let message = if inbox.paused {
+            "карточек нет, но конвейер на паузе (см. баннер выше) — новая фаза/раунд не начнётся, пока пауза снята"
+        } else {
+            "ничего не требует решения оператора прямо сейчас"
+        };
+        let border = if inbox.paused { RED } else { DIM };
+        let para = Paragraph::new(Line::from(Span::styled(message, Style::default().fg(DIM))))
+            .block(block("Decision Inbox").border_style(Style::default().fg(border)));
+        f.render_widget(para, area);
+        return;
+    }
+
+    let thirds = Layout::vertical([
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
+        Constraint::Percentage(33),
+    ])
+    .split(area);
+
+    render_escalated_panel(
+        f,
+        thirds[0],
+        &inbox.escalated,
+        app.inbox_focus == InboxPanel::Escalated,
+        app.inbox_scroll[InboxPanel::Escalated as usize],
+    );
+    render_quarantine_panel(
+        f,
+        thirds[1],
+        &inbox.quarantined,
+        app.inbox_focus == InboxPanel::Quarantined,
+        app.inbox_scroll[InboxPanel::Quarantined as usize],
+    );
+    render_blocked_panel(
+        f,
+        thirds[2],
+        &inbox.blocked,
+        app.inbox_focus == InboxPanel::Blocked,
+        app.inbox_scroll[InboxPanel::Blocked as usize],
+    );
+}
+
+/// `▶ ` prefix on a panel title when it currently holds scroll focus (see `main.rs` for the
+/// `←`/`→` key handling that moves it, and `↑`/`↓` for the accompanying `scroll` offset).
+fn focus_marker(focused: bool) -> &'static str {
+    if focused {
+        "▶ "
+    } else {
+        ""
+    }
+}
+
+fn render_escalated_panel(f: &mut Frame, area: Rect, cards: &[EscalatedCard], focused: bool, scroll: u16) {
+    let mut lines: Vec<Line> = Vec::new();
+    if cards.is_empty() {
+        lines.push(dim_line("эскалированных задач нет"));
+    } else {
+        for c in cards {
+            lines.push(card_title_line(&c.id, &c.title, RED));
+            lines.push(dim_line(
+                "  требуется решение оператора — терминальное состояние, само не продолжится",
+            ));
+            lines.push(field_line("  причина: ", c.reason.as_deref().unwrap_or("не указана")));
+            if !c.blocks.is_empty() {
+                lines.push(field_line("  разблокирует: ", &c.blocks.join(", ")));
+            }
+        }
+    }
+    let title = format!("{}Эскалировано ({})", focus_marker(focused), cards.len());
+    let border = if cards.is_empty() { DIM } else { RED };
+    let para = Paragraph::new(lines)
+        .block(block(&title).border_style(Style::default().fg(border)))
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0));
+    f.render_widget(para, area);
+}
+
+fn render_quarantine_panel(f: &mut Frame, area: Rect, cards: &[QuarantineCard], focused: bool, scroll: u16) {
+    let mut lines: Vec<Line> = Vec::new();
+    if cards.is_empty() {
+        lines.push(dim_line("нет задач в карантине"));
+    } else {
+        for c in cards {
+            lines.push(card_title_line(&c.id, &c.title, YELLOW));
+            let attempt = c
+                .attempt
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "?".into());
+            lines.push(dim_line(&format!(
+                "  карантин, попытка {attempt} — вернётся в исполнение автоматически; стоит проверить причину"
+            )));
+            lines.push(field_line("  причина: ", c.reason.as_deref().unwrap_or("не указана")));
+            if !c.blocks.is_empty() {
+                lines.push(field_line("  разблокирует: ", &c.blocks.join(", ")));
+            }
+        }
+    }
+    let title = format!("{}Карантин / повторы ({})", focus_marker(focused), cards.len());
+    let border = if cards.is_empty() { DIM } else { YELLOW };
+    let para = Paragraph::new(lines)
+        .block(block(&title).border_style(Style::default().fg(border)))
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0));
+    f.render_widget(para, area);
+}
+
+fn render_blocked_panel(f: &mut Frame, area: Rect, cards: &[BlockedCard], focused: bool, scroll: u16) {
+    let mut lines: Vec<Line> = Vec::new();
+    if cards.is_empty() {
+        lines.push(dim_line("нет заблокированных задач"));
+    } else {
+        for c in cards {
+            lines.push(card_title_line(&c.id, &c.title, YELLOW));
+            if c.blocking_infeasible {
+                lines.push(Line::from(vec![
+                    Span::styled("  блокировано: ", Style::default().fg(DIM)),
+                    Span::styled(
+                        format!("{} эскалирована — без решения по ней не продолжится", c.blocking_on),
+                        Style::default().fg(RED),
+                    ),
+                ]));
+            } else if c.blocking_unknown {
+                lines.push(Line::from(vec![
+                    Span::styled("  блокировано: ", Style::default().fg(DIM)),
+                    Span::styled(
+                        format!(
+                            "{} не найден ни в очереди, ни в Tasks_Done.md — проверьте Предпосылки:",
+                            c.blocking_on
+                        ),
+                        Style::default().fg(RED),
+                    ),
+                ]));
+            } else {
+                lines.push(field_line("  ожидает: ", &c.blocking_on));
+            }
+        }
+    }
+    let title = format!("{}Заблокировано ({})", focus_marker(focused), cards.len());
+    let border = if cards.is_empty() { DIM } else { YELLOW };
+    let para = Paragraph::new(lines)
+        .block(block(&title).border_style(Style::default().fg(border)))
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0));
+    f.render_widget(para, area);
+}
+
+fn render_inbox_footer(f: &mut Frame, area: Rect) {
+    let hint = Line::from(vec![
+        Span::styled(" q/Esc ", Style::default().fg(CYAN)),
+        Span::raw("выход  "),
+        Span::styled(" Tab ", Style::default().fg(CYAN)),
+        Span::raw("обзор  "),
+        Span::styled(" ←/→ ", Style::default().fg(CYAN)),
+        Span::raw("фокус панели  "),
+        Span::styled(" ↑/↓ ", Style::default().fg(CYAN)),
+        Span::raw("прокрутка  "),
         Span::styled(
             " read-only ",
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "— TUI ничего не пишет в .work/",
+            "— только просмотр, команды (approve/pause/resume) сюда не входят",
             Style::default().fg(DIM),
         ),
     ]);
     f.render_widget(Paragraph::new(hint).alignment(Alignment::Left), area);
+}
+
+fn card_title_line<'a>(id: &'a str, title: &'a str, color: Color) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            format!("{id:<7}"),
+            Style::default().add_modifier(Modifier::BOLD).fg(color),
+        ),
+        Span::raw(title),
+    ])
+}
+
+fn dim_line(text: &str) -> Line<'static> {
+    Line::from(Span::styled(text.to_string(), Style::default().fg(DIM)))
+}
+
+fn field_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label.to_string(), Style::default().fg(DIM)),
+        Span::raw(value.to_string()),
+    ])
 }
 
 fn phase_color(phase: CohortPhase) -> Color {
@@ -358,5 +643,67 @@ mod tests {
             screen.contains("read-only") || screen.contains("ничего не пишет"),
             "missing read-only footer"
         );
+    }
+
+    /// Render the §6.2 Decision Inbox screen headlessly and assert every card category, the
+    /// pause banner, and the read-only footer land on screen.
+    #[test]
+    fn renders_decision_inbox_screen_headlessly() {
+        let mut app = AppState::new();
+        app.screen = Screen::DecisionInbox;
+        app.inbox = DecisionInbox {
+            paused: true,
+            pause_note: Some("оператор остановил конвейер на ночь".to_string()),
+            escalated: vec![crate::inbox::EscalatedCard {
+                id: "T-050".to_string(),
+                title: "Старая задача".to_string(),
+                reason: Some("INTEGRATION_LOOP_MAX".to_string()),
+                blocks: vec!["T-060".to_string()],
+            }],
+            quarantined: vec![crate::inbox::QuarantineCard {
+                id: "T-104".to_string(),
+                title: "Экран Decision Inbox".to_string(),
+                attempt: Some(2),
+                reason: Some("merge-conflict".to_string()),
+                blocks: vec![],
+            }],
+            blocked: vec![crate::inbox::BlockedCard {
+                id: "T-060".to_string(),
+                title: "Ждёт T-050".to_string(),
+                blocking_on: "T-050".to_string(),
+                blocking_infeasible: true,
+                blocking_unknown: false,
+            }],
+        };
+
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let screen: String = buf.content.iter().map(|c| c.symbol()).collect();
+
+        assert!(screen.contains("Decision Inbox"), "missing screen title");
+        assert!(screen.contains("ПАУЗА активна"), "missing pause banner");
+        assert!(screen.contains("T-050"), "escalated card not shown");
+        assert!(screen.contains("INTEGRATION_LOOP_MAX"), "escalation reason not shown");
+        assert!(screen.contains("T-104"), "quarantine card not shown");
+        assert!(screen.contains("merge-conflict"), "quarantine reason not shown");
+        assert!(screen.contains("T-060"), "blocked card not shown");
+        assert!(screen.contains("Заблокировано"), "missing blocked panel");
+        assert!(
+            screen.contains("read-only") || screen.contains("approve/pause/resume"),
+            "missing read-only footer"
+        );
+    }
+
+    #[test]
+    fn toggle_screen_switches_between_overview_and_inbox() {
+        let mut app = AppState::new();
+        assert_eq!(app.screen, Screen::Overview);
+        app.toggle_screen();
+        assert_eq!(app.screen, Screen::DecisionInbox);
+        app.toggle_screen();
+        assert_eq!(app.screen, Screen::Overview);
     }
 }

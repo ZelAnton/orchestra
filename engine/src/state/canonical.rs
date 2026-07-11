@@ -199,8 +199,8 @@ mod tests {
             ("эскалирована", "escalated"),
             ("конфликт", "conflict"),
         ] {
-            let st = TaskState::from_markdown(literal)
-                .unwrap_or_else(|| panic!("{literal} must map"));
+            let st =
+                TaskState::from_markdown(literal).unwrap_or_else(|| panic!("{literal} must map"));
             assert_eq!(st.as_str(), canon, "{literal} -> {canon}");
             assert_eq!(TaskState::from_canonical(canon), Some(st));
         }
@@ -269,7 +269,14 @@ mod tests {
     #[test]
     fn integration_canonical_names_round_trip() {
         // §13.3 has no Cyrillic literal — exercise every canonical name via round-trip.
-        for name in ["none", "in-progress", "reviewed", "published", "failed", "cleaned"] {
+        for name in [
+            "none",
+            "in-progress",
+            "reviewed",
+            "published",
+            "failed",
+            "cleaned",
+        ] {
             let st = IntegrationState::from_canonical(name)
                 .unwrap_or_else(|| panic!("{name} must parse"));
             assert_eq!(st.as_str(), name);

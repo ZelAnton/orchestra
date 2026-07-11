@@ -16,6 +16,29 @@ use std::collections::BTreeMap;
 use orchestra_engine_spike::events::{Event, EventType};
 use serde_json::{Map, Value};
 
+use crate::inbox::DecisionInbox;
+
+/// Which of the two screens (§6.1 overview / §6.2 Decision Inbox) is currently drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Screen {
+    #[default]
+    Overview,
+    DecisionInbox,
+}
+
+/// Which Decision Inbox panel currently holds scroll focus (R-3: each of the three panels —
+/// escalated/quarantined/blocked — scrolls independently, since a fixed-height layout would
+/// otherwise silently clip cards beyond the terminal's height). `←`/`→` in `main.rs` cycle
+/// focus; `↑`/`↓` scroll whichever panel is focused. Fieldless, so `as usize` indexes
+/// `AppState::inbox_scroll` in declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InboxPanel {
+    #[default]
+    Escalated,
+    Quarantined,
+    Blocked,
+}
+
 /// The stage a task's status maps to, for the "deviations first, green collapsed" §6.1 layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusClass {
@@ -145,6 +168,15 @@ pub struct AppState {
     pub events_seen: u64,
     /// `occurred_at` of the most recent event (fallback "updated" when status.md is absent).
     pub last_event_at: Option<String>,
+    /// Which screen is currently drawn (§6.1 overview vs §6.2 Decision Inbox).
+    pub screen: Screen,
+    /// The Decision Inbox projection (§6.2), rebuilt from `engine::state::Snapshot` +
+    /// `.work/PAUSE` on the same cadence as the `status.md` overlay (see `main.rs`).
+    pub inbox: DecisionInbox,
+    /// Which Decision Inbox panel currently holds scroll focus (R-3, see `InboxPanel`).
+    pub inbox_focus: InboxPanel,
+    /// Per-panel scroll offset (lines), indexed by `InboxPanel as usize` (R-3).
+    pub inbox_scroll: [u16; 3],
     next_seq: u64,
 }
 
@@ -401,6 +433,41 @@ impl AppState {
             .or_else(|| self.last_event_at.clone())
     }
 
+    /// Switch between the §6.1 overview and the §6.2 Decision Inbox screen.
+    pub fn toggle_screen(&mut self) {
+        self.screen = match self.screen {
+            Screen::Overview => Screen::DecisionInbox,
+            Screen::DecisionInbox => Screen::Overview,
+        };
+    }
+
+    /// Move Decision Inbox scroll focus to the next panel (R-3; wraps around).
+    pub fn focus_next_inbox_panel(&mut self) {
+        self.inbox_focus = match self.inbox_focus {
+            InboxPanel::Escalated => InboxPanel::Quarantined,
+            InboxPanel::Quarantined => InboxPanel::Blocked,
+            InboxPanel::Blocked => InboxPanel::Escalated,
+        };
+    }
+
+    /// Move Decision Inbox scroll focus to the previous panel (R-3; wraps around).
+    pub fn focus_prev_inbox_panel(&mut self) {
+        self.inbox_focus = match self.inbox_focus {
+            InboxPanel::Escalated => InboxPanel::Blocked,
+            InboxPanel::Quarantined => InboxPanel::Escalated,
+            InboxPanel::Blocked => InboxPanel::Quarantined,
+        };
+    }
+
+    /// Scroll the currently-focused Decision Inbox panel by `delta` lines (negative scrolls up;
+    /// R-3). Saturates at 0 — ratatui itself clips an offset past the content's end, so no upper
+    /// clamp is needed here.
+    pub fn scroll_inbox(&mut self, delta: i16) {
+        let idx = self.inbox_focus as usize;
+        let cur = i32::from(self.inbox_scroll[idx]);
+        self.inbox_scroll[idx] = (cur + i32::from(delta)).max(0) as u16;
+    }
+
     /// Friendly display name for a task: status.md's name column if we have it, else the id.
     pub fn task_name(&self, task_id: &str) -> Option<String> {
         self.status
@@ -552,6 +619,35 @@ mod tests {
         assert_eq!(t.codex_attempts, 1);
         // capture after the attempt still fills in the metadata.
         assert_eq!(t.level.as_deref(), Some("coder_deep"));
+    }
+
+    #[test]
+    fn inbox_panel_focus_cycles_and_wraps() {
+        let mut app = AppState::new();
+        assert_eq!(app.inbox_focus, InboxPanel::Escalated);
+        app.focus_next_inbox_panel();
+        assert_eq!(app.inbox_focus, InboxPanel::Quarantined);
+        app.focus_next_inbox_panel();
+        assert_eq!(app.inbox_focus, InboxPanel::Blocked);
+        app.focus_next_inbox_panel();
+        assert_eq!(app.inbox_focus, InboxPanel::Escalated);
+        app.focus_prev_inbox_panel();
+        assert_eq!(app.inbox_focus, InboxPanel::Blocked);
+    }
+
+    #[test]
+    fn inbox_scroll_is_per_panel_and_saturates_at_zero() {
+        let mut app = AppState::new();
+        app.scroll_inbox(5);
+        assert_eq!(app.inbox_scroll[InboxPanel::Escalated as usize], 5);
+        app.focus_next_inbox_panel();
+        app.scroll_inbox(3);
+        assert_eq!(app.inbox_scroll[InboxPanel::Quarantined as usize], 3);
+        // the other panel's offset is untouched.
+        assert_eq!(app.inbox_scroll[InboxPanel::Escalated as usize], 5);
+        // scrolling up past 0 saturates instead of underflowing.
+        app.scroll_inbox(-100);
+        assert_eq!(app.inbox_scroll[InboxPanel::Quarantined as usize], 0);
     }
 
     #[test]
