@@ -242,7 +242,7 @@ argv-элемент, инъекция невозможна). `sandbox_workspace_
   CLI-флага режима одобрения не имеет (`--ask-for-approval` в 0.142.5 отсутствует, exit 2) —
   политика задаётся **config-оверрайдом**, который `codex exec` принимает.
 - **Валидация значений (fail-closed).** `--sandbox` вне `{read-only, workspace-write}` или
-  `--reasoning` вне `{low, medium, high}` → runtime завершается ошибкой (exit 2), **не** строя
+  `--reasoning` вне `{low, medium, high, xhigh}` → runtime завершается ошибкой (exit 2), **не** строя
   вызов; `danger-full-access` и любое расширение записи за пределы рабочей копии в `--sandbox`
   **не** попадают. `CODEX_SANDBOX` перепроверь и **до** вызова (как раньше): непустое вне
   множества → `ЭСКАЛАЦИЯ codex: CODEX_UNAVAILABLE — CODEX_SANDBOX invalid: <значение> (allowed:
