@@ -58,7 +58,7 @@ $script:PolicySchemaVersion = 'orchestra/policy-schema@1'
 #   default     - human default string (matches config.example.md's defaults table prose).
 #   enum        - allowed value set for 'enum' (else $null).
 #   min         - inclusive lower bound for 'int' (else $null); ints have no explicit max.
-#   envFallback - $true only for the two keys that also resolve from the OS environment.
+#   envFallback - $true only for the three keys that also resolve from the OS environment.
 #   sensitivity - 'low' | 'medium' | 'high' (how much a wrong value can widen blast radius).
 function New-ConfigKey {
     param(
@@ -100,7 +100,7 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'REVIEWER_TIERING'        'bool'   'true')
         (New-ConfigKey 'MAIN_BRANCH'             'string' 'autodetect'                       -Sensitivity 'high')
         (New-ConfigKey 'EVENTS_OUTBOX'           'enum'   'on'     -Enum @('on', 'off'))
-        (New-ConfigKey 'KB'                      'enum'   'off'    -Enum @('on', 'off'))
+        (New-ConfigKey 'KB'                      'enum'   'on'     -Enum @('on', 'off')                         -EnvFallback $true)
         (New-ConfigKey 'KB_TTL'                  'int'    '8'                                -Min 1)
         (New-ConfigKey 'KB_CAP'                  'int'    '12'                               -Min 1)
         (New-ConfigKey 'CODEX_CODER'             'enum'   'off'    -Enum @('off', 'fast', 'fast+std')          -EnvFallback $true -Sensitivity 'medium')

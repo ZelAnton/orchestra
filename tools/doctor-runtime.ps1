@@ -22,7 +22,9 @@
                                 CODEX_REVIEWER).
     3. Codex key validation   - fail-closed classification of the six value-constrained
                                 Codex keys against their allowed sets ($codexAllowed).
-    4. KB status              - the KB mode and per-shard entry counts.
+    4. KB status              - the resolved KB mode (.work/config.md, with the same
+                                documented config-then-env fallback, default `on`) and
+                                per-shard entry counts.
     5. Windows sandbox        - Windows-only: the [windows] sandbox profile + approval
                                 policy from ~/.codex/config.toml vs this process's
                                 elevation. N/A on POSIX (the concept does not exist there).
@@ -275,7 +277,12 @@ if (-not $codexInvalid) {
 Write-Host ''
 Write-Host ('== ' + $script:KbTitle + ' (KB; .work/knowledge) ==')
 $kb = Get-Cfg 'KB'
-if (-not $kb) { $kb = 'off (default)' }
+$kbSrc = ''
+if (-not $kb) {
+    $ev = Get-EnvTrimmed 'KB'
+    if ($ev) { $kb = $ev; $kbSrc = ' (env)' }
+}
+if (-not $kb) { $kb = 'on (default)' } else { $kb = $kb + $kbSrc }
 Write-Host ('  KB = ' + $kb)
 $kbDir = Join-Path $script:WorkDir 'knowledge'
 if (Test-Path -LiteralPath $kbDir) {

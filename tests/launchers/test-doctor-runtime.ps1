@@ -14,7 +14,8 @@
   .cmd program the runtime replaced) directly against the engine: exec-permission
   classification (routing off / routing on with no grant / settings allow-rule / session
   grant / deny-only / CI-fix-only / custom CODEX_CMD), effective CODEX_* + env fallback,
-  fail-closed Codex key value validation, KB status, the queue/config audit, and the
+  fail-closed Codex key value validation, KB status (default, env fallback, config
+  precedence over env), the queue/config audit, and the
   Windows sandbox profile block (OS-conditionally: the real classification on Windows, the
   N/A line on POSIX). The codex "binary present/version" line is not asserted (it depends
   on an external binary and carries no classification logic); the "NOT FOUND" branch is
@@ -78,7 +79,7 @@ function Invoke-Doctor {
     # CODEX_REVIEWER env fallback, CC_CODEX_EXEC_GRANT session grant). Set them on the
     # parent so the spawned child inherits them, then restore. Unset ambient routing by
     # default so a machine with real CODEX_* set cannot make these scenarios flaky.
-    $defaults = @{ CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = '' }
+    $defaults = @{ CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = '' }
     foreach ($k in $Env.Keys) { $defaults[$k] = $Env[$k] }
 
     $saved = @{}
@@ -262,6 +263,32 @@ $r = Invoke-Doctor -Case $c
 Assert-Contains $r.Out 'codex binary : NOT FOUND (codex-such-binary-does-not-exist-xyz)' 'bogus cmd: NOT FOUND'
 Assert-Contains $r.Out 'KB = on' 'KB: reflects config'
 Assert-Contains $r.Out 'pitfalls      = 1 entries' 'KB: pitfalls count reflects the knowledge dir'
+Remove-Case $c
+
+# =============================================================================
+# 12a) KB status: unset config and env -> default is now "on" (not "off")
+# =============================================================================
+$c = New-Case
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'KB = on (default)' 'KB: default is on when unset in both config and env'
+Remove-Case $c
+
+# =============================================================================
+# 12b) KB status: env fallback labelled "(env)" when config.md does not set KB
+# =============================================================================
+$c = New-Case
+$r = Invoke-Doctor -Case $c -Env @{ KB = 'off' }
+Assert-Contains $r.Out 'KB = off (env)' 'KB: env fallback read and labelled'
+Remove-Case $c
+
+# =============================================================================
+# 12c) KB status: config.md always wins over env
+# =============================================================================
+$c = New-Case
+Set-Config $c 'KB: off'
+$r = Invoke-Doctor -Case $c -Env @{ KB = 'on' }
+Assert-Contains $r.Out 'KB = off' 'KB: config wins over env'
+Assert-NotContains $r.Out 'KB = off (env)' 'KB: config value is not labelled as env-sourced'
 Remove-Case $c
 
 # =============================================================================
