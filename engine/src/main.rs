@@ -40,12 +40,25 @@
 //!                             succeeds when the lock is free or provably stale and cleanly refuses
 //!                             a live processor lease; `release` presents the engine's own owner id
 //!                             so it can only remove its own lease. See `src/lease.rs`.
+//!   run      --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]
+//!            [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>]
+//!            [--json]
+//!                             Drive ONE cohort/phase end-to-end over a hermetic SANDBOX `.work`
+//!                             (task T-109): take the engine lease, admit a cohort (T-106), capture
+//!                             each task through `queue-tx`, run ONE supervised leaf round (the
+//!                             deterministic `__fake-agent` stand-in — a real `--live` model call is
+//!                             out of scope and refused), validate every descriptor/cohort transition
+//!                             through `state-tx check-transition`, emit the events through `outbox`,
+//!                             and release the lease. `--work` is REQUIRED and has no default, so this
+//!                             can never touch the repository's live `.work`. `--once` is required.
 //!   __fake-agent ...          Hidden: a deterministic stand-in child used by the
-//!                             hermetic tests and by `selfcheck` (emits stream-json,
-//!                             can sleep / exit with a chosen code).
+//!                             hermetic tests, by `selfcheck`, and by `run`'s round (emits
+//!                             stream-json; `--mode leaf` carries a parseable leaf report, and
+//!                             other modes can sleep / exit with a chosen code).
 //!
-//! Only the `lease` subcommand mutates `.work/` — and strictly through the owner-checked
-//! `tools/state-tx.ps1` (never a direct write or `rm -rf`). Every other subcommand is read-only.
+//! The `lease` and `run` subcommands are the ONLY ones that mutate `.work/` — `lease` strictly
+//! through the owner-checked `tools/state-tx.ps1`, and `run` strictly over a sandbox `.work` via
+//! the transactional `tools/{state-tx,queue-tx,outbox}.ps1`. Every other subcommand is read-only.
 //! Live model calls are strictly opt-in via `--live`; the default path is offline and token-free.
 
 use std::collections::BTreeSet;
@@ -65,6 +78,7 @@ use orchestra_engine_spike::resolvers::{
     ActiveTask, AdmissionGate, AdmissionOutcome, Candidate, CohortCounters, CohortThresholds,
     Domain, Level,
 };
+use orchestra_engine_spike::run::{self, RunConfig};
 use orchestra_engine_spike::state::{Snapshot, TaskState};
 use orchestra_engine_spike::supervise::{self, SpawnSpec};
 
@@ -80,11 +94,12 @@ fn main() {
         "state" => cmd_state(&args),
         "plan" => cmd_plan(&args),
         "lease" => cmd_lease(&args),
+        "run" => cmd_run(&args),
         "__fake-agent" => cmd_fake_agent(&args),
         "version" | "--version" => println!("orchestra-engine-spike 0.0.1"),
         _ => {
             eprintln!(
-                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|plan|lease|version>\n\
+                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|plan|lease|run|version>\n\
                  (see src/main.rs; live model calls require --live and are opt-in)"
             );
             exit(2);
@@ -994,9 +1009,93 @@ fn lease_status(script: &str, work: &str, json: bool) -> i32 {
     lease_exit::OK
 }
 
+/// `run --once --work <sandbox>` — drive ONE cohort/phase end-to-end over a SANDBOX `.work`
+/// (task T-109). `--work` is REQUIRED and has NO default, so `run` can never silently resolve the
+/// repository's live `.work`; `--once` is the only mode. Offline by construction: `--live` is
+/// refused, and the round drives the deterministic `__fake-agent` stand-in, not a real model call.
+fn cmd_run(args: &[String]) {
+    if args.iter().any(|a| a == "--live") {
+        eprintln!(
+            "run: refusing --live — this hermetic run drives ONLY the deterministic __fake-agent\n\
+             stand-in over a sandbox .work; a real model call is out of scope for T-109."
+        );
+        exit(run::exit::USAGE);
+    }
+    if !args.iter().any(|a| a == "--once") {
+        eprintln!(
+            "usage: run --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]\n\
+             \x20          [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>] [--json]\n\
+             (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work)"
+        );
+        exit(run::exit::USAGE);
+    }
+    let work = match opt(args, "--work") {
+        Some(w) if !w.is_empty() => abs_path(&w),
+        _ => {
+            eprintln!("run: --work <sandbox-dir> is required (run has no default work dir)");
+            exit(run::exit::USAGE);
+        }
+    };
+    let root = match opt(args, "--root") {
+        Some(r) => abs_path(&r),
+        None => work
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| work.clone()),
+    };
+    let tools = match opt(args, "--tools") {
+        Some(t) => abs_path(&t),
+        None => root.join("tools"),
+    };
+    let batch_id = opt(args, "--batch")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(run::default_batch_id);
+    let base = opt(args, "--base").unwrap_or_else(|| "sandbox-base".to_string());
+    let cohort_size = opt(args, "--cohort-size")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(3)
+        .max(1);
+    let ttl_secs = opt(args, "--ttl")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(900);
+    let inject_escalate = opt(args, "--inject-escalate").filter(|s| !s.is_empty());
+    let json = args.iter().any(|a| a == "--json");
+
+    let cfg = RunConfig {
+        work,
+        root,
+        tools,
+        self_exe: self_exe(),
+        batch_id,
+        base,
+        cohort_size,
+        reviewer_tiering: true,
+        ttl_secs,
+        inject_escalate,
+        leaf_deadline: Duration::from_secs(60),
+    };
+
+    match run::run_once(&cfg) {
+        Ok(report) => {
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_human());
+            }
+        }
+        Err(e) => {
+            eprintln!("run: {}", e.message);
+            exit(e.code);
+        }
+    }
+}
+
 /// Hidden deterministic stand-in child for hermetic tests / selfcheck.
 ///   --mode success   emit a valid stream-json transcript, exit (0 unless --exit given)
 ///   --mode hang      sleep 30s (so a short deadline fires) — the tree-kill target
+///   --mode leaf      emit a stream-json transcript whose `result` carries a parseable leaf
+///                    report (contract markers) — used by `run`'s round. `--task <id>` names
+///                    the task; `--verdict готово|эскалация` selects the terminal `ИТОГ:` line.
 ///   --exit N         override the exit code
 fn cmd_fake_agent(args: &[String]) {
     let mode = opt(args, "--mode").unwrap_or_else(|| "success".to_string());
@@ -1014,6 +1113,34 @@ fn cmd_fake_agent(args: &[String]) {
         }
         "hang" => {
             std::thread::sleep(Duration::from_secs(30));
+            exit(exit_code);
+        }
+        "leaf" => {
+            // A deterministic leaf-agent stand-in for `run`'s round: emit a stream-json
+            // transcript whose final `result` carries a parseable leaf report (the contract
+            // markers `Изменённые файлы:` + the terminal `ИТОГ:` line). Offline, token-free.
+            let task = opt(args, "--task").unwrap_or_else(|| "T-000".to_string());
+            let verdict = opt(args, "--verdict").unwrap_or_else(|| "готово".to_string());
+            let itog: &str = if verdict == "эскалация" {
+                "ИТОГ: эскалация \u{00B7} режим=1 \u{00B7} причина=sandbox-fault"
+            } else {
+                "ИТОГ: готово \u{00B7} режим=1"
+            };
+            let report = format!(
+                "Реализовал {task} в песочнице.\nИзменённые файлы: engine/src/{task}.rs\n{itog}"
+            );
+            println!(r#"{{"type":"system","subtype":"init","model":"fake"}}"#);
+            println!(r#"{{"type":"assistant","message":{{"type":"message","role":"assistant"}}}}"#);
+            // Build the result line via serde_json so the report (newlines, Cyrillic, the
+            // middle-dot separator) is escaped correctly and round-trips through parse_transcript.
+            let result_line = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "num_turns": 3,
+                "result": report,
+            });
+            println!("{result_line}");
             exit(exit_code);
         }
         other => {
