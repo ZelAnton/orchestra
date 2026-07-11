@@ -42,12 +42,12 @@ fn render_overview(f: &mut Frame, app: &AppState) {
 
     render_header(f, root[0], app);
 
-    let body = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(root[1]);
-    let left = Layout::vertical([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(body[0]);
-    let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(body[1]);
+    let body =
+        Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(root[1]);
+    let left =
+        Layout::vertical([Constraint::Percentage(42), Constraint::Percentage(58)]).split(body[0]);
+    let right =
+        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(body[1]);
 
     render_attention(f, left[0], app);
     render_active(f, left[1], app);
@@ -58,12 +58,10 @@ fn render_overview(f: &mut Frame, app: &AppState) {
 }
 
 fn block(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
+    Block::default().borders(Borders::ALL).title(Span::styled(
+        format!(" {title} "),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &AppState) {
@@ -121,10 +119,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &AppState) {
         .map(|b| b.planned_tasks.len())
         .unwrap_or(0);
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("активные {active}"),
-            Style::default().fg(GREEN),
-        ),
+        Span::styled(format!("активные {active}"), Style::default().fg(GREEN)),
         Span::raw("  ·  "),
         Span::styled(
             format!("требуют внимания {attention}"),
@@ -141,14 +136,11 @@ fn render_header(f: &mut Frame, area: Rect, app: &AppState) {
         ),
     ]));
 
-    let para = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(Span::styled(
-                " control-plane ",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-    );
+    let para =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(Span::styled(
+            " control-plane ",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
     f.render_widget(para, area);
 }
 
@@ -169,8 +161,8 @@ fn render_attention(f: &mut Frame, area: Rect, app: &AppState) {
         )));
     }
     let border_color = if has_attention { RED } else { DIM };
-    let para = Paragraph::new(lines)
-        .block(block(&title).border_style(Style::default().fg(border_color)));
+    let para =
+        Paragraph::new(lines).block(block(&title).border_style(Style::default().fg(border_color)));
     f.render_widget(para, area);
 }
 
@@ -199,7 +191,10 @@ fn task_line<'a>(app: &AppState, t: &'a TaskState, phase_color: Color) -> Line<'
         Style::default().add_modifier(Modifier::BOLD),
     )];
     if let Some(level) = &t.level {
-        spans.push(Span::styled(format!("{level:<11}"), Style::default().fg(DIM)));
+        spans.push(Span::styled(
+            format!("{level:<11}"),
+            Style::default().fg(DIM),
+        ));
     }
     if let Some(status) = &t.status {
         spans.push(Span::styled(
@@ -338,12 +333,20 @@ fn render_inbox_header(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
         Span::raw("  ·  "),
         Span::styled(
             format!("карантин {}", inbox.quarantined.len()),
-            Style::default().fg(if inbox.quarantined.is_empty() { DIM } else { YELLOW }),
+            Style::default().fg(if inbox.quarantined.is_empty() {
+                DIM
+            } else {
+                YELLOW
+            }),
         ),
         Span::raw("  ·  "),
         Span::styled(
             format!("заблокировано {}", inbox.blocked.len()),
-            Style::default().fg(if inbox.blocked.is_empty() { DIM } else { YELLOW }),
+            Style::default().fg(if inbox.blocked.is_empty() {
+                DIM
+            } else {
+                YELLOW
+            }),
         ),
     ])];
     if inbox.paused {
@@ -352,7 +355,10 @@ fn render_inbox_header(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
             Style::default().fg(RED).add_modifier(Modifier::BOLD),
         )];
         if let Some(note) = &inbox.pause_note {
-            spans.push(Span::styled(format!("  · {note}"), Style::default().fg(DIM)));
+            spans.push(Span::styled(
+                format!("  · {note}"),
+                Style::default().fg(DIM),
+            ));
         }
         lines.push(Line::from(spans));
     }
@@ -428,7 +434,13 @@ fn focus_marker(focused: bool) -> &'static str {
     }
 }
 
-fn render_escalated_panel(f: &mut Frame, area: Rect, cards: &[EscalatedCard], focused: bool, scroll: u16) {
+fn render_escalated_panel(
+    f: &mut Frame,
+    area: Rect,
+    cards: &[EscalatedCard],
+    focused: bool,
+    scroll: u16,
+) {
     let mut lines: Vec<Line> = Vec::new();
     if cards.is_empty() {
         lines.push(dim_line("эскалированных задач нет"));
@@ -438,7 +450,10 @@ fn render_escalated_panel(f: &mut Frame, area: Rect, cards: &[EscalatedCard], fo
             lines.push(dim_line(
                 "  требуется решение оператора — терминальное состояние, само не продолжится",
             ));
-            lines.push(field_line("  причина: ", c.reason.as_deref().unwrap_or("не указана")));
+            lines.push(field_line(
+                "  причина: ",
+                c.reason.as_deref().unwrap_or("не указана"),
+            ));
             if !c.blocks.is_empty() {
                 lines.push(field_line("  разблокирует: ", &c.blocks.join(", ")));
             }
@@ -453,7 +468,13 @@ fn render_escalated_panel(f: &mut Frame, area: Rect, cards: &[EscalatedCard], fo
     f.render_widget(para, area);
 }
 
-fn render_quarantine_panel(f: &mut Frame, area: Rect, cards: &[QuarantineCard], focused: bool, scroll: u16) {
+fn render_quarantine_panel(
+    f: &mut Frame,
+    area: Rect,
+    cards: &[QuarantineCard],
+    focused: bool,
+    scroll: u16,
+) {
     let mut lines: Vec<Line> = Vec::new();
     if cards.is_empty() {
         lines.push(dim_line("нет задач в карантине"));
@@ -467,13 +488,20 @@ fn render_quarantine_panel(f: &mut Frame, area: Rect, cards: &[QuarantineCard], 
             lines.push(dim_line(&format!(
                 "  карантин, попытка {attempt} — вернётся в исполнение автоматически; стоит проверить причину"
             )));
-            lines.push(field_line("  причина: ", c.reason.as_deref().unwrap_or("не указана")));
+            lines.push(field_line(
+                "  причина: ",
+                c.reason.as_deref().unwrap_or("не указана"),
+            ));
             if !c.blocks.is_empty() {
                 lines.push(field_line("  разблокирует: ", &c.blocks.join(", ")));
             }
         }
     }
-    let title = format!("{}Карантин / повторы ({})", focus_marker(focused), cards.len());
+    let title = format!(
+        "{}Карантин / повторы ({})",
+        focus_marker(focused),
+        cards.len()
+    );
     let border = if cards.is_empty() { DIM } else { YELLOW };
     let para = Paragraph::new(lines)
         .block(block(&title).border_style(Style::default().fg(border)))
@@ -482,7 +510,13 @@ fn render_quarantine_panel(f: &mut Frame, area: Rect, cards: &[QuarantineCard], 
     f.render_widget(para, area);
 }
 
-fn render_blocked_panel(f: &mut Frame, area: Rect, cards: &[BlockedCard], focused: bool, scroll: u16) {
+fn render_blocked_panel(
+    f: &mut Frame,
+    area: Rect,
+    cards: &[BlockedCard],
+    focused: bool,
+    scroll: u16,
+) {
     let mut lines: Vec<Line> = Vec::new();
     if cards.is_empty() {
         lines.push(dim_line("нет заблокированных задач"));
@@ -493,7 +527,10 @@ fn render_blocked_panel(f: &mut Frame, area: Rect, cards: &[BlockedCard], focuse
                 lines.push(Line::from(vec![
                     Span::styled("  блокировано: ", Style::default().fg(DIM)),
                     Span::styled(
-                        format!("{} эскалирована — без решения по ней не продолжится", c.blocking_on),
+                        format!(
+                            "{} эскалирована — без решения по ней не продолжится",
+                            c.blocking_on
+                        ),
                         Style::default().fg(RED),
                     ),
                 ]));
@@ -632,10 +669,16 @@ mod tests {
         // deviations-forward: the escalated task and the attention count are visible
         assert!(screen.contains("Отклонения"), "missing attention panel");
         assert!(screen.contains("T-88"), "escalated task not shown");
-        assert!(screen.contains("эскалирована"), "escalation status not shown");
+        assert!(
+            screen.contains("эскалирована"),
+            "escalation status not shown"
+        );
         // active task + its name overlaid from status.md
         assert!(screen.contains("T-77"), "active task not shown");
-        assert!(screen.contains("Живой TUI"), "status.md name overlay missing");
+        assert!(
+            screen.contains("Живой TUI"),
+            "status.md name overlay missing"
+        );
         // recent feed reflects the escalation
         assert!(screen.contains("Недавно завершено"), "missing recent panel");
         // read-only assurance is on the footer
@@ -686,9 +729,15 @@ mod tests {
         assert!(screen.contains("Decision Inbox"), "missing screen title");
         assert!(screen.contains("ПАУЗА активна"), "missing pause banner");
         assert!(screen.contains("T-050"), "escalated card not shown");
-        assert!(screen.contains("INTEGRATION_LOOP_MAX"), "escalation reason not shown");
+        assert!(
+            screen.contains("INTEGRATION_LOOP_MAX"),
+            "escalation reason not shown"
+        );
         assert!(screen.contains("T-104"), "quarantine card not shown");
-        assert!(screen.contains("merge-conflict"), "quarantine reason not shown");
+        assert!(
+            screen.contains("merge-conflict"),
+            "quarantine reason not shown"
+        );
         assert!(screen.contains("T-060"), "blocked card not shown");
         assert!(screen.contains("Заблокировано"), "missing blocked panel");
         assert!(

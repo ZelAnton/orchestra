@@ -212,7 +212,9 @@ fn dependents_of(id: &str, snapshot: &Snapshot) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestra_engine_spike::state::{Descriptor, IntegrationSnapshot, IntegrationState, QueueEntry};
+    use orchestra_engine_spike::state::{
+        Descriptor, IntegrationSnapshot, IntegrationState, QueueEntry,
+    };
     use std::path::PathBuf;
 
     fn queue_entry(

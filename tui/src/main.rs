@@ -119,7 +119,9 @@ fn run(cfg: Config) -> io::Result<()> {
                         app.scroll_inbox(1)
                     }
                     KeyCode::PageUp if app.screen == Screen::DecisionInbox => app.scroll_inbox(-10),
-                    KeyCode::PageDown if app.screen == Screen::DecisionInbox => app.scroll_inbox(10),
+                    KeyCode::PageDown if app.screen == Screen::DecisionInbox => {
+                        app.scroll_inbox(10)
+                    }
                     _ => {}
                 },
                 _ => {}
