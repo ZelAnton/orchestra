@@ -33,12 +33,21 @@
 //! gate, review-cycle limits) compiled into deterministic pure functions over typed inputs (and
 //! reusing [`contract::ReviewParse::is_clean_pass`]). Like the layers below it, it performs no
 //! I/O and no mutation and is not wired into the running orchestrator.
+//!
+//! [`lease`] is the first module that *mutates* control-plane state — but never directly: it is
+//! the engine's owner-lease interlock (contract §14–§17, task T-107), taking / renewing / releasing
+//! / inspecting the `.work/orchestrator.lock` lease **strictly** through `tools/state-tx.ps1`
+//! (owner-checked, liveness-checked) under the engine's own role (`engine`, distinct from
+//! `processor`). It re-implements no owner/TTL check and never force-removes a foreign lease, so the
+//! engine and a live processor mutually exclude each other on the one shared lock. It is exercised
+//! only by the `engine lease` subcommand and is **not** wired into any launcher or live `.work/`.
 
 pub mod claude;
 pub mod codex;
 pub mod contract;
 pub mod events;
 pub mod jsonline;
+pub mod lease;
 pub mod resolvers;
 pub mod state;
 pub mod supervise;

@@ -28,12 +28,25 @@
 //!                             (T-105). STRICTLY read-only: takes no `.work/orchestrator.lock`,
 //!                             calls no mutating `queue-tx`/`state-tx`, creates no worktree/branch,
 //!                             writes nothing. `--dry-run` is required (the only mode).
+//!   lease    <acquire|heartbeat|release|status> [--work <dir>] [--root <dir>]
+//!            [--script <state-tx.ps1>] [--owner <id>] [--ttl <sec>] [--session <id>]
+//!            [--pid <n>] [--json]
+//!                             Take / renew / release / inspect the engine's owner lease on
+//!                             `.work/orchestrator.lock`, the mutual-exclusion interlock with a
+//!                             running `processor` (contract §14–§17, T-107). This is the ONE
+//!                             subcommand that mutates `.work/` — but only via `tools/state-tx.ps1`
+//!                             (owner-checked, liveness-checked) under the engine's own role
+//!                             (`engine`). It never force-removes a foreign lease: `acquire`
+//!                             succeeds when the lock is free or provably stale and cleanly refuses
+//!                             a live processor lease; `release` presents the engine's own owner id
+//!                             so it can only remove its own lease. See `src/lease.rs`.
 //!   __fake-agent ...          Hidden: a deterministic stand-in child used by the
 //!                             hermetic tests and by `selfcheck` (emits stream-json,
 //!                             can sleep / exit with a chosen code).
 //!
-//! No subcommand ever mutates the repository or `.work/`. Live model calls are strictly
-//! opt-in via `--live`; the default path is offline and token-free.
+//! Only the `lease` subcommand mutates `.work/` — and strictly through the owner-checked
+//! `tools/state-tx.ps1` (never a direct write or `rm -rf`). Every other subcommand is read-only.
+//! Live model calls are strictly opt-in via `--live`; the default path is offline and token-free.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -46,6 +59,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use orchestra_engine_spike::claude::{ClaudeCall, PermissionPosture};
 use orchestra_engine_spike::codex::{CodexCall, Sandbox};
 use orchestra_engine_spike::events::TailReader;
+use orchestra_engine_spike::lease::{self, exit as lease_exit, AcquireVerdict, LeaseOp};
 use orchestra_engine_spike::resolvers::{
     admission_gate, base_reviewer, is_ready, plan_admission, unmet_prerequisites, ActiveClass,
     ActiveTask, AdmissionGate, AdmissionOutcome, Candidate, CohortCounters, CohortThresholds,
@@ -65,11 +79,12 @@ fn main() {
         "events" => cmd_events(&args),
         "state" => cmd_state(&args),
         "plan" => cmd_plan(&args),
+        "lease" => cmd_lease(&args),
         "__fake-agent" => cmd_fake_agent(&args),
         "version" | "--version" => println!("orchestra-engine-spike 0.0.1"),
         _ => {
             eprintln!(
-                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|plan|version>\n\
+                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|plan|lease|version>\n\
                  (see src/main.rs; live model calls require --live and are opt-in)"
             );
             exit(2);
@@ -698,6 +713,285 @@ fn is_task_id(s: &str) -> bool {
     s.strip_prefix("T-")
         .and_then(|r| r.chars().next())
         .is_some_and(|c| c.is_ascii_digit())
+}
+
+/// `engine lease <acquire|heartbeat|release|status>` — take / renew / release / inspect the
+/// engine's owner lease on `.work/orchestrator.lock` (the mutual-exclusion interlock with a live
+/// `processor`, contract §14–§17, T-107) STRICTLY through `tools/state-tx.ps1`. The engine holds
+/// the lease under its own role (`engine`); it never impersonates the processor, never passes
+/// `--force`, and never removes a foreign lease by hand. Exit-code / argv contract: `src/lease.rs`.
+fn cmd_lease(args: &[String]) {
+    let op = match args.get(2).map(|s| s.as_str()).and_then(LeaseOp::from_arg) {
+        Some(op) => op,
+        None => {
+            eprintln!(
+                "usage: lease <acquire|heartbeat|release|status> [--work <dir>] [--root <dir>]\n\
+                 \x20            [--script <state-tx.ps1>] [--owner <id>] [--ttl <sec>] [--session <id>]\n\
+                 \x20            [--pid <n>] [--json]\n\
+                 (takes/renews/releases/inspects the engine's owner lease via tools/state-tx.ps1,\n\
+                  role=engine — never impersonates processor, never --force, never rm -rf a lease)"
+            );
+            exit(lease_exit::USAGE);
+        }
+    };
+
+    // Resolve --work (default `.work`), --root (default the work dir's parent), and the
+    // `state-tx.ps1` script (default `<root>/tools/state-tx.ps1`). All are absolutised so the
+    // child tool gets stable paths regardless of the engine's own cwd; `--script` lets a test
+    // point at the real tool while using a throwaway `.work`.
+    let work = abs_path(&opt(args, "--work").unwrap_or_else(|| ".work".to_string()));
+    let root = match opt(args, "--root") {
+        Some(r) => abs_path(&r),
+        None => work
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| work.clone()),
+    };
+    let script = match opt(args, "--script") {
+        Some(s) => abs_path(&s),
+        None => root.join("tools").join("state-tx.ps1"),
+    };
+    if !script.exists() {
+        eprintln!(
+            "lease: state-tx.ps1 not found at {} (pass --script <path> or --root <project root>)",
+            script.display()
+        );
+        exit(lease_exit::FAILED);
+    }
+
+    let work_s = work.to_string_lossy().into_owned();
+    let root_s = root.to_string_lossy().into_owned();
+    let script_s = script.to_string_lossy().into_owned();
+    let json = args.iter().any(|a| a == "--json");
+    let ttl = opt(args, "--ttl");
+    let session = opt(args, "--session");
+    let pid = opt(args, "--pid");
+    let owner = opt(args, "--owner");
+
+    let code = match op {
+        LeaseOp::Acquire => lease_acquire(
+            &script_s,
+            &work_s,
+            &root_s,
+            ttl.as_deref(),
+            session.as_deref(),
+            pid.as_deref(),
+            owner.as_deref(),
+        ),
+        LeaseOp::Heartbeat => lease_heartbeat(&script_s, &work_s, owner.as_deref()),
+        LeaseOp::Release => lease_release(&script_s, &work_s, owner.as_deref()),
+        LeaseOp::Status => lease_status(&script_s, &work_s, json),
+    };
+    exit(code);
+}
+
+/// Make a path absolute against the current working directory without resolving symlinks
+/// (so it stays a plain, tool-friendly path rather than a Windows `\\?\` extended path).
+fn abs_path(p: &str) -> std::path::PathBuf {
+    let path = Path::new(p);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|c| c.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+/// Run one `state-tx.ps1` operation under supervision. On a hard supervision failure
+/// (spawn failure / timeout / crash — no clean exit code) print a diagnostic and return the
+/// engine's `FAILED` code via `Err`; otherwise return the state-tx exit code and its verdict.
+fn run_lease_op(script: &str, argv: &[String]) -> Result<(i32, supervise::Verdict), i32> {
+    match lease::run_state_tx(script, argv, lease::STATE_TX_DEADLINE) {
+        Err(e) => {
+            eprintln!("lease: {e}");
+            Err(lease_exit::FAILED)
+        }
+        Ok(v) => match v.exit_code {
+            Some(code) => Ok((code, v)),
+            None => {
+                eprintln!(
+                    "lease: state-tx did not complete ({}) — {}",
+                    v.reason.as_str(),
+                    v.outcome_reason
+                );
+                Err(lease_exit::FAILED)
+            }
+        },
+    }
+}
+
+/// The first non-empty (trimmed) line of `state-tx`'s stderr — its refusal diagnostic.
+fn state_tx_reason(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("(no diagnostic)")
+        .to_string()
+}
+
+/// Print a clean refusal line (never a panic): the context, the raw state-tx exit code, and
+/// its human diagnostic. Goes to stderr since the outcome is a nonzero exit.
+fn print_lease_refusal(context: &str, stderr: &str, state_tx_code: i32) {
+    eprintln!(
+        "lease {context}: refused (state-tx exit {state_tx_code}) — {}",
+        state_tx_reason(stderr)
+    );
+}
+
+/// Print an acquire/takeover success, surfacing the owner id (for the caller to present on
+/// later `heartbeat`/`release`) plus the raw state-tx line for generation/ttl detail.
+fn print_acquire_success(state_tx_stdout: &str, adopted: bool) {
+    let line = state_tx_stdout.trim();
+    let owner = lease::extract_owner(line).unwrap_or_default();
+    if adopted {
+        println!("lease acquired (adopted a stale lease; previous owner provably not live) role=engine owner={owner}");
+    } else {
+        println!("lease acquired role=engine owner={owner}");
+    }
+    if !line.is_empty() {
+        println!("state-tx: {line}");
+    }
+}
+
+/// `engine lease acquire` — take the lease when the lock is free; on a provably **stale**
+/// lease (state-tx exit 11) escalate to the liveness-gated `takeover` (never `--force`,
+/// which still refuses a lease that raced live); cleanly refuse a live/legacy/corrupt lease.
+fn lease_acquire(
+    script: &str,
+    work: &str,
+    root: &str,
+    ttl: Option<&str>,
+    session: Option<&str>,
+    pid: Option<&str>,
+    owner: Option<&str>,
+) -> i32 {
+    let argv = lease::acquire_argv(work, root, ttl, session, pid, owner);
+    let (code, v) = match run_lease_op(script, &argv) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    match lease::acquire_verdict(code) {
+        AcquireVerdict::Acquired => {
+            print_acquire_success(&v.stdout, false);
+            lease_exit::OK
+        }
+        AcquireVerdict::Stale => {
+            eprintln!(
+                "lease acquire: a stale lease is present; adopting it via safe takeover \
+                 (state-tx refuses a lease that is live)"
+            );
+            let targv = lease::takeover_argv(work, root, ttl, pid);
+            let (tcode, tv) = match run_lease_op(script, &targv) {
+                Ok(x) => x,
+                Err(c) => return c,
+            };
+            match lease::takeover_verdict(tcode) {
+                AcquireVerdict::Acquired => {
+                    print_acquire_success(&tv.stdout, true);
+                    lease_exit::OK
+                }
+                other => {
+                    print_lease_refusal("acquire (takeover)", &tv.stderr, tcode);
+                    lease::acquire_exit(other)
+                }
+            }
+        }
+        other => {
+            print_lease_refusal("acquire", &v.stderr, code);
+            lease::acquire_exit(other)
+        }
+    }
+}
+
+/// `engine lease heartbeat --owner <id>` — renew the engine's own lease (owner-checked).
+fn lease_heartbeat(script: &str, work: &str, owner: Option<&str>) -> i32 {
+    let owner = match owner {
+        Some(o) if !o.is_empty() => o,
+        _ => {
+            eprintln!("lease heartbeat: --owner <id> is required (renew only your own lease)");
+            return lease_exit::USAGE;
+        }
+    };
+    let argv = lease::heartbeat_argv(work, owner);
+    let (code, v) = match run_lease_op(script, &argv) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    let ec = lease::heartbeat_exit(code);
+    if ec == lease_exit::OK {
+        println!("lease heartbeat renewed owner={owner}");
+        let line = v.stdout.trim();
+        if !line.is_empty() {
+            println!("state-tx: {line}");
+        }
+    } else {
+        print_lease_refusal("heartbeat", &v.stderr, code);
+    }
+    ec
+}
+
+/// `engine lease release --owner <id>` — owner-checked release of the engine's OWN lease.
+/// The engine always presents its owner id and never `--force`/`rm -rf`, so it can never
+/// tear down a foreign lease (state-tx returns exit 13 for that — the late-cleanup guard).
+fn lease_release(script: &str, work: &str, owner: Option<&str>) -> i32 {
+    let owner = match owner {
+        Some(o) if !o.is_empty() => o,
+        _ => {
+            eprintln!(
+                "lease release: --owner <id> is required — the engine releases only its OWN \
+                 lease (never --force, never rm -rf a foreign lease)"
+            );
+            return lease_exit::USAGE;
+        }
+    };
+    let argv = lease::release_argv(work, owner);
+    let (code, v) = match run_lease_op(script, &argv) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    let ec = lease::release_exit(code);
+    if ec == lease_exit::OK {
+        let line = v.stdout.trim(); // "released" or the idempotent "not-held"
+        let word = if line.is_empty() { "released" } else { line };
+        println!("lease {word} owner={owner}");
+    } else {
+        print_lease_refusal("release", &v.stderr, code);
+    }
+    ec
+}
+
+/// `engine lease status [--json]` — inspect the lease (live/stale, owner, role, TTL, heartbeat
+/// age). A read-only query: it exits 0 whenever state-tx reported a state — including "no lease"
+/// (the lock is free), a legacy lock, or a corrupt record — with the state carried in the output
+/// (verbatim compact JSON with `--json`, like `engine state --json`). It fails only on a usage or
+/// hard supervision error.
+fn lease_status(script: &str, work: &str, json: bool) -> i32 {
+    let argv = lease::status_argv(work, json);
+    let (code, v) = match run_lease_op(script, &argv) {
+        Ok(x) => x,
+        Err(c) => return c,
+    };
+    if code == 2 {
+        print_lease_refusal("status", &v.stderr, code);
+        return lease_exit::USAGE;
+    }
+    let out = v.stdout.trim();
+    if json {
+        // state-tx prints one compact JSON object on stdout for every present/absent case;
+        // pass it through verbatim so `--json` stays machine-parseable.
+        if out.is_empty() {
+            println!("{{\"present\":false}}");
+        } else {
+            println!("{out}");
+        }
+    } else if code == 14 || out == "no-lease" || out.is_empty() {
+        println!("lease: none (free — no owner holds .work/orchestrator.lock)");
+    } else {
+        println!("lease: {out}");
+    }
+    lease_exit::OK
 }
 
 /// Hidden deterministic stand-in child for hermetic tests / selfcheck.
