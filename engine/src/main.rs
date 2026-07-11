@@ -20,6 +20,14 @@
 //!                             cohort admission, integration/join state, batch manifest — and
 //!                             print it human-readably, or as one JSON object with `--json`.
 //!                             Read-only: never writes, locks, or emits.
+//!   plan     --dry-run [--work <dir>]
+//!                             Print the cohort + per-task decisions the engine WOULD make now
+//!                             over a read-only snapshot (default `.work`): the cohort
+//!                             budget/circuit-breaker gate, the admission plan the planner's
+//!                             "Выбор батча" resolver yields, and the per-active-task reviewer tier
+//!                             (T-105). STRICTLY read-only: takes no `.work/orchestrator.lock`,
+//!                             calls no mutating `queue-tx`/`state-tx`, creates no worktree/branch,
+//!                             writes nothing. `--dry-run` is required (the only mode).
 //!   __fake-agent ...          Hidden: a deterministic stand-in child used by the
 //!                             hermetic tests and by `selfcheck` (emits stream-json,
 //!                             can sleep / exit with a chosen code).
@@ -27,14 +35,23 @@
 //! No subcommand ever mutates the repository or `.work/`. Live model calls are strictly
 //! opt-in via `--live`; the default path is offline and token-free.
 
+use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write as _;
+use std::fs;
+use std::path::Path;
 use std::process::exit;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use orchestra_engine_spike::claude::{ClaudeCall, PermissionPosture};
 use orchestra_engine_spike::codex::{CodexCall, Sandbox};
 use orchestra_engine_spike::events::TailReader;
-use orchestra_engine_spike::state::Snapshot;
+use orchestra_engine_spike::resolvers::{
+    admission_gate, base_reviewer, is_ready, plan_admission, unmet_prerequisites, ActiveClass,
+    ActiveTask, AdmissionGate, AdmissionOutcome, Candidate, CohortCounters, CohortThresholds,
+    Domain, Level,
+};
+use orchestra_engine_spike::state::{Snapshot, TaskState};
 use orchestra_engine_spike::supervise::{self, SpawnSpec};
 
 fn main() {
@@ -47,11 +64,12 @@ fn main() {
         "codex" => cmd_codex(&args),
         "events" => cmd_events(&args),
         "state" => cmd_state(&args),
+        "plan" => cmd_plan(&args),
         "__fake-agent" => cmd_fake_agent(&args),
         "version" | "--version" => println!("orchestra-engine-spike 0.0.1"),
         _ => {
             eprintln!(
-                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|version>\n\
+                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|plan|version>\n\
                  (see src/main.rs; live model calls require --live and are opt-in)"
             );
             exit(2);
@@ -286,6 +304,400 @@ fn cmd_state(args: &[String]) {
     } else {
         print!("{}", snap.to_human());
     }
+}
+
+/// `plan --dry-run [--work <dir>]` — print the cohort + per-task decisions the engine WOULD make
+/// now over a read-only snapshot (default `.work`): the cohort budget/circuit-breaker gate
+/// ([`resolvers::budget`]), the admission plan ([`resolvers::admission::plan_admission`]), and the
+/// per-active-task reviewer tier ([`resolvers::tiering::base_reviewer`], T-105). STRICTLY
+/// read-only: it only reads `.work/` (snapshot + `config.md` + `Tasks_Done.md`) and the wall clock;
+/// it takes no lock, calls no mutating `queue-tx`/`state-tx`, and creates no worktree/branch.
+fn cmd_plan(args: &[String]) {
+    if !args.iter().any(|a| a == "--dry-run") {
+        eprintln!(
+            "usage: plan --dry-run [--work <dir>]\n\
+             (dry-run is the only mode: it prints the cohort + per-task decisions the engine WOULD\n\
+              make now over a READ-ONLY snapshot — it never locks, mutates, spawns, or writes)"
+        );
+        exit(2);
+    }
+    // `--work <dir>`, or a bare positional after `plan` (like `state`), default `.work`.
+    let work = opt(args, "--work")
+        .or_else(|| args.iter().skip(2).find(|a| !a.starts_with("--")).cloned())
+        .unwrap_or_else(|| ".work".to_string());
+
+    if !Path::new(&work).is_dir() {
+        eprintln!("plan: work directory not found: {work}");
+        exit(2);
+    }
+
+    let snap = Snapshot::load(&work);
+    let cfg = PlanConfig::load(&work);
+    let completed = completed_ids(&work, &snap);
+    print!("{}", render_plan(&snap, &cfg, &completed, now_epoch_secs()));
+}
+
+/// The config keys the dry-run needs (parsed read-only from `.work/config.md`, with the documented
+/// defaults when a key is absent/commented).
+struct PlanConfig {
+    max_parallel: u32,
+    reviewer_tiering: bool,
+    thresholds: CohortThresholds,
+}
+
+impl PlanConfig {
+    fn load(work: &str) -> PlanConfig {
+        let text = fs::read_to_string(Path::new(work).join("config.md")).unwrap_or_default();
+        let max_parallel = config_u64(&text, "MAX_PARALLEL").unwrap_or(1).max(1) as u32;
+        let size =
+            config_u64(&text, "COHORT_SIZE").unwrap_or((3 * max_parallel as u64).max(1)) as u32;
+        let max_age_minutes = config_u64(&text, "COHORT_MAX_AGE").unwrap_or(90);
+        // COHORT_BUDGET_SEC: 0 (or absent) = no budget circuit-breaker.
+        let budget_sec = config_u64(&text, "COHORT_BUDGET_SEC").filter(|&b| b > 0);
+        let reviewer_tiering = config_bool(&text, "REVIEWER_TIERING").unwrap_or(true);
+        PlanConfig {
+            max_parallel,
+            reviewer_tiering,
+            thresholds: CohortThresholds {
+                size,
+                max_age_minutes,
+                budget_sec,
+            },
+        }
+    }
+}
+
+/// Render the dry-run report as one human-readable block. Pure over its inputs (the wall clock is
+/// passed in as `now_epoch`), so it prints exactly what the resolvers decide for this snapshot.
+fn render_plan(
+    snap: &Snapshot,
+    cfg: &PlanConfig,
+    completed: &BTreeSet<String>,
+    now_epoch: u64,
+) -> String {
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "Engine plan (dry-run) — WORK={}",
+        snap.work_dir.display()
+    );
+    let _ = writeln!(
+        s,
+        "(read-only: no orchestrator.lock, no queue-tx/state-tx, no worktrees, no writes)"
+    );
+    let _ = writeln!(s);
+
+    // --- Cohort + budget/circuit-breaker gate (resolvers::budget) -------------------------------
+    match &snap.cohort {
+        Some(c) => {
+            let admitted = c.admitted_total.unwrap_or(0);
+            let _ = write!(
+                s,
+                "Cohort: {} · admission={}",
+                c.batch_id.as_deref().unwrap_or("(no batch id)"),
+                c.admission.map(|a| a.as_str()).unwrap_or("?"),
+            );
+            if let Some(r) = &c.admission_reason {
+                let _ = write!(s, " (reason={r})");
+            }
+            if let Some(w) = c.wave {
+                let _ = write!(s, " · wave={w}");
+            }
+            let _ = write!(s, " · admitted={admitted}");
+            let elapsed_sec = c
+                .started_at
+                .as_deref()
+                .and_then(parse_iso_utc)
+                .map(|start| now_epoch.saturating_sub(start));
+            match elapsed_sec {
+                Some(e) => {
+                    let _ = writeln!(s, " · age={}m", e / 60);
+                }
+                None => {
+                    let _ = writeln!(s, " · age=? (start time unknown)");
+                }
+            }
+
+            let counters = CohortCounters {
+                admitted_total: admitted,
+                age_minutes: elapsed_sec.unwrap_or(0) / 60,
+                elapsed_sec: elapsed_sec.unwrap_or(0),
+            };
+            let _ = write!(s, "Budget/circuit-breaker gate: ");
+            match admission_gate(counters, cfg.thresholds) {
+                AdmissionGate::Continue => {
+                    let _ = write!(s, "keep admitting (Continue)");
+                }
+                AdmissionGate::Close(reason) => {
+                    let _ = write!(s, "close admission · причина={}", reason.as_str());
+                }
+            }
+            let budget_disp = cfg
+                .thresholds
+                .budget_sec
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "0".to_string());
+            let _ = writeln!(
+                s,
+                "  [COHORT_SIZE={}, COHORT_MAX_AGE={}m, COHORT_BUDGET_SEC={}]",
+                cfg.thresholds.size, cfg.thresholds.max_age_minutes, budget_disp
+            );
+        }
+        None => {
+            let _ = writeln!(
+                s,
+                "Cohort: none (no active cohort) — budget/circuit-breaker gate N/A"
+            );
+        }
+    }
+    let _ = writeln!(s);
+
+    // --- Active tasks: blocking class + per-task base reviewer tier (T-105) ----------------------
+    // Domains/classes come from the batch manifest joined with descriptor states.
+    let mut active_tasks: Vec<ActiveTask> = Vec::new();
+    let _ = writeln!(
+        s,
+        "Active tasks (status · blocking class · base reviewer tier — REVIEWER_TIERING={}):",
+        cfg.reviewer_tiering
+    );
+    let mut any_active = false;
+    if let Some(b) = &snap.batch {
+        for t in &b.tasks {
+            any_active = true;
+            let state = snap
+                .descriptors
+                .iter()
+                .find(|d| d.id == t.id)
+                .and_then(|d| d.state);
+            let class = state.and_then(ActiveClass::from_state);
+            let domain = Domain::parse(t.domain.as_deref().unwrap_or(""));
+            if let Some(cls) = class {
+                active_tasks.push(ActiveTask { domain, class: cls });
+            }
+            let class_disp = match class {
+                Some(ActiveClass::Active) => "active",
+                Some(ActiveClass::Terminal) => "terminal",
+                None => "non-blocking",
+            };
+            let _ = write!(
+                s,
+                "  {} · status={} · class={class_disp}",
+                t.id,
+                state.map(|st| st.as_str()).unwrap_or("?"),
+            );
+            match t.level.as_deref().and_then(Level::from_field) {
+                Some(level) => {
+                    let _ = writeln!(
+                        s,
+                        " · reviewer={}",
+                        base_reviewer(cfg.reviewer_tiering, level).as_str()
+                    );
+                }
+                None => {
+                    let _ = writeln!(s, " · reviewer=? (level unknown)");
+                }
+            }
+        }
+    }
+    if !any_active {
+        let _ = writeln!(s, "  (none — no batch manifest)");
+    } else {
+        let _ = writeln!(
+            s,
+            "  (only base_reviewer of the T-105 per-task resolvers is derivable from a static"
+        );
+        let _ = writeln!(
+            s,
+            "   snapshot; route_coder/route_reviewer/review_gate/review_cycle_decision need"
+        );
+        let _ = writeln!(
+            s,
+            "   per-round inputs — review.md, config flags, Реализовано: history — not held here.)"
+        );
+    }
+    let _ = writeln!(s);
+
+    // --- Admission plan over not-started queue candidates (resolvers::admission) -----------------
+    let active_working = snap
+        .descriptors
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.state,
+                Some(TaskState::Working) | Some(TaskState::InReview)
+            )
+        })
+        .count() as u32;
+    let free_slots = cfg.max_parallel.saturating_sub(active_working);
+
+    let not_started: Vec<&_> = snap
+        .queue
+        .iter()
+        .filter(|e| e.state == Some(TaskState::NotStarted))
+        .collect();
+    // Fresh-candidate conflict-domains are NOT in the read-only snapshot (the planner derives them
+    // from task text); an empty domain conflicts with nothing, so packing here reflects readiness +
+    // capacity + known active-task domains only. This is stated in the NOTE below.
+    let candidates: Vec<Candidate> = not_started
+        .iter()
+        .map(|e| Candidate {
+            id: e.id.clone(),
+            ready: is_ready(&e.prerequisites, completed),
+            domain: Domain::parse(""),
+        })
+        .collect();
+
+    let _ = writeln!(
+        s,
+        "Admission plan (capacity={free_slots} free slot(s) of MAX_PARALLEL={}):",
+        cfg.max_parallel
+    );
+    match plan_admission(&candidates, &active_tasks, free_slots as usize) {
+        AdmissionOutcome::Admitted(ids) => {
+            let _ = writeln!(s, "  would admit: {}", ids.join(", "));
+        }
+        AdmissionOutcome::Empty(reason) => {
+            let _ = write!(s, "  admit nothing · причина={}", reason.as_str());
+            match reason.to_close_reason() {
+                Some(cr) => {
+                    let _ = writeln!(s, " (would close admission · причина={})", cr.as_str());
+                }
+                None => {
+                    let _ = writeln!(s, " (keep admission open, retry next round)");
+                }
+            }
+        }
+    }
+    let _ = writeln!(s);
+
+    let _ = writeln!(s, "Not-started candidates ({}):", not_started.len());
+    for e in &not_started {
+        let unmet = unmet_prerequisites(&e.prerequisites, completed);
+        if unmet.is_empty() {
+            let _ = writeln!(s, "  {} · ready", e.id);
+        } else {
+            let _ = writeln!(
+                s,
+                "  {} · blocked (unmet prereqs: {})",
+                e.id,
+                unmet.join(", ")
+            );
+        }
+    }
+    let _ = writeln!(s);
+    let _ = writeln!(
+        s,
+        "NOTE: fresh-candidate conflict-domains are derived by the planner from task text and are"
+    );
+    let _ = writeln!(
+        s,
+        "      NOT part of the read-only snapshot; the admission plan reflects readiness + capacity"
+    );
+    let _ = writeln!(s, "      + known active-task domains only.");
+    s
+}
+
+/// Current wall clock as seconds since the Unix epoch (0 if the clock is before the epoch).
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Parse a `YYYY-MM-DDTHH:MM:SS` UTC timestamp (as `cohort_state.md` `Начало когорты:` writes;
+/// any trailing zone suffix `Z`/`+00:00` is ignored and treated as UTC) into epoch seconds.
+/// `None` for a malformed timestamp. Uses Howard Hinnant's `days_from_civil` — no dependency.
+fn parse_iso_utc(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    if b.get(4) != Some(&b'-') || b.get(7) != Some(&b'-') {
+        return None;
+    }
+    let month: i64 = s.get(5..7)?.parse().ok()?;
+    let day: i64 = s.get(8..10)?.parse().ok()?;
+    match b.get(10) {
+        Some(&b'T') | Some(&b' ') => {}
+        _ => return None,
+    }
+    let hour: i64 = s.get(11..13)?.parse().ok()?;
+    let min: i64 = s.get(14..16)?.parse().ok()?;
+    let sec: i64 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // days_from_civil: days since 1970-01-01 for a civil (proleptic Gregorian) date.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146097 + doe - 719468;
+    let secs = days * 86400 + hour * 3600 + min * 60 + sec;
+    u64::try_from(secs).ok()
+}
+
+/// The value of a non-commented `KEY: value` line in `config.md` (`.work/config.md` is a small
+/// `KEY: value` file; `#`-prefixed lines are comments / defaults). The exact key must be followed
+/// by `:` so `MAX_PARALLEL` never matches `MAX_PARALLELISM`.
+fn config_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| {
+            let rest = l.strip_prefix(key)?.trim_start();
+            let rest = rest.strip_prefix(':')?.trim();
+            Some(rest)
+        })
+}
+
+/// The first whitespace token of a `config.md` numeric key (a trailing inline `# comment` is
+/// ignored), parsed as `u64`.
+fn config_u64(text: &str, key: &str) -> Option<u64> {
+    config_value(text, key)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// A boolean `config.md` key (`true`/`false`), ignoring a trailing inline comment.
+fn config_bool(text: &str, key: &str) -> Option<bool> {
+    match config_value(text, key)?.split_whitespace().next()? {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// The set of completed task ids for readiness: every `[T-NNN]` listed in `Tasks_Done.md` (done
+/// tasks are removed from the queue) plus any descriptor already at `done`/`published`. Read-only.
+fn completed_ids(work: &str, snap: &Snapshot) -> BTreeSet<String> {
+    let mut set = BTreeSet::new();
+    if let Ok(text) = fs::read_to_string(Path::new(work).join("Tasks_Done.md")) {
+        for seg in text.split('[') {
+            if let Some(end) = seg.find(']') {
+                let id = &seg[..end];
+                if is_task_id(id) {
+                    set.insert(id.to_string());
+                }
+            }
+        }
+    }
+    for d in &snap.descriptors {
+        if matches!(d.state, Some(TaskState::Done) | Some(TaskState::Published)) {
+            set.insert(d.id.clone());
+        }
+    }
+    set
+}
+
+/// `^T-\d` — a T-id is `T-` followed by at least one digit.
+fn is_task_id(s: &str) -> bool {
+    s.strip_prefix("T-")
+        .and_then(|r| r.chars().next())
+        .is_some_and(|c| c.is_ascii_digit())
 }
 
 /// Hidden deterministic stand-in child for hermetic tests / selfcheck.

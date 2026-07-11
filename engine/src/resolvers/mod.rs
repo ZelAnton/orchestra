@@ -18,6 +18,14 @@
 //! * [`cycles`] — the `REVIEW_LOOP_MAX` review-cycle limit off the `Циклов-ревью` counter
 //!   (phases 2.5 / 2.8).
 //!
+//! Beyond the per-task trees it also carries the batch/cohort-level judgment (`agents/planner.md`
+//! "Выбор батча"; `agents/processor.md` "Роллинг-приём когорты"; intent doc §4/§7):
+//!
+//! * [`admission`] — cohort admission planning: readiness by prerequisite completion, packing of
+//!   non-overlapping conflict-domains, and the three empty-result reasons.
+//! * [`budget`] — the cohort budget / circuit-breaker gate (`COHORT_SIZE` / `COHORT_MAX_AGE` /
+//!   `COHORT_BUDGET_SEC`), sharing [`admission::CloseReason`]'s §13.2 close vocabulary.
+//!
 //! **Pure by construction.** Every function is a deterministic transformation of already-parsed
 //! inputs — no mutation, no I/O, no `claude`/`codex`/`state-tx`/`queue-tx` calls. Reading the
 //! descriptor, scanning `.work/knowledge/`, and taking the `date -u` mark stay in the caller;
@@ -26,6 +34,8 @@
 //! running orchestrator; it is the judgment layer a future engine and the equivalence difftest
 //! (T-110) build on.
 
+pub mod admission;
+pub mod budget;
 pub mod coder;
 pub mod cycles;
 pub mod gate;
@@ -33,6 +43,11 @@ pub mod reviewer;
 pub mod tiering;
 pub mod vocab;
 
+pub use admission::{
+    is_ready, plan_admission, unmet_prerequisites, ActiveClass, ActiveTask, AdmissionOutcome,
+    Candidate, CloseReason, Domain, EmptyReason,
+};
+pub use budget::{admission_gate, AdmissionGate, CohortCounters, CohortThresholds};
 pub use coder::{
     network_need, route_coder, CoderRoute, CoderRouteInput, CodexCoder, Ecosystem, EnvLimitClass,
     NetworkNeed, StayClaude,
