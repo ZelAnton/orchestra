@@ -32,12 +32,12 @@ pub fn render(f: &mut Frame, app: &AppState) {
 
     render_header(f, root[0], app);
 
-    let body =
-        Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(root[1]);
-    let left =
-        Layout::vertical([Constraint::Percentage(42), Constraint::Percentage(58)]).split(body[0]);
-    let right =
-        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(body[1]);
+    let body = Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(root[1]);
+    let left = Layout::vertical([Constraint::Percentage(42), Constraint::Percentage(58)])
+        .split(body[0]);
+    let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(body[1]);
 
     render_attention(f, left[0], app);
     render_active(f, left[1], app);
@@ -48,10 +48,12 @@ pub fn render(f: &mut Frame, app: &AppState) {
 }
 
 fn block(title: &str) -> Block<'_> {
-    Block::default().borders(Borders::ALL).title(Span::styled(
-        format!(" {title} "),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))
+    Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
 }
 
 fn render_header(f: &mut Frame, area: Rect, app: &AppState) {
@@ -109,7 +111,10 @@ fn render_header(f: &mut Frame, area: Rect, app: &AppState) {
         .map(|b| b.planned_tasks.len())
         .unwrap_or(0);
     lines.push(Line::from(vec![
-        Span::styled(format!("активные {active}"), Style::default().fg(GREEN)),
+        Span::styled(
+            format!("активные {active}"),
+            Style::default().fg(GREEN),
+        ),
         Span::raw("  ·  "),
         Span::styled(
             format!("требуют внимания {attention}"),
@@ -126,11 +131,14 @@ fn render_header(f: &mut Frame, area: Rect, app: &AppState) {
         ),
     ]));
 
-    let para =
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(Span::styled(
-            " control-plane ",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " control-plane ",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+    );
     f.render_widget(para, area);
 }
 
@@ -151,8 +159,8 @@ fn render_attention(f: &mut Frame, area: Rect, app: &AppState) {
         )));
     }
     let border_color = if has_attention { RED } else { DIM };
-    let para =
-        Paragraph::new(lines).block(block(&title).border_style(Style::default().fg(border_color)));
+    let para = Paragraph::new(lines)
+        .block(block(&title).border_style(Style::default().fg(border_color)));
     f.render_widget(para, area);
 }
 
@@ -181,10 +189,7 @@ fn task_line<'a>(app: &AppState, t: &'a TaskState, phase_color: Color) -> Line<'
         Style::default().add_modifier(Modifier::BOLD),
     )];
     if let Some(level) = &t.level {
-        spans.push(Span::styled(
-            format!("{level:<11}"),
-            Style::default().fg(DIM),
-        ));
+        spans.push(Span::styled(format!("{level:<11}"), Style::default().fg(DIM)));
     }
     if let Some(status) = &t.status {
         spans.push(Span::styled(
@@ -267,7 +272,10 @@ fn render_footer(f: &mut Frame, area: Rect, _app: &AppState) {
             " read-only ",
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("— TUI ничего не пишет в .work/", Style::default().fg(DIM)),
+        Span::styled(
+            "— TUI ничего не пишет в .work/",
+            Style::default().fg(DIM),
+        ),
     ]);
     f.render_widget(Paragraph::new(hint).alignment(Alignment::Left), area);
 }
@@ -339,16 +347,10 @@ mod tests {
         // deviations-forward: the escalated task and the attention count are visible
         assert!(screen.contains("Отклонения"), "missing attention panel");
         assert!(screen.contains("T-88"), "escalated task not shown");
-        assert!(
-            screen.contains("эскалирована"),
-            "escalation status not shown"
-        );
+        assert!(screen.contains("эскалирована"), "escalation status not shown");
         // active task + its name overlaid from status.md
         assert!(screen.contains("T-77"), "active task not shown");
-        assert!(
-            screen.contains("Живой TUI"),
-            "status.md name overlay missing"
-        );
+        assert!(screen.contains("Живой TUI"), "status.md name overlay missing");
         // recent feed reflects the escalation
         assert!(screen.contains("Недавно завершено"), "missing recent panel");
         // read-only assurance is on the footer
