@@ -15,11 +15,15 @@
          - agents/*.md  (minus the two generator templates) -> <dest>/agents
          - launchers    (*.cmd on Windows, *.sh on POSIX)    -> <dest>/scripts
          - config.example.md, constraints.example.md         -> <dest>/scripts
-         - tools/doctor-runtime.ps1 (the engine cc-doctor's  -> <dest>/scripts
-           thin wrappers delegate to, so cc-doctor runs from the mirror)
-         - tools/codex-runtime.ps1 (the engine coder_codex/  -> <dest>/scripts
-           reviewer_codex drive codex through, so those adapters can resolve
-           and run it from a mirror-only target project - task T-114)
+         - tools/*.ps1  (EVERY runner except cc-sync's own   -> <dest>/scripts
+           sync-runtime.ps1) so any runtime a launcher or an agent drives by a
+           bare tools/<name>.ps1 path - the launcher engines doctor-runtime.ps1 /
+           codex-runtime.ps1 AND the transactional/orchestration runners the
+           agents call directly (state-tx, queue-tx, outbox, policy, redaction,
+           supervisor, harness, ...) - resolves from a mirror-only target project
+           at ~/.claude/scripts/<name>.ps1 too (task T-115; generalizes the
+           two-file T-114 allowlist to the whole tools/ folder, so a new runner is
+           picked up automatically)
        Publication goes through a staging area and a persisted journal, so an
        error mid-publish (or a hard crash, recovered on the next run) is rolled
        back to the exact prior state - never a partially applied mirror.
@@ -263,6 +267,12 @@ function Remove-Stale {
 
 $script:ExcludedAgents = @('coder.template.md', 'reviewer.template.md')
 
+# cc-sync's OWN engine is the one tools/*.ps1 that is deliberately never mirrored: run
+# from a mirror it has nothing to sync FROM (a reported no-op), and cc-sync.cmd/.sh only
+# ever resolve it from ../tools, never from the mirror - so a mirrored copy would be dead
+# weight. Every OTHER runner in tools/ IS mirrored (see Get-ManagedPairs).
+$script:ExcludedRuntimes = @('sync-runtime.ps1')
+
 function Get-ManagedPairs {
     # Returns @{ Source; Dest; Kind } for every file this tool mirrors.
     param([string]$Repo, [string]$Dest, [string]$Glob)
@@ -292,22 +302,29 @@ function Get-ManagedPairs {
         }
     }
 
-    # Launcher runtimes: a mirrored launcher that is only a thin wrapper over a
-    # tools/*.ps1 engine needs that engine present next to it to run from the mirror.
-    # cc-doctor.cmd/.sh delegate to tools/doctor-runtime.ps1, and cc-doctor's whole point
-    # is to run from the ~/.claude/scripts mirror against a target project, so the runtime
-    # must travel with it. It is mirrored regardless of the launcher glob (both OSes need
-    # the same single pwsh engine). codex-runtime.ps1 is mirrored for the same reason
-    # (task T-114): coder_codex/reviewer_codex drive codex through it with a Bash command
-    # that must resolve in a mirror-only target project too (no tools/ checkout there), so
-    # this is the copy their dual-layout path resolution finds at
-    # ~/.claude/scripts/codex-runtime.ps1 (see agents/coder_codex.md, "Резолвинг пути к
-    # runtime"). cc-sync's own runtime is deliberately NOT mirrored: cc-sync run from a
-    # mirror has nothing to sync FROM and is a reported no-op anyway.
-    foreach ($rt in @('doctor-runtime.ps1', 'codex-runtime.ps1')) {
-        $src = Join-Path (Join-Path $Repo 'tools') $rt
-        if (Test-Path -LiteralPath $src -PathType Leaf) {
-            $pairs.Add([ordered]@{ Source = $src; Dest = (Join-Path $scriptsDst $rt); Kind = 'runtime' })
+    # Tools runtimes: mirror the ENTIRE tools/*.ps1 set next to the launchers (task T-115),
+    # not a curated allowlist, so EVERY runner an agent or launcher drives by a bare
+    # tools/<name>.ps1 path resolves from a mirror-only target project (no orchestra checkout)
+    # at ~/.claude/scripts/<name>.ps1 - and a NEW runner added to tools/ is picked up
+    # automatically, with no per-tool edit here (the T-114-style one-off is gone).
+    #   - The launcher engines the thin cc-* wrappers delegate to: doctor-runtime.ps1
+    #     (cc-doctor - runs from the mirror against a target project) and, historically the
+    #     first mirrored member, codex-runtime.ps1 (coder_codex/reviewer_codex drive codex
+    #     through it - task T-114).
+    #   - The transactional/orchestration runners processor and the other agents call
+    #     directly (state-tx, queue-tx, outbox, policy, policy-schema, redaction, supervisor,
+    #     harness, check-codex-config-guard, ...): these were the ones that used to resolve
+    #     ONLY from a checkout; they now travel with the mirror too, so the agents' dual-layout
+    #     path resolution (checkout tools/<name>.ps1 vs mirror ~/.claude/scripts/<name>.ps1;
+    #     see the tools/*.ps1 runner-resolution rule in knowledge.md / docs/queue_contract.md)
+    #     finds a real copy in either layout.
+    # Mirrored regardless of the launcher glob (both OSes need the same single pwsh engines).
+    # cc-sync's own runtime is the sole exclusion (see $script:ExcludedRuntimes).
+    $toolsSrc = Join-Path $Repo 'tools'
+    if (Test-Path -LiteralPath $toolsSrc) {
+        foreach ($f in (Get-ChildItem -LiteralPath $toolsSrc -File -Filter '*.ps1' -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            if ($script:ExcludedRuntimes -contains $f.Name) { continue }
+            $pairs.Add([ordered]@{ Source = $f.FullName; Dest = (Join-Path $scriptsDst $f.Name); Kind = 'runtime' })
         }
     }
 

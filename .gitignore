@@ -2,3 +2,6 @@
 # Rust build output for the engine spike (engine/, task T-097). Source, Cargo.toml and
 # Cargo.lock are tracked; only the compiled target/ tree is ignored.
 engine/target/
+# Stray stdout/stderr capture artifacts occasionally left behind by ad hoc test/debug
+# runs of tests/launchers/*.ps1 (e.g. manual out/err redirection while iterating).
+tests/launchers/*.tmp

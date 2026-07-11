@@ -9,8 +9,10 @@
   path: the pass/fail result is the cross-platform equivalence proof for sync.
 
   Covered:
-    - a clean mirror publishes agents, launchers and config templates + a manifest;
-    - stale pruning removes only files recorded in the manifest, never foreign files;
+    - a clean mirror publishes agents, launchers, config templates and the WHOLE
+      tools/*.ps1 runner folder (except cc-sync's own engine) + a manifest (T-115);
+    - stale pruning removes only files recorded in the manifest (a removed agent AND a
+      removed runner), never foreign files;
     - a mid-publish failure rolls the mirror back to its exact prior state (no partial
       apply) and leaves the manifest untouched;
     - an empty-directory husk at a destination is healed into the mirrored file;
@@ -59,12 +61,17 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'launchers\cc-sync.cmd') "@echo off`n"
     Write-File (Join-Path $repo 'launchers\cc-doctor.cmd') "@echo off`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.sh') "#!/usr/bin/env bash`n"
-    # The doctor runtime the thin cc-doctor wrappers delegate to; sync must mirror it
-    # into scripts/ (regardless of the launcher glob) so cc-doctor runs from the mirror.
+    # tools/*.ps1: sync mirrors the WHOLE folder into scripts/ (task T-115), except its own
+    # sync-runtime.ps1 engine, so EVERY runner resolves from a mirror-only project. The
+    # launcher engines the thin cc-doctor wrappers / codex adapters delegate to
+    # (doctor-runtime.ps1, codex-runtime.ps1 - T-114) plus the transactional/orchestration
+    # runners the agents call directly (state-tx.ps1, queue-tx.ps1, ...) must all travel with
+    # the mirror; sync-runtime.ps1 is present here to prove it is the sole EXCLUSION.
     Write-File (Join-Path $repo 'tools\doctor-runtime.ps1') "doctor-rt-v1`n"
-    # The codex runtime coder_codex/reviewer_codex drive codex through (task T-114); sync
-    # must mirror it the same way so those adapters resolve it from a mirror-only project.
     Write-File (Join-Path $repo 'tools\codex-runtime.ps1') "codex-rt-v1`n"
+    Write-File (Join-Path $repo 'tools\state-tx.ps1') "state-tx-v1`n"
+    Write-File (Join-Path $repo 'tools\queue-tx.ps1') "queue-tx-v1`n"
+    Write-File (Join-Path $repo 'tools\sync-runtime.ps1') "sync-rt-SELF`n"
     Write-File (Join-Path $repo 'config.example.md') "config-v1`n"
     Write-File (Join-Path $repo 'constraints.example.md') "constraints-v1`n"
     return $repo
@@ -115,6 +122,12 @@ Assert-FileText (Join-Path $dest 'scripts\config.example.md') "config-v1`n" 'cle
 Assert-FileText (Join-Path $dest 'scripts\constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored'
 Assert-FileText (Join-Path $dest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored next to the launchers (so cc-doctor runs from the mirror)'
 Assert-FileText (Join-Path $dest 'scripts\codex-runtime.ps1') "codex-rt-v1`n" 'clean: codex-runtime.ps1 mirrored next to the launchers (so coder_codex/reviewer_codex resolve it from the mirror - T-114)'
+# T-115: the WHOLE tools/*.ps1 folder is mirrored, not a curated allowlist, so the
+# transactional/orchestration runners the agents call directly travel with the mirror too.
+Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'clean: state-tx.ps1 mirrored (whole tools/ folder - T-115)'
+Assert-FileText (Join-Path $dest 'scripts\queue-tx.ps1') "queue-tx-v1`n" 'clean: queue-tx.ps1 mirrored (whole tools/ folder - T-115)'
+# ...but cc-sync's own engine is the sole exclusion (dead weight in a mirror).
+Assert-True (-not (Test-Path (Join-Path $dest 'scripts\sync-runtime.ps1'))) 'clean: sync-runtime.ps1 NOT mirrored (cc-sync engine is the sole tools/*.ps1 exclusion)'
 $manifestPath = Join-Path $dest '.orchestra-sync-manifest.json'
 Assert-True (Test-Path -LiteralPath $manifestPath) 'clean: manifest written'
 if (Test-Path -LiteralPath $manifestPath) {
@@ -123,18 +136,25 @@ if (Test-Path -LiteralPath $manifestPath) {
     Assert-True (@($mf.managed) -contains 'scripts/config.example.md') 'clean: manifest lists scripts/config.example.md'
     Assert-True (@($mf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: manifest lists scripts/doctor-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/codex-runtime.ps1') 'clean: manifest lists scripts/codex-runtime.ps1'
+    Assert-True (@($mf.managed) -contains 'scripts/state-tx.ps1') 'clean: manifest lists scripts/state-tx.ps1 (T-115)'
+    Assert-True (-not (@($mf.managed) -contains 'scripts/sync-runtime.ps1')) 'clean: manifest excludes cc-sync own engine'
     Assert-True (-not (@($mf.managed) -contains 'agents/coder.template.md')) 'clean: manifest excludes template'
 }
 
 # =============================================================================
 # 2) Stale pruning removes only managed files; foreign files are untouched
 # =============================================================================
-# Add a foreign agent the tool never wrote, then drop a source agent and re-sync.
+# Add a foreign agent the tool never wrote, then drop a source agent AND a source runner
+# and re-sync. The runner drop proves manifest-based pruning still removes a tools/*.ps1
+# that stopped existing in the source (T-115 criterion), exactly like a removed agent.
 Write-File (Join-Path $dest 'agents\custom_local.md') "mine`n"
 Remove-Item -LiteralPath (Join-Path $repo 'agents\reviewer.md') -Force
+Remove-Item -LiteralPath (Join-Path $repo 'tools\queue-tx.ps1') -Force
 $r2 = Invoke-Sync -Repo $repo -Dest $dest
 Assert-True ($r2.ExitCode -eq 0) "prune sync exits 0 (got $($r2.ExitCode); err=$($r2.Err.Trim()))"
 Assert-True (-not (Test-Path (Join-Path $dest 'agents\reviewer.md'))) 'prune: removed source agent pruned from mirror'
+Assert-True (-not (Test-Path (Join-Path $dest 'scripts\queue-tx.ps1'))) 'prune: removed source runner pruned from mirror (T-115)'
+Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'prune: still-sourced runner kept'
 Assert-FileText (Join-Path $dest 'agents\custom_local.md') "mine`n" 'prune: foreign file untouched'
 Assert-FileText (Join-Path $dest 'agents\coder.md') "coder-v1`n" 'prune: still-sourced agent kept'
 
