@@ -11,10 +11,11 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{AppState, CohortPhase, InboxPanel, RecentKind, Screen, TaskState};
+use crate::app::{AppState, CohortPhase, InboxPanel, Modal, RecentKind, Screen, TaskState};
+use crate::commands::LeaseStatus;
 use crate::inbox::{BlockedCard, DecisionInbox, EscalatedCard, QuarantineCard};
 
 const RED: Color = Color::Red;
@@ -24,11 +25,20 @@ const CYAN: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
 
 /// Dispatch to whichever screen is currently active (§6.1 overview / §6.2 Decision Inbox), both
-/// switchable from either side with the `Tab` key (see `main.rs`).
+/// switchable from either side with the `Tab` key (see `main.rs`). Command overlays (the
+/// lease-status popup and the force-lock confirmation modal) draw on top of the active screen.
 pub fn render(f: &mut Frame, app: &AppState) {
     match app.screen {
         Screen::Overview => render_overview(f, app),
         Screen::DecisionInbox => render_decision_inbox(f, app),
+    }
+    // Overlays, drawn over whichever screen is active. The destructive force-lock modal is drawn
+    // last so it sits on top of everything, including an open lease-status popup.
+    if let Some(lease) = &app.lease {
+        render_lease_overlay(f, lease);
+    }
+    if app.modal == Modal::ConfirmForceLock {
+        render_force_lock_modal(f);
     }
 }
 
@@ -272,30 +282,49 @@ fn render_footer(f: &mut Frame, area: Rect, app: &AppState) {
     let mut spans = vec![
         Span::styled(" q/Esc ", Style::default().fg(CYAN)),
         Span::raw("выход  "),
-        Span::styled(" r ", Style::default().fg(CYAN)),
-        Span::raw("обновить status.md  "),
         Span::styled(" Tab ", Style::default().fg(CYAN)),
-        Span::raw("Decision Inbox"),
+        Span::raw("Decision Inbox  "),
+        Span::styled(" r ", Style::default().fg(CYAN)),
+        Span::raw("status.md  "),
     ];
+    spans.extend(command_hint_spans());
     if !app.inbox.is_empty() {
         spans.push(Span::styled(
-            format!("  ⚠ требует внимания: {inbox_count}"),
+            format!("   ⚠ требует внимания: {inbox_count}"),
             Style::default().fg(RED),
         ));
     }
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        " read-only ",
-        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(
-        "— TUI ничего не пишет в .work/",
-        Style::default().fg(DIM),
-    ));
+    spans.extend(notice_spans(app));
     f.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
         area,
     );
+}
+
+/// The §5/§6.2 command-key hints shared by both screens' footers: pause / resume / lease-status,
+/// and the destructive force-lock (in red — it opens a confirmation modal, `main.rs`).
+fn command_hint_spans() -> Vec<Span<'static>> {
+    vec![
+        Span::styled(" p ", Style::default().fg(CYAN)),
+        Span::raw("пауза  "),
+        Span::styled(" u ", Style::default().fg(CYAN)),
+        Span::raw("снять  "),
+        Span::styled(" s ", Style::default().fg(CYAN)),
+        Span::raw("аренда  "),
+        Span::styled(" x ", Style::default().fg(RED)),
+        Span::raw("force-lock"),
+    ]
+}
+
+/// The trailing footer segment carrying the most recent command's result notice, if any.
+fn notice_spans(app: &AppState) -> Vec<Span<'static>> {
+    match &app.notice {
+        Some(notice) => vec![
+            Span::styled("   ⟩ ", Style::default().fg(DIM)),
+            Span::styled(notice.clone(), Style::default().fg(YELLOW)),
+        ],
+        None => Vec::new(),
+    }
 }
 
 // ---- §6.2 Decision Inbox screen -------------------------------------------------------------
@@ -316,7 +345,7 @@ fn render_decision_inbox(f: &mut Frame, app: &AppState) {
 
     render_inbox_header(f, root[0], &app.inbox);
     render_inbox_body(f, root[1], app);
-    render_inbox_footer(f, root[2]);
+    render_inbox_footer(f, root[2], app);
 }
 
 fn render_inbox_header(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
@@ -559,26 +588,138 @@ fn render_blocked_panel(
     f.render_widget(para, area);
 }
 
-fn render_inbox_footer(f: &mut Frame, area: Rect) {
-    let hint = Line::from(vec![
+fn render_inbox_footer(f: &mut Frame, area: Rect, app: &AppState) {
+    let mut spans = vec![
         Span::styled(" q/Esc ", Style::default().fg(CYAN)),
         Span::raw("выход  "),
         Span::styled(" Tab ", Style::default().fg(CYAN)),
         Span::raw("обзор  "),
-        Span::styled(" ←/→ ", Style::default().fg(CYAN)),
-        Span::raw("фокус панели  "),
-        Span::styled(" ↑/↓ ", Style::default().fg(CYAN)),
-        Span::raw("прокрутка  "),
-        Span::styled(
-            " read-only ",
-            Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "— только просмотр, команды (approve/pause/resume) сюда не входят",
-            Style::default().fg(DIM),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(hint).alignment(Alignment::Left), area);
+        Span::styled(" ←/→ ↑/↓ ", Style::default().fg(CYAN)),
+        Span::raw("панели  "),
+    ];
+    spans.extend(command_hint_spans());
+    // Only pause/resume/lease/force-lock are wired; approve/decision actions have no backend yet.
+    spans.push(Span::styled(
+        "   (approve/решения — не входят)",
+        Style::default().fg(DIM),
+    ));
+    spans.extend(notice_spans(app));
+    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Left), area);
+}
+
+// ---- command overlays: lease-status popup + force-lock confirmation modal -------------------
+
+/// A centered rectangle `percent_x` × `percent_y` of `area`, for a modal/popup overlay.
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1])[1]
+}
+
+/// The lease-status popup (§5 lease-status command): who owns `.work/orchestrator.lock` and
+/// whether the lease is live, read via the engine crate's owner-checked `state-tx.ps1 status`
+/// path (see `commands::query_lease_status`). Dismissed with Esc; refreshed with `s` (`main.rs`).
+fn render_lease_overlay(f: &mut Frame, lease: &LeaseStatus) {
+    let area = centered_rect(70, 55, f.area());
+    f.render_widget(Clear, area);
+
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        lease.summary(),
+        Style::default().add_modifier(Modifier::BOLD),
+    ))];
+    if let LeaseStatus::Present(l) = lease {
+        lines.push(Line::from(""));
+        lines.push(field_line("  роль: ", l.role.as_deref().unwrap_or("?")));
+        lines.push(field_line("  владелец: ", l.owner_id.as_deref().unwrap_or("?")));
+        if let Some(host) = &l.host {
+            lines.push(field_line("  хост: ", host));
+        }
+        if let Some(pid) = l.pid {
+            lines.push(field_line("  pid: ", &pid.to_string()));
+        }
+        let liveness = if l.live { "жива" } else { "устарела" };
+        lines.push(Line::from(vec![
+            Span::styled("  состояние: ", Style::default().fg(DIM)),
+            Span::styled(
+                liveness,
+                Style::default().fg(if l.live { GREEN } else { YELLOW }),
+            ),
+        ]));
+        if let Some(reason) = &l.reason {
+            lines.push(field_line("  почему: ", reason));
+        }
+        if let (Some(age), Some(ttl)) = (l.heartbeat_age_secs, l.ttl_seconds) {
+            lines.push(field_line("  heartbeat: ", &format!("{age}s / ttl {ttl}s")));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(" s ", Style::default().fg(CYAN)),
+        Span::raw("обновить   "),
+        Span::styled(" Esc ", Style::default().fg(CYAN)),
+        Span::raw("закрыть"),
+    ]));
+
+    let border = match lease {
+        LeaseStatus::Present(l) if l.live => GREEN,
+        LeaseStatus::Unavailable(_) | LeaseStatus::Degraded(_) => YELLOW,
+        _ => CYAN,
+    };
+    let para = Paragraph::new(lines)
+        .block(block("Аренда orchestrator.lock").border_style(Style::default().fg(border)))
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, area);
+}
+
+/// The force-lock confirmation modal (§6.2 "опасные операции — с явным confirm"): the destructive
+/// removal of `.work/orchestrator.lock`, mirroring `cc-processor.sh --force-lock`, only fires on an
+/// explicit `y`/Enter here (see `main.rs::handle_modal_key`), never a single stray keystroke.
+fn render_force_lock_modal(f: &mut Frame) {
+    let area = centered_rect(72, 45, f.area());
+    f.render_widget(Clear, area);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Удалить .work/orchestrator.lock (force-lock)?",
+            Style::default().fg(RED).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::raw(
+            "Разрушительно. Делайте это ТОЛЬКО если предыдущий processor точно не работает —",
+        )),
+        Line::from(Span::raw(
+            "иначе два управляющих цикла столкнутся на одном .work/. Зеркалит",
+        )),
+        Line::from(Span::raw("cc-processor.sh --force-lock (rm -rf каталога замка целиком).")),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" y ", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+            Span::raw("подтвердить удаление    "),
+            Span::styled(" n / Esc ", Style::default().fg(CYAN)),
+            Span::raw("отмена"),
+        ]),
+    ];
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    " подтверждение force-lock ",
+                    Style::default().add_modifier(Modifier::BOLD).fg(RED),
+                ))
+                .border_style(Style::default().fg(RED)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, area);
 }
 
 fn card_title_line<'a>(id: &'a str, title: &'a str, color: Color) -> Line<'a> {
@@ -681,15 +822,15 @@ mod tests {
         );
         // recent feed reflects the escalation
         assert!(screen.contains("Недавно завершено"), "missing recent panel");
-        // read-only assurance is on the footer
+        // the command-channel key hints are on the footer (pause + the destructive force-lock)
         assert!(
-            screen.contains("read-only") || screen.contains("ничего не пишет"),
-            "missing read-only footer"
+            screen.contains("пауза") && screen.contains("force-lock"),
+            "missing command-channel footer hints"
         );
     }
 
     /// Render the §6.2 Decision Inbox screen headlessly and assert every card category, the
-    /// pause banner, and the read-only footer land on screen.
+    /// pause banner, and the command-channel footer (with the out-of-scope note) land on screen.
     #[test]
     fn renders_decision_inbox_screen_headlessly() {
         let mut app = AppState::new();
@@ -740,9 +881,10 @@ mod tests {
         );
         assert!(screen.contains("T-060"), "blocked card not shown");
         assert!(screen.contains("Заблокировано"), "missing blocked panel");
+        // the footer now advertises the wired command subset AND that approve/decisions are not.
         assert!(
-            screen.contains("read-only") || screen.contains("approve/pause/resume"),
-            "missing read-only footer"
+            screen.contains("force-lock") && screen.contains("approve/решения"),
+            "missing command-channel / out-of-scope footer hints"
         );
     }
 
@@ -754,5 +896,65 @@ mod tests {
         assert_eq!(app.screen, Screen::DecisionInbox);
         app.toggle_screen();
         assert_eq!(app.screen, Screen::Overview);
+    }
+
+    /// The force-lock confirmation modal overlays the active screen with an explicit destructive
+    /// warning and the y/cancel affordances (§6.2 confirm gate) — rendered headlessly.
+    #[test]
+    fn renders_force_lock_confirm_modal_headlessly() {
+        let mut app = AppState::new();
+        app.arm_force_lock();
+
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = buf.content.iter().map(|c| c.symbol()).collect();
+
+        assert!(
+            screen.contains("подтверждение force-lock"),
+            "missing modal title"
+        );
+        assert!(
+            screen.contains("orchestrator.lock"),
+            "missing lock path in the warning"
+        );
+        assert!(
+            screen.contains("подтвердить") && screen.contains("отмена"),
+            "missing confirm/cancel affordances"
+        );
+    }
+
+    /// The lease-status popup surfaces owner / role / liveness from a `commands::LeaseStatus`.
+    #[test]
+    fn renders_lease_overlay_headlessly() {
+        let mut app = AppState::new();
+        app.set_lease(crate::commands::LeaseStatus::Present(
+            crate::commands::LeasePresent {
+                role: Some("processor".to_string()),
+                owner_id: Some("ab12cd34".to_string()),
+                host: Some("HOSTA".to_string()),
+                pid: Some(4321),
+                live: true,
+                heartbeat_age_secs: Some(12),
+                ttl_seconds: Some(900),
+                generation: Some(3),
+                reason: Some("pid 4321 alive (start-time matches)".to_string()),
+            },
+        ));
+
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = buf.content.iter().map(|c| c.symbol()).collect();
+
+        assert!(
+            screen.contains("Аренда orchestrator.lock"),
+            "missing lease overlay title"
+        );
+        assert!(screen.contains("ab12cd34"), "missing owner id");
+        assert!(screen.contains("processor"), "missing role");
+        assert!(screen.contains("жива"), "missing liveness label");
     }
 }

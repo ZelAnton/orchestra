@@ -6,16 +6,21 @@
 //! fixture event lines (the same fixture shape as `engine/tests/events_fixture.rs`) without ever
 //! opening a terminal.
 //!
-//! **Read-only by construction.** Nothing here (nor anywhere in this crate) writes a file, takes a
-//! lock, or emits an event: it only *consumes* the typed [`Event`] values handed over by the
-//! engine crate's cursor reader. The events are the source of truth for the batch/cohort/task
-//! projection; `status.md` (see [`crate::status`]) is folded in separately as human context.
+//! **Read-only by construction (this module).** Nothing in *this* module writes a file, takes a
+//! lock, or emits an event: it only *consumes* the typed [`Event`] values handed over by the engine
+//! crate's cursor reader, plus a little UI state (screen, inbox focus, the force-lock confirmation
+//! modal, the last command notice). The one place the crate may write is the deliberately narrow
+//! §5/§6.2 command channel in [`crate::commands`] (pause / resume / lease-status / force-lock),
+//! driven only by an explicit keystroke. The events are the source of truth for the
+//! batch/cohort/task projection; `status.md` (see [`crate::status`]) is folded in separately as
+//! human context.
 
 use std::collections::BTreeMap;
 
 use orchestra_engine_spike::events::{Event, EventType};
 use serde_json::{Map, Value};
 
+use crate::commands::LeaseStatus;
 use crate::inbox::DecisionInbox;
 
 /// Which of the two screens (§6.1 overview / §6.2 Decision Inbox) is currently drawn.
@@ -37,6 +42,19 @@ pub enum InboxPanel {
     Escalated,
     Quarantined,
     Blocked,
+}
+
+/// A modal overlay that captures input until dismissed. The only modal is the destructive
+/// **force-lock** confirmation: force-lock (removing `.work/orchestrator.lock`, mirroring
+/// `cc-processor.sh --force-lock`) must never fire from a single stray keystroke, so *arming* it
+/// opens this modal and only an explicit *second* confirmation keystroke (see `main.rs`) actually
+/// removes the lock (§6.2 "опасные операции — с явным confirm").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Modal {
+    #[default]
+    None,
+    /// Force-lock armed: awaiting the explicit confirm keystroke.
+    ConfirmForceLock,
 }
 
 /// The stage a task's status maps to, for the "deviations first, green collapsed" §6.1 layout.
@@ -178,6 +196,14 @@ pub struct AppState {
     pub inbox_focus: InboxPanel,
     /// Per-panel scroll offset (lines), indexed by `InboxPanel as usize` (R-3).
     pub inbox_scroll: [u16; 3],
+    /// An open modal overlay capturing input (currently only the force-lock confirmation, §6.2).
+    pub modal: Modal,
+    /// The most recent lease-status query result (§5 lease-status command), shown as an overlay
+    /// until dismissed; `None` before the operator ever queries it.
+    pub lease: Option<LeaseStatus>,
+    /// A one-line result of the most recent command (pause/resume/force-lock), shown in the footer
+    /// as operator feedback; `None` until the first command is issued.
+    pub notice: Option<String>,
     next_seq: u64,
 }
 
@@ -470,6 +496,50 @@ impl AppState {
         self.inbox_scroll[idx] = (cur + i32::from(delta)).max(0) as u16;
     }
 
+    // ---- command channel state (§5/§6.2 safe command subset) ------------------------------
+
+    /// Arm the destructive force-lock command: open its confirmation modal (step 1). This never
+    /// removes the lock by itself — only [`AppState::take_force_lock_confirmation`], after an
+    /// explicit second keystroke, does (§6.2).
+    pub fn arm_force_lock(&mut self) {
+        self.modal = Modal::ConfirmForceLock;
+    }
+
+    /// Consume an armed force-lock confirmation (step 2): if the force-lock modal is currently
+    /// open, close it and return `true` (the caller should now perform the removal); otherwise
+    /// return `false` and do nothing. This is the confirmation *gate* — a `true` result is
+    /// impossible without a prior [`AppState::arm_force_lock`], so force-lock can never fire from
+    /// one stray keystroke.
+    pub fn take_force_lock_confirmation(&mut self) -> bool {
+        if self.modal == Modal::ConfirmForceLock {
+            self.modal = Modal::None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Dismiss any open modal without acting (Esc / n).
+    pub fn dismiss_modal(&mut self) {
+        self.modal = Modal::None;
+    }
+
+    /// Whether a modal is currently capturing input.
+    pub fn has_modal(&self) -> bool {
+        self.modal != Modal::None
+    }
+
+    /// Record a lease-status query result to show as an overlay.
+    pub fn set_lease(&mut self, status: LeaseStatus) {
+        self.lease = Some(status);
+    }
+
+    /// Dismiss the lease-status overlay. Returns whether one was showing, so the caller can tell
+    /// an Esc that consumed the overlay from an Esc that should fall through to quit.
+    pub fn dismiss_lease(&mut self) -> bool {
+        self.lease.take().is_some()
+    }
+
     /// Friendly display name for a task: status.md's name column if we have it, else the id.
     pub fn task_name(&self, task_id: &str) -> Option<String> {
         self.status
@@ -670,6 +740,47 @@ mod tests {
         // scrolling up past 0 saturates instead of underflowing.
         app.scroll_inbox(-100);
         assert_eq!(app.inbox_scroll[InboxPanel::Quarantined as usize], 0);
+    }
+
+    #[test]
+    fn force_lock_needs_arming_then_explicit_confirmation() {
+        let mut app = AppState::new();
+        // No modal by default; a bare confirmation does NOT fire — force-lock can never happen
+        // from a single stray keystroke (§6.2 "не одно случайное нажатие").
+        assert!(!app.has_modal());
+        assert!(!app.take_force_lock_confirmation());
+        // Arming opens the modal but still removes nothing.
+        app.arm_force_lock();
+        assert!(app.has_modal());
+        assert_eq!(app.modal, Modal::ConfirmForceLock);
+        // The explicit second confirmation fires exactly once and closes the modal.
+        assert!(app.take_force_lock_confirmation());
+        assert!(!app.has_modal());
+        // A repeat confirmation after the modal closed does nothing.
+        assert!(!app.take_force_lock_confirmation());
+    }
+
+    #[test]
+    fn force_lock_modal_can_be_cancelled_without_firing() {
+        let mut app = AppState::new();
+        app.arm_force_lock();
+        assert!(app.has_modal());
+        app.dismiss_modal();
+        assert!(!app.has_modal());
+        // After cancelling, a later confirmation attempt does not fire.
+        assert!(!app.take_force_lock_confirmation());
+    }
+
+    #[test]
+    fn lease_overlay_set_and_dismiss() {
+        let mut app = AppState::new();
+        assert!(app.lease.is_none());
+        // Dismissing when nothing is showing reports "nothing consumed".
+        assert!(!app.dismiss_lease());
+        app.set_lease(crate::commands::LeaseStatus::Absent);
+        assert!(app.lease.is_some());
+        assert!(app.dismiss_lease());
+        assert!(app.lease.is_none());
     }
 
     #[test]

@@ -30,7 +30,9 @@ pub fn usage() -> String {
     // Built line-by-line (not one `\`-continued literal) so the intended indentation survives —
     // a `\`-newline in a Rust string literal also swallows the next line's leading whitespace.
     let mut s = String::new();
-    s.push_str("orchestra-tui — read-only live overview of a running orchestrator (plan §6.1)\n\n");
+    s.push_str(
+        "orchestra-tui — live overview of a running orchestrator (plan §6.1 / §6.2 Decision Inbox)\n\n",
+    );
     s.push_str("USAGE:\n");
     s.push_str("    orchestra-tui [OPTIONS] [WORK_DIR]\n\n");
     s.push_str("ARGS:\n");
@@ -46,10 +48,23 @@ pub fn usage() -> String {
     s.push_str("    -h, --help           Print this help and exit\n");
     s.push_str("    -V, --version        Print version and exit\n\n");
     s.push_str(
-        "The TUI is strictly read-only: it tails <WORK_DIR>/events.jsonl and reads \
-<WORK_DIR>/status.md,\nand never writes, locks, or otherwise touches the running orchestrator.\n\n",
+        "The TUI observes read-only by default — it tails <WORK_DIR>/events.jsonl and reads \
+<WORK_DIR>/status.md —\nbut can also send a small, named command subset downward, each mirroring \
+an existing launcher/tool\nand touching ONLY <WORK_DIR>/PAUSE or <WORK_DIR>/orchestrator.lock. It \
+never touches the queue,\ntask descriptors, or code, and never runs the processor itself. \
+Decision-Inbox approve/decisions\nare NOT included (that backend does not yet exist).\n\n",
     );
-    s.push_str("KEYS:  q / Esc quit   ·   r reload status.md\n");
+    s.push_str("KEYS:\n");
+    s.push_str("    q / Esc  quit (Esc first closes an open lease popup)   ·   Tab  switch screen\n");
+    s.push_str("    r        reload status.md\n");
+    s.push_str("    p        pause      — create <WORK_DIR>/PAUSE (kill switch, mirrors cc-pause)\n");
+    s.push_str("    u        resume     — remove <WORK_DIR>/PAUSE (mirrors cc-unpause)\n");
+    s.push_str(
+        "    s        lease      — show orchestrator.lock owner / liveness (tools/state-tx.ps1 status)\n",
+    );
+    s.push_str(
+        "    x        force-lock — remove <WORK_DIR>/orchestrator.lock; DESTRUCTIVE, asks to confirm (y)\n",
+    );
     s
 }
 
