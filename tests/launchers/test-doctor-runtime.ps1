@@ -153,6 +153,17 @@ Assert-NotContains $r.Out 'WARN exec permission' 'allow-rule: no WARN'
 Remove-Case $c
 
 # =============================================================================
+# 3b) exec permission: only the MIRROR-form allow-rule present (T-114) -> OK too
+# =============================================================================
+$c = New-Case
+Set-Config $c 'CODEX_REVIEWER: fast+std'
+Set-Settings $c '{"permissions":{"allow":["Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)"]}}'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   exec permission: allow-rule for the codex runtime' 'mirror-form allow-rule: OK'
+Assert-NotContains $r.Out 'WARN exec permission' 'mirror-form allow-rule: no WARN'
+Remove-Case $c
+
+# =============================================================================
 # 4) effective CODEX_*: env fallback for CODEX_CODER labelled "(env)"
 # =============================================================================
 $c = New-Case

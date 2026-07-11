@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Seed .work/config.md and .work/constraints.md from the repo templates if they do not
 # exist yet, and seed the Claude Code allow-rules for autonomous Codex (the runtime
-# wrapper `pwsh -File tools/codex-runtime.ps1` the adapters actually run, plus the
+# wrapper the adapters actually run, in both its layout forms -
+# `pwsh -File tools/codex-runtime.ps1` from a repo checkout or
+# `pwsh -File ~/.claude/scripts/codex-runtime.ps1` from a cc-sync mirror - plus the
 # historical `codex exec` anchor) into .claude/settings.local.json. An existing target
 # file is NEVER overwritten wholesale (same guarantee for all three).
 #   - config.md: only the copyable block between the "# >>> config.md seed start" /
@@ -97,15 +99,21 @@ fi
 # Canonical Codex allow-list (single source of truth - keep byte-identical to
 # launchers/cc-config.cmd's $rules and to the hint text printed by
 # launchers/cc-doctor.cmd/.sh; documented in config.example.md under "Codex-агенты" /
-# "Разрешение на запуск codex"). TWO rules (task F-05):
-#   - Bash(pwsh -File tools/codex-runtime.ps1 *) - the command Bash ACTUALLY runs. Since
-#     task T-075 both adapters drive codex through the runtime wrapper
-#     `pwsh -File tools/codex-runtime.ps1 <run|guard-commit|...>`; the child `codex exec`
-#     is spawned by the runtime via .NET ProcessStartInfo and never crosses the Bash
-#     permission gate, so this is the rule that must be present for the classifier to let
-#     the adapters run. One prefix covers every runtime subcommand and every CODEX_CMD
-#     (a non-default CODEX_CMD is only a `--codex-cmd` argument to the wrapper, not a
-#     separate Bash command).
+# "Разрешение на запуск codex"). THREE rules (task F-05, extended by T-114):
+#   - Bash(pwsh -File tools/codex-runtime.ps1 *) - the command Bash ACTUALLY runs when the
+#     adapters run from a repo checkout. Since task T-075 both adapters drive codex through
+#     the runtime wrapper `pwsh -File tools/codex-runtime.ps1 <run|guard-commit|...>`; the
+#     child `codex exec` is spawned by the runtime via .NET ProcessStartInfo and never
+#     crosses the Bash permission gate, so this is the rule that must be present for the
+#     classifier to let the adapters run. One prefix covers every runtime subcommand and
+#     every CODEX_CMD (a non-default CODEX_CMD is only a `--codex-cmd` argument to the
+#     wrapper, not a separate Bash command).
+#   - Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *) - the command's OTHER literal
+#     form (task T-114): a target project that only has the cc-sync mirror (no tools/
+#     checkout of its own) has no relative tools/codex-runtime.ps1 to resolve, so the
+#     adapters fall back to the mirrored copy at ~/.claude/scripts/codex-runtime.ps1
+#     instead - kept as a literal, unexpanded tilde so the rule stays a fixed,
+#     machine-independent string.
 #   - Bash(codex exec *) - kept as the historical anchor (the form CC_CODEX_EXEC_GRANT
 #     names and older setups may already carry); harmless, does not itself authorize the
 #     real runtime command.
@@ -122,7 +130,7 @@ fi
 # written - fall back to printing the exact rule(s) to add by hand (never a silent no-op).
 # Only the operator (by running this launcher) ever writes these rules; the
 # orchestrator/subagents never do.
-CODEX_ALLOW_RULES=('Bash(pwsh -File tools/codex-runtime.ps1 *)' 'Bash(codex exec *)')
+CODEX_ALLOW_RULES=('Bash(pwsh -File tools/codex-runtime.ps1 *)' 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)' 'Bash(codex exec *)')
 SETTINGS=".claude/settings.local.json"
 if [ -f "$SETTINGS" ]; then
   missing=()

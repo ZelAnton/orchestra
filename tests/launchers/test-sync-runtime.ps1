@@ -62,6 +62,9 @@ function New-SyntheticRepo {
     # The doctor runtime the thin cc-doctor wrappers delegate to; sync must mirror it
     # into scripts/ (regardless of the launcher glob) so cc-doctor runs from the mirror.
     Write-File (Join-Path $repo 'tools\doctor-runtime.ps1') "doctor-rt-v1`n"
+    # The codex runtime coder_codex/reviewer_codex drive codex through (task T-114); sync
+    # must mirror it the same way so those adapters resolve it from a mirror-only project.
+    Write-File (Join-Path $repo 'tools\codex-runtime.ps1') "codex-rt-v1`n"
     Write-File (Join-Path $repo 'config.example.md') "config-v1`n"
     Write-File (Join-Path $repo 'constraints.example.md') "constraints-v1`n"
     return $repo
@@ -111,6 +114,7 @@ Assert-True (-not (Test-Path (Join-Path $dest 'scripts\cc-sync.sh'))) 'clean: .s
 Assert-FileText (Join-Path $dest 'scripts\config.example.md') "config-v1`n" 'clean: config.example.md mirrored'
 Assert-FileText (Join-Path $dest 'scripts\constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored'
 Assert-FileText (Join-Path $dest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored next to the launchers (so cc-doctor runs from the mirror)'
+Assert-FileText (Join-Path $dest 'scripts\codex-runtime.ps1') "codex-rt-v1`n" 'clean: codex-runtime.ps1 mirrored next to the launchers (so coder_codex/reviewer_codex resolve it from the mirror - T-114)'
 $manifestPath = Join-Path $dest '.orchestra-sync-manifest.json'
 Assert-True (Test-Path -LiteralPath $manifestPath) 'clean: manifest written'
 if (Test-Path -LiteralPath $manifestPath) {
@@ -118,6 +122,7 @@ if (Test-Path -LiteralPath $manifestPath) {
     Assert-True (@($mf.managed) -contains 'agents/coder.md') 'clean: manifest lists agents/coder.md'
     Assert-True (@($mf.managed) -contains 'scripts/config.example.md') 'clean: manifest lists scripts/config.example.md'
     Assert-True (@($mf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: manifest lists scripts/doctor-runtime.ps1'
+    Assert-True (@($mf.managed) -contains 'scripts/codex-runtime.ps1') 'clean: manifest lists scripts/codex-runtime.ps1'
     Assert-True (-not (@($mf.managed) -contains 'agents/coder.template.md')) 'clean: manifest excludes template'
 }
 

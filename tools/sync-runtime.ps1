@@ -17,6 +17,9 @@
          - config.example.md, constraints.example.md         -> <dest>/scripts
          - tools/doctor-runtime.ps1 (the engine cc-doctor's  -> <dest>/scripts
            thin wrappers delegate to, so cc-doctor runs from the mirror)
+         - tools/codex-runtime.ps1 (the engine coder_codex/  -> <dest>/scripts
+           reviewer_codex drive codex through, so those adapters can resolve
+           and run it from a mirror-only target project - task T-114)
        Publication goes through a staging area and a persisted journal, so an
        error mid-publish (or a hard crash, recovered on the next run) is rolled
        back to the exact prior state - never a partially applied mirror.
@@ -294,9 +297,14 @@ function Get-ManagedPairs {
     # cc-doctor.cmd/.sh delegate to tools/doctor-runtime.ps1, and cc-doctor's whole point
     # is to run from the ~/.claude/scripts mirror against a target project, so the runtime
     # must travel with it. It is mirrored regardless of the launcher glob (both OSes need
-    # the same single pwsh engine). cc-sync's own runtime is deliberately NOT mirrored:
-    # cc-sync run from a mirror has nothing to sync FROM and is a reported no-op anyway.
-    foreach ($rt in @('doctor-runtime.ps1')) {
+    # the same single pwsh engine). codex-runtime.ps1 is mirrored for the same reason
+    # (task T-114): coder_codex/reviewer_codex drive codex through it with a Bash command
+    # that must resolve in a mirror-only target project too (no tools/ checkout there), so
+    # this is the copy their dual-layout path resolution finds at
+    # ~/.claude/scripts/codex-runtime.ps1 (see agents/coder_codex.md, "Резолвинг пути к
+    # runtime"). cc-sync's own runtime is deliberately NOT mirrored: cc-sync run from a
+    # mirror has nothing to sync FROM and is a reported no-op anyway.
+    foreach ($rt in @('doctor-runtime.ps1', 'codex-runtime.ps1')) {
         $src = Join-Path (Join-Path $Repo 'tools') $rt
         if (Test-Path -LiteralPath $src -PathType Leaf) {
             $pairs.Add([ordered]@{ Source = $src; Dest = (Join-Path $scriptsDst $rt); Kind = 'runtime' })

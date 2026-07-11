@@ -14,9 +14,12 @@
 
   What it reports, in order:
     1. Codex preflight        - codex binary presence/version, ~/.codex/auth.json,
-                                and the auto-mode allow-rule for the runtime wrapper
-                                `pwsh -File tools/codex-runtime.ps1` (session grant OR
-                                permissions.allow), gated on whether Codex routing is on.
+                                and the auto-mode allow-rule for the runtime wrapper,
+                                in EITHER of its two layout forms (task T-114) -
+                                `pwsh -File tools/codex-runtime.ps1` (repo checkout) or
+                                `pwsh -File ~/.claude/scripts/codex-runtime.ps1` (cc-sync
+                                mirror) - (session grant OR permissions.allow), gated on
+                                whether Codex routing is on.
     2. Effective CODEX_*      - the resolved CODEX_* values (.work/config.md, with the
                                 documented config-then-env fallback for CODEX_CODER/
                                 CODEX_REVIEWER).
@@ -166,11 +169,17 @@ if (Test-Path -LiteralPath $authFile -PathType Leaf) {
 
 # Since T-075 the adapters run the runtime wrapper `pwsh -File tools/codex-runtime.ps1`
 # (which spawns the real `codex exec` as a child, past the Bash gate). So the allow-rule
-# that must actually be present is the one covering that wrapper (runtimeRule); it covers
+# that must actually be present is the one covering that wrapper (runtimeRules); it covers
 # every CODEX_CMD (a non-default CODEX_CMD is just a --codex-cmd argument to the wrapper).
 # cmdPrefix ("<CODEX_CMD> exec") is kept only for the launcher session-grant comparison.
-$cmdPrefix   = $codexCmd + ' exec'
-$runtimeRule = 'pwsh -File tools/codex-runtime.ps1'
+# Task T-114: the wrapper resolves to one of TWO literal command forms depending on
+# layout - a repo checkout (tools/codex-runtime.ps1, relative) or a cc-sync mirror in a
+# target project that has no tools/ checkout of its own
+# (~/.claude/scripts/codex-runtime.ps1, literal tilde - the adapters never expand it
+# themselves, so it stays a fixed, machine-independent string the allow-rule can match
+# byte-for-byte). Either form present in permissions.allow is sufficient.
+$cmdPrefix    = $codexCmd + ' exec'
+$runtimeRules = @('pwsh -File tools/codex-runtime.ps1', 'pwsh -File ~/.claude/scripts/codex-runtime.ps1')
 
 # Routing is on if ANY of CODEX_CODER / CODEX_REVIEWER (config-or-env) or CODEX_CIFIX
 # (config only) is something other than off - the union of the three Codex routes.
@@ -200,7 +209,8 @@ foreach ($sf in $settingsFiles) {
     try { $j = Get-Content -LiteralPath $sf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $j = $null }
     if ($j -and $j.permissions -and $j.permissions.allow) {
         foreach ($e in $j.permissions.allow) {
-            if (($e -is [string]) -and $e.Contains($runtimeRule)) { $permRule = $true }
+            if ($e -isnot [string]) { continue }
+            foreach ($rr in $runtimeRules) { if ($e.Contains($rr)) { $permRule = $true } }
         }
     }
 }
@@ -210,9 +220,9 @@ if (-not $codexRoutingOn) {
 } elseif ($sessionGrant) {
     Write-Host ('OK   exec permission: session grant present (CC_CODEX_EXEC_GRANT covers the ' + $cmdPrefix + ' command prefix) - no persistent settings allow-rule required for this session')
 } elseif ($permRule) {
-    Write-Host ('OK   exec permission: allow-rule for the codex runtime (' + $runtimeRule + ') present in Claude Code settings (permissions.allow)')
+    Write-Host ('OK   exec permission: allow-rule for the codex runtime (' + ($runtimeRules -join ' or ') + ') present in Claude Code settings (permissions.allow)')
 } else {
-    Write-Host 'WARN exec permission: NOT found -> CODEX_CODER/CODEX_REVIEWER/CODEX_CIFIX routing is on, so the auto-mode classifier blocks the autonomous codex runtime without it; run cc-config (seeds .claude/settings.local.json with the canonical allow-rules Bash(pwsh -File tools/codex-runtime.ps1 *) and Bash(codex exec *) if absent, else lists what is missing) or add the allow-rule by hand (permissions.allow: Bash(pwsh -File tools/codex-runtime.ps1 *)) to .claude/settings.local.json or .claude/settings.json, else coder_codex/reviewer_codex escalate to Claude'
+    Write-Host 'WARN exec permission: NOT found -> CODEX_CODER/CODEX_REVIEWER/CODEX_CIFIX routing is on, so the auto-mode classifier blocks the autonomous codex runtime without it; run cc-config (seeds .claude/settings.local.json with the canonical allow-rules Bash(pwsh -File tools/codex-runtime.ps1 *), Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *) and Bash(codex exec *) if absent, else lists what is missing) or add the allow-rule by hand (permissions.allow: Bash(pwsh -File tools/codex-runtime.ps1 *) for a repo checkout, or Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *) for a cc-sync mirror) to .claude/settings.local.json or .claude/settings.json, else coder_codex/reviewer_codex escalate to Claude'
 }
 
 # =============================================================================

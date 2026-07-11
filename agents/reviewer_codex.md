@@ -68,6 +68,38 @@ codex не читает и не должен трогать `.work/`.
 (ведёшь), `$WORK/tasks/<T-ID>/status.md` (пишешь свой статус). Общий обзор
 `$WORK/status.md` и `F-`/`review_integration.md` не трогаешь.
 
+# Резолвинг пути к runtime (T-114, до первого вызова)
+
+Реально исполняемая Bash-строка адаптера — это не голая `codex exec`, а runtime-обёртка
+`pwsh -File <runtime> …` (см. «Вызов codex (read-only) и прогоны»), где `<runtime>` — путь к
+`codex-runtime.ps1`. Он существует в **двух** раскладках, и голый относительный путь
+`tools/codex-runtime.ps1` резолвится только в первой из них — определи раскладку **один
+раз** перед первым вызовом в этой задаче (инструментами `Glob`/`Read`, **не** через Bash —
+незачем тратить на пробу лишний Bash-вызов под permission-гейтом) и держи результат в
+`$CODEX_RT` до конца задачи:
+
+1. **Чекаут репозитория orchestra** — файл `tools/codex-runtime.ps1` существует
+   относительно корня чекаута. Найден → `CODEX_RT=tools/codex-runtime.ps1` (буквально этот
+   относительный путь — **не** переписывай его в абсолютный: именно эта литеральная форма
+   совпадает с давно предвыданным Bash-грантом launcher'ов и seed-правилом `cc-config`).
+2. **Зеркало `cc-sync`** (типовой случай для ЛЮБОГО другого проекта, где нет своего
+   `tools/`) — файл существует в `~/.claude/scripts/codex-runtime.ps1` (`tools/sync-runtime.ps1`
+   зеркалирует его туда тем же способом, что и `doctor-runtime.ps1`). Найден (и (1) не
+   найден) → `CODEX_RT=~/.claude/scripts/codex-runtime.ps1` — **держи тильду буквально в
+   тексте команды** (не подставляй заранее раскрытый `$HOME`): её раскрывает сама shell при
+   выполнении, а неизменный литеральный текст с тильдой — это то, под что заведено отдельное
+   allow-правило `cc-config`.
+3. **Ни один не найден** → раннер недоступен ни в одной раскладке, к самому codex не
+   обращайся вовсе: верни `ЭСКАЛАЦИЯ codex: CODEX_UNAVAILABLE — codex-runtime.ps1 not
+   found in checkout (tools/) or mirror (~/.claude/scripts/); run cc-sync from an
+   orchestra checkout to install the mirror`.
+
+Во всех примерах ниже `pwsh -File tools/codex-runtime.ps1 …` — это `pwsh -File $CODEX_RT
+…` c уже резолвленным значением; код-блоки для краткости показывают checkout-форму, но
+реально подставляй `$CODEX_RT`. **Не бери `$CODEX_RT` в кавычки** при подстановке (ни в
+одной из двух форм пробелов нет) — литеральный текст без кавычек нужен, чтобы совпасть
+байт-в-байт с allow-правилом/грантом.
+
 # Отчёт о статусе
 
 Перезаписывай `$WORK/tasks/<T-ID>/status.md` целиком (`Write`), «Обновлено» из `date`,
@@ -79,15 +111,18 @@ codex не читает и не должен трогать `.work/`.
 - `CODEX_CMD` (по умолч. `codex`) — бинарь/команда codex; передавай в runtime флагом
   `--codex-cmd "$CODEX_CMD"` (runtime резолвит и запускает бинарь сам — см. «Вызов codex»).
   **Важно для разрешений:** реально исполняемая Bash-строка адаптера — это runtime-обёртка
-  `pwsh -File tools/codex-runtime.ps1 …`, и именно на неё launcher'ы (`cc-processor`/
-  `cc-resume`) выдают сессии предвыданный грант `Bash(pwsh -File tools/codex-runtime.ps1:*)`
+  `pwsh -File $CODEX_RT …` (см. «Резолвинг пути к runtime» — одна из двух литеральных форм),
+  и именно на неё (в её конкретной, резолвленной для этой сессии форме) launcher'ы
+  (`cc-processor`/`cc-resume`, checkout-форма) и/или `cc-config` (постоянное правило, обе
+  формы) выдают предвыданный грант — `Bash(pwsh -File tools/codex-runtime.ps1:*)` (чекаут)
+  либо `Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1:*)` (зеркало)
   (один префикс на все подкоманды runtime). Дочерний `codex exec` runtime порождает уже
   **внутри себя** (.NET ProcessStartInfo) — через permission-гейт Bash он **не** проходит,
   поэтому грант `Bash(codex exec:*)` реальный runtime-вызов **не** покрывал бы (находка R-01).
   Нестандартный `CODEX_CMD` передаётся runtime **аргументом**, поэтому под классификатор он
   тоже попадает в pwsh-грант и **отдельного** allow-правила не требует — тот же runtime-грант
-  его покрывает (гейт Фазы 1.1 processor'а проверяет разрешение по подстроке runtime-обёртки
-  `pwsh -File tools/codex-runtime.ps1`, а не по `<CODEX_CMD> exec`), а не эта роль. Бинарь не
+  его покрывает (гейт Фазы 1.1 processor'а проверяет разрешение по подстроке любой из двух
+  форм runtime-обёртки, а не по `<CODEX_CMD> exec`), а не эта роль. Бинарь не
   найден/не запускается → штатная эскалация `CODEX_UNAVAILABLE` (ниже).
 - `CODEX_MODEL` (по умолч. не задано) — `-m`; пусто → модель из `~/.codex/config.toml`
   (текущая подтверждённая — `gpt-5.6-terra`, OpenAI Terra).
@@ -125,7 +160,7 @@ jj-first, как у всех: `jj root` успешен → jj (в т.ч. colocat
 # Порог размера diff (защита от молчаливой обрезки)
 
 Прежде чем строить промпт, измерь полученный diff **через runtime**:
-`<diff> | pwsh -File tools/codex-runtime.ps1 check-diff --max-lines 4000` (или
+`<diff> | pwsh -File $CODEX_RT check-diff --max-lines 4000` (или
 `--diff-file <файл>`) → JSON `{lines, threshold, overLimit}` (обе стороны unified diff
 считаются одним потоком). **Порог — 4000 строк.** Это относится и к первому, и к повторному
 (инкрементальному) ревью — считай по тому diff'у, который в этот раз пойдёт в промпт.
@@ -214,7 +249,7 @@ Output format (exactly; one item per line):
 
 Прежде чем учитывать прогон (один вызов `run`) в счётчике или применять его к
 `review.md`, проверь его на **полноту разбора** — независимо от `RC`. **Проверку ведёт
-runtime в коде**: `pwsh -File tools/codex-runtime.ps1 validate-reviewer --rc <rc>
+runtime в коде**: `pwsh -File $CODEX_RT validate-reviewer --rc <rc>
 --requested-ids "<R-01,R-02,…>" --out-file "$WORK/tasks/<T-ID>/codex_review_out.md"` → JSON
 `{clean, recheckValid, newValid, reason}`; `clean=true` ⇔ чистый прогон. Правила, которые
 он реализует (справочно):
@@ -252,14 +287,15 @@ runtime в коде**: `pwsh -File tools/codex-runtime.ps1 validate-reviewer --r
 
 **Механику ведёт runtime.** Сборку argv, запуск, приём промпта через stdin, раздельный
 захват stdout/stderr/RC, классификацию отказов и маппинг сентинелов выполняет единый
-исполняемый runtime `tools/codex-runtime.ps1` (тот же, что у `coder_codex` — **один**
+исполняемый runtime `codex-runtime.ps1` (резолвленный путь — `$CODEX_RT`, см. «Резолвинг
+пути к runtime»; тот же, что у `coder_codex` — **один**
 источник сборки команды, без двух расходящихся вариантов; отличие ревью — фиксированный
 `--sandbox read-only` и отсутствие сети/брокера). Каждый прогон — один вызов `run`; промпт
 (см. «Построение промпта») положи в файл, путь — в `$PROMPT`; между прогонами варьируй
 фразу-затравку и пересобирай промпт:
 
 ```bash
-pwsh -File tools/codex-runtime.ps1 run \
+pwsh -File $CODEX_RT run \
   --codex-cmd "$CODEX_CMD" \
   --worktree "$WT" \
   --sandbox read-only \
@@ -297,9 +333,10 @@ codex exec -C "$WT" \
   config-оверрайдом. `--sandbox read-only` + `never` — Codex ничего не пишет и не повышает
   режим при сбое песочницы; структурной изоляции записи на Windows не предполагаем, границу
   держит эта fail-closed связка.
-- **Отказ в разрешении на запуск** (classifier отклонил запуск runtime-обёртки: грант
-  `Bash(pwsh -File tools/codex-runtime.ps1:*)` не доставлен — напр. ad-hoc сессия не через
-  launcher и без соответствующего allow-правила) либо
+- **Отказ в разрешении на запуск** (classifier отклонил запуск runtime-обёртки: грант для
+  резолвленной формы — `Bash(pwsh -File tools/codex-runtime.ps1:*)` (чекаут) либо
+  `Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1:*)` (зеркало) — не доставлен —
+  напр. ad-hoc сессия не через launcher и без соответствующего allow-правила) либо
   `stage=resolve`/`sentinel=CODEX_UNAVAILABLE` из runtime (бинарь codex не найден) → это
   `CODEX_UNAVAILABLE`: верни сентинел эскалации (ниже), в `review.md` ничего не записав.
   **Категорически запрещено** обходить отказ — не редактируй `.claude/settings.json`/
@@ -391,13 +428,15 @@ Claude-`reviewer`.
 # Сбой codex и эскалация
 
 Единственная поверхность эскалации — одна строка в отчёте; её можно собрать через
-`pwsh -File tools/codex-runtime.ps1 map-sentinel --kind <unavailable|failed> [--class <класс>]
+`pwsh -File $CODEX_RT map-sentinel --kind <unavailable|failed> [--class <класс>]
 --detail "<кратко>"` (либо взять `sentinel` из `codex_review_run.json`) — префикс/формат
 гарантированно совпадают с тем, что распознаёт processor:
 - `ЭСКАЛАЦИЯ codex: CODEX_UNAVAILABLE — <причина>` — preflight не прошёл (нет бинаря/
-  аутентификации/инициализации sandbox) **или** classifier отказал в разрешении на запуск
-  runtime-обёртки (грант `Bash(pwsh -File tools/codex-runtime.ps1:*)` / соответствующее
-  allow-правило не доставлены); в
+  аутентификации/инициализации sandbox), `codex-runtime.ps1` не найден ни в одной
+  раскладке (см. «Резолвинг пути к runtime»), **или** classifier отказал в разрешении на
+  запуск runtime-обёртки (грант для резолвленной формы — `Bash(pwsh -File
+  tools/codex-runtime.ps1:*)` либо `Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1:*)`
+  — / соответствующее allow-правило не доставлены); в
   `review.md` **ничего не записал**. Отказ обходить запрещено (не трогай `.claude/settings*`) —
   это штатный фолбэк на Claude-ревьюера, а не остановка прогона.
 - `ЭСКАЛАЦИЯ codex: CODEX_FAILED — <причина>` — codex запускался, но не дал пригодного
@@ -471,7 +510,8 @@ CODEX_FAILED` **не меняется** (processor распознаёт эска
 - Аутентификацию/ключи codex не трогаешь и не логируешь.
 - **Не** редактируешь `.claude/settings.json`/`.claude/settings.local.json` и никак иначе
   не расширяешь собственные полномочия. Разрешение на запуск codex через runtime-обёртку
-  (`Bash(pwsh -File tools/codex-runtime.ps1:*)`) выдаётся заранее пользователем через
+  (`Bash(pwsh -File tools/codex-runtime.ps1:*)` в чекауте либо `Bash(pwsh -File
+  ~/.claude/scripts/codex-runtime.ps1:*)` в зеркале) выдаётся заранее пользователем через
   launchers; отказ classifier'а → эскалация `CODEX_UNAVAILABLE`.
 
 # Финальный отчёт (возврат processor)

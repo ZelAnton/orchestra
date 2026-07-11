@@ -2,15 +2,17 @@
 # block of config.example.md when absent, never overwrites an existing
 # .work/config.md, and fails gracefully when no template can be found. Also
 # verifies the .claude/settings.local.json Codex allow-list (tasks T-058/T-078,
-# F-05): created with BOTH canonical allow-rules - the runtime wrapper
-# Bash(pwsh -File tools/codex-runtime.ps1 *) the adapters actually run, plus the
+# F-05, extended by T-114): created with ALL THREE canonical allow-rules - the
+# runtime wrapper in its checkout form Bash(pwsh -File tools/codex-runtime.ps1 *)
+# and its mirror form Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *) the
+# adapters actually run (one or the other, depending on layout), plus the
 # historical Bash(codex exec *) anchor - when absent; when the file exists but
 # lacks a canonical rule, the missing rule(s) are MERGED into permissions.allow
 # add-only (other keys / existing allow entries preserved) and the merge is
-# idempotent on a re-run; a file that already grants both is left unchanged and
-# reported OK; and degenerate cases (invalid JSON, a read-only/unwritable file)
-# leave the file untouched and fall back to printing the rule(s) to add by hand.
-# This launcher never calls claude/codex.
+# idempotent on a re-run; a file that already grants all three is left unchanged
+# and reported OK; and degenerate cases (invalid JSON, a read-only/unwritable
+# file) leave the file untouched and fall back to printing the rule(s) to add by
+# hand. This launcher never calls claude/codex.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -93,7 +95,8 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         $settingsPath = Join-Path $paths.Project '.claude\settings.local.json'
         Assert-FileExists $settingsPath '[settings: fresh] .claude/settings.local.json must be created'
         $settingsContent = Get-Content -LiteralPath $settingsPath -Raw
-        Assert-Contains $settingsContent 'Bash(pwsh -File tools/codex-runtime.ps1 *)' '[settings: fresh] runtime-wrapper allow-rule (the actual adapter command) must be present'
+        Assert-Contains $settingsContent 'Bash(pwsh -File tools/codex-runtime.ps1 *)' '[settings: fresh] checkout-form runtime-wrapper allow-rule (the actual adapter command) must be present'
+        Assert-Contains $settingsContent 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)' '[settings: fresh] mirror-form runtime-wrapper allow-rule (T-114) must be present'
         Assert-Contains $settingsContent 'Bash(codex exec *)' '[settings: fresh] historical codex exec anchor rule must be present'
         Assert-Contains $result.Output 'Created .claude\settings.local.json' '[settings: fresh] success message printed'
     }
@@ -120,12 +123,13 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Assert-Contains $result.Output 'Merged allow-rule(s) into .claude\settings.local.json' '[settings: merge] must report the rule was merged'
 
         $merged = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File tools/codex-runtime.ps1 *)')) '[settings: merge] canonical runtime-wrapper rule must be added to permissions.allow'
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File tools/codex-runtime.ps1 *)')) '[settings: merge] canonical checkout-form runtime-wrapper rule must be added to permissions.allow'
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)')) '[settings: merge] canonical mirror-form runtime-wrapper rule (T-114) must be added to permissions.allow'
         Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(codex exec *)')) '[settings: merge] canonical codex exec anchor rule must be added to permissions.allow'
         Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(git status)')) '[settings: merge] pre-existing allow entry must be preserved'
         Assert-True ([bool](@($merged.permissions.deny) -contains 'Bash(rm *)')) '[settings: merge] pre-existing deny entry must be preserved'
         Assert-Equal $true $merged.otherKey '[settings: merge] unrelated top-level key must be preserved'
-        Assert-Equal 3 (@($merged.permissions.allow).Count) '[settings: merge] allow must have the pre-existing entry plus both canonical rules (no duplication)'
+        Assert-Equal 4 (@($merged.permissions.allow).Count) '[settings: merge] allow must have the pre-existing entry plus all three canonical rules (no duplication)'
         # A leftover temp file must never remain after a successful merge.
         Assert-NoFileExists ($settingsPath + '.tmp') '[settings: merge] no temp file must be left behind'
     }
@@ -142,7 +146,7 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         $claudeDir = Join-Path $paths.Project '.claude'
         New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
         $settingsPath = Join-Path $claudeDir 'settings.local.json'
-        $original = '{"permissions":{"allow":["Bash(pwsh -File tools/codex-runtime.ps1 *)","Bash(codex exec *)"]}}'
+        $original = '{"permissions":{"allow":["Bash(pwsh -File tools/codex-runtime.ps1 *)","Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)","Bash(codex exec *)"]}}'
         Set-Content -LiteralPath $settingsPath -Value $original -Encoding utf8 -NoNewline
 
         $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
@@ -179,7 +183,7 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         $afterSecond = Get-Content -LiteralPath $settingsPath -Raw
         Assert-Equal $afterFirst $afterSecond '[settings: idempotent] second run must not change the file'
         $parsed = $afterSecond | ConvertFrom-Json
-        Assert-Equal 3 (@($parsed.permissions.allow).Count) '[settings: idempotent] pre-existing entry plus both canonical rules, not duplicated on re-run'
+        Assert-Equal 4 (@($parsed.permissions.allow).Count) '[settings: idempotent] pre-existing entry plus all three canonical rules, not duplicated on re-run'
     }
     finally {
         Remove-Sandbox $paths
@@ -204,6 +208,7 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Assert-Equal $original $settingsContent '[settings: invalid json] file must be left byte-for-byte unchanged'
         Assert-Contains $result.Output 'not valid JSON' '[settings: invalid json] must report the file is not valid JSON'
         Assert-Contains $result.Output 'Bash(codex exec *)' '[settings: invalid json] must print the rule to add by hand'
+        Assert-Contains $result.Output 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)' '[settings: invalid json] must also print the mirror-form rule (T-114) to add by hand'
         Assert-True ($result.Output -notlike '*Merged*') '[settings: invalid json] must not claim a merge happened'
     }
     finally {
@@ -234,6 +239,7 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Assert-Equal $original $settingsContent '[settings: read-only] file must be left byte-for-byte unchanged'
         Assert-Contains $result.Output 'could not be written' '[settings: read-only] must report the file could not be written'
         Assert-Contains $result.Output 'Bash(codex exec *)' '[settings: read-only] must print the rule to add by hand'
+        Assert-Contains $result.Output 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)' '[settings: read-only] must also print the mirror-form rule (T-114) to add by hand'
         Assert-NoFileExists ($settingsPath + '.tmp') '[settings: read-only] no temp file must be left behind'
     }
     finally {
@@ -255,9 +261,10 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Assert-Equal 0 $result.ExitCode '[settings: empty object] exit code'
         Assert-Contains $result.Output 'Merged allow-rule(s)' '[settings: empty object] must report the rule was merged'
         $merged = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File tools/codex-runtime.ps1 *)')) '[settings: empty object] runtime-wrapper rule must be present under permissions.allow'
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File tools/codex-runtime.ps1 *)')) '[settings: empty object] checkout-form runtime-wrapper rule must be present under permissions.allow'
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)')) '[settings: empty object] mirror-form runtime-wrapper rule (T-114) must be present under permissions.allow'
         Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(codex exec *)')) '[settings: empty object] codex exec anchor rule must be present under permissions.allow'
-        Assert-Equal 2 (@($merged.permissions.allow).Count) '[settings: empty object] allow must contain exactly the two canonical rules'
+        Assert-Equal 3 (@($merged.permissions.allow).Count) '[settings: empty object] allow must contain exactly the three canonical rules'
     }
     finally {
         Remove-Sandbox $paths
@@ -278,7 +285,8 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Assert-Equal 0 $result.ExitCode '[settings: no allow key] exit code'
         Assert-Contains $result.Output 'Merged allow-rule(s)' '[settings: no allow key] must report the rule was merged'
         $merged = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File tools/codex-runtime.ps1 *)')) '[settings: no allow key] runtime-wrapper rule must be added under a new permissions.allow'
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File tools/codex-runtime.ps1 *)')) '[settings: no allow key] checkout-form runtime-wrapper rule must be added under a new permissions.allow'
+        Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)')) '[settings: no allow key] mirror-form runtime-wrapper rule (T-114) must be added under a new permissions.allow'
         Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(codex exec *)')) '[settings: no allow key] codex exec anchor rule must be added under a new permissions.allow'
         Assert-True ([bool](@($merged.permissions.deny) -contains 'Bash(rm *)')) '[settings: no allow key] pre-existing deny list must be preserved'
     }
