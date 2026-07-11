@@ -185,7 +185,10 @@ function Vcs-Init {
         Invoke-Bin 'git' @('-C', $repo, 'config', 'user.name', 'Harness') | Out-Null
         Invoke-Bin 'git' @('-C', $repo, 'config', 'commit.gpgsign', 'false') | Out-Null
         Write-Text (Join-Path $repo $script:TrunkFile) "l1`nl2`nl3`nl4`nl5`n"
-        Invoke-Bin 'git' @('-C', $repo, 'add', '-A') | Out-Null
+        # Stage ONLY the trunk file (never a broad `add -A` in the primary worktree): the fixture's
+        # .work sandbox is created inside this repo, and the tracked set must stay provably {app.txt}
+        # so the trunk fingerprint is content-deterministic regardless of any ambient global ignore.
+        Invoke-Bin 'git' @('-C', $repo, 'add', '--', $script:TrunkFile) | Out-Null
         $c = Invoke-Bin 'git' @('-C', $repo, 'commit', '-q', '-m', 'base'); if ($c.ExitCode -ne 0) { Fail 3 "git base commit failed: $($c.Err)" }
         $Fx.Base = (Invoke-Bin 'git' @('-C', $repo, 'rev-parse', 'HEAD')).Out.Trim()
     } else {
@@ -323,7 +326,16 @@ function Vcs-CommitOnMain {
         $lines = @(Get-Content -LiteralPath $f)
         $lines[$Line - 1] = "l$Line-$Token"
         Write-Text $f (($lines -join "`n") + "`n")
-        Invoke-Bin 'git' @('-C', $repo, 'add', '-A') | Out-Null
+        # Stage ONLY the trunk file. This commit lands in the PRIMARY worktree, and the fixture's
+        # live .work sandbox sits inside that same working tree - so a broad `add -A` here would
+        # sweep the non-deterministic .work state (events.jsonl event-ids/occurred_at, the lease,
+        # queue_state.json) into the main tree and make Vcs-TreeFingerprint (hence the whole
+        # final-state fingerprint) vary run-to-run. On a developer box that leak is masked only by
+        # a global ignore of .work/ (~/.config/git/ignore); a clean CI clone has none, which is
+        # exactly why the diverge scenario's faulted-vs-clean fingerprint equivalence broke on CI
+        # but passed locally. Commit precisely what this models: an out-of-band edit to the trunk
+        # file, nothing else.
+        Invoke-Bin 'git' @('-C', $repo, 'add', '--', $script:TrunkFile) | Out-Null
         $c = Invoke-Bin 'git' @('-C', $repo, 'commit', '-q', '-m', "out-of-band $Token")
         if ($c.ExitCode -ne 0) { Fail 4 "out-of-band main commit failed: $($c.Err)" }
     } else {
