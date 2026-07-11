@@ -6,8 +6,10 @@
 //! there is no duplicated tail/dedup/torn-tail logic) and folds the `cohort.*` / `task.*` stream
 //! into the current batch/cohort/task projection ([`app::AppState`]), overlaying human context
 //! from `<work>/status.md` ([`status`]). The Decision Inbox ([`inbox`]) is rebuilt on the same
-//! cadence from a fresh [`orchestra_engine_spike::state::Snapshot`] (queue + task descriptors)
-//! plus whether `<work>/PAUSE` exists. Nothing here writes a file, takes a lock, creates or
+//! cadence from a fresh [`orchestra_engine_spike::state::Snapshot`] (queue + task descriptors),
+//! whether `<work>/PAUSE` exists, and the task ids already archived to `<work>/Tasks_Done.md`
+//! (used only to confirm, not invent, a predecessor's completion — see [`done_task_ids`]).
+//! Nothing here writes a file, takes a lock, creates or
 //! checks `orchestrator.lock`, or calls `processor` / `tools/*.ps1` / launchers: this observer
 //! runs safely against the LIVE `.work/` of the very orchestra producing those artifacts.
 //!
@@ -20,6 +22,7 @@ mod status;
 mod terminal;
 mod ui;
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -28,7 +31,7 @@ use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifier
 use orchestra_engine_spike::events::TailReader;
 use orchestra_engine_spike::state::Snapshot;
 
-use app::AppState;
+use app::{AppState, Screen};
 use cli::{Cli, Config};
 
 fn main() {
@@ -101,6 +104,22 @@ fn run(cfg: Config) -> io::Result<()> {
                         app.inbox = load_inbox(&cfg.work_dir);
                         last_status_reload = Instant::now();
                     }
+                    // Decision Inbox panel navigation (R-3): independent per-panel scrolling so
+                    // cards beyond the visible height stay reachable instead of silently clipped.
+                    KeyCode::Left | KeyCode::Char('h') if app.screen == Screen::DecisionInbox => {
+                        app.focus_prev_inbox_panel()
+                    }
+                    KeyCode::Right | KeyCode::Char('l') if app.screen == Screen::DecisionInbox => {
+                        app.focus_next_inbox_panel()
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if app.screen == Screen::DecisionInbox => {
+                        app.scroll_inbox(-1)
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if app.screen == Screen::DecisionInbox => {
+                        app.scroll_inbox(1)
+                    }
+                    KeyCode::PageUp if app.screen == Screen::DecisionInbox => app.scroll_inbox(-10),
+                    KeyCode::PageDown if app.screen == Screen::DecisionInbox => app.scroll_inbox(10),
                     _ => {}
                 },
                 _ => {}
@@ -112,9 +131,11 @@ fn run(cfg: Config) -> io::Result<()> {
 }
 
 /// Build the Decision Inbox (§6.2) from the current `.work/` contents: a fresh, read-only
-/// `Snapshot` (queue + task descriptors) plus whether `.work/PAUSE` currently exists. Only the
-/// pause file's *existence* is meaningful (see `agents/processor.md`, "Пауза — kill switch
-/// `.work/PAUSE`"); its content, if any, is carried through as an informational note only.
+/// `Snapshot` (queue + task descriptors), whether `.work/PAUSE` currently exists, and the set of
+/// task ids already archived to `Tasks_Done.md` (R-2: lets `inbox::build` positively confirm a
+/// predecessor absent from the live snapshot is truly done, instead of silently assuming it).
+/// Only the pause file's *existence* is meaningful (see `agents/processor.md`, "Пауза — kill
+/// switch `.work/PAUSE`"); its content, if any, is carried through as an informational note only.
 fn load_inbox(work_dir: &Path) -> inbox::DecisionInbox {
     let snapshot = Snapshot::load(work_dir);
     let pause_path = work_dir.join("PAUSE");
@@ -127,5 +148,25 @@ fn load_inbox(work_dir: &Path) -> inbox::DecisionInbox {
     } else {
         None
     };
-    inbox::build(&snapshot, paused, pause_note)
+    let done_ids = done_task_ids(work_dir);
+    inbox::build(&snapshot, paused, pause_note, &done_ids)
+}
+
+/// Task ids already archived to `.work/Tasks_Done.md`, decoded from that file's `### [T-NNN]
+/// <title>` headers (same shape as `Tasks_Queue.md`'s own headers, see
+/// `orchestra_engine_spike::state`). Read-only, best-effort: a missing/unreadable file degrades
+/// to an empty set, matching the rest of this observer's "total loading" convention (see
+/// `Snapshot::load`) — used only by `inbox::build` to confirm, not to invent, a predecessor's
+/// completion (R-2).
+fn done_task_ids(work_dir: &Path) -> BTreeSet<String> {
+    let text = std::fs::read_to_string(work_dir.join("Tasks_Done.md")).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.trim_start().strip_prefix("###")?.trim_start();
+            let rest = rest.strip_prefix('[')?;
+            let close = rest.find(']')?;
+            Some(rest[..close].trim().to_string())
+        })
+        .filter(|id| id.starts_with("T-"))
+        .collect()
 }

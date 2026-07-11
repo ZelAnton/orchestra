@@ -15,15 +15,17 @@
 //! * **Blocked** — plain `не начата` queue entries whose `Предпосылки:` list contains a T-ID that
 //!   is not yet resolved, resolved the same way `tools/queue-tx.ps1 ready` does: a predecessor is
 //!   "done" if it is `выполнена`/archived, "infeasible" if it is itself `эскалирована`, else still
-//!   in flight. A predecessor that appears in neither `snapshot.queue` nor `snapshot.descriptors`
-//!   is treated as already archived to `Tasks_Done.md` (this Snapshot has no access to that file;
-//!   a genuinely missing/typo'd predecessor is instead caught at proposal time by
-//!   `queue-tx.ps1 validate-deps`, so "not found here" safely reads as "already done").
+//!   in flight. A predecessor absent from both `snapshot.queue` and `snapshot.descriptors` is
+//!   cross-checked against the caller-supplied `done_ids` (task ids already archived to
+//!   `Tasks_Done.md`, decoded by `main.rs::done_task_ids`): confirmed there → resolved; still
+//!   absent → surfaced explicitly as `blocking_unknown` rather than silently assumed done, so a
+//!   typo'd/stale `Предпосылки:` entry that slipped past `queue-tx.ps1 validate-deps` does not
+//!   hide a genuinely blocked task from the operator (R-2).
 //!
 //! Nothing here invents facts absent from the source Markdown: card fields are `None`/empty when
 //! the corresponding suffix (`причина=`, `попытка=`, …) is itself absent from the artifact.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use orchestra_engine_spike::state::{Snapshot, TaskState};
 
@@ -61,6 +63,10 @@ pub struct BlockedCard {
     /// Whether the blocking predecessor is itself escalated — never completes without an
     /// operator decision on THAT task — versus merely still in flight.
     pub blocking_infeasible: bool,
+    /// The predecessor id appears in neither `snapshot.queue`, `snapshot.descriptors`, nor
+    /// `Tasks_Done.md` — a data-integrity signal (typo'd/stale `Предпосылки:` entry, or a race
+    /// with archival) worth the operator's attention, distinct from ordinary in-flight blocking.
+    pub blocking_unknown: bool,
 }
 
 /// The full Decision Inbox projection (§6.2), built from one `Snapshot` plus the pause marker.
@@ -92,9 +98,17 @@ impl DecisionInbox {
 }
 
 /// Build the Decision Inbox from a snapshot plus whether `.work/PAUSE` currently exists (and its
-/// optional note). Read-only: only reads the already-decoded `snapshot.queue` /
-/// `snapshot.descriptors` fields — no filesystem access happens here.
-pub fn build(snapshot: &Snapshot, paused: bool, pause_note: Option<String>) -> DecisionInbox {
+/// optional note), plus `done_ids` — task ids already archived to `Tasks_Done.md` (decoded by the
+/// caller, see `main.rs::done_task_ids`), used only to positively confirm a predecessor absent
+/// from the live snapshot is truly done rather than silently assuming it (R-2). Read-only: only
+/// reads the already-decoded `snapshot.queue` / `snapshot.descriptors` fields plus the passed-in
+/// `done_ids` — no filesystem access happens inside this function.
+pub fn build(
+    snapshot: &Snapshot,
+    paused: bool,
+    pause_note: Option<String>,
+    done_ids: &BTreeSet<String>,
+) -> DecisionInbox {
     // Authoritative state-by-id for predecessor resolution: the descriptor's `Статус:` is
     // authoritative once a task is captured (`engine::state::descriptor`), so it overrides the
     // queue header, which can lag until the processor resyncs it at a phase boundary.
@@ -132,14 +146,15 @@ pub fn build(snapshot: &Snapshot, paused: bool, pause_note: Option<String>) -> D
                 })
             }
             Some(TaskState::NotStarted) => {
-                if let Some((blocking_on, blocking_infeasible)) =
-                    first_unresolved_prerequisite(&q.prerequisites, &state_by_id)
+                if let Some((blocking_on, blocking_infeasible, blocking_unknown)) =
+                    first_unresolved_prerequisite(&q.prerequisites, &state_by_id, done_ids)
                 {
                     blocked.push(BlockedCard {
                         id: q.id.clone(),
                         title: q.title.clone(),
                         blocking_on,
                         blocking_infeasible,
+                        blocking_unknown,
                     });
                 }
             }
@@ -156,19 +171,28 @@ pub fn build(snapshot: &Snapshot, paused: bool, pause_note: Option<String>) -> D
     }
 }
 
-/// The first predecessor T-ID that is not yet resolved, and whether it is escalated (infeasible
-/// without an operator decision on it). `None` if every predecessor is resolved.
+/// The first predecessor T-ID that is not yet resolved, whether it is escalated (infeasible
+/// without an operator decision on it), and whether it is unresolvable-unknown (absent from the
+/// queue, descriptors, AND `done_ids`). `None` if every predecessor is resolved.
 fn first_unresolved_prerequisite(
     prerequisites: &[String],
     state_by_id: &BTreeMap<&str, TaskState>,
-) -> Option<(String, bool)> {
+    done_ids: &BTreeSet<String>,
+) -> Option<(String, bool, bool)> {
     for p in prerequisites {
         match state_by_id.get(p.as_str()) {
-            // Not in queue nor descriptors: already archived to Tasks_Done.md -> resolved.
-            None => continue,
             Some(TaskState::Done) => continue,
-            Some(TaskState::Escalated) => return Some((p.clone(), true)),
-            Some(_) => return Some((p.clone(), false)),
+            Some(TaskState::Escalated) => return Some((p.clone(), true, false)),
+            Some(_) => return Some((p.clone(), false, false)),
+            None => {
+                if done_ids.contains(p.as_str()) {
+                    // Confirmed archived to Tasks_Done.md -> resolved.
+                    continue;
+                }
+                // Not in queue, descriptors, NOR Tasks_Done.md: surface explicitly (R-2) instead
+                // of silently assuming "already done".
+                return Some((p.clone(), false, true));
+            }
         }
     }
     None
@@ -230,7 +254,7 @@ mod tests {
     #[test]
     fn empty_snapshot_yields_empty_inbox() {
         let snap = snapshot(vec![], vec![]);
-        let inbox = build(&snap, false, None);
+        let inbox = build(&snap, false, None, &BTreeSet::new());
         assert!(inbox.is_empty());
         assert_eq!(inbox.card_count(), 0);
     }
@@ -258,7 +282,7 @@ mod tests {
             ),
         ];
         let snap = snapshot(q, vec![]);
-        let inbox = build(&snap, false, None);
+        let inbox = build(&snap, false, None, &BTreeSet::new());
         assert!(!inbox.is_empty());
         assert_eq!(inbox.escalated.len(), 1);
         let card = &inbox.escalated[0];
@@ -269,6 +293,7 @@ mod tests {
         assert_eq!(inbox.blocked.len(), 1);
         assert_eq!(inbox.blocked[0].blocking_on, "T-050");
         assert!(inbox.blocked[0].blocking_infeasible);
+        assert!(!inbox.blocked[0].blocking_unknown);
     }
 
     #[test]
@@ -283,7 +308,7 @@ mod tests {
             &["T-102", "T-103"],
         )];
         let snap = snapshot(q, vec![]);
-        let inbox = build(&snap, false, None);
+        let inbox = build(&snap, false, None, &BTreeSet::new());
         assert_eq!(inbox.quarantined.len(), 1);
         let card = &inbox.quarantined[0];
         assert_eq!(card.attempt, Some(2));
@@ -315,10 +340,11 @@ mod tests {
             ),
         ];
         let snap = snapshot(q, vec![]);
-        let inbox = build(&snap, false, None);
+        let inbox = build(&snap, false, None, &BTreeSet::new());
         assert_eq!(inbox.blocked.len(), 1);
         assert_eq!(inbox.blocked[0].blocking_on, "T-102");
         assert!(!inbox.blocked[0].blocking_infeasible);
+        assert!(!inbox.blocked[0].blocking_unknown);
     }
 
     #[test]
@@ -344,14 +370,15 @@ mod tests {
             ),
         ];
         let snap = snapshot(q, vec![]);
-        let inbox = build(&snap, false, None);
+        let inbox = build(&snap, false, None, &BTreeSet::new());
         assert!(inbox.blocked.is_empty());
     }
 
     #[test]
-    fn predecessor_missing_from_snapshot_reads_as_already_archived() {
-        // T-050 does not appear anywhere in the snapshot: treated as already archived to
-        // Tasks_Done.md, so T-104 is NOT reported as blocked on it.
+    fn predecessor_confirmed_done_via_tasks_done_ids_unblocks() {
+        // T-050 does not appear in the live snapshot's queue/descriptors, but IS present in the
+        // caller-supplied `done_ids` (decoded from Tasks_Done.md) -> confirmed done, so T-104 is
+        // NOT reported as blocked on it.
         let q = vec![queue_entry(
             "T-104",
             "Экран Decision Inbox",
@@ -362,8 +389,31 @@ mod tests {
             &["T-050"],
         )];
         let snap = snapshot(q, vec![]);
-        let inbox = build(&snap, false, None);
+        let done: BTreeSet<String> = ["T-050".to_string()].into_iter().collect();
+        let inbox = build(&snap, false, None, &done);
         assert!(inbox.blocked.is_empty());
+    }
+
+    #[test]
+    fn predecessor_missing_everywhere_is_surfaced_as_unknown_not_silently_resolved() {
+        // T-050 is absent from the queue, descriptors, AND `done_ids` (R-2): rather than
+        // silently assuming "already done", it must be surfaced so a typo'd/stale
+        // `Предпосылки:` entry doesn't hide a genuinely blocked task from the operator.
+        let q = vec![queue_entry(
+            "T-104",
+            "Экран Decision Inbox",
+            Some(TaskState::NotStarted),
+            None,
+            None,
+            None,
+            &["T-050"],
+        )];
+        let snap = snapshot(q, vec![]);
+        let inbox = build(&snap, false, None, &BTreeSet::new());
+        assert_eq!(inbox.blocked.len(), 1);
+        assert_eq!(inbox.blocked[0].blocking_on, "T-050");
+        assert!(inbox.blocked[0].blocking_unknown);
+        assert!(!inbox.blocked[0].blocking_infeasible);
     }
 
     #[test]
@@ -397,13 +447,18 @@ mod tests {
             prerequisites: vec![],
         }];
         let snap = snapshot(q, d);
-        let inbox = build(&snap, false, None);
+        let inbox = build(&snap, false, None, &BTreeSet::new());
         assert!(inbox.blocked.is_empty());
     }
 
     #[test]
     fn pause_marker_is_surfaced_verbatim() {
-        let inbox = build(&snapshot(vec![], vec![]), true, Some("2026-07-11T12:00:00Z".into()));
+        let inbox = build(
+            &snapshot(vec![], vec![]),
+            true,
+            Some("2026-07-11T12:00:00Z".into()),
+            &BTreeSet::new(),
+        );
         assert!(!inbox.is_empty());
         assert!(inbox.paused);
         assert_eq!(inbox.pause_note.as_deref(), Some("2026-07-11T12:00:00Z"));

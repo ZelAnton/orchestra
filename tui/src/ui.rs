@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{AppState, CohortPhase, RecentKind, Screen, TaskState};
+use crate::app::{AppState, CohortPhase, InboxPanel, RecentKind, Screen, TaskState};
 use crate::inbox::{BlockedCard, DecisionInbox, EscalatedCard, QuarantineCard};
 
 const RED: Color = Color::Red;
@@ -320,7 +320,7 @@ fn render_decision_inbox(f: &mut Frame, app: &AppState) {
     .split(f.area());
 
     render_inbox_header(f, root[0], &app.inbox);
-    render_inbox_body(f, root[1], &app.inbox);
+    render_inbox_body(f, root[1], app);
     render_inbox_footer(f, root[2]);
 }
 
@@ -368,13 +368,22 @@ fn render_inbox_header(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
     f.render_widget(para, area);
 }
 
-fn render_inbox_body(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
+/// The Decision Inbox body: either the empty-state message (R-1: distinguishes "nothing at all"
+/// from "no cards, but paused" — the pause banner in the header still demands attention even
+/// with an empty card list) or the three scrollable panels (R-3: each independently focusable
+/// with `←`/`→` and scrollable with `↑`/`↓`, so cards beyond the visible height are reachable
+/// rather than silently clipped).
+fn render_inbox_body(f: &mut Frame, area: Rect, app: &AppState) {
+    let inbox = &app.inbox;
     if inbox.card_count() == 0 {
-        let para = Paragraph::new(Line::from(Span::styled(
-            "ничего не требует решения оператора прямо сейчас",
-            Style::default().fg(DIM),
-        )))
-        .block(block("Decision Inbox").border_style(Style::default().fg(DIM)));
+        let message = if inbox.paused {
+            "карточек нет, но конвейер на паузе (см. баннер выше) — новая фаза/раунд не начнётся, пока пауза снята"
+        } else {
+            "ничего не требует решения оператора прямо сейчас"
+        };
+        let border = if inbox.paused { RED } else { DIM };
+        let para = Paragraph::new(Line::from(Span::styled(message, Style::default().fg(DIM))))
+            .block(block("Decision Inbox").border_style(Style::default().fg(border)));
         f.render_widget(para, area);
         return;
     }
@@ -386,12 +395,40 @@ fn render_inbox_body(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
     ])
     .split(area);
 
-    render_escalated_panel(f, thirds[0], &inbox.escalated);
-    render_quarantine_panel(f, thirds[1], &inbox.quarantined);
-    render_blocked_panel(f, thirds[2], &inbox.blocked);
+    render_escalated_panel(
+        f,
+        thirds[0],
+        &inbox.escalated,
+        app.inbox_focus == InboxPanel::Escalated,
+        app.inbox_scroll[InboxPanel::Escalated as usize],
+    );
+    render_quarantine_panel(
+        f,
+        thirds[1],
+        &inbox.quarantined,
+        app.inbox_focus == InboxPanel::Quarantined,
+        app.inbox_scroll[InboxPanel::Quarantined as usize],
+    );
+    render_blocked_panel(
+        f,
+        thirds[2],
+        &inbox.blocked,
+        app.inbox_focus == InboxPanel::Blocked,
+        app.inbox_scroll[InboxPanel::Blocked as usize],
+    );
 }
 
-fn render_escalated_panel(f: &mut Frame, area: Rect, cards: &[EscalatedCard]) {
+/// `▶ ` prefix on a panel title when it currently holds scroll focus (see `main.rs` for the
+/// `←`/`→` key handling that moves it, and `↑`/`↓` for the accompanying `scroll` offset).
+fn focus_marker(focused: bool) -> &'static str {
+    if focused {
+        "▶ "
+    } else {
+        ""
+    }
+}
+
+fn render_escalated_panel(f: &mut Frame, area: Rect, cards: &[EscalatedCard], focused: bool, scroll: u16) {
     let mut lines: Vec<Line> = Vec::new();
     if cards.is_empty() {
         lines.push(dim_line("эскалированных задач нет"));
@@ -407,15 +444,16 @@ fn render_escalated_panel(f: &mut Frame, area: Rect, cards: &[EscalatedCard]) {
             }
         }
     }
-    let title = format!("Эскалировано ({})", cards.len());
+    let title = format!("{}Эскалировано ({})", focus_marker(focused), cards.len());
     let border = if cards.is_empty() { DIM } else { RED };
     let para = Paragraph::new(lines)
         .block(block(&title).border_style(Style::default().fg(border)))
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0));
     f.render_widget(para, area);
 }
 
-fn render_quarantine_panel(f: &mut Frame, area: Rect, cards: &[QuarantineCard]) {
+fn render_quarantine_panel(f: &mut Frame, area: Rect, cards: &[QuarantineCard], focused: bool, scroll: u16) {
     let mut lines: Vec<Line> = Vec::new();
     if cards.is_empty() {
         lines.push(dim_line("нет задач в карантине"));
@@ -435,15 +473,16 @@ fn render_quarantine_panel(f: &mut Frame, area: Rect, cards: &[QuarantineCard]) 
             }
         }
     }
-    let title = format!("Карантин / повторы ({})", cards.len());
+    let title = format!("{}Карантин / повторы ({})", focus_marker(focused), cards.len());
     let border = if cards.is_empty() { DIM } else { YELLOW };
     let para = Paragraph::new(lines)
         .block(block(&title).border_style(Style::default().fg(border)))
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0));
     f.render_widget(para, area);
 }
 
-fn render_blocked_panel(f: &mut Frame, area: Rect, cards: &[BlockedCard]) {
+fn render_blocked_panel(f: &mut Frame, area: Rect, cards: &[BlockedCard], focused: bool, scroll: u16) {
     let mut lines: Vec<Line> = Vec::new();
     if cards.is_empty() {
         lines.push(dim_line("нет заблокированных задач"));
@@ -458,16 +497,28 @@ fn render_blocked_panel(f: &mut Frame, area: Rect, cards: &[BlockedCard]) {
                         Style::default().fg(RED),
                     ),
                 ]));
+            } else if c.blocking_unknown {
+                lines.push(Line::from(vec![
+                    Span::styled("  блокировано: ", Style::default().fg(DIM)),
+                    Span::styled(
+                        format!(
+                            "{} не найден ни в очереди, ни в Tasks_Done.md — проверьте Предпосылки:",
+                            c.blocking_on
+                        ),
+                        Style::default().fg(RED),
+                    ),
+                ]));
             } else {
                 lines.push(field_line("  ожидает: ", &c.blocking_on));
             }
         }
     }
-    let title = format!("Заблокировано ({})", cards.len());
+    let title = format!("{}Заблокировано ({})", focus_marker(focused), cards.len());
     let border = if cards.is_empty() { DIM } else { YELLOW };
     let para = Paragraph::new(lines)
         .block(block(&title).border_style(Style::default().fg(border)))
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: true })
+        .scroll((scroll, 0));
     f.render_widget(para, area);
 }
 
@@ -477,6 +528,10 @@ fn render_inbox_footer(f: &mut Frame, area: Rect) {
         Span::raw("выход  "),
         Span::styled(" Tab ", Style::default().fg(CYAN)),
         Span::raw("обзор  "),
+        Span::styled(" ←/→ ", Style::default().fg(CYAN)),
+        Span::raw("фокус панели  "),
+        Span::styled(" ↑/↓ ", Style::default().fg(CYAN)),
+        Span::raw("прокрутка  "),
         Span::styled(
             " read-only ",
             Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
@@ -617,6 +672,7 @@ mod tests {
                 title: "Ждёт T-050".to_string(),
                 blocking_on: "T-050".to_string(),
                 blocking_infeasible: true,
+                blocking_unknown: false,
             }],
         };
 
