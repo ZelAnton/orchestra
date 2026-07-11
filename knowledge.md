@@ -372,6 +372,55 @@ workspace, коммитит результаты листовых агентов
 - `github_sync.md` — синхронизирует issues/PR через `gh`; PR закрывает, но не мержит.
 - `knowledge_curator.md` — единственный писатель runtime-базы `.work/knowledge/`.
 
+## Резолвинг контрактов очереди и ограничение поиска
+
+Голые ссылки `docs/queue_contract.md` и `~/.claude/specs/Tasks_Queue_Format.md` в
+агентских инструкциях **не являются заданием искать файл на диске**. Если роль действительно
+должна прочитать контракт, она строит точный путь без обхода файловой системы:
+
+1. Возьми уже определённый стандартным VCS-паттерном корень текущего репозитория `ROOT` и
+   открой абсолютный путь `$ROOT/docs/queue_contract.md`. Не трактуй эту ссылку как путь
+   относительно произвольного текущего каталога worktree.
+2. Полная спецификация формата лежит ровно в `$HOME/.claude/specs/Tasks_Queue_Format.md`
+   (PowerShell: `$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Раскрой `HOME` /
+   `USERPROFILE` в путь и открой его напрямую.
+
+**Запрещён** `find /`, `find C:/`, обход всего профиля или любой иной неограниченный поиск по
+диску — в Git Bash/MSYS `/` означает весь системный диск и такой вызов может остановить роль.
+Для точного известного пути используй `Read`; для проверки используй доступный всем ролям
+`Glob` либо `find`, ограниченный малым известным поддеревом (`$ROOT/docs` или
+`$HOME/.claude/specs`).
+
+### Классификация 71 ссылок в `agents/*.md`
+
+Проверка T-118 разделила ссылки на **6 чтений** и **65 цитат**. Чтение нужно только там, где
+роль берёт нормативный контракт как рабочее правило: у `queue_builder.md`,
+`code_auditor.md`, `enhancement_scout.md` и `thinker.md` — `docs/queue_contract.md`; у
+`github_sync.md` — он же и полная спецификация `Tasks_Queue_Format.md`. Все остальные ссылки,
+включая номера разделов, trust/redaction, модель состояния и резолвинг раннеров, — справочные
+цитаты и не требуют открытия файла.
+
+| Файл | Чтение | Цитаты |
+|---|---:|---:|
+| `code_auditor.md` | 1 | 5 |
+| `coder_codex.md` | 0 | 1 |
+| `coder_deep.md` | 0 | 2 |
+| `coder_fast.md` | 0 | 2 |
+| `coder.md` | 0 | 2 |
+| `coder.template.md` | 0 | 2 |
+| `enhancement_scout.md` | 1 | 5 |
+| `github_sync.md` | 2 | 8 |
+| `knowledge_curator.md` | 0 | 2 |
+| `merger.md` | 0 | 1 |
+| `planner.md` | 0 | 2 |
+| `processor.md` | 0 | 15 |
+| `queue_builder.md` | 1 | 5 |
+| `reviewer_codex.md` | 0 | 1 |
+| `reviewer_std.md` | 0 | 2 |
+| `reviewer.md` | 0 | 2 |
+| `reviewer.template.md` | 0 | 2 |
+| `thinker.md` | 1 | 6 |
+
 ### Конфигурация и запуск
 
 - `config.example.md` — каноническое описание `.work/config.md`, всех defaults и
