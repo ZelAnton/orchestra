@@ -699,6 +699,13 @@ function Cmd-Run {
 # ==========================================================================
 # Dispatch
 # ==========================================================================
+# When dot-sourced (e.g. by tools/codex-preflight.ps1, which reuses the helpers
+# above so the ENV_LIMIT signature table stays single-sourced, T-117), expose the
+# functions without running the CLI dispatch. Direct `-File`/`&` invocation
+# (InvocationName != '.') keeps the original behaviour, so tests/test-codex-runtime.ps1
+# and every caller are unaffected.
+if ($MyInvocation.InvocationName -eq '.') { return }
+
 switch ($Command) {
     'build-argv'        { Cmd-BuildArgv }
     'run'               { Cmd-Run }
