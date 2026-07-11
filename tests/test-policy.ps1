@@ -40,6 +40,7 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 $script:Tool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\policy.ps1')).Path
 $script:SchemaLib = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\policy-schema.ps1')).Path
 $script:ConfigExample = (Resolve-Path (Join-Path $PSScriptRoot '..\config.example.md')).Path
+$script:ConstraintsExample = (Resolve-Path (Join-Path $PSScriptRoot '..\constraints.example.md')).Path
 $script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
@@ -432,6 +433,67 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 0 'validate-policy: no file -> OK (not in force)'
 }.Invoke()
 
+# =============================================================================
+# 9a. placeholder forms in the seeded constraints template
+# =============================================================================
+{
+    . $script:SchemaLib
+
+    # Both documented placeholder forms must be ignored by the shared parser.
+    $placeholderLines = @(
+        '## Разрешённые ветки и remotes',
+        '',
+        '**Активные ограничения**:',
+        '',
+        '- (пусто — ограничение не задано)',
+        '- Ветки публикации: (по умолчанию — trunk)',
+        '- Remotes: (не задано)',
+        '- Явное значение: `origin`'
+    )
+    $active = Get-PolicyActiveBullets $placeholderLines 'Разрешённые ветки и remotes'
+    Assert-Equal 1 $active.Count 'policy placeholders: bare and labelled forms are skipped by one parser rule'
+    Assert-Equal 'Явное значение: `origin`' $active[0] 'policy placeholders: explicit value remains active'
+
+    # Placeholder keywords use a Unicode-safe explicit terminator: whitespace, ')' or end.
+    # ASCII explicit values remain active alongside Cyrillic placeholder text.
+    $boundaryLines = @(
+        '## Разрешённые ветки и remotes',
+        '',
+        '**Активные ограничения**:',
+        '',
+        '- (пусто)',
+        '- Ветки публикации: (не задано)',
+        '- Remote policy: (по умолчанию — origin)',
+        '- Explicit value: upstream'
+    )
+    $active = Get-PolicyActiveBullets $boundaryLines 'Разрешённые ветки и remotes'
+    Assert-Equal 1 $active.Count 'policy placeholders: explicit Unicode-safe terminators are skipped'
+    Assert-Equal 'Explicit value: upstream' $active[0] 'policy placeholders: ASCII explicit value remains active'
+
+    # cc-config seeds this exact template. Its default branch/remote, push and size text
+    # must remain inactive, while a real explicit branch/remote policy still applies.
+    $templateLines = [System.IO.File]::ReadAllLines($script:ConstraintsExample, $script:Utf8)
+    Assert-Equal 0 (Get-PolicyActiveBullets $templateLines 'Разрешённые ветки и remotes').Count 'template placeholders: branch/remotes are inactive'
+    $pushTemplate = Get-PolicyActiveBullets $templateLines 'Push/merge policy'
+    Assert-Equal 1 $pushTemplate.Count 'template placeholders: only the explicit ff-merge invariant remains active'
+    Assert-True (([string]$pushTemplate[0]) -notmatch 'Публикация \(push\)') 'template placeholders: push default is inactive'
+    Assert-Equal 0 (Get-PolicyActiveBullets $templateLines 'Пороги размера изменений').Count 'template placeholders: size thresholds are inactive'
+
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+    $constraints = Join-Path $work 'constraints.md'
+    [System.IO.File]::WriteAllText($constraints, [System.IO.File]::ReadAllText($script:ConstraintsExample, $script:Utf8), $script:Utf8)
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'check-publish: untouched constraints template does not restrict main/origin'
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'feature/any-real-branch', '--remote', 'upstream')
+    Assert-Exit $r 0 'check-publish: untouched constraints template does not restrict branch or remote'
+
+    Write-Utf8 $constraints "## Разрешённые ветки и remotes`n`n**Активные ограничения**:`n`n- Ветки публикации: main`n- Remotes: origin`n"
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'check-publish: explicit bare branch+remote pass'
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'develop', '--remote', 'origin')
+    Assert-Exit $r 8 'check-publish: explicit bare branch restriction remains active'
+}.Invoke()
 # =============================================================================
 # 10. check-gate (T-095): the fail-closed, SHA-bound, whole-set publish CI gate
 # =============================================================================
