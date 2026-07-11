@@ -2,10 +2,14 @@
 
 This directory (`engine/`) is the top-level home of the future deterministic orchestrator
 engine described in [`plans/DETERMINISTIC_ORCHESTRATOR_INTENT.md`](../plans/DETERMINISTIC_ORCHESTRATOR_INTENT.md).
-It currently holds **only the Stage 1 de-risking spike** for task **T-097**, not the
-engine itself. The engine is deliberately NOT built here yet: the intent doc's non-goals
-(§13) forbid a big-bang rewrite of `agents/processor.md` before this spike proves the one
-real unknown is tractable, and before the leaf-agent contracts are hardened (§8.2).
+It began as the Stage 1 de-risking spike for task **T-097**, and is now growing its first
+engine-grade library modules — currently the **`events`** module (T-101): typed, read-only
+access to the `.work/events.jsonl` durable event outbox (contract
+[`docs/queue_contract.md`](../docs/queue_contract.md) §19). The headless engine itself is
+still deliberately NOT built here: the intent doc's non-goals (§13) forbid a big-bang rewrite
+of `agents/processor.md` before the spike's one real unknown is proven tractable and the
+leaf-agent contracts are hardened (§8.2). The `events` module only *reads* the journal; it is
+not wired into the running orchestrator.
 
 ## What the spike answers
 
@@ -30,6 +34,7 @@ each piece under `cargo test`.
 | `src/codex.rs` | build the fail-closed `codex exec … -c approval_policy=never --sandbox …` argv, mirroring the already-working `tools/codex-runtime.ps1`. |
 | `src/contract.rs` | deterministically parse the leaf-agent structured markers (`R-NN`, `SUMMARY-R-<ts>`, `F-NN`, Codex sentinels, `Изменённые файлы:`) and compute the processor's phase-2.6 clean-pass gate as a pure function. |
 | `src/jsonline.rs` | a minimal top-level JSON field scanner for one stream-json line (no dependency). |
+| `src/events/` | typed, **read-only** consumer of the `.work/events.jsonl` durable event outbox (contract §19): `model` (the typed envelope — `Event` / `Actor` / `EventType`), `parse` (strict-envelope, lenient-forward line decode, §19.4), `reader` (a `TailReader` cursor that yields only new, unique, fully-committed events and never hands out a torn tail, §19.5/§19.7). This is the first module to use `serde_json`. |
 
 ## Run it
 
@@ -39,7 +44,18 @@ cargo test            # hermetic, offline, token-free: unit tests + the e2e spik
 cargo run -- selfcheck    # supervise a stand-in child (success / timeout / error cases)
 cargo run -- argv claude  # print the argv the engine WOULD spawn for a claude call
 cargo run -- argv codex   # print the fail-closed codex exec argv
+cargo run -- events tail ../.work/events.jsonl            # decode the outbox to EOF and exit
+cargo run -- events tail --follow ../.work/events.jsonl   # keep polling for new events (^C to stop)
 ```
+
+`events tail` opens the file **read-only** — it never writes, truncates, or locks it — so it is
+safe to point at the live `.work/events.jsonl` while the orchestrator runs. It prints each new,
+unique, fully-committed event as one normalized JSON line and never emits a torn (half-written)
+trailing record.
+
+The first `cargo build`/`cargo test` performs a one-time online fetch of `serde_json`; after that
+`engine/Cargo.lock` is committed and the crate builds and tests **offline** (the smoke gate stays
+green with no network). The T-097 spike modules remain dependency-free; only `events` uses a crate.
 
 A **real** model call is strictly opt-in and never runs in tests or `selfcheck`:
 

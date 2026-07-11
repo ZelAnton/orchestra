@@ -9,6 +9,11 @@
 //!                             supervised verdict + parsed stream-json result.
 //!   codex    --live "<prompt>"  Spawn a REAL `codex exec` child (opt-in).
 //!   argv     claude|codex     Print the argv the engine WOULD spawn (offline, safe).
+//!   events   tail [--follow] <file>
+//!                             Read a `.work/events.jsonl`-shaped file and print each decoded
+//!                             event (contract §19) as one normalized JSON line. Without
+//!                             `--follow` it reads to EOF and exits; with `--follow` it keeps
+//!                             polling for newly appended lines. Read-only.
 //!   __fake-agent ...          Hidden: a deterministic stand-in child used by the
 //!                             hermetic tests and by `selfcheck` (emits stream-json,
 //!                             can sleep / exit with a chosen code).
@@ -22,6 +27,7 @@ use std::time::Duration;
 
 use orchestra_engine_spike::claude::{ClaudeCall, PermissionPosture};
 use orchestra_engine_spike::codex::{CodexCall, Sandbox};
+use orchestra_engine_spike::events::TailReader;
 use orchestra_engine_spike::supervise::{self, SpawnSpec};
 
 fn main() {
@@ -32,11 +38,12 @@ fn main() {
         "argv" => cmd_argv(&args),
         "claude" => cmd_claude(&args),
         "codex" => cmd_codex(&args),
+        "events" => cmd_events(&args),
         "__fake-agent" => cmd_fake_agent(&args),
         "version" | "--version" => println!("orchestra-engine-spike 0.0.1"),
         _ => {
             eprintln!(
-                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|version>\n\
+                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|version>\n\
                  (see src/main.rs; live model calls require --live and are opt-in)"
             );
             exit(2);
@@ -194,6 +201,54 @@ fn cmd_codex(args: &[String]) {
         v.stdout.len() + v.stderr.len()
     );
     exit(v.reason.exit_code());
+}
+
+/// `events tail [--follow] <file>` — decode a `.work/events.jsonl`-shaped file and print each
+/// new, unique, fully-committed event as one normalized JSON line (contract §19). Read-only:
+/// it opens the file for reading, never writes or locks it. A torn/unterminated tail is never
+/// printed. With `--follow` it polls indefinitely for appended lines (like `tail -f`).
+fn cmd_events(args: &[String]) {
+    let sub = args.get(2).map(|s| s.as_str()).unwrap_or("");
+    if sub != "tail" {
+        eprintln!("usage: events tail [--follow] <file>");
+        exit(2);
+    }
+    let follow = args.iter().any(|a| a == "--follow");
+    // The file is the first non-flag argument after `events tail`.
+    let path = args.iter().skip(3).find(|a| !a.starts_with("--")).cloned();
+    let path = match path {
+        Some(p) => p,
+        None => {
+            eprintln!("usage: events tail [--follow] <file>");
+            exit(2);
+        }
+    };
+
+    // Without --follow a missing file is a user error; with --follow we tolerate it and wait.
+    if !follow && !std::path::Path::new(&path).exists() {
+        eprintln!("events tail: file not found: {path}");
+        exit(2);
+    }
+
+    let mut reader = TailReader::new(&path);
+    let poll_interval = Duration::from_millis(200);
+    loop {
+        match reader.poll() {
+            Ok(events) => {
+                for ev in events {
+                    println!("{}", ev.to_json_line());
+                }
+            }
+            Err(e) => {
+                eprintln!("events tail: read error on {path}: {e}");
+                exit(3);
+            }
+        }
+        if !follow {
+            break;
+        }
+        std::thread::sleep(poll_interval);
+    }
 }
 
 /// Hidden deterministic stand-in child for hermetic tests / selfcheck.

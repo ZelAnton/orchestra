@@ -1,0 +1,365 @@
+//! Cursor / tail reader over `.work/events.jsonl` (§19.5, §19.7).
+//!
+//! A [`TailReader`] is a reference consumer: it returns only **new, unique, fully-committed**
+//! events, and NEVER hands out a torn tail. The two guarantees:
+//!
+//! * **Dedup by `event_id` (§19.7).** A line whose `event_id` was already delivered is
+//!   dropped — replay/resume of the same committed fact does not re-emit it.
+//! * **Torn-tail safety (§19.5).** Only newline-*terminated* lines are candidates. The trailing
+//!   bytes after the last `\n` — a half-written final record from a crash mid-append, or even a
+//!   valid line whose newline has not landed yet — are never delivered and the byte cursor is
+//!   not advanced past them. On a later `poll`, once the newline arrives, the completed line is
+//!   delivered exactly once. (This reader only *reads*; append-repair itself is §19.5's writer,
+//!   out of this task's scope.)
+//!
+//! `events.jsonl` is append-only / single-writer (§19.6), so a byte offset is a stable cursor:
+//! everything before it is permanently committed. Newline-terminated but *invalid* lines are
+//! skipped (counted, not delivered) AND the cursor advances past them — a permanently corrupt
+//! committed line must not wedge the stream forever, matching `tools/outbox.ps1 read`.
+
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use super::model::Event;
+use super::parse::parse_line;
+
+/// A durable cursor: how far the consumer has read, and which ids it has already delivered.
+///
+/// `byte_offset` alone would suffice for dedup *within* a monotonic file, but `delivered_ids`
+/// makes dedup robust to duplicates that are appended later (idempotent replay writes the same
+/// `event_id` again, §19.5) and lets a persisted cursor resume without re-emitting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cursor {
+    pub byte_offset: u64,
+    pub delivered_ids: Vec<String>,
+}
+
+impl Cursor {
+    /// Serialize to the compact JSON shape used by the reference consumer's
+    /// `events_cursor.json` (`{ "byte_offset": N, "delivered_ids": [...] }`).
+    pub fn to_json(&self) -> String {
+        let mut obj = Map::new();
+        obj.insert("byte_offset".into(), Value::from(self.byte_offset));
+        obj.insert(
+            "delivered_ids".into(),
+            Value::Array(
+                self.delivered_ids
+                    .iter()
+                    .cloned()
+                    .map(Value::from)
+                    .collect(),
+            ),
+        );
+        Value::Object(obj).to_string()
+    }
+
+    /// Parse a persisted cursor. A malformed / partial cursor is an error (the caller decides
+    /// whether to fall back to a fresh cursor).
+    pub fn from_json(s: &str) -> Result<Cursor, String> {
+        let v: Value = serde_json::from_str(s).map_err(|e| format!("cursor is unreadable: {e}"))?;
+        let obj = v.as_object().ok_or("cursor must be a JSON object")?;
+        let byte_offset = obj.get("byte_offset").and_then(|v| v.as_u64()).unwrap_or(0);
+        let delivered_ids = obj
+            .get("delivered_ids")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Cursor {
+            byte_offset,
+            delivered_ids,
+        })
+    }
+}
+
+/// Outcome counters from a `poll`, for observability / tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PollStats {
+    pub delivered: u64,
+    pub skipped_invalid: u64,
+    pub skipped_dup: u64,
+}
+
+/// A stateful tail reader over one events-file path.
+pub struct TailReader {
+    path: PathBuf,
+    offset: u64,
+    delivered: HashSet<String>,
+    stats: PollStats,
+}
+
+impl TailReader {
+    /// Start a fresh reader at the beginning of `path` (which need not exist yet).
+    pub fn new(path: impl AsRef<Path>) -> TailReader {
+        TailReader {
+            path: path.as_ref().to_path_buf(),
+            offset: 0,
+            delivered: HashSet::new(),
+            stats: PollStats::default(),
+        }
+    }
+
+    /// Resume from a persisted [`Cursor`].
+    pub fn with_cursor(path: impl AsRef<Path>, cursor: &Cursor) -> TailReader {
+        TailReader {
+            path: path.as_ref().to_path_buf(),
+            offset: cursor.byte_offset,
+            delivered: cursor.delivered_ids.iter().cloned().collect(),
+            stats: PollStats::default(),
+        }
+    }
+
+    /// The cursor capturing all progress so far (persist this to resume later).
+    pub fn cursor(&self) -> Cursor {
+        let mut ids: Vec<String> = self.delivered.iter().cloned().collect();
+        ids.sort(); // deterministic serialization
+        Cursor {
+            byte_offset: self.offset,
+            delivered_ids: ids,
+        }
+    }
+
+    /// Cumulative counters across every `poll` on this reader.
+    pub fn stats(&self) -> PollStats {
+        self.stats
+    }
+
+    /// Read everything appended since the last poll and return the new, unique, committed
+    /// events in file order. Advances the internal cursor past every newline-terminated line
+    /// consumed; leaves any unterminated trailing fragment for a future poll. A missing file
+    /// reads as empty (so `--follow` can wait for the file to appear).
+    pub fn poll(&mut self) -> io::Result<Vec<Event>> {
+        let mut file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let len = file.metadata()?.len();
+        // Defensive: an append-only file should never shrink (§19.6). If it somehow did,
+        // there is nothing new past our cursor to read.
+        if self.offset >= len {
+            return Ok(Vec::new());
+        }
+        file.seek(SeekFrom::Start(self.offset))?;
+        let mut buf = Vec::with_capacity((len - self.offset) as usize);
+        file.read_to_end(&mut buf)?;
+
+        let mut out = Vec::new();
+        let mut consumed: usize = 0; // bytes up to and including the last newline processed
+        let mut line_start: usize = 0;
+        for i in 0..buf.len() {
+            if buf[i] == b'\n' {
+                let raw = &buf[line_start..i]; // line content, newline excluded
+                consumed = i + 1;
+                line_start = i + 1;
+                self.process_line(raw, &mut out);
+            }
+        }
+        // buf[line_start..] is the unterminated trailing fragment (torn tail or not-yet-newline
+        // valid line): deliberately NOT consumed and NOT advanced past.
+        self.offset += consumed as u64;
+        Ok(out)
+    }
+
+    fn process_line(&mut self, raw: &[u8], out: &mut Vec<Event>) {
+        // A non-UTF-8 line cannot be a valid event; treat as an invalid (skipped) line.
+        let text = match std::str::from_utf8(raw) {
+            Ok(t) => t.trim(),
+            Err(_) => {
+                self.stats.skipped_invalid += 1;
+                return;
+            }
+        };
+        if text.is_empty() {
+            return; // a blank separator line — neither delivered nor counted
+        }
+        match parse_line(text) {
+            Ok(ev) => {
+                if self.delivered.insert(ev.event_id.clone()) {
+                    self.stats.delivered += 1;
+                    out.push(ev);
+                } else {
+                    self.stats.skipped_dup += 1;
+                }
+            }
+            Err(_) => {
+                self.stats.skipped_invalid += 1;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const A: &str = r#"{"schema_version":1,"event_id":"evt-a","occurred_at":"2026-07-08T12:24:10Z","type":"cohort.opened","batch_id":"B-1","actor":{"kind":"agent","name":"processor"},"payload":{"wave":1}}"#;
+    const B: &str = r#"{"schema_version":1,"event_id":"evt-b","occurred_at":"2026-07-08T12:24:11Z","type":"task.captured","batch_id":"B-1","task_id":"T-1","actor":{"kind":"agent","name":"processor"},"payload":{"wave":1}}"#;
+    const C: &str = r#"{"schema_version":1,"event_id":"evt-c","occurred_at":"2026-07-08T12:24:12Z","type":"task.status_changed","task_id":"T-1","actor":{"kind":"agent","name":"processor"},"payload":{"from":"в работе","to":"на ревью"}}"#;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TmpFile {
+        path: PathBuf,
+    }
+    impl TmpFile {
+        fn new() -> TmpFile {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let mut path = std::env::temp_dir();
+            path.push(format!(
+                "orchestra-events-test-{}-{nanos}-{n}.jsonl",
+                std::process::id()
+            ));
+            TmpFile { path }
+        }
+        /// Overwrite the whole file with `bytes`.
+        fn set(&self, bytes: &[u8]) {
+            let mut f = File::create(&self.path).unwrap();
+            f.write_all(bytes).unwrap();
+            f.flush().unwrap();
+        }
+    }
+    impl Drop for TmpFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    #[test]
+    fn missing_file_reads_empty() {
+        let mut r = TailReader::new(std::env::temp_dir().join("does-not-exist-xyz.jsonl"));
+        assert!(r.poll().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delivers_new_unique_events_in_order() {
+        let tf = TmpFile::new();
+        tf.set(format!("{A}\n{B}\n{C}\n").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        let evs = r.poll().unwrap();
+        let ids: Vec<&str> = evs.iter().map(|e| e.event_id.as_str()).collect();
+        assert_eq!(ids, ["evt-a", "evt-b", "evt-c"]);
+        // A second poll with no growth yields nothing.
+        assert!(r.poll().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dedups_by_event_id() {
+        let tf = TmpFile::new();
+        // A appears twice (idempotent replay write, §19.5) — delivered once.
+        tf.set(format!("{A}\n{A}\n{B}\n").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        let evs = r.poll().unwrap();
+        let ids: Vec<&str> = evs.iter().map(|e| e.event_id.as_str()).collect();
+        assert_eq!(ids, ["evt-a", "evt-b"]);
+        assert_eq!(r.stats().skipped_dup, 1);
+    }
+
+    #[test]
+    fn never_delivers_torn_tail_then_completes_it() {
+        let tf = TmpFile::new();
+        // A full line, then a HALF-written record with no trailing newline (crash mid-append).
+        let torn = r#"{"schema_version":1,"event_id":"evt-b","occurred_at":"2026-07-08T12:24"#;
+        tf.set(format!("{A}\n{torn}").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        let evs = r.poll().unwrap();
+        assert_eq!(evs.len(), 1, "only the completed line A is delivered");
+        assert_eq!(evs[0].event_id, "evt-a");
+        // The writer finishes B (repairs the tail by completing the record) and adds a newline.
+        tf.set(format!("{A}\n{B}\n").as_bytes());
+        let evs2 = r.poll().unwrap();
+        assert_eq!(evs2.len(), 1, "the now-complete line B is delivered once");
+        assert_eq!(evs2[0].event_id, "evt-b");
+    }
+
+    #[test]
+    fn valid_but_unterminated_final_line_waits_for_newline() {
+        let tf = TmpFile::new();
+        // A valid line whose trailing newline simply has not landed yet: must not be delivered.
+        tf.set(format!("{A}\n{B}").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        let evs = r.poll().unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event_id, "evt-a");
+        // Newline lands.
+        tf.set(format!("{A}\n{B}\n").as_bytes());
+        let evs2 = r.poll().unwrap();
+        assert_eq!(evs2.len(), 1);
+        assert_eq!(evs2[0].event_id, "evt-b");
+    }
+
+    #[test]
+    fn skips_invalid_committed_line_and_advances_past_it() {
+        let tf = TmpFile::new();
+        let garbage = r#"{"schema_version":1,"event_id":"broken","type":"cohort.exploded"}"#;
+        tf.set(format!("{A}\n{garbage}\n{B}\n").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        let evs = r.poll().unwrap();
+        let ids: Vec<&str> = evs.iter().map(|e| e.event_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["evt-a", "evt-b"],
+            "invalid middle line skipped, not wedged"
+        );
+        assert_eq!(r.stats().skipped_invalid, 1);
+        // A second poll does not re-read the invalid line.
+        assert!(r.poll().unwrap().is_empty());
+    }
+
+    #[test]
+    fn incremental_growth_like_follow() {
+        let tf = TmpFile::new();
+        tf.set(format!("{A}\n").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        assert_eq!(r.poll().unwrap().len(), 1);
+        tf.set(format!("{A}\n{B}\n").as_bytes());
+        let evs = r.poll().unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event_id, "evt-b");
+        tf.set(format!("{A}\n{B}\n{C}\n").as_bytes());
+        let evs = r.poll().unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event_id, "evt-c");
+    }
+
+    #[test]
+    fn cursor_round_trip_resumes_without_redelivery() {
+        let tf = TmpFile::new();
+        tf.set(format!("{A}\n{B}\n").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        assert_eq!(r.poll().unwrap().len(), 2);
+        let cur = r.cursor();
+        let json = cur.to_json();
+        let restored = Cursor::from_json(&json).unwrap();
+        assert_eq!(restored, cur);
+        // A fresh reader resumed from the cursor must not re-deliver A/B, but must see C.
+        let mut r2 = TailReader::with_cursor(&tf.path, &restored);
+        tf.set(format!("{A}\n{B}\n{C}\n").as_bytes());
+        let evs = r2.poll().unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event_id, "evt-c");
+    }
+
+    #[test]
+    fn blank_lines_are_ignored() {
+        let tf = TmpFile::new();
+        tf.set(format!("{A}\n\n{B}\n").as_bytes());
+        let mut r = TailReader::new(&tf.path);
+        assert_eq!(r.poll().unwrap().len(), 2);
+        assert_eq!(r.stats().skipped_invalid, 0);
+    }
+}

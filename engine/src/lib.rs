@@ -15,9 +15,16 @@
 //! * [`codex`] — fail-closed `codex exec` argv mirroring `tools/codex-runtime.ps1`.
 //! * [`contract`] — deterministic parse of leaf-agent structured markers (§8.2).
 //! * [`jsonline`] — minimal top-level JSON field scanner for stream-json lines.
+//!
+//! Beyond the original spike, the crate now also carries [`events`] — typed, read-only access
+//! to the `.work/events.jsonl` durable event outbox (contract `docs/queue_contract.md` §19).
+//! This is the first module to grow the crate from spike toward engine and the first to pull
+//! in `serde_json` (see Cargo.toml / README "Spike outcome"). It only *reads* the journal; it
+//! is not wired into the running orchestrator.
 
 pub mod claude;
 pub mod codex;
 pub mod contract;
+pub mod events;
 pub mod jsonline;
 pub mod supervise;

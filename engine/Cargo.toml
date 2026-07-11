@@ -7,11 +7,15 @@ description = "T-097 Stage 1 de-risking spike: spawn and supervise ONE claude le
 license = "MIT"
 publish = false
 
-# Dependency-free ON PURPOSE: a de-risking spike must build offline, instantly, and
-# without a registry so the smoke gate / CI stay green with no network at build time.
-# The PRODUCTION engine should adopt the Rust line's `processkit` crate (kill-on-drop
-# Job Object / cgroup v2 / process group) and `serde_json` for robust stream-json parse
-# instead of the spike-grade primitives here (see README.md "Spike outcome").
+# The T-097 spike modules (supervise/claude/codex/contract/jsonline) stay dependency-free by
+# design. The `events` module (T-101) is the first step from spike toward engine and pulls in
+# `serde_json` for robust parsing of the `.work/events.jsonl` outbox — sanctioned by README.md
+# "Spike outcome". Cargo.lock is committed so the offline smoke gate stays green after the one
+# initial dependency fetch. The PRODUCTION engine should further adopt the Rust line's
+# `processkit` crate (kill-on-drop Job Object / cgroup v2 / process group) for supervision.
+
+[dependencies]
+serde_json = "1"
 
 [lib]
 name = "orchestra_engine_spike"
