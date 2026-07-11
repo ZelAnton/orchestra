@@ -1,1 +1,22 @@
-*.cmd text eol=crlf
+# End-of-line policy — deterministic and tool-agnostic (git AND jj).
+#
+# Rationale: jj's `working-copy.eol-conversion` is a blunt, global switch whose
+# behaviour is unreliable per-file (it does not honour these attributes the way
+# git does). So we do NOT rely on any checkout-time conversion. Instead the blob
+# is the single source of truth: every tool checks the working copy out verbatim.
+#   - git : `core.autocrlf` is neutralised by the explicit attributes below.
+#   - jj  : `working-copy.eol-conversion` is set to "none" (see docs/eol.md), so
+#           the working copy is a byte-for-byte materialisation of the blob.
+# The blob therefore carries exactly the bytes we want on disk: LF everywhere,
+# except Windows batch launchers, which are stored verbatim with CRLF.
+
+# Default: normalise all text to LF in the repository and check it out as LF.
+* text=auto eol=lf
+
+# Windows .cmd launchers are complex multi-line batch programs (labels, goto,
+# delayed expansion) that cmd.exe mis-parses with LF line endings. They are the
+# only files that must be CRLF. Mark them non-text so NO tool ever rewrites their
+# endings; the blob itself is committed with CRLF. Do not change this to
+# `text eol=crlf` — that keeps an LF blob and relies on checkout conversion, which
+# jj (eol-conversion=none) does not perform, so the working copy would get LF.
+*.cmd -text
