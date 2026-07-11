@@ -14,6 +14,12 @@
 //!                             event (contract §19) as one normalized JSON line. Without
 //!                             `--follow` it reads to EOF and exits; with `--follow` it keeps
 //!                             polling for newly appended lines. Read-only.
+//!   state    [--json] [<work-dir>]
+//!                             Load a read-only control-plane snapshot (contract §13) from a
+//!                             `.work/` directory (default `.work`) — queue, task descriptors,
+//!                             cohort admission, integration/join state, batch manifest — and
+//!                             print it human-readably, or as one JSON object with `--json`.
+//!                             Read-only: never writes, locks, or emits.
 //!   __fake-agent ...          Hidden: a deterministic stand-in child used by the
 //!                             hermetic tests and by `selfcheck` (emits stream-json,
 //!                             can sleep / exit with a chosen code).
@@ -28,6 +34,7 @@ use std::time::Duration;
 use orchestra_engine_spike::claude::{ClaudeCall, PermissionPosture};
 use orchestra_engine_spike::codex::{CodexCall, Sandbox};
 use orchestra_engine_spike::events::TailReader;
+use orchestra_engine_spike::state::Snapshot;
 use orchestra_engine_spike::supervise::{self, SpawnSpec};
 
 fn main() {
@@ -39,11 +46,12 @@ fn main() {
         "claude" => cmd_claude(&args),
         "codex" => cmd_codex(&args),
         "events" => cmd_events(&args),
+        "state" => cmd_state(&args),
         "__fake-agent" => cmd_fake_agent(&args),
         "version" | "--version" => println!("orchestra-engine-spike 0.0.1"),
         _ => {
             eprintln!(
-                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|version>\n\
+                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|version>\n\
                  (see src/main.rs; live model calls require --live and are opt-in)"
             );
             exit(2);
@@ -248,6 +256,35 @@ fn cmd_events(args: &[String]) {
             break;
         }
         std::thread::sleep(poll_interval);
+    }
+}
+
+/// `state [--json] [<work-dir>]` — load a read-only control-plane snapshot (contract §13) from a
+/// `.work/` directory and print it. Human-readable by default; one compact JSON object with
+/// `--json`. The work directory is the first non-flag argument (default `.work`). Read-only: the
+/// snapshot only reads `.work/`, never writes, locks, or emits.
+fn cmd_state(args: &[String]) {
+    let json = args.iter().any(|a| a == "--json");
+    // The work dir is the first non-flag argument after `state`; default to the project `.work`.
+    let work = args
+        .iter()
+        .skip(2)
+        .find(|a| !a.starts_with("--"))
+        .cloned()
+        .unwrap_or_else(|| ".work".to_string());
+
+    // A wholly missing work directory is a usage error (likely a wrong path); missing individual
+    // artifacts inside a real `.work/` are tolerated by `Snapshot::load` as the idle state.
+    if !std::path::Path::new(&work).is_dir() {
+        eprintln!("state: work directory not found: {work}");
+        exit(2);
+    }
+
+    let snap = Snapshot::load(&work);
+    if json {
+        println!("{}", snap.to_json());
+    } else {
+        print!("{}", snap.to_human());
     }
 }
 

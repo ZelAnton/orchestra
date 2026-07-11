@@ -21,10 +21,17 @@
 //! This is the first module to grow the crate from spike toward engine and the first to pull
 //! in `serde_json` (see Cargo.toml / README "Spike outcome"). It only *reads* the journal; it
 //! is not wired into the running orchestrator.
+//!
+//! [`state`] extends that read-only direction to the **control plane** (contract §13): it parses
+//! the queue / task-descriptor / cohort / integration / batch Markdown artifacts into one typed
+//! [`state::Snapshot`], mapping the Cyrillic status literals onto their canonical ASCII names.
+//! Like [`events`], it only *reads* `.work/` — no mutation, no lock — and is not wired into the
+//! running orchestrator; it is the model layer future resolvers and the TUI build on.
 
 pub mod claude;
 pub mod codex;
 pub mod contract;
 pub mod events;
 pub mod jsonline;
+pub mod state;
 pub mod supervise;
