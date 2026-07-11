@@ -16,6 +16,16 @@ use std::collections::BTreeMap;
 use orchestra_engine_spike::events::{Event, EventType};
 use serde_json::{Map, Value};
 
+use crate::inbox::DecisionInbox;
+
+/// Which of the two screens (§6.1 overview / §6.2 Decision Inbox) is currently drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Screen {
+    #[default]
+    Overview,
+    DecisionInbox,
+}
+
 /// The stage a task's status maps to, for the "deviations first, green collapsed" §6.1 layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusClass {
@@ -145,6 +155,11 @@ pub struct AppState {
     pub events_seen: u64,
     /// `occurred_at` of the most recent event (fallback "updated" when status.md is absent).
     pub last_event_at: Option<String>,
+    /// Which screen is currently drawn (§6.1 overview vs §6.2 Decision Inbox).
+    pub screen: Screen,
+    /// The Decision Inbox projection (§6.2), rebuilt from `engine::state::Snapshot` +
+    /// `.work/PAUSE` on the same cadence as the `status.md` overlay (see `main.rs`).
+    pub inbox: DecisionInbox,
     next_seq: u64,
 }
 
@@ -399,6 +414,14 @@ impl AppState {
             .as_ref()
             .and_then(|s| s.updated.clone())
             .or_else(|| self.last_event_at.clone())
+    }
+
+    /// Switch between the §6.1 overview and the §6.2 Decision Inbox screen.
+    pub fn toggle_screen(&mut self) {
+        self.screen = match self.screen {
+            Screen::Overview => Screen::DecisionInbox,
+            Screen::DecisionInbox => Screen::Overview,
+        };
     }
 
     /// Friendly display name for a task: status.md's name column if we have it, else the id.
