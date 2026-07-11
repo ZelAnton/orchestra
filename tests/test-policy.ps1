@@ -454,6 +454,22 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Equal 1 $active.Count 'policy placeholders: bare and labelled forms are skipped by one parser rule'
     Assert-Equal 'Явное значение: `origin`' $active[0] 'policy placeholders: explicit value remains active'
 
+    # Placeholder keywords use a Unicode-safe explicit terminator: whitespace, ')' or end.
+    # ASCII explicit values remain active alongside Cyrillic placeholder text.
+    $boundaryLines = @(
+        '## Разрешённые ветки и remotes',
+        '',
+        '**Активные ограничения**:',
+        '',
+        '- (пусто)',
+        '- Ветки публикации: (не задано)',
+        '- Remote policy: (по умолчанию — origin)',
+        '- Explicit value: upstream'
+    )
+    $active = Get-PolicyActiveBullets $boundaryLines 'Разрешённые ветки и remotes'
+    Assert-Equal 1 $active.Count 'policy placeholders: explicit Unicode-safe terminators are skipped'
+    Assert-Equal 'Explicit value: upstream' $active[0] 'policy placeholders: ASCII explicit value remains active'
+
     # cc-config seeds this exact template. Its default branch/remote, push and size text
     # must remain inactive, while a real explicit branch/remote policy still applies.
     $templateLines = [System.IO.File]::ReadAllLines($script:ConstraintsExample, $script:Utf8)

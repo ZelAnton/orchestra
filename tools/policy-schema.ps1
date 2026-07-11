@@ -246,7 +246,7 @@ function Get-PolicyActiveBullets {
             $item = $Matches[1]
             # A placeholder may be a bare value or the value after a human-readable label.
             # Keep this one rule section-agnostic so every policy consumer ignores both forms.
-            if ($item -match '^(?:[^:]+:\s*)?\(\s*(?:пусто|не\s+задано|по\s+умолчанию)\b') { continue }
+            if ($item -match '^(?:[^:]+:\s*)?\(\s*(?:пусто|не\s+задано|по\s+умолчанию)(?=\s|\)|$)') { continue }
             $bullets.Add($item)
         }
     }
