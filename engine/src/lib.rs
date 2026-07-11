@@ -27,11 +27,18 @@
 //! [`state::Snapshot`], mapping the Cyrillic status literals onto their canonical ASCII names.
 //! Like [`events`], it only *reads* `.work/` — no mutation, no lock — and is not wired into the
 //! running orchestrator; it is the model layer future resolvers and the TUI build on.
+//!
+//! [`resolvers`] is that first layer of resolvers: the processor's per-task decision trees
+//! (`agents/processor.md` phases 2.x — reviewer tiering, Codex maker/checker routing, the clean
+//! gate, review-cycle limits) compiled into deterministic pure functions over typed inputs (and
+//! reusing [`contract::ReviewParse::is_clean_pass`]). Like the layers below it, it performs no
+//! I/O and no mutation and is not wired into the running orchestrator.
 
 pub mod claude;
 pub mod codex;
 pub mod contract;
 pub mod events;
 pub mod jsonline;
+pub mod resolvers;
 pub mod state;
 pub mod supervise;
