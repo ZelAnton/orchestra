@@ -9,6 +9,10 @@
 //!   * clean-pass summary `### [SUMMARY-R-<UTC ISO-8601>] Итог ревью задачи — статус: готово к слиянию`
 //!   * Codex sentinels    `CODEX_UNAVAILABLE`, `CODEX_FAILED`, `ЭСКАЛАЦИЯ codex: ...`
 //!   * coder Mode-3 tail  `Изменённые файлы: <list>`
+//!   * terminal outcome   `ИТОГ: <verdict> · key=value · ...` (the LAST line of every leaf
+//!                        report; task T-111 adds it ADDITIVELY so the decision tree reads a
+//!                        deterministic verdict token instead of interpreting the prose that
+//!                        still sits above it — every marker above is parsed unchanged).
 //!
 //! The clean-pass GATE the processor applies (phase 2.6) is: a FRESH `SUMMARY-R` exists
 //! AND there is no open (`статус: новая`) `R-` finding. Both halves are computed here as
@@ -161,6 +165,69 @@ pub fn parse_changed_files(text: &str) -> Option<Vec<String>> {
     None
 }
 
+/// A leaf agent's terminal outcome line `ИТОГ: <verdict>[ · key=value]...`.
+///
+/// Task T-111 adds this line to the END of every leaf-agent report (coder / reviewer /
+/// full_reviewer / merger, plus the Codex variants). It is STRICTLY ADDITIVE: the prose
+/// bullets and every other marker (`SUMMARY-R`/`R-NN`/`F-NN`, `merge_report.md` lines,
+/// `Изменённые файлы:`, the Codex sentinels) are untouched and still parsed as before — this
+/// line merely hands the processor's decision tree a deterministic verdict + fields so the
+/// one soft place (interpreting the free-text report) no longer needs model judgment.
+///
+/// Grammar: the verdict phrase (may contain spaces) followed by zero or more ` · `-separated
+/// `key=value` fields. The separator is ` · ` (space, U+00B7 MIDDLE DOT, space) — the same one
+/// the queue-status line already uses. Field values never contain the separator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    /// The verdict phrase, role-specific and open-ended on purpose (e.g. `готово`,
+    /// `эскалация`, `готово к слиянию`, `открытые находки`, `слито всё`, `есть карантин`).
+    /// Kept as a string (not an enum) so a new verdict never breaks the parse — the consumer
+    /// interprets it per role, exactly as `Status::Other` catches unknown statuses.
+    pub verdict: String,
+    /// The ordered `key=value` fields after the verdict (e.g. `режим=1`, `открытых=0`,
+    /// `сборка=ok`, `риск=high`). Order preserved; a segment without `=` yields an empty value.
+    pub fields: Vec<(String, String)>,
+}
+
+impl Outcome {
+    /// First value for `key`, if present (fields keep insertion order; first wins on dupes).
+    pub fn field(&self, key: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// The ` · ` separator shared by the terminal outcome line and the queue-status line.
+const OUTCOME_SEP: &str = " \u{00B7} ";
+
+/// Parse the terminal `ИТОГ: ...` line out of a leaf-agent report. The contract puts it LAST,
+/// so the LAST matching line wins — a quoted example higher up (docs, a cited prior report)
+/// never shadows the real one. Returns `None` when no such line is present (a detectable
+/// condition — a report that forgot its machine-readable tail, not a silent guess).
+pub fn parse_outcome(text: &str) -> Option<Outcome> {
+    let mut found: Option<Outcome> = None;
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("ИТОГ:") {
+            let mut parts = rest.split(OUTCOME_SEP);
+            let verdict = parts.next().unwrap_or("").trim().to_string();
+            if verdict.is_empty() {
+                continue;
+            }
+            let fields = parts
+                .map(|seg| match seg.split_once('=') {
+                    Some((k, v)) => (k.trim().to_string(), v.trim().to_string()),
+                    None => (seg.trim().to_string(), String::new()),
+                })
+                .collect();
+            found = Some(Outcome { verdict, fields });
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +316,65 @@ mod tests {
         let p = parse_review(text);
         assert!(p.findings[0].is_integration());
         assert_eq!(p.findings[0].status, Status::New);
+    }
+
+    #[test]
+    fn coder_outcome_verdict_and_fields() {
+        // A coder Mode-1 success with a risk elevation, exactly as coder.template.md prescribes.
+        let report = "Реализовал контракт.\nИзменённые файлы: a.rs\nИТОГ: готово \u{00B7} режим=1 \u{00B7} риск=high\n";
+        let o = parse_outcome(report).unwrap();
+        assert_eq!(o.verdict, "готово");
+        assert_eq!(o.field("режим"), Some("1"));
+        assert_eq!(o.field("риск"), Some("high"));
+        // Absent field is a detectable None, not a guess.
+        assert_eq!(o.field("причина"), None);
+    }
+
+    #[test]
+    fn escalation_outcome_carries_reason() {
+        let report = "не сошлось.\nИТОГ: эскалация \u{00B7} режим=2 \u{00B7} причина=denylist\n";
+        let o = parse_outcome(report).unwrap();
+        assert_eq!(o.verdict, "эскалация");
+        assert_eq!(o.field("причина"), Some("denylist"));
+    }
+
+    #[test]
+    fn multiword_verdict_is_preserved() {
+        // Reviewer / merger verdicts contain spaces; only ` · ` delimits the fields.
+        let review = "прогон чист.\nИТОГ: готово к слиянию \u{00B7} прогонов=2 \u{00B7} открытых=0\n";
+        let o = parse_outcome(review).unwrap();
+        assert_eq!(o.verdict, "готово к слиянию");
+        assert_eq!(o.field("прогонов"), Some("2"));
+        assert_eq!(o.field("открытых"), Some("0"));
+
+        let merge = "ИТОГ: слито всё \u{00B7} слито=3 \u{00B7} карантин=0 \u{00B7} сборка=ok\n";
+        let m = parse_outcome(merge).unwrap();
+        assert_eq!(m.verdict, "слито всё");
+        assert_eq!(m.field("сборка"), Some("ok"));
+    }
+
+    #[test]
+    fn last_outcome_line_wins() {
+        // The contract puts the marker LAST; if two matching lines appear (e.g. an agent
+        // restates a draft before the final one), the terminal line is authoritative.
+        let report = "\
+ИТОГ: эскалация \u{00B7} режим=1 \u{00B7} причина=draft\n\
+Передумал, всё сошлось.\n\
+ИТОГ: готово \u{00B7} режим=1\n";
+        let o = parse_outcome(report).unwrap();
+        assert_eq!(o.verdict, "готово");
+        assert_eq!(o.field("причина"), None);
+    }
+
+    #[test]
+    fn outcome_verdict_only_and_absence() {
+        // Bare verdict, no fields.
+        let o = parse_outcome("ИТОГ: открытые находки\n").unwrap();
+        assert_eq!(o.verdict, "открытые находки");
+        assert!(o.fields.is_empty());
+        // A report with no terminal marker is a distinct, detectable condition.
+        assert!(parse_outcome("just prose, no tail").is_none());
+        // An empty verdict is not a valid outcome.
+        assert!(parse_outcome("ИТОГ:").is_none());
     }
 }
