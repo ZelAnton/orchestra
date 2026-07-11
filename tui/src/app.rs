@@ -30,7 +30,8 @@ pub enum StatusClass {
 /// Classify a raw descriptor status string (the `payload.to` of a `task.status_changed`).
 pub fn classify(status: &str) -> StatusClass {
     let s = status.trim();
-    if s.contains("эскалирована") || s.contains("конфликт") || s.contains("блок") {
+    if s.contains("эскалирована") || s.contains("конфликт") || s.contains("блок")
+    {
         StatusClass::Attention
     } else if s == "выполнена" {
         StatusClass::Done
@@ -297,9 +298,11 @@ impl AppState {
                 format!("{task_id} → {to}"),
                 RecentKind::Attention,
             ),
-            StatusClass::Done => {
-                self.push_recent(&ev.occurred_at, format!("{task_id} → {to}"), RecentKind::Good)
-            }
+            StatusClass::Done => self.push_recent(
+                &ev.occurred_at,
+                format!("{task_id} → {to}"),
+                RecentKind::Good,
+            ),
             StatusClass::Active => {
                 // "опубликована" is still active but is a notable positive milestone.
                 if to.trim() == "опубликована" {
@@ -364,11 +367,7 @@ impl AppState {
 
     /// Tasks in a given class, in capture order.
     fn tasks_by_class(&self, class: StatusClass) -> Vec<&TaskState> {
-        let mut v: Vec<&TaskState> = self
-            .tasks
-            .values()
-            .filter(|t| t.class() == class)
-            .collect();
+        let mut v: Vec<&TaskState> = self.tasks.values().filter(|t| t.class() == class).collect();
         v.sort_by_key(|t| t.seq);
         v
     }
@@ -390,7 +389,10 @@ impl AppState {
 
     /// Count of tasks needing human attention (the §6.1 "requires human" figure).
     pub fn attention_count(&self) -> usize {
-        self.tasks.values().filter(|t| t.class() == StatusClass::Attention).count()
+        self.tasks
+            .values()
+            .filter(|t| t.class() == StatusClass::Attention)
+            .count()
     }
 
     /// Best "updated at": status.md's own timestamp if present, else the last event time.
@@ -423,7 +425,11 @@ fn pi64(p: &Map<String, Value>, key: &str) -> Option<i64> {
 fn pstrs(p: &Map<String, Value>, key: &str) -> Vec<String> {
     p.get(key)
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -497,7 +503,10 @@ mod tests {
         // active list no longer contains the escalated task.
         assert!(app.active_tasks().iter().all(|t| t.task_id != "T-11"));
         // and it shows up in the recent feed as an attention item, newest-first.
-        assert_eq!(app.recent.first().map(|r| r.kind), Some(RecentKind::Attention));
+        assert_eq!(
+            app.recent.first().map(|r| r.kind),
+            Some(RecentKind::Attention)
+        );
         assert!(app.recent[0].label.contains("T-11"));
     }
 
@@ -508,12 +517,18 @@ mod tests {
         let mut app = AppState::new();
         app.apply_all(&events(&[OPENED, CAP_10, done, published]));
         assert_eq!(app.batch.as_ref().unwrap().phase, CohortPhase::Published);
-        assert_eq!(app.batch.as_ref().unwrap().published_sha.as_deref(), Some("cafef00d"));
+        assert_eq!(
+            app.batch.as_ref().unwrap().published_sha.as_deref(),
+            Some("cafef00d")
+        );
         assert_eq!(app.done_tasks().len(), 1);
         // recent, newest-first: cohort published, then the done transition.
         assert!(app.recent[0].label.contains("опубликована"));
         assert!(app.recent[0].label.contains("B-2"));
-        assert!(app.recent.iter().any(|r| r.label.contains("T-10 → выполнена")));
+        assert!(app
+            .recent
+            .iter()
+            .any(|r| r.label.contains("T-10 → выполнена")));
         assert!(app.recent.iter().all(|r| r.kind == RecentKind::Good));
     }
 
@@ -540,7 +555,10 @@ mod tests {
         assert!(app.active_tasks().is_empty());
         assert!(app.done_tasks().is_empty());
         // but the recent feed retains the T-10 completion.
-        assert!(app.recent.iter().any(|r| r.label.contains("T-10 → выполнена")));
+        assert!(app
+            .recent
+            .iter()
+            .any(|r| r.label.contains("T-10 → выполнена")));
     }
 
     #[test]
@@ -548,7 +566,11 @@ mod tests {
         let attempt = r#"{"schema_version":1,"event_id":"e-at","occurred_at":"2026-07-11T11:50:00Z","type":"codex.attempt","batch_id":"B-2","task_id":"T-10","actor":{"kind":"tool","name":"codex"},"payload":{"role":"coder","attempt_number":1}}"#;
         let mut app = AppState::new();
         app.apply_all(&events(&[OPENED, attempt, CAP_10]));
-        let t = app.active_tasks().into_iter().find(|t| t.task_id == "T-10").unwrap();
+        let t = app
+            .active_tasks()
+            .into_iter()
+            .find(|t| t.task_id == "T-10")
+            .unwrap();
         assert_eq!(t.codex_attempts, 1);
         // capture after the attempt still fills in the metadata.
         assert_eq!(t.level.as_deref(), Some("coder_deep"));

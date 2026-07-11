@@ -64,7 +64,11 @@ impl Snapshot {
     /// Render a human-readable multi-line summary (ends with a newline).
     pub fn to_human(&self) -> String {
         let mut s = String::new();
-        let _ = writeln!(s, "Control-plane snapshot (WORK={})", self.work_dir.display());
+        let _ = writeln!(
+            s,
+            "Control-plane snapshot (WORK={})",
+            self.work_dir.display()
+        );
         let _ = writeln!(s);
 
         match &self.cohort {
@@ -300,8 +304,14 @@ mod tests {
         let snap = Snapshot::load(&w.dir);
         assert_eq!(snap.queue.len(), 1);
         assert_eq!(snap.descriptors.len(), 1);
-        assert_eq!(snap.descriptors[0].state.map(|s| s.as_str()), Some("in-review"));
-        assert_eq!(snap.cohort.as_ref().unwrap().admission.map(|a| a.as_str()), Some("open"));
+        assert_eq!(
+            snap.descriptors[0].state.map(|s| s.as_str()),
+            Some("in-review")
+        );
+        assert_eq!(
+            snap.cohort.as_ref().unwrap().admission.map(|a| a.as_str()),
+            Some("open")
+        );
         assert_eq!(snap.integration.state.as_str(), "in-progress");
         assert_eq!(snap.batch.as_ref().unwrap().tasks.len(), 1);
 

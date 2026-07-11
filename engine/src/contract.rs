@@ -10,9 +10,9 @@
 //!   * Codex sentinels    `CODEX_UNAVAILABLE`, `CODEX_FAILED`, `ЭСКАЛАЦИЯ codex: ...`
 //!   * coder Mode-3 tail  `Изменённые файлы: <list>`
 //!   * terminal outcome   `ИТОГ: <verdict> · key=value · ...` (the LAST line of every leaf
-//!                        report; task T-111 adds it ADDITIVELY so the decision tree reads a
-//!                        deterministic verdict token instead of interpreting the prose that
-//!                        still sits above it — every marker above is parsed unchanged).
+//!     report; task T-111 adds it ADDITIVELY so the decision tree reads a deterministic
+//!     verdict token instead of interpreting the prose that still sits above it — every
+//!     marker above is parsed unchanged).
 //!
 //! The clean-pass GATE the processor applies (phase 2.6) is: a FRESH `SUMMARY-R` exists
 //! AND there is no open (`статус: новая`) `R-` finding. Both halves are computed here as
@@ -341,7 +341,8 @@ mod tests {
     #[test]
     fn multiword_verdict_is_preserved() {
         // Reviewer / merger verdicts contain spaces; only ` · ` delimits the fields.
-        let review = "прогон чист.\nИТОГ: готово к слиянию \u{00B7} прогонов=2 \u{00B7} открытых=0\n";
+        let review =
+            "прогон чист.\nИТОГ: готово к слиянию \u{00B7} прогонов=2 \u{00B7} открытых=0\n";
         let o = parse_outcome(review).unwrap();
         assert_eq!(o.verdict, "готово к слиянию");
         assert_eq!(o.field("прогонов"), Some("2"));

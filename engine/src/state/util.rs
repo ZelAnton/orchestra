@@ -69,10 +69,7 @@ mod tests {
             Some("B-20260711T113948Z".to_string())
         );
         // The integration branch token `integration/B-…` must not be mistaken for the id.
-        assert_eq!(
-            find_batch_id("Интеграционная ветка: integration/B-1"),
-            None
-        );
+        assert_eq!(find_batch_id("Интеграционная ветка: integration/B-1"), None);
         assert_eq!(find_batch_id("# Когорта\nПриём: закрыт"), None);
     }
 }
