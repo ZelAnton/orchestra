@@ -1,0 +1,30 @@
+[package]
+name = "orchestra-tui"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.74"
+description = "T-102 operator TUI PoC: a strictly read-only live overview screen (plan §6.1) rendered over the running orchestrator's `.work/events.jsonl` (tailed via the engine crate's cursor reader) and `.work/status.md`. Never writes into `.work/`, takes no lock, and does not touch processor / tools / launchers."
+license = "MIT"
+publish = false
+
+# ratatui + crossterm: the operator TUI stack chosen by the intent doc (§6). `ratatui` re-exports
+# a matching `crossterm`, but `crossterm` is also declared directly (pinned to the same minor cargo
+# unifies) because `main.rs` drives raw-mode / alternate-screen / input directly. The path dep on
+# the engine crate reuses `events::TailReader` — the SAME cursor reader the future engine uses —
+# so there is zero duplication of the `.work/events.jsonl` tail/dedup/torn-tail logic (T-101).
+# `serde_json` is pulled directly only to read opaque event `payload` fields (Map<String, Value>);
+# it is already in the lock via the engine dep, so no new transitive surface. Cargo.lock is
+# committed so that after the ONE initial online fetch the build/test smoke gate stays offline
+# (same pattern as engine/Cargo.lock — see engine/README.md).
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde_json = "1"
+orchestra-engine-spike = { path = "../engine" }
+
+[[bin]]
+name = "orchestra-tui"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
