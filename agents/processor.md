@@ -67,7 +67,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 эта форма, таблица `config.example.md` и движок `cc-doctor` (`tools/doctor-runtime.ps1`) не
 разошлись):
 `CODEX_CODER` ∈ {off, fast, fast+std}; `CODEX_REVIEWER` ∈ {off, fast, fast+std, deep};
-`CODEX_CIFIX` ∈ {off, on}; `CODEX_REASONING` ∈ {auto, low, medium, high}; `CODEX_SANDBOX` ∈
+`CODEX_CIFIX` ∈ {off, on}; `CODEX_REASONING` ∈ {auto, low, medium, high, xhigh}; `CODEX_SANDBOX` ∈
 {read-only, workspace-write}; `CODEX_NETWORK` ∈ {on, off}. Пустой ключ → его default (для
 `CODEX_CODER`/`CODEX_REVIEWER` — после env-фолбэка); непустое значение **вне** множества —
 ошибка конфигурации, обрабатываемая fail-closed на Фазе 1.1 (см. ниже), а не молчаливо
@@ -102,7 +102,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `CODEX_REVIEWER` | off | Фаза 2 (2.4) — маршрутизация ревью в reviewer_codex: `off`/`fast`/`fast+std`/`deep` (см. «Codex-ревьюер и маршрутизация») |
 | `CODEX_CIFIX` | off | Фазы 4.3/5.4 — точечные CI/сборочные фиксы (Режим 3) через coder_codex: `off`/`on` |
 | `CODEX_MODEL` | (не задано) | codex-агенты — `-m` для codex; пусто → дефолт codex |
-| `CODEX_REASONING` | auto | codex-агенты — `model_reasoning_effort` (coder auto: fast→low, coder→medium; reviewer auto→medium) |
+| `CODEX_REASONING` | auto | codex-агенты — `model_reasoning_effort` (coder auto→high; reviewer auto→xhigh) |
 | `CODEX_SANDBOX` | workspace-write | coder_codex — `--sandbox` codex (reviewer_codex — всегда read-only) |
 | `CODEX_NETWORK` | on | Фазы 2.2/2.8 — сетевой гейт маршрутизации в coder_codex для задач с полем `Сеть:` (см. «Codex-исполнитель и маршрутизация»); внутри coder_codex — сеть песочницы codex |
 | `CODEX_CMD` | codex | codex-агенты — бинарь/команда codex |
@@ -2260,7 +2260,7 @@ envelope обязательны `schema_version: 1`, `type: "codex.attempt"`, т
   `occurred_at` envelope — UTC-момент финальной записи (обычно равен `ended_at`).
 - Effective config разрешай до вызова: `effective_model` = точное значение `-m`, либо
   строка `default`; `effective_reasoning` = фактический `model_reasoning_effort` после
-  `auto` (`coder_fast→low`, `coder→medium`, reviewer→`medium`) либо явное значение;
+  `auto` (coder→`high`, reviewer→`xhigh`) либо явное значение;
   `effective_sandbox` = фактический `--sandbox` (`CODEX_SANDBOX` для coder,
   `read-only` для reviewer); `effective_network` = резолвленное `CODEX_NETWORK`
   (`on|off`) на момент вызова, даже если read-only reviewer сеть не использует.

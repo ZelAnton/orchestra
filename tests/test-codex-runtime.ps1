@@ -163,7 +163,7 @@ function Get-ArgsCaptured {
 
     $r = Invoke-Runtime -RuntimeArgs @(
         'run', '--codex-cmd', $fake, '--worktree', $wt, '--sandbox', 'workspace-write',
-        '--reasoning', 'medium', '--network', 'on', '--model', 'gpt-5-codex',
+        '--reasoning', 'medium', '--network', 'on', '--model', 'gpt-5.6-terra',
         '--out-file', $outFile, '--stderr-file', $errFile, '--result-file', $resultFile,
         '--prompt-file', $promptFile
     ) -EnvVars @{
@@ -366,6 +366,12 @@ function Get-ArgsCaptured {
     Assert-Equal 0 $r3.ExitCode 'build-argv: valid values accepted'
     Assert-True ($r3.Json.argv -contains 'approval_policy=never') 'build-argv: pins approval_policy=never'
     Assert-True (-not ($r3.Json.argv -contains 'sandbox_workspace_write.network_access=true')) 'build-argv: network defaults off (no override)'
+
+    # T-100: xhigh is a confirmed reasoning-effort tier (codex-cli 0.144.1); reviewer_codex
+    # defaults to it, so the runtime must accept it and carry it verbatim into the argv.
+    $r4 = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', 'x', '--sandbox', 'read-only', '--reasoning', 'xhigh')
+    Assert-Equal 0 $r4.ExitCode 'build-argv: xhigh reasoning accepted'
+    Assert-True ($r4.Json.argv -contains 'model_reasoning_effort=xhigh') 'build-argv: argv carries xhigh reasoning effort'
 }.Invoke()
 
 # =============================================================================

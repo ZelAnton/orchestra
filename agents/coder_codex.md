@@ -64,7 +64,8 @@ gitignored и физически там отсутствует). Поэтому 
   роль. Availability проверяется отдельно: бинарь не найден/не запускается (preflight
   `command -v`/`--version` либо `stage=resolve` из runtime) → штатная эскалация
   `CODEX_UNAVAILABLE` (ниже).
-- `CODEX_MODEL` (по умолч. не задано) — `-m`; пусто → модель из `~/.codex/config.toml`.
+- `CODEX_MODEL` (по умолч. не задано) — `-m`; пусто → модель из `~/.codex/config.toml`
+  (текущая подтверждённая — `gpt-5.6-terra`, OpenAI Terra).
 - `CODEX_SANDBOX` (по умолч. `workspace-write`) — `--sandbox`. **Допустимо только
   `read-only` или `workspace-write`** (единый источник — таблица «Допустимые значения
   Codex-ключей» в `config.example.md`); значение `danger-full-access` или любое иное,
@@ -78,9 +79,11 @@ gitignored и физически там отсутствует). Поэтому 
 - `CODEX_CIFIX` (по умолч. `off`) — гейт Режима 3. Тебя на Режим 3 зовёт только
   processor и только при `on`; если позвали с ним `off` — верни эскалацию
   `ЭСКАЛАЦИЯ codex: CODEX_UNAVAILABLE` (неверный вызов), как для F-.
-- `CODEX_REASONING` (по умолч. `auto`) — `auto` мапит уровень задачи из `task.md`
-  (`Рекомендуемый исполнитель`: `coder_fast → low`, `coder → medium`); `low|medium|high`
-  — явное значение. Результат — в `EFF`.
+- `CODEX_REASONING` (по умолч. `auto`) — `auto` → `high` (дефолтное усилие рассуждения
+  codex-coder'а на модели Terra; переопределяет прежний маппинг уровня задачи
+  `coder_fast→low`/`coder→medium` — оператор запросил High для codex-coder'а независимо от
+  уровня); явные значения `low|medium|high|xhigh` (`xhigh` — максимальная подтверждённая
+  ступень). Результат — в `EFF`.
 - `CODEX_NETWORK` (по умолч. `on`) — даёт ли песочница `codex exec` исходящий сетевой
   доступ. `on` (дефолт) → к вызову добавляются сетевой оверрайд и git-обвязка openssl
   (см. «Вызов codex»), а constraints-блок промпта описывает доступную сеть; `off` →

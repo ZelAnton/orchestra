@@ -157,6 +157,11 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-OutMatch $r "unknown key 'FOO_BAR'" 'validate-config: unknown key reported'
     Assert-OutMatch $r 'not a boolean' 'validate-config: bool reported'
     Assert-OutMatch $r 'duplicate key' 'validate-config: duplicate reported'
+
+    # T-100: xhigh is a confirmed reasoning-effort tier added to the CODEX_REASONING enum.
+    Write-Utf8 $cfg "CODEX_REASONING: xhigh`n"
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 0 'validate-config accepts CODEX_REASONING: xhigh (enum extended in T-100)'
 }.Invoke()
 
 # =============================================================================

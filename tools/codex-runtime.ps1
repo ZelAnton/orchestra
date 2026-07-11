@@ -141,7 +141,7 @@ function Emit-Json {
 # the actual codex exec call.
 # --------------------------------------------------------------------------
 $AllowedSandbox = @('read-only', 'workspace-write')
-$AllowedReasoning = @('low', 'medium', 'high')
+$AllowedReasoning = @('low', 'medium', 'high', 'xhigh')
 $AllowedNetwork = @('on', 'off')
 
 # The Orchestra-pinned fail-closed approval policy (T-069): every codex exec call

@@ -246,7 +246,7 @@ $codexAllowed = [ordered]@{
     'CODEX_CODER'     = @('off', 'fast', 'fast+std')
     'CODEX_REVIEWER'  = @('off', 'fast', 'fast+std', 'deep')
     'CODEX_CIFIX'     = @('off', 'on')
-    'CODEX_REASONING' = @('auto', 'low', 'medium', 'high')
+    'CODEX_REASONING' = @('auto', 'low', 'medium', 'high', 'xhigh')
     'CODEX_SANDBOX'   = @('read-only', 'workspace-write')
     'CODEX_NETWORK'   = @('on', 'off')
 }

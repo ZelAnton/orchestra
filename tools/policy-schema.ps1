@@ -107,7 +107,7 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'CODEX_REVIEWER'          'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'deep')  -EnvFallback $true -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_CIFIX'             'enum'   'off'    -Enum @('off', 'on')                        -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_MODEL'             'string' 'unset')
-        (New-ConfigKey 'CODEX_REASONING'         'enum'   'auto'   -Enum @('auto', 'low', 'medium', 'high'))
+        (New-ConfigKey 'CODEX_REASONING'         'enum'   'auto'   -Enum @('auto', 'low', 'medium', 'high', 'xhigh'))
         (New-ConfigKey 'CODEX_SANDBOX'           'enum'   'workspace-write' -Enum @('read-only', 'workspace-write') -Sensitivity 'high')
         (New-ConfigKey 'CODEX_NETWORK'           'enum'   'on'     -Enum @('on', 'off')                        -Sensitivity 'high')
         (New-ConfigKey 'CODEX_CMD'               'string' 'codex')
