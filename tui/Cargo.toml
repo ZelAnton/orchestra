@@ -3,7 +3,7 @@ name = "orchestra-tui"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.74"
-description = "T-102 operator TUI PoC: a strictly read-only live overview screen (plan §6.1) rendered over the running orchestrator's `.work/events.jsonl` (tailed via the engine crate's cursor reader) and `.work/status.md`. Never writes into `.work/`, takes no lock, and does not touch processor / tools / launchers."
+description = "Operator TUI for a running orchestrator (plan §6.1 overview + §6.2 Decision Inbox): read-only by default, rendered over `.work/events.jsonl` (tailed via the engine crate's cursor reader) and `.work/status.md`. Also sends a small, explicit-keystroke command subset (pause/resume/lease-status/force-lock) that touches ONLY `.work/PAUSE` and `.work/orchestrator.lock`, mirroring the existing launchers/state-tx; never touches the queue, task descriptors, or code."
 license = "MIT"
 publish = false
 

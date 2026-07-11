@@ -1,5 +1,6 @@
-//! orchestra-tui — a strictly **read-only** live operator overview of a running orchestrator,
-//! with two switchable screens (`Tab`): the §6.1 overview and the §6.2 Decision Inbox.
+//! orchestra-tui — a live operator overview of a running orchestrator, **read-only by default for
+//! observation** but able to send a small, named command subset "downward", with two switchable
+//! screens (`Tab`): the §6.1 overview and the §6.2 Decision Inbox.
 //!
 //! It tails `<work>/events.jsonl` through the engine crate's cursor reader
 //! ([`orchestra_engine_spike::events::TailReader`] — the SAME reader the future engine uses, so
@@ -9,14 +10,22 @@
 //! cadence from a fresh [`orchestra_engine_spike::state::Snapshot`] (queue + task descriptors),
 //! whether `<work>/PAUSE` exists, and the task ids already archived to `<work>/Tasks_Done.md`
 //! (used only to confirm, not invent, a predecessor's completion — see [`done_task_ids`]).
-//! Nothing here writes a file, takes a lock, creates or
-//! checks `orchestrator.lock`, or calls `processor` / `tools/*.ps1` / launchers: this observer
-//! runs safely against the LIVE `.work/` of the very orchestra producing those artifacts.
+//!
+//! **Command channel ([`commands`]).** Every module above only *observes* `.work/`; the sole way
+//! this TUI writes is the deliberately narrow §5/§6.2 command subset, driven only by an explicit
+//! keystroke: `p` pause (create `.work/PAUSE`, mirroring `cc-pause.sh`), `u` resume (remove it,
+//! mirroring `cc-unpause.sh`), `s` lease-status (read `.work/orchestrator.lock` via the engine
+//! crate's owner-checked `tools/state-tx.ps1 status` path), and `x` force-lock — the one
+//! destructive command, gated behind an explicit confirmation modal (`y` to confirm) and mirroring
+//! `cc-processor.sh --force-lock` (remove `.work/orchestrator.lock`). It touches ONLY those two
+//! files, never the queue / task descriptors / code, and never calls `processor` or a launcher.
+//! Decision-Inbox approve/decisions are intentionally NOT here — that backend does not yet exist.
 //!
 //! The terminal is always restored — normal quit, error return, or panic (see [`terminal`]).
 
 mod app;
 mod cli;
+mod commands;
 mod inbox;
 mod status;
 mod terminal;
@@ -27,7 +36,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use orchestra_engine_spike::events::TailReader;
 use orchestra_engine_spike::state::Snapshot;
 
@@ -94,42 +103,127 @@ fn run(cfg: Config) -> io::Result<()> {
 
         // 4. Handle input, blocking up to one tick so the loop also serves as the refresh timer.
         if event::poll(tick)? {
-            match event::read()? {
-                CEvent::Key(k) if k.kind == KeyEventKind::Press => match k.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Tab => app.toggle_screen(),
-                    KeyCode::Char('r') => {
-                        app.status = status::load(&status_path);
-                        app.inbox = load_inbox(&cfg.work_dir);
-                        last_status_reload = Instant::now();
+            if let CEvent::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
+                    // An open modal captures ALL input until dismissed, so no navigation or other
+                    // command can leak past the force-lock confirmation gate (§6.2).
+                    if app.has_modal() {
+                        handle_modal_key(&mut app, &cfg.work_dir, k);
+                    } else if handle_key(&mut app, &cfg, &status_path, &mut last_status_reload, k) {
+                        break;
                     }
-                    // Decision Inbox panel navigation (R-3): independent per-panel scrolling so
-                    // cards beyond the visible height stay reachable instead of silently clipped.
-                    KeyCode::Left | KeyCode::Char('h') if app.screen == Screen::DecisionInbox => {
-                        app.focus_prev_inbox_panel()
-                    }
-                    KeyCode::Right | KeyCode::Char('l') if app.screen == Screen::DecisionInbox => {
-                        app.focus_next_inbox_panel()
-                    }
-                    KeyCode::Up | KeyCode::Char('k') if app.screen == Screen::DecisionInbox => {
-                        app.scroll_inbox(-1)
-                    }
-                    KeyCode::Down | KeyCode::Char('j') if app.screen == Screen::DecisionInbox => {
-                        app.scroll_inbox(1)
-                    }
-                    KeyCode::PageUp if app.screen == Screen::DecisionInbox => app.scroll_inbox(-10),
-                    KeyCode::PageDown if app.screen == Screen::DecisionInbox => {
-                        app.scroll_inbox(10)
-                    }
-                    _ => {}
-                },
-                _ => {}
+                }
             }
         }
     }
 
     Ok(())
+}
+
+/// Route a keystroke while no modal is open. Returns `true` when the app should quit. Besides the
+/// read-only navigation, this routes the §5/§6.2 safe command subset (see the module docs): `p`
+/// pause, `u` resume, `s` lease-status, `x` *arm* force-lock (which only opens the confirmation
+/// modal — the removal itself needs the explicit second keystroke handled by [`handle_modal_key`]).
+fn handle_key(
+    app: &mut AppState,
+    cfg: &Config,
+    status_path: &Path,
+    last_status_reload: &mut Instant,
+    k: KeyEvent,
+) -> bool {
+    match k.code {
+        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Char('q') => return true,
+        // Esc first dismisses a lease-status overlay if one is showing, otherwise it quits.
+        KeyCode::Esc => {
+            if !app.dismiss_lease() {
+                return true;
+            }
+        }
+        KeyCode::Tab => app.toggle_screen(),
+        KeyCode::Char('r') => {
+            app.status = status::load(status_path);
+            app.inbox = load_inbox(&cfg.work_dir);
+            *last_status_reload = Instant::now();
+        }
+        // ---- §5/§6.2 safe command subset --------------------------------------------------
+        KeyCode::Char('p') => run_pause(app, &cfg.work_dir, last_status_reload),
+        KeyCode::Char('u') => run_resume(app, &cfg.work_dir, last_status_reload),
+        // lease-status runs `state-tx.ps1 status` synchronously (a brief, read-only pwsh call);
+        // the loop redraws right after, so the momentary block is acceptable for a single command.
+        KeyCode::Char('s') => app.set_lease(commands::query_lease_status(&cfg.work_dir)),
+        // `x` only ARMS force-lock (opens the confirm modal); it never removes the lock by itself.
+        KeyCode::Char('x') => app.arm_force_lock(),
+        // ---- Decision Inbox panel navigation (R-3): independent per-panel scrolling so cards
+        // beyond the visible height stay reachable instead of silently clipped. ---------------
+        KeyCode::Left | KeyCode::Char('h') if app.screen == Screen::DecisionInbox => {
+            app.focus_prev_inbox_panel()
+        }
+        KeyCode::Right | KeyCode::Char('l') if app.screen == Screen::DecisionInbox => {
+            app.focus_next_inbox_panel()
+        }
+        KeyCode::Up | KeyCode::Char('k') if app.screen == Screen::DecisionInbox => {
+            app.scroll_inbox(-1)
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.screen == Screen::DecisionInbox => {
+            app.scroll_inbox(1)
+        }
+        KeyCode::PageUp if app.screen == Screen::DecisionInbox => app.scroll_inbox(-10),
+        KeyCode::PageDown if app.screen == Screen::DecisionInbox => app.scroll_inbox(10),
+        _ => {}
+    }
+    false
+}
+
+/// Input while the force-lock confirmation modal is open: only an explicit confirm (`y`/`Y`/Enter)
+/// removes `.work/orchestrator.lock`; `n`/Esc/anything else cancels without touching it. The
+/// removal fires strictly through the [`AppState::take_force_lock_confirmation`] gate, so it is
+/// impossible for a single stray keystroke to have triggered it.
+fn handle_modal_key(app: &mut AppState, work_dir: &Path, k: KeyEvent) {
+    match k.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            if app.take_force_lock_confirmation() {
+                app.notice = Some(match commands::force_lock(work_dir) {
+                    Ok(true) => {
+                        "force-lock: .work/orchestrator.lock удалён (замок снят)".to_string()
+                    }
+                    Ok(false) => {
+                        "force-lock: замка не было — .work/orchestrator.lock отсутствует".to_string()
+                    }
+                    Err(e) => format!("force-lock не удался: {e}"),
+                });
+            }
+        }
+        // n / Esc / any other key cancels without touching the lock.
+        _ => app.dismiss_modal(),
+    }
+}
+
+/// **pause** command: create `.work/PAUSE` (mirroring `cc-pause.sh`) and refresh the inbox so the
+/// pause banner reflects it immediately. Any IO error is surfaced as a footer notice, not a crash.
+fn run_pause(app: &mut AppState, work_dir: &Path, last_status_reload: &mut Instant) {
+    let now = commands::now_iso8601();
+    app.notice = Some(match commands::pause(work_dir, &now) {
+        Ok(_) => {
+            "пауза поднята — .work/PAUSE создан (процессор остановится на границе фазы/раунда)"
+                .to_string()
+        }
+        Err(e) => format!("не удалось поднять паузу: {e}"),
+    });
+    app.inbox = load_inbox(work_dir);
+    *last_status_reload = Instant::now();
+}
+
+/// **resume** command: remove `.work/PAUSE` (mirroring `cc-unpause.sh`, tolerant of an absent
+/// file) and refresh the inbox so the banner clears immediately.
+fn run_resume(app: &mut AppState, work_dir: &Path, last_status_reload: &mut Instant) {
+    app.notice = Some(match commands::resume(work_dir) {
+        Ok(true) => "пауза снята — .work/PAUSE удалён".to_string(),
+        Ok(false) => "паузы не было — .work/PAUSE отсутствует (нечего снимать)".to_string(),
+        Err(e) => format!("не удалось снять паузу: {e}"),
+    });
+    app.inbox = load_inbox(work_dir);
+    *last_status_reload = Instant::now();
 }
 
 /// Build the Decision Inbox (§6.2) from the current `.work/` contents: a fresh, read-only

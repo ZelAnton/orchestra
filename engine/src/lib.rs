@@ -41,6 +41,16 @@
 //! `processor`). It re-implements no owner/TTL check and never force-removes a foreign lease, so the
 //! engine and a live processor mutually exclude each other on the one shared lock. It is exercised
 //! only by the `engine lease` subcommand and is **not** wired into any launcher or live `.work/`.
+//!
+//! [`run`] is the first module that *composes* all the layers above into a real control loop —
+//! but ONLY over a hermetic **sandbox** `.work` handed in as `--work <dir>` (task T-109): it takes
+//! the [`lease`], admits a cohort with the [`resolvers`], captures each task through
+//! `tools/queue-tx.ps1`, runs ONE supervised leaf round ([`supervise`] + [`claude`] + [`contract`]),
+//! validates each descriptor/cohort transition through `tools/state-tx.ps1`, and emits the round's
+//! events through `tools/outbox.ps1`. It is the engine's first end-to-end orchestration, exercised
+//! by `engine run --once` and the hermetic `run_fixture` test — never against a live repository
+//! `.work` (the subcommand has no default work dir) and never touching `agents/processor.md` or a
+//! launcher.
 
 pub mod claude;
 pub mod codex;
@@ -49,5 +59,6 @@ pub mod events;
 pub mod jsonline;
 pub mod lease;
 pub mod resolvers;
+pub mod run;
 pub mod state;
 pub mod supervise;
