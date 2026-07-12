@@ -98,6 +98,24 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check Codex runtime path resolution contract
+        # tools/check-codex-runtime-path-guard.ps1 (T-119): the checkout/mirror runtime
+        # allow-rules agree across cc-config.{sh,cmd} and config.example.md, both adapters
+        # document the literal command each rule grants (no CODEX_RT=~ shell variable, whose
+        # unexpanded tilde was the T-119 failure), and the tilde-expansion caveat is
+        # consistent across coder_codex.md / reviewer_codex.md / knowledge.md /
+        # docs/queue_contract.md.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tools/check-codex-runtime-path-guard.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY validator $p is missing on ${{ matrix.os }} - a missing mandatory validator is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check Codex config value validation contract
         # tools/check-codex-config-guard.ps1 (T-072): the six value-constrained Codex keys
         # carry identical allowed sets + defaults across config.example.md,
