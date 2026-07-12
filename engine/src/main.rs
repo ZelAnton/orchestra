@@ -1024,7 +1024,8 @@ fn cmd_run(args: &[String]) {
     if !args.iter().any(|a| a == "--once") {
         eprintln!(
             "usage: run --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]\n\
-             \x20          [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>] [--json]\n\
+             \x20          [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>]\n\
+             \x20          [--review] [--inject-findings <T-ID>] [--json]\n\
              (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work)"
         );
         exit(run::exit::USAGE);
@@ -1059,6 +1060,8 @@ fn cmd_run(args: &[String]) {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(900);
     let inject_escalate = opt(args, "--inject-escalate").filter(|s| !s.is_empty());
+    let review = args.iter().any(|a| a == "--review");
+    let inject_findings = opt(args, "--inject-findings").filter(|s| !s.is_empty());
     let json = args.iter().any(|a| a == "--json");
 
     let cfg = RunConfig {
@@ -1072,6 +1075,8 @@ fn cmd_run(args: &[String]) {
         reviewer_tiering: true,
         ttl_secs,
         inject_escalate,
+        review,
+        inject_findings,
         leaf_deadline: Duration::from_secs(60),
     };
 
@@ -1094,8 +1099,13 @@ fn cmd_run(args: &[String]) {
 ///   --mode success   emit a valid stream-json transcript, exit (0 unless --exit given)
 ///   --mode hang      sleep 30s (so a short deadline fires) — the tree-kill target
 ///   --mode leaf      emit a stream-json transcript whose `result` carries a parseable leaf
-///                    report (contract markers) — used by `run`'s round. `--task <id>` names
-///                    the task; `--verdict готово|эскалация` selects the terminal `ИТОГ:` line.
+///                    report (contract markers) — used by `run`'s execution round. `--task <id>`
+///                    names the task; `--verdict готово|эскалация` selects the terminal `ИТОГ:` line.
+///   --mode review    the reviewer stand-in for `run`'s review round: write the task's `review.md`
+///                    (the phase-2.6 gate input) under `--work`, then emit a reviewer transcript.
+///                    `--task <id>` names the task; `--outcome clean|findings` selects a fresh
+///                    `SUMMARY-R` (clean) vs an open `R-` (with-findings); `--summary-ts <iso>` is
+///                    the fresh clean-pass summary timestamp the engine hands it.
 ///   --exit N         override the exit code
 fn cmd_fake_agent(args: &[String]) {
     let mode = opt(args, "--mode").unwrap_or_else(|| "success".to_string());
@@ -1133,6 +1143,56 @@ fn cmd_fake_agent(args: &[String]) {
             println!(r#"{{"type":"assistant","message":{{"type":"message","role":"assistant"}}}}"#);
             // Build the result line via serde_json so the report (newlines, Cyrillic, the
             // middle-dot separator) is escaped correctly and round-trips through parse_transcript.
+            let result_line = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "num_turns": 3,
+                "result": report,
+            });
+            println!("{result_line}");
+            exit(exit_code);
+        }
+        "review" => {
+            // The reviewer stand-in for `run`'s review round. It writes the task's `review.md`
+            // (the phase-2.6 gate input the engine reads back) and returns a machine-readable
+            // reviewer report. Offline, token-free.
+            let task = opt(args, "--task").unwrap_or_else(|| "T-000".to_string());
+            let work = opt(args, "--work").unwrap_or_default();
+            let outcome = opt(args, "--outcome").unwrap_or_else(|| "clean".to_string());
+            let summary_ts =
+                opt(args, "--summary-ts").unwrap_or_else(|| "2026-01-01T00:00:00Z".to_string());
+            let findings = outcome == "findings";
+            // A with-findings pass leaves ONE open `R-`; a clean pass writes a fresh `SUMMARY-R`
+            // (newer than the engine's freshness mark) plus a resolved `R-` to exercise that the
+            // gate ignores non-`новая` findings.
+            let review_md = if findings {
+                format!(
+                    "# Review {task}\n\
+                     ### [R-01] Missing error handling in the sandbox change — статус: новая\n\
+                     - Файл: engine/src/{task}.rs\n"
+                )
+            } else {
+                format!(
+                    "# Review {task}\n\
+                     ### [R-01] Minor naming nit (addressed) — статус: исправлено\n\
+                     ### [SUMMARY-R-{summary_ts}] Итог ревью задачи — статус: готово к слиянию\n\
+                     - Открытых проблем: 0\n"
+                )
+            };
+            if !work.is_empty() {
+                let dir = Path::new(&work).join("tasks").join(&task);
+                let _ = fs::create_dir_all(&dir);
+                let _ = fs::write(dir.join("review.md"), &review_md);
+            }
+            let itog: &str = if findings {
+                "ИТОГ: есть находки \u{00B7} режим=ревью \u{00B7} открытых=1"
+            } else {
+                "ИТОГ: готово к слиянию \u{00B7} режим=ревью \u{00B7} открытых=0"
+            };
+            let report = format!("Ревью {task} в песочнице.\n{itog}");
+            println!(r#"{{"type":"system","subtype":"init","model":"fake"}}"#);
+            println!(r#"{{"type":"assistant","message":{{"type":"message","role":"assistant"}}}}"#);
             let result_line = serde_json::json!({
                 "type": "result",
                 "subtype": "success",
