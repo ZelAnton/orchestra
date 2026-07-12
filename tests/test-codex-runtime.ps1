@@ -463,6 +463,73 @@ if (-not $git) {
 }
 
 # =============================================================================
+# 13. jj no-commit guard (T-120): the fingerprint must be STABLE across a plain
+# file edit (auto-snapshot changes commit_id but NOT change_id -> committed=false),
+# yet still catch a real drift (`jj new` / a bookmark set onto `@` -> jj-drift).
+# Self-skips when jj is not on PATH (optional binary; jj is not installed on CI).
+# =============================================================================
+$jj = Get-Command jj -ErrorAction SilentlyContinue
+if (-not $jj) {
+    Write-Host 'SKIP - jj not on PATH; guard-commit jj tests skipped (optional-binary self-skip; jj is not installed on the CI runner).'
+} else {
+    function New-TempJjRepo {
+        # A short-lived jj repo under the OS temp dir. Kept out of the deep
+        # scratchpad tree so the internal `.jj/repo/index/segments/<hash>` paths
+        # stay under the Windows MAX_PATH limit.
+        $dir = New-TempDir
+        & jj git init $dir 2>&1 | Out-Null
+        & jj -R $dir config set --repo user.name 'Test' 2>&1 | Out-Null
+        & jj -R $dir config set --repo user.email 'test@example.com' 2>&1 | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $dir 'a.txt'), 'one', $script:Utf8)
+        return $dir
+    }
+
+    # (a) FALSE-POSITIVE CLOSED: a plain file edit (no VCS-mutating command) must NOT
+    # be read as a commit - guard-commit returns committed=false / action=none. This is
+    # the exact scenario a successful coder_codex Mode 1/2/3 produces on jj; before T-120
+    # the commit_id-based signal flipped on the edit and false-escalated as jj-drift.
+    {
+        $repo = New-TempJjRepo
+        # PRE via the SAME code path guard-commit uses for POST (guard-head), so a pass
+        # is proof the fingerprint itself is stable, not an artifact of a matching capture.
+        $preR = Invoke-Runtime -RuntimeArgs @('guard-head', '--worktree', $repo, '--vcs', 'jj')
+        $pre = $preR.Out.Trim()
+        Assert-True ($pre -ne '') 'guard-commit(jj): guard-head yields a non-empty change_id fingerprint'
+
+        # A pure working-copy edit - jj auto-snapshots it (commit_id moves, change_id stays).
+        [System.IO.File]::WriteAllText((Join-Path $repo 'a.txt'), 'two - edited, but NOT committed', $script:Utf8)
+
+        $r = Invoke-Runtime -RuntimeArgs @('guard-commit', '--worktree', $repo, '--vcs', 'jj', '--pre', $pre, '--reset')
+        Assert-Equal $false $r.Json.committed 'guard-commit(jj): a plain file edit is NOT a commit (committed=false)'
+        Assert-Equal 'none' $r.Json.action 'guard-commit(jj): no jj-drift action on a plain edit (false positive closed)'
+        Assert-Equal $pre $r.Json.post 'guard-commit(jj): post fingerprint == pre across the edit (change_id stable)'
+    }.Invoke()
+
+    # (b) TRUE-POSITIVE PRESERVED - new revision: `jj new` moves the change_id of `@`,
+    # a genuine history drift -> committed=true, action=jj-drift (never a rewrite).
+    {
+        $repo = New-TempJjRepo
+        $pre = (Invoke-Runtime -RuntimeArgs @('guard-head', '--worktree', $repo, '--vcs', 'jj')).Out.Trim()
+        & jj -R $repo new 2>&1 | Out-Null
+        $r = Invoke-Runtime -RuntimeArgs @('guard-commit', '--worktree', $repo, '--vcs', 'jj', '--pre', $pre, '--reset')
+        Assert-Equal $true $r.Json.committed 'guard-commit(jj): `jj new` (new change_id) IS detected as drift'
+        Assert-Equal 'jj-drift' $r.Json.action 'guard-commit(jj): real drift -> action=jj-drift (reported, never rewritten)'
+    }.Invoke()
+
+    # (b') TRUE-POSITIVE PRESERVED - bookmark moved onto `@`: another way codex could
+    # "commit" its work. The change_id of `@` is unchanged, so this proves the bookmark
+    # component of the fingerprint (not change_id alone) carries the signal.
+    {
+        $repo = New-TempJjRepo
+        $pre = (Invoke-Runtime -RuntimeArgs @('guard-head', '--worktree', $repo, '--vcs', 'jj')).Out.Trim()
+        & jj -R $repo bookmark create sneaky -r '@' 2>&1 | Out-Null
+        $r = Invoke-Runtime -RuntimeArgs @('guard-commit', '--worktree', $repo, '--vcs', 'jj', '--pre', $pre, '--reset')
+        Assert-Equal $true $r.Json.committed 'guard-commit(jj): a bookmark set onto `@` IS detected as drift'
+        Assert-Equal 'jj-drift' $r.Json.action 'guard-commit(jj): bookmark drift -> action=jj-drift'
+    }.Invoke()
+}
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($item in $script:TempItems) {
