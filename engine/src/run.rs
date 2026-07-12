@@ -13,12 +13,21 @@
 //!    `tools/queue-tx.ps1 capture` for each admitted task and the cohort admission transition
 //!    validated by `tools/state-tx.ps1 check-transition --kind cohort` — never by hand-editing the
 //!    queue / control-plane state.
-//! 3. **One round.** For each captured task, run ONE supervised leaf call — the deterministic,
-//!    offline `__fake-agent` stand-in (a real `--live` model call is deliberately out of scope) —
-//!    parse its structured report with [`crate::contract`], apply the T-105 per-task decision
-//!    (reviewer tier via [`base_reviewer`]), validate the descriptor status transition through
-//!    `state-tx check-transition --kind task`, write the descriptor, and emit the round/task
-//!    events through `tools/outbox.ps1` in the §19 outbox format.
+//! 3. **One execution round.** For each captured task, run ONE supervised leaf call — the
+//!    deterministic, offline `__fake-agent` stand-in (a real `--live` model call is deliberately
+//!    out of scope) — parse its structured report with [`crate::contract`], apply the T-105
+//!    per-task decision (reviewer tier via [`base_reviewer`]), validate the descriptor status
+//!    transition through `state-tx check-transition --kind task`, write the descriptor, and emit
+//!    the round/task events through `tools/outbox.ps1` in the §19 outbox format.
+//! 4. **Per-task review round (opt-in, `--review`).** After the execution round, every task that
+//!    reached `in-review` enters the phase-2.4…2.6 review round: the base reviewer tier is picked
+//!    by [`base_reviewer`] and the concrete reviewer by [`reelect_reviewer`], a supervised reviewer
+//!    stand-in writes the task's `review.md`, [`crate::contract::parse_review`] parses it, and
+//!    [`review_gate`] names the branch. A **clean** pass (`in-review -> ready`) and a **with-findings**
+//!    pass (`in-review -> in-review`, kept under the T-128 fix cycle) are DIFFERENT transitions,
+//!    each validated through `state-tx check-transition` before the descriptor is written; the
+//!    review round brackets and its promotions are emitted through `tools/outbox.ps1`. The phase is
+//!    off by default so the T-109 execution-only baseline (which stops at `in-review`) is unchanged.
 //!
 //! **Boundaries this module keeps.** It touches ONLY the `.work` passed as `--work` (the run
 //! subcommand has NO default work dir, so it can never silently resolve the repo's live `.work`);
@@ -34,11 +43,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 
 use crate::claude::{ClaudeCall, PermissionPosture};
-use crate::contract::{parse_changed_files, parse_outcome};
+use crate::contract::{parse_changed_files, parse_outcome, parse_review};
 use crate::lease::{self, AcquireVerdict};
 use crate::resolvers::{
-    base_reviewer, is_ready, plan_admission, ActiveClass, ActiveTask, AdmissionOutcome,
-    BaseReviewer, Candidate, CloseReason, Domain, Level,
+    base_reviewer, is_ready, plan_admission, reelect_reviewer, review_gate, ActiveClass,
+    ActiveTask, AdmissionOutcome, BaseReviewer, Candidate, CloseReason, CodexReviewer, Domain,
+    ImplBy, Level, ReviewGate, ReviewerRoute,
 };
 use crate::state::{Snapshot, TaskState};
 use crate::supervise::{self, Reason, SpawnSpec};
@@ -99,6 +109,12 @@ pub struct RunConfig {
     /// Optional task id whose leaf call emits an `эскалация` verdict — deterministic
     /// fault-injection for the escalation branch of the round.
     pub inject_escalate: Option<String>,
+    /// Whether the per-task review round (phases 2.4–2.6) runs after the execution round. Off by
+    /// default so the T-109 execution-only baseline (which stops at `in-review`) is unchanged.
+    pub review: bool,
+    /// Optional task id whose reviewer stand-in writes an open `R-` finding instead of a fresh
+    /// clean `SUMMARY-R` — deterministic fault-injection for the with-findings review branch.
+    pub inject_findings: Option<String>,
     /// Wall-clock bound on one supervised leaf call.
     pub leaf_deadline: Duration,
 }
@@ -133,6 +149,23 @@ pub struct TaskOutcome {
     pub to: TaskState,
     /// The files the leaf reported changing (`Изменённые файлы:`), if any.
     pub changed_files: Vec<String>,
+    /// The per-task review-round outcome, when the review phase (`--review`) ran for this task
+    /// (only tasks that reached `in-review` after execution are reviewed).
+    pub review: Option<ReviewOutcome>,
+}
+
+/// The outcome of driving one `in-review` task through the phase-2.4…2.6 review round.
+#[derive(Debug, Clone)]
+pub struct ReviewOutcome {
+    /// The concrete reviewer the tiering + Codex-routing resolvers elected (e.g. `reviewer`).
+    pub reviewer: &'static str,
+    /// The clean / findings / incomplete gate branch [`review_gate`] named.
+    pub gate: &'static str,
+    /// The supervised reviewer-leaf stop reason (`ok` / `timeout` / …).
+    pub supervised: &'static str,
+    /// The descriptor state the review round transitioned to: `ready` on a clean pass, `in-review`
+    /// when findings keep it under the fix cycle, `escalated` on a reviewer-supervision failure.
+    pub to: TaskState,
 }
 
 /// The report of one `run --once`.
@@ -180,6 +213,17 @@ impl RunReport {
                 t.from.as_str(),
                 t.to.as_str(),
             );
+            if let Some(r) = &t.review {
+                let _ = writeln!(
+                    s,
+                    "      review · reviewer={} · gate={} · leaf={} · {} -> {}",
+                    r.reviewer,
+                    r.gate,
+                    r.supervised,
+                    t.to.as_str(),
+                    r.to.as_str(),
+                );
+            }
         }
         let _ = writeln!(
             s,
@@ -207,6 +251,12 @@ impl RunReport {
                 "from": t.from.as_str(),
                 "to": t.to.as_str(),
                 "changed_files": t.changed_files,
+                "review": t.review.as_ref().map(|r| json!({
+                    "reviewer": r.reviewer,
+                    "gate": r.gate,
+                    "supervised": r.supervised,
+                    "to": r.to.as_str(),
+                })),
             })).collect::<Vec<_>>(),
         })
         .to_string()
@@ -244,6 +294,39 @@ fn decide_to_state(supervised_ok: bool, verdict: &str) -> TaskState {
         TaskState::InReview
     } else {
         TaskState::Escalated
+    }
+}
+
+/// The review round's per-task decision over the [`review_gate`] branch (phases 2.6/2.7/2.8): a
+/// supervised **clean** pass promotes `in-review -> ready`; **findings** and an **incomplete**
+/// pass both keep the task `in-review` for the fix cycle (the T-128 successor owns the loop); a
+/// reviewer that could not be supervised is a fail-closed `in-review -> escalated`, never a
+/// silent "assume clean".
+fn decide_review_state(supervised_ok: bool, gate: ReviewGate) -> TaskState {
+    if !supervised_ok {
+        return TaskState::Escalated;
+    }
+    match gate {
+        ReviewGate::Clean => TaskState::Ready,
+        ReviewGate::Findings | ReviewGate::Incomplete => TaskState::InReview,
+    }
+}
+
+/// The stable label of a [`review_gate`] branch for the report / event payload.
+fn review_gate_label(gate: ReviewGate) -> &'static str {
+    match gate {
+        ReviewGate::Clean => "clean",
+        ReviewGate::Findings => "findings",
+        ReviewGate::Incomplete => "incomplete",
+    }
+}
+
+/// The concrete reviewer name a [`ReviewerRoute`] dispatches to (the tier for a Claude route /
+/// diversity augment, `reviewer_codex` for a full Codex replacement).
+fn route_reviewer_name(route: ReviewerRoute) -> &'static str {
+    match route {
+        ReviewerRoute::Claude(base) | ReviewerRoute::Augment(base) => base.as_str(),
+        ReviewerRoute::CodexFull => "reviewer_codex",
     }
 }
 
@@ -315,6 +398,35 @@ fn now_epoch_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Format epoch seconds as an ISO-8601 UTC timestamp `YYYY-MM-DDTHH:MM:SSZ` (second precision) —
+/// the inverse of `main::parse_iso_utc`, via Howard Hinnant's `civil_from_days` (no external
+/// dependency). Second precision matches the `SUMMARY-R-<ts>` id format so the two sort lexically
+/// with each other, which is exactly what the phase-2.6 freshness gate compares.
+fn epoch_to_iso(secs: u64) -> String {
+    let secs = secs as i64;
+    let days = secs.div_euclid(86400);
+    let tod = secs.rem_euclid(86400);
+    let (hour, min, sec) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+    // civil_from_days: (days since 1970-01-01) -> (year, month, day), proleptic Gregorian.
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
+/// The current wall clock as an ISO-8601 UTC `date -u` mark — the freshness cutoff the review
+/// round records JUST BEFORE a reviewer call (a clean `SUMMARY-R` must be newer than this).
+fn now_utc_iso() -> String {
+    epoch_to_iso(now_epoch_secs())
+}
+
 /// A fresh, sandbox-only batch id when the caller did not pin one.
 pub fn default_batch_id() -> String {
     format!("B-{}", now_epoch_secs())
@@ -342,6 +454,16 @@ fn descriptor_domain(snap: &Snapshot, id: &str) -> Domain {
     descriptor_globs(snap, id)
         .map(Domain::from_globs)
         .unwrap_or_else(Domain::unknown)
+}
+
+/// A task's prerequisite ids from the queue snapshot (the descriptor the engine writes on capture
+/// and on each transition carries them forward).
+fn prereqs_of(snap: &Snapshot, id: &str) -> Vec<String> {
+    snap.queue
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| e.prerequisites.clone())
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -668,15 +790,6 @@ impl<'a> Runner<'a> {
             }
         };
 
-        // Map admitted ids back to their prerequisites (for the descriptor we write on capture).
-        let prereqs_of = |id: &str| -> Vec<String> {
-            snap.queue
-                .iter()
-                .find(|e| e.id == id)
-                .map(|e| e.prerequisites.clone())
-                .unwrap_or_default()
-        };
-
         // --- open the cohort ------------------------------------------------------------
         self.write_file(
             "batch.md",
@@ -718,7 +831,7 @@ impl<'a> Runner<'a> {
             self.write_descriptor(
                 id,
                 TaskState::Working,
-                &prereqs_of(id),
+                &prereqs_of(&snap, id),
                 descriptor_globs(&snap, id),
             )?;
             self.emit(
@@ -756,7 +869,8 @@ impl<'a> Runner<'a> {
 
         let mut outcomes = Vec::new();
         for id in &admitted {
-            let outcome = self.run_one_task(id, &prereqs_of(id), descriptor_globs(&snap, id))?;
+            let outcome =
+                self.run_one_task(id, &prereqs_of(&snap, id), descriptor_globs(&snap, id))?;
             outcomes.push(outcome);
             self.heartbeat()?;
         }
@@ -774,6 +888,9 @@ impl<'a> Runner<'a> {
             ],
             "emit cohort.round_closed",
         )?;
+
+        // --- the opt-in per-task review round (phases 2.4–2.6) --------------------------
+        self.run_review_round(&snap, &mut outcomes)?;
 
         // --- close the cohort's admission (validated cohort transition) -----------------
         let reason = close_reason(admitted.len(), self.cfg.cohort_size);
@@ -925,6 +1042,203 @@ impl<'a> Runner<'a> {
             from: TaskState::Working,
             to,
             changed_files,
+            review: None,
+        })
+    }
+
+    /// The opt-in per-task review round (phases 2.4–2.6). Every task that reached `in-review`
+    /// after the execution round is reviewed by a supervised reviewer stand-in; the round is
+    /// bracketed by `cohort.round_started`/`cohort.round_closed` (wave 2, the review wave) in the
+    /// same §19 envelope the execution round uses. A no-op when `--review` is off or no task
+    /// reached review (e.g. every task escalated), so no empty review round is emitted.
+    fn run_review_round(
+        &mut self,
+        snap: &Snapshot,
+        outcomes: &mut [TaskOutcome],
+    ) -> Result<(), RunError> {
+        if !self.cfg.review {
+            return Ok(());
+        }
+        if !outcomes.iter().any(|o| o.to == TaskState::InReview) {
+            return Ok(());
+        }
+
+        self.emit(
+            &[
+                "--type",
+                "cohort.round_started",
+                "--batch-id",
+                &self.cfg.batch_id,
+                "--wave",
+                "2",
+                "--payload",
+                "{}",
+            ],
+            "emit cohort.round_started (review)",
+        )?;
+
+        for outcome in outcomes.iter_mut() {
+            // Only a successfully-executed (`in-review`) task is reviewed; an escalated one is not.
+            if outcome.to != TaskState::InReview {
+                continue;
+            }
+            let id = outcome.id.clone();
+            let level = outcome.level;
+            let prereqs = prereqs_of(snap, &id);
+            let domain = descriptor_globs(snap, &id);
+            let review = self.run_one_review(&id, level, &prereqs, domain)?;
+            outcome.review = Some(review);
+            self.heartbeat()?;
+        }
+
+        self.emit(
+            &[
+                "--type",
+                "cohort.round_closed",
+                "--batch-id",
+                &self.cfg.batch_id,
+                "--wave",
+                "2",
+                "--payload",
+                "{}",
+            ],
+            "emit cohort.round_closed (review)",
+        )?;
+        Ok(())
+    }
+
+    /// Review ONE `in-review` task (phases 2.4–2.6): pick the tier via [`base_reviewer`] and the
+    /// concrete reviewer via [`reelect_reviewer`]; take the freshness mark; run the supervised
+    /// reviewer stand-in (deterministic `__fake-agent --mode review`, which writes the task's
+    /// `review.md`); parse it with [`parse_review`]; name the branch with [`review_gate`]; validate
+    /// and write the resulting descriptor transition; and emit the review-phase events. A **clean**
+    /// pass promotes `in-review -> ready`, **findings** keep it `in-review` under the T-128 fix
+    /// cycle, and a reviewer that could not be supervised fail-closes to `escalated`.
+    fn run_one_review(
+        &mut self,
+        id: &str,
+        level: Level,
+        prerequisites: &[String],
+        conflict_domain: Option<&[String]>,
+    ) -> Result<ReviewOutcome, RunError> {
+        // Resolver 1 (tiering): the base Claude reviewer tier for this level.
+        let base = base_reviewer(self.cfg.reviewer_tiering, level);
+        // Resolver 2b (reviewer routing / re-election): elect the concrete reviewer off the range
+        // author. The sandbox is Claude-only (CODEX_REVIEWER=off, the last range authored by the
+        // Claude coder stand-in), so this resolves to the base Claude reviewer — but through the
+        // real resolver, never a hard-coded name.
+        let route = reelect_reviewer(CodexReviewer::Off, base, level, &[ImplBy::Claude]);
+        let reviewer_name = route_reviewer_name(route);
+
+        // The phase-2.6 freshness cutoff: the UTC mark taken JUST BEFORE the reviewer call. A
+        // clean `SUMMARY-R` must be newer than this. The clean stand-in stamps its summary one
+        // second later (a deterministic, always-fresh "the reviewer finished after the mark").
+        let since = now_utc_iso();
+        let summary_ts = epoch_to_iso(now_epoch_secs() + 1);
+        let want_findings = self.cfg.inject_findings.as_deref() == Some(id);
+
+        // Build the headless reviewer `claude` argv the engine WOULD spawn (proving the adapter is
+        // on the real path), then spawn the deterministic, offline reviewer stand-in instead.
+        let prompt = format!(
+            "Use the {reviewer_name} subagent to review task {id}. Worktree={} WORK={}",
+            self.cfg.work.join("worktrees").join(id).display(),
+            self.cfg.work.display()
+        );
+        let mut call = ClaudeCall::new(prompt);
+        call.model = Some("opus".into());
+        call.max_turns = Some(40);
+        call.posture = PermissionPosture::BypassInSandbox;
+        let _would_argv = call.to_argv();
+
+        let outcome_arg = if want_findings { "findings" } else { "clean" };
+        let spec = SpawnSpec::new(
+            &self.cfg.self_exe,
+            vec![
+                "__fake-agent".into(),
+                "--mode".into(),
+                "review".into(),
+                "--task".into(),
+                id.to_string(),
+                "--work".into(),
+                self.work_s.clone(),
+                "--outcome".into(),
+                outcome_arg.to_string(),
+                "--summary-ts".into(),
+                summary_ts,
+            ],
+        )
+        .deadline(Some(self.cfg.leaf_deadline));
+        let v = supervise::run(&spec);
+        let parsed = crate::claude::parse_transcript(&v.stdout);
+        let supervised_ok = v.reason == Reason::Ok && parsed.is_error != Some(true);
+
+        // The gate reads the `review.md` the reviewer wrote (phase 2.6), exactly like the
+        // processor — the terminal `ИТОГ:` line is NOT what decides clean/with-findings.
+        let review_md = fs::read_to_string(self.cfg.work.join("tasks").join(id).join("review.md"))
+            .unwrap_or_default();
+        let gate = review_gate(&parse_review(&review_md), &since);
+        let to = decide_review_state(supervised_ok, gate);
+
+        // Validate `in-review -> {ready|in-review|escalated}` through the state machine, then write.
+        self.check_transition("task", TaskState::InReview.as_str(), to.as_str())?;
+        self.write_descriptor(id, to, prerequisites, conflict_domain)?;
+
+        // A reviewer that could not be supervised is a fail-closed escalation; reflect it in the
+        // queue transactionally (queue-tx escalate) so the queue and descriptor agree.
+        if to == TaskState::Escalated {
+            let esc_argv = vec![
+                "escalate".into(),
+                "--work".into(),
+                self.work_s.clone(),
+                "--id".into(),
+                id.to_string(),
+                "--reason".into(),
+                "reviewer leaf failed in sandbox review round".into(),
+            ];
+            self.tool_ok(
+                &self.cfg.queue_tx(),
+                &esc_argv,
+                &format!("queue-tx escalate {id}"),
+            )?;
+        }
+
+        // Emit the review-phase transition only when the descriptor status actually changes
+        // (`in-review -> ready` on a clean pass, `-> escalated` on a supervision failure). A
+        // with-findings pass keeps the task `in-review` (no status change) — the review-round
+        // bracket already records that the review phase ran.
+        if to != TaskState::InReview {
+            let from_lit = task_literal(TaskState::InReview);
+            let to_lit = task_literal(to);
+            let payload = format!(
+                "{{\"from\":\"{from_lit}\",\"to\":\"{to_lit}\",\"gate\":\"{}\"}}",
+                review_gate_label(gate)
+            );
+            self.emit(
+                &[
+                    "--type",
+                    "task.status_changed",
+                    "--task-id",
+                    id,
+                    "--from",
+                    from_lit,
+                    "--to",
+                    to_lit,
+                    "--attempt",
+                    "1",
+                    "--round",
+                    "1",
+                    "--payload",
+                    &payload,
+                ],
+                &format!("emit task.status_changed (review) {id}"),
+            )?;
+        }
+
+        Ok(ReviewOutcome {
+            reviewer: reviewer_name,
+            gate: review_gate_label(gate),
+            supervised: v.reason.as_str(),
+            to,
         })
     }
 }
@@ -991,6 +1305,75 @@ mod tests {
         assert_eq!(close_reason(3, 3).as_str(), "COHORT_SIZE");
         assert_eq!(close_reason(2, 3).as_str(), "очередь-пуста");
         assert_eq!(close_reason(0, 0).as_str(), "очередь-пуста");
+    }
+
+    #[test]
+    fn decide_review_state_maps_every_gate_branch_fail_closed() {
+        // A supervised clean pass promotes to `ready`; findings/incomplete keep the task in review
+        // for the fix cycle; a reviewer that could not be supervised fail-closes to `escalated`.
+        assert_eq!(
+            decide_review_state(true, ReviewGate::Clean),
+            TaskState::Ready
+        );
+        assert_eq!(
+            decide_review_state(true, ReviewGate::Findings),
+            TaskState::InReview
+        );
+        assert_eq!(
+            decide_review_state(true, ReviewGate::Incomplete),
+            TaskState::InReview
+        );
+        // Supervision failure escalates regardless of what (if anything) landed in review.md.
+        for gate in [
+            ReviewGate::Clean,
+            ReviewGate::Findings,
+            ReviewGate::Incomplete,
+        ] {
+            assert_eq!(decide_review_state(false, gate), TaskState::Escalated);
+        }
+    }
+
+    #[test]
+    fn review_gate_labels_are_stable() {
+        assert_eq!(review_gate_label(ReviewGate::Clean), "clean");
+        assert_eq!(review_gate_label(ReviewGate::Findings), "findings");
+        assert_eq!(review_gate_label(ReviewGate::Incomplete), "incomplete");
+    }
+
+    #[test]
+    fn route_reviewer_name_maps_each_route() {
+        use crate::resolvers::ReviewerRoute::*;
+        assert_eq!(
+            route_reviewer_name(Claude(BaseReviewer::Reviewer)),
+            "reviewer"
+        );
+        assert_eq!(
+            route_reviewer_name(Claude(BaseReviewer::ReviewerStd)),
+            "reviewer_std"
+        );
+        assert_eq!(route_reviewer_name(CodexFull), "reviewer_codex");
+        assert_eq!(
+            route_reviewer_name(Augment(BaseReviewer::Reviewer)),
+            "reviewer"
+        );
+    }
+
+    #[test]
+    fn epoch_to_iso_formats_known_utc_instants() {
+        // Well-known epochs (UTC): 1970-01-01 and 2021-01-01, plus a within-day offset.
+        assert_eq!(epoch_to_iso(0), "1970-01-01T00:00:00Z");
+        assert_eq!(epoch_to_iso(1_609_459_200), "2021-01-01T00:00:00Z");
+        assert_eq!(epoch_to_iso(1_609_462_861), "2021-01-01T01:01:01Z");
+    }
+
+    #[test]
+    fn epoch_to_iso_is_lexically_monotonic_across_boundaries() {
+        // The freshness gate compares timestamps lexically, so `+1s` must sort strictly greater —
+        // including across a minute rollover (…T00:00:59Z < …T00:01:00Z).
+        let boundary = 1_609_459_200 + 59; // 2021-01-01T00:00:59Z
+        assert_eq!(epoch_to_iso(boundary), "2021-01-01T00:00:59Z");
+        assert_eq!(epoch_to_iso(boundary + 1), "2021-01-01T00:01:00Z");
+        assert!(epoch_to_iso(boundary + 1) > epoch_to_iso(boundary));
     }
 
     #[test]
