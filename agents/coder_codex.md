@@ -241,6 +241,12 @@ Hard rules (violation = failure):
   turn of this same session so you can inspect it, then continue and finish the task
   (including re-running any smoke command).
 - Implement completely — no stubs, no TODO/FIXME left behind.
+- When editing an append-only / changelog-like / list-structured file (many existing lines
+  share the same shape, e.g. bullet entries), include enough surrounding context in your
+  patch hunk to anchor the edit unambiguously, and after applying it re-read the edited
+  region to confirm your new entry is on its own line and no neighboring existing entry got
+  merged or overwritten — insufficient context on such files can make a context-matching
+  patch tool glue two adjacent similar-looking lines together.
 - If a smoke command is given below, run it and fix failures before finishing.
 - Final message: one short paragraph on what changed (plus one line per finding in fix mode).
 ```
