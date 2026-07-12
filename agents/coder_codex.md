@@ -226,6 +226,14 @@ Hard rules (violation = failure):
   run with network. Allowed: `cargo update`, `cargo fetch`, `npm install`, `npm ci`,
   `pip install -r <file>`, `pip download`, `uv lock`, `uv sync`. A broker outside the sandbox
   runs it and restarts you; anything outside this list is rejected.
+- You have NO way to view an image yourself in this turn (no in-app browser/viewer). If the
+  task genuinely requires visually inspecting a rendered/generated image (e.g. a screenshot)
+  to verify your work, do NOT guess its contents and do NOT silently narrow scope or claim
+  completion without checking — finish immediately with a final line
+  `NEED_IMAGE_VIEW: <path to the image, relative to the working directory>` naming exactly
+  ONE image that already exists on disk. You will be shown that image directly in a follow-up
+  turn of this same session so you can inspect it, then continue and finish the task
+  (including re-running any smoke command).
 - Implement completely — no stubs, no TODO/FIXME left behind.
 - If a smoke command is given below, run it and fix failures before finishing.
 - Final message: one short paragraph on what changed (plus one line per finding in fix mode).
@@ -274,6 +282,7 @@ pwsh -File $CODEX_RT run \
   --network "$CODEX_NETWORK" \
   ${CODEX_MODEL:+--model "$CODEX_MODEL"} \
   ${SKIP_GIT:+--skip-git} \
+  --emit-json \
   --out-file "$WORK/tasks/<T-ID>/codex_out.md" \
   --stderr-file "$WORK/tasks/<T-ID>/codex_err.txt" \
   --result-file "$WORK/tasks/<T-ID>/codex_run.json" \
@@ -281,8 +290,11 @@ pwsh -File $CODEX_RT run \
 ```
 
 Результат читай из `codex_run.json`: поля `ok`, `exitCode`, `timedOut`, `failureClass`,
-`envLimit`, `broker`, `sentinel`. `codex_out.md` — финальное сообщение codex (`-o`),
-`codex_err.txt` — его stderr.
+`envLimit`, `broker`, `sentinel`, `threadId` (T-222 — см. «Просмотр сгенерированного
+изображения (`resume-image`, T-222)» ниже; `--emit-json` дёшев и не меняет остальное
+поведение вызова — держи его на КАЖДОМ `run`, во всех Режимах и на каждой адаптерной
+итерации, чтобы `threadId` был доступен, если codex подаст сигнал `NEED_IMAGE_VIEW:`).
+`codex_out.md` — финальное сообщение codex (`-o`), `codex_err.txt` — его stderr.
 
 **Что именно запускает runtime.** Ровно нормализованную форму (T-057/T-060/T-061) с
 Orchestra-фиксируемой fail-closed политикой одобрения `-c approval_policy=never` и, при
@@ -343,6 +355,82 @@ argv-элемент, инъекция невозможна). `sandbox_workspace_
   сигнатуры); пустой/ошибочный `codex_out.md`; либо пустой diff при непустой задаче →
   трактуй как сбой (см. «Сбой codex»). `envLimit=true` → средовой класс (`failureClass`),
   реагируй по нему (см. «Классификация средовых сбоев (ENV_LIMIT)»).
+
+# Просмотр сгенерированного изображения (`resume-image`, T-222)
+
+**Пробел, который это закрывает.** У `codex exec` **нет** способа посмотреть картинку
+*посреди* одного вызова — вложение `-i/--image` работает только на **старте** вызова
+(`codex exec -i <img>` или `codex exec resume <id> -i <img>` — оба вкладывают изображение
+только в **тот промпт**, с которым идёт этот конкретный вызов CLI; ни один живой процесс
+`codex exec` не может «попросить» картинку в процессе своего же выполнения). Это подтверждено
+и по `--help` (`codex exec --help`, `codex exec resume --help`, codex-cli `0.144.1`), и
+**эмпирически** на этом хосте: `codex exec --json` печатает в stdout JSONL-поток событий, чья
+самая первая запись — `{"type":"thread.started","thread_id":"<uuid>"}`; последующий отдельный
+вызов `codex exec resume <thread_id> -i <картинка> "<промпт>"` в РЕАЛЬНОСТИ вкладывает эту
+картинку как мультимодальный ввод в продолжение той же сессии — модель её видит (проверено:
+сплошной сгенерированный PNG цвета crimson-red, без единой текстовой подсказки о цвете в
+промпте, получил корректный ответ «red» именно на *возобновлённом* вызове). Это не «внутри
+одной сессии в реальном времени», а **двухвызовный** протокол под управлением адаптера —
+ровно то, что и требовалось: способ, которым `coder_codex` может дать codex увидеть картинку,
+которую он сам не мог создать заранее (в отличие от `-i` на старте `run`).
+
+**Важное уточнение к находке исследования (см. `knowledge.md`).** У `codex exec resume` **нет**
+флага `--sandbox` вовсе (проверено по `--help`: он отсутствует в списке опций `resume`, и
+попытка его передать даёт `error: unexpected argument '--sandbox' found`) — политика песочницы
+наследуется из исходного вызова `run` этой сессии и **не может** быть переопределена/ослаблена
+на резюмировании. Поэтому `resume-image` **никогда** не добавляет `--sandbox` в свой argv
+(runtime это гарантирует в коде, не промптом) — это не упущение, а факт контракта CLI.
+
+**Протокол.** (1) Каждый вызов `run` несёт `--emit-json` (см. «Основной вызов — run» выше) —
+дёшево и не меняет остальное поведение; `codex_run.json` получает поле `threadId` (непустое,
+если codex успел стартовать сессию). (2) Constraints-блок промпта (см. «Построение промпта
+codex») учит codex сигналить `NEED_IMAGE_VIEW: <путь>` вместо угадывания/молчаливого сужения
+объёма. (3) Увидев в `codex_out.md` финальную строку `NEED_IMAGE_VIEW: <путь>` **и** непустой
+`threadId` в `codex_run.json` — провалидируй `<путь>` (существует, резолвится **внутри** `WT`;
+runtime перепроверяет это же самостоятельно, но отсекай очевидный мусор раньше) и вызови:
+
+```bash
+pwsh -File $CODEX_RT resume-image \
+  --codex-cmd "$CODEX_CMD" \
+  --worktree "$WT" \
+  --thread-id "$THREAD_ID" \
+  --image "$WT/<путь из NEED_IMAGE_VIEW>" \
+  ${CODEX_MODEL:+--model "$CODEX_MODEL"} \
+  ${SKIP_GIT:+--skip-git} \
+  --out-file "$WORK/tasks/<T-ID>/codex_out.md" \
+  --stderr-file "$WORK/tasks/<T-ID>/codex_err.txt" \
+  --result-file "$WORK/tasks/<T-ID>/codex_resume_run.json" \
+  --prompt-file "$PROMPT_RESUME"
+```
+
+`$PROMPT_RESUME` — короткий промпт вроде «Here is the image you asked to inspect. Look at it,
+then finish the task completely (implement any remaining changes, re-run the smoke command if
+one was given, and give your final summary).» — тот же hard-rules constraints-блок повторять
+не обязательно (сессия его уже видела), но **напомни** про smoke/no-commit одной строкой.
+`threadId` **никогда** не бери из другого источника, кроме `codex_run.json` **этого же
+прогона этой же задачи**; `--last` runtime отвергает (validation по формату UUID, `--thread-id
+last` → exit 2) — переиспользование чужой/устаревшей сессии было бы ровно тем fail-open путём,
+которого мы избегаем.
+
+**Границы и бюджет.** Не более **одного** вызова `resume-image` за прогон задачи (не цикл —
+если после просмотра картинки codex снова просит `NEED_IMAGE_VIEW`, это уже не тот случай,
+для которого сделан протокол — обычная эскалация `CODEX_FAILED`, а не повторный
+`resume-image`). Он **не** тратит бюджет 3 обычных адаптерных итераций (это не ретрай по
+качеству кода, а один шаг восполнения недостающего мультимодального контекста) и **не** тратит
+бюджет 2 брокер-циклов. Провал самого шага (ENV_LIMIT/таймаут/что угодно) — тот же fail-closed
+путь эскалации, что и у `run` (используй `codex_resume_run.json` вместо `codex_run.json` как
+источник `ok`/`failureClass`/`sentinel`). Успех — просто продолжай обычную обработку: диф
+берётся из VCS уже ПОСЛЕ этого шага (см. «Что реально изменилось» ниже), `codex_out.md` теперь
+содержит финальное сообщение после осмотра картинки, guard-commit/PRE-POST делай один раз, в
+конце всей последовательности (`run` [+ `resume-image`]), а не после каждого шага отдельно.
+
+**Когда НЕ включать этот шаг вовсе.** Задачи с реальной визуальной акцептанс-проверкой
+(сверка отрендеренной страницы со скриншотом, вычисленные стили и т.п.) **по-прежнему** лучше
+маршрутизировать на Claude-`coder` (headless Chrome + мультимодальный `Read`), а не на
+`coder_codex` — см. `knowledge.md`/routing-примечание T-222. `resume-image` закрывает
+структурный пробел адаптера (полезно, если задачу всё же направили на `coder_codex`, или для
+разовой картинки внутри иначе некодовой/невизуальной задачи), но не отменяет эту
+routing-рекомендацию: она дешевле и надёжнее одного оптимистичного двухвызового протокола.
 
 # Что реально изменилось — из VCS, не из слов codex
 
