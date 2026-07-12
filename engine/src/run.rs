@@ -259,7 +259,13 @@ fn close_reason(admitted: usize, capacity: usize) -> CloseReason {
 }
 
 /// Render the descriptor `task.md` the engine writes on capture / on a status transition.
-fn descriptor_md(id: &str, state: TaskState, batch: &str, prerequisites: &[String]) -> String {
+fn descriptor_md(
+    id: &str,
+    state: TaskState,
+    batch: &str,
+    prerequisites: &[String],
+    conflict_domain: Option<&[String]>,
+) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "# {id}");
     let _ = writeln!(s, "Статус: {}", task_literal(state));
@@ -267,6 +273,9 @@ fn descriptor_md(id: &str, state: TaskState, batch: &str, prerequisites: &[Strin
     let _ = writeln!(s, "Батч: {batch}");
     if !prerequisites.is_empty() {
         let _ = writeln!(s, "Предпосылки: {}", prerequisites.join(", "));
+    }
+    if let Some(domain) = conflict_domain {
+        let _ = writeln!(s, "Конфликт-домен: {}", domain.join(", "));
     }
     s
 }
@@ -317,6 +326,22 @@ fn first_line(text: &str) -> &str {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("(no diagnostic)")
+}
+
+/// The planner's typed domain for one descriptor, when it exists and is usable.
+fn descriptor_globs<'a>(snap: &'a Snapshot, id: &str) -> Option<&'a [String]> {
+    snap.descriptors
+        .iter()
+        .find(|descriptor| descriptor.id == id)
+        .and_then(|descriptor| descriptor.conflict_domain.as_deref())
+}
+
+/// Resolve a descriptor domain fail-closed: absent or malformed fields block packing with every
+/// other task instead of behaving like an empty, conflict-free domain.
+fn descriptor_domain(snap: &Snapshot, id: &str) -> Domain {
+    descriptor_globs(snap, id)
+        .map(Domain::from_globs)
+        .unwrap_or_else(Domain::unknown)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -567,6 +592,7 @@ impl<'a> Runner<'a> {
         id: &str,
         state: TaskState,
         prerequisites: &[String],
+        conflict_domain: Option<&[String]>,
     ) -> Result<(), RunError> {
         let dir = self.cfg.work.join("tasks").join(id);
         fs::create_dir_all(&dir)
@@ -574,7 +600,13 @@ impl<'a> Runner<'a> {
         let path = dir.join("task.md");
         fs::write(
             &path,
-            descriptor_md(id, state, &self.cfg.batch_id, prerequisites),
+            descriptor_md(
+                id,
+                state,
+                &self.cfg.batch_id,
+                prerequisites,
+                conflict_domain,
+            ),
         )
         .map_err(|e| RunError::new(exit::FAILED, format!("write {}: {e}", path.display())))
     }
@@ -592,8 +624,8 @@ impl<'a> Runner<'a> {
         let completed = completed_ids(&self.cfg.work, &snap);
 
         // Candidates: every not-started queue entry, ready iff its prerequisites are complete.
-        // A queue snapshot carries no conflict-domain (the planner derives it from task text), so
-        // domains are empty here — the sandbox tasks are independent by construction.
+        // Their planner-created descriptors carry the conflict-domain. A missing or malformed
+        // descriptor field is deliberately an unknown domain, which blocks packing fail-closed.
         let candidates: Vec<Candidate> = snap
             .queue
             .iter()
@@ -601,12 +633,12 @@ impl<'a> Runner<'a> {
             .map(|e| Candidate {
                 id: e.id.clone(),
                 ready: is_ready(&e.prerequisites, &completed),
-                domain: Domain::parse(""),
+                domain: descriptor_domain(&snap, &e.id),
             })
             .collect();
 
-        // Active tasks (their conflict-domains block admission) — a fresh sandbox has none, but a
-        // re-run over a partly-advanced sandbox honours them.
+        // Active descriptors use the same state-layer domains, so ongoing work also blocks an
+        // overlapping candidate. Missing/malformed values remain conservative here as well.
         let active: Vec<ActiveTask> = snap
             .descriptors
             .iter()
@@ -614,7 +646,7 @@ impl<'a> Runner<'a> {
                 d.state
                     .and_then(ActiveClass::from_state)
                     .map(|class| ActiveTask {
-                        domain: Domain::parse(""),
+                        domain: descriptor_domain(&snap, &d.id),
                         class,
                     })
             })
@@ -683,7 +715,12 @@ impl<'a> Runner<'a> {
                 &capture_argv,
                 &format!("queue-tx capture {id}"),
             )?;
-            self.write_descriptor(id, TaskState::Working, &prereqs_of(id))?;
+            self.write_descriptor(
+                id,
+                TaskState::Working,
+                &prereqs_of(id),
+                descriptor_globs(&snap, id),
+            )?;
             self.emit(
                 &[
                     "--type",
@@ -719,7 +756,7 @@ impl<'a> Runner<'a> {
 
         let mut outcomes = Vec::new();
         for id in &admitted {
-            let outcome = self.run_one_task(id, &prereqs_of(id))?;
+            let outcome = self.run_one_task(id, &prereqs_of(id), descriptor_globs(&snap, id))?;
             outcomes.push(outcome);
             self.heartbeat()?;
         }
@@ -779,6 +816,7 @@ impl<'a> Runner<'a> {
         &mut self,
         id: &str,
         prerequisites: &[String],
+        conflict_domain: Option<&[String]>,
     ) -> Result<TaskOutcome, RunError> {
         // The executor level in the sandbox defaults to `coder`; the T-105 tiering resolver still
         // runs over it to pick the reviewer tier (the one per-task decision derivable statically).
@@ -834,7 +872,7 @@ impl<'a> Runner<'a> {
 
         // Validate working -> {in-review|escalated} through the state machine, then write it.
         self.check_transition("task", TaskState::Working.as_str(), to.as_str())?;
-        self.write_descriptor(id, to, prerequisites)?;
+        self.write_descriptor(id, to, prerequisites, conflict_domain)?;
 
         // On an escalation, also reflect it in the queue transactionally (queue-tx escalate) so
         // the queue and descriptor agree; the happy path leaves the queue as captured (в работе).
@@ -957,7 +995,13 @@ mod tests {
 
     #[test]
     fn descriptor_md_parses_back() {
-        let md = descriptor_md("T-201", TaskState::Working, "B-1", &["T-200".to_string()]);
+        let md = descriptor_md(
+            "T-201",
+            TaskState::Working,
+            "B-1",
+            &["T-200".to_string()],
+            Some(&["engine/src/**".to_string()]),
+        );
         let d = crate::state::parse_descriptor("T-201", &md);
         assert_eq!(d.state, Some(TaskState::Working));
         assert_eq!(d.prerequisites, vec!["T-200"]);

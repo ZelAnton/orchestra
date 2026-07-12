@@ -117,6 +117,17 @@ fn queue_propose(
     cmd.output().expect("spawn queue-tx propose")
 }
 
+/// Seed the planner-owned descriptor that supplies a task's typed conflict-domain to admission.
+fn write_planned_descriptor(work: &Path, id: &str, state: &str, domain: Option<&str>) {
+    let dir = work.join("tasks").join(id);
+    fs::create_dir_all(&dir).expect("create planned descriptor directory");
+    let mut text = format!("# {id}\nСтатус: {state}\n");
+    if let Some(domain) = domain {
+        text.push_str(&format!("Конфликт-домен: {domain}\n"));
+    }
+    fs::write(dir.join("task.md"), text).expect("write planned descriptor");
+}
+
 /// Run `engine run --once` over the sandbox with the real tools.
 fn engine_run(work: &Path, extra: &[&str]) -> Output {
     let mut cmd = Command::new(BIN);
@@ -153,6 +164,11 @@ fn opens_cohort_and_runs_one_round_end_to_end() {
         let out = queue_propose(&host, &sb.work, id, title, pred);
         assert!(out.status.success(), "propose {id}: {}", stderr_of(&out));
     }
+
+    write_planned_descriptor(&sb.work, "T-201", "не начата", Some("engine/src/**"));
+    write_planned_descriptor(&sb.work, "T-202", "не начата", Some("tui/**"));
+    // T-203 is not ready, so its domain is irrelevant to this admission pass.
+    write_planned_descriptor(&sb.work, "T-203", "не начата", Some("docs/**"));
 
     let batch = "B-20260712T000000Z";
     let run = engine_run(
@@ -191,10 +207,12 @@ fn opens_cohort_and_runs_one_round_end_to_end() {
     // The descriptors the engine wrote reflect the round's terminal state.
     assert_eq!(sb.descriptor_status("T-201"), "на ревью");
     assert_eq!(sb.descriptor_status("T-202"), "на ревью");
-    // T-203 was never admitted, so it has no descriptor.
-    assert!(
-        !sb.work.join("tasks/T-203/task.md").exists(),
-        "the blocked task was not captured"
+    // T-203 was never admitted (its prerequisite is still open), so its planner-seeded
+    // descriptor (written above, before the run, to supply its domain) is left untouched.
+    assert_eq!(
+        sb.descriptor_status("T-203"),
+        "не начата",
+        "the blocked task's descriptor is not advanced"
     );
 
     // The queue was mutated only through queue-tx capture: the two admitted tasks read `в работе`,
@@ -248,6 +266,93 @@ fn opens_cohort_and_runs_one_round_end_to_end() {
 }
 
 #[test]
+fn descriptor_domains_control_cohort_packing() {
+    let host = host_or_skip!();
+
+    let overlapping = Sandbox::new();
+    for (id, title) in [("T-401", "engine root"), ("T-402", "engine state")] {
+        let out = queue_propose(&host, &overlapping.work, id, title, None);
+        assert!(out.status.success(), "propose {id}: {}", stderr_of(&out));
+    }
+    write_planned_descriptor(
+        &overlapping.work,
+        "T-401",
+        "не начата",
+        Some("engine/src/**"),
+    );
+    write_planned_descriptor(
+        &overlapping.work,
+        "T-402",
+        "не начата",
+        Some("engine/src/state/**"),
+    );
+    let overlap_run = engine_run(
+        &overlapping.work,
+        &["--batch", "B-overlap", "--cohort-size", "2", "--json"],
+    );
+    let overlap_out = stdout_of(&overlap_run);
+    assert!(
+        overlap_run.status.success(),
+        "overlap run exits 0: {overlap_out} / {}",
+        stderr_of(&overlap_run)
+    );
+    assert!(
+        overlap_out.contains("\"admitted\":[\"T-401\"]"),
+        "overlapping domains must not share a cohort: {overlap_out}"
+    );
+
+    let disjoint = Sandbox::new();
+    for (id, title) in [("T-411", "engine"), ("T-412", "tui")] {
+        let out = queue_propose(&host, &disjoint.work, id, title, None);
+        assert!(out.status.success(), "propose {id}: {}", stderr_of(&out));
+    }
+    write_planned_descriptor(&disjoint.work, "T-411", "не начата", Some("engine/src/**"));
+    write_planned_descriptor(&disjoint.work, "T-412", "не начата", Some("tui/**"));
+    let disjoint_run = engine_run(
+        &disjoint.work,
+        &["--batch", "B-disjoint", "--cohort-size", "2", "--json"],
+    );
+    let disjoint_out = stdout_of(&disjoint_run);
+    assert!(
+        disjoint_run.status.success(),
+        "disjoint run exits 0: {disjoint_out} / {}",
+        stderr_of(&disjoint_run)
+    );
+    assert!(
+        disjoint_out.contains("\"admitted\":[\"T-411\",\"T-412\"]"),
+        "non-overlapping domains should share a cohort: {disjoint_out}"
+    );
+}
+
+#[test]
+fn active_descriptor_domain_blocks_an_overlapping_candidate() {
+    let host = host_or_skip!();
+    let sb = Sandbox::new();
+    for (id, title) in [("T-421", "blocked by active"), ("T-422", "independent")] {
+        let out = queue_propose(&host, &sb.work, id, title, None);
+        assert!(out.status.success(), "propose {id}: {}", stderr_of(&out));
+    }
+    write_planned_descriptor(&sb.work, "T-420", "в работе", Some("engine/src/**"));
+    write_planned_descriptor(&sb.work, "T-421", "не начата", Some("engine/src/state/**"));
+    write_planned_descriptor(&sb.work, "T-422", "не начата", Some("tui/**"));
+
+    let run = engine_run(
+        &sb.work,
+        &["--batch", "B-active", "--cohort-size", "2", "--json"],
+    );
+    let out = stdout_of(&run);
+    assert!(
+        run.status.success(),
+        "active-domain run exits 0: {out} / {}",
+        stderr_of(&run)
+    );
+    assert!(
+        out.contains("\"admitted\":[\"T-422\"]"),
+        "the active descriptor blocks only its overlapping candidate: {out}"
+    );
+}
+
+#[test]
 fn injected_escalation_takes_one_task_to_escalated() {
     let host = host_or_skip!();
     let sb = Sandbox::new();
@@ -256,6 +361,8 @@ fn injected_escalation_takes_one_task_to_escalated() {
         let out = queue_propose(&host, &sb.work, id, title, None);
         assert!(out.status.success(), "propose {id}: {}", stderr_of(&out));
     }
+    write_planned_descriptor(&sb.work, "T-301", "не начата", Some("engine/src/**"));
+    write_planned_descriptor(&sb.work, "T-302", "не начата", Some("tui/**"));
 
     // Deterministic fault injection: T-302's leaf emits an `эскалация` verdict.
     let run = engine_run(
