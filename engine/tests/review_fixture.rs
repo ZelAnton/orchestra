@@ -1,18 +1,25 @@
-//! Hermetic, offline end-to-end proof of `engine run --once --review` (task T-127): after the
-//! execution round, drive the REAL built binary through the per-task **review round** over a
+//! Hermetic, offline end-to-end proof of `engine run --once --review` (tasks T-127 / T-128): after
+//! the execution round, drive the REAL built binary through the per-task **review fix cycle** over a
 //! throwaway **sandbox** `.work` and the REAL transaction tools (`queue-tx.ps1` / `state-tx.ps1` /
-//! `outbox.ps1`), and assert BOTH review-gate branches wire correctly:
+//! `outbox.ps1`), and assert BOTH terminal outcomes of the loop wire correctly:
 //!
-//!   * **clean** (a fresh `SUMMARY-R`, zero open `R-`) → the descriptor is promoted
-//!     `на ревью -> готова к слиянию` through a `state-tx check-transition`-validated transition;
-//!   * **with-findings** (an open `R-`) → the descriptor STAYS `на ревью` under the (T-128) fix
-//!     cycle, through the equally-validated self-transition — a DIFFERENT, legal transition.
+//!   * **converging** — an open `R-` (findings) dispatches a supervised deterministic coder fix
+//!     round and a re-review; once the fix converges the re-review is a fresh clean `SUMMARY-R` with
+//!     zero open `R-`, so the descriptor is promoted `на ревью -> готова к слиянию`. The per-cycle
+//!     `Циклов-ревью: N` counter and each cycle's `state-tx check-transition`-validated transition
+//!     are recorded on the descriptor and emitted through the outbox (keyed by cycle → distinct
+//!     fingerprints).
+//!   * **diverging** — persistent findings never converge, so the loop escalates the task
+//!     `на ревью -> эскалирована` on exhausting `REVIEW_LOOP_MAX` (`не сходится ревью после N
+//!     циклов`) through the SAME `state-tx check-transition` + `queue-tx escalate` path the
+//!     execution round uses — a clean terminal escalation, no re-interpretation.
 //!
-//! The review is run by the deterministic `__fake-agent --mode review` reviewer stand-in (never a
-//! live model call); the tier + concrete reviewer come from the real tiering/reviewer resolvers,
-//! and the branch from the real `contract`/`gate`. Like `run_fixture`, the PowerShell-driven tools
-//! need a `pwsh`/`powershell` host; when neither is available the tests self-skip (never fail).
-//! Every sandbox lives in a per-test temp directory removed on drop; the run is offline/token-free.
+//! The review + fix rounds run the deterministic `__fake-agent` stand-ins (never a live model call);
+//! the tier + concrete reviewer come from the real tiering/reviewer resolvers, the branch from the
+//! real `contract`/`gate`, and the loop limit from the real `resolvers::cycles`. Like `run_fixture`,
+//! the PowerShell-driven tools need a `pwsh`/`powershell` host; when neither is available the tests
+//! self-skip (never fail). Every sandbox lives in a per-test temp directory removed on drop; the run
+//! is offline/token-free.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -142,19 +149,21 @@ fn stderr_of(o: &Output) -> String {
 }
 
 #[test]
-fn review_round_wires_clean_and_with_findings_branches() {
+fn review_fix_cycle_converges_findings_to_ready() {
     let host = host_or_skip!();
     let sb = Sandbox::new();
 
     // Two independent (non-overlapping) tasks so both are admitted in one cohort.
-    for (id, title) in [("T-501", "clean pass"), ("T-502", "with findings")] {
+    for (id, title) in [("T-501", "clean pass"), ("T-502", "converging findings")] {
         let out = queue_propose(&host, &sb.work, id, title);
         assert!(out.status.success(), "propose {id}: {}", stderr_of(&out));
     }
     write_planned_descriptor(&sb.work, "T-501", "не начата", "engine/src/**");
     write_planned_descriptor(&sb.work, "T-502", "не начата", "tui/**");
 
-    // T-502's reviewer stand-in emits an open `R-` (with-findings); T-501's is a clean pass.
+    // T-502's reviewer stand-in emits an open `R-` (findings) on cycle 1; the fix converges, so the
+    // re-review at cycle 2 is a fresh clean `SUMMARY-R` (`--converge-after 2`). T-501 is clean at
+    // cycle 1. The default `REVIEW_LOOP_MAX` (8) is never approached.
     let batch = "B-20260712T140000Z";
     let run = engine_run(
         &sb.work,
@@ -166,6 +175,8 @@ fn review_round_wires_clean_and_with_findings_branches() {
             "--review",
             "--inject-findings",
             "T-502",
+            "--converge-after",
+            "2",
             "--json",
         ],
     );
@@ -183,31 +194,37 @@ fn review_round_wires_clean_and_with_findings_branches() {
     );
 
     // The review phase resolved the tier + reviewer through the real resolvers (coder → opus
-    // `reviewer`) and named both gate branches.
+    // `reviewer`) and both gate branches were exercised (T-502 cycle 1 findings, then clean).
     assert!(
         out.contains("\"gate\":\"clean\""),
         "the clean branch is exercised: {out}"
     );
     assert!(
-        out.contains("\"gate\":\"findings\""),
-        "the with-findings branch is exercised: {out}"
+        out.contains("\"gate\":\"findings\"")
+            || sb.read("events.jsonl").contains("\"gate\":\"findings\""),
+        "the with-findings branch drove a fix cycle: {out}"
     );
     assert!(
         out.contains("\"reviewer\":\"reviewer\""),
         "the tiering/reviewer resolvers elected the opus reviewer: {out}"
     );
-    // The clean task's review transitioned it to `ready`; the injected review never escalated.
-    assert!(
-        out.contains("\"to\":\"ready\""),
-        "the clean pass promotes to ready: {out}"
-    );
+    // Neither task escalated; the fix cycle converged both to ready.
     assert!(
         !out.contains("\"to\":\"escalated\""),
-        "a clean/with-findings review escalates nothing: {out}"
+        "a converging review fix cycle escalates nothing: {out}"
+    );
+    // T-502 took a two-cycle fix; T-501 landed clean on the first cycle.
+    assert!(
+        out.contains("\"cycles\":2"),
+        "the converging task ran two review cycles: {out}"
+    );
+    assert!(
+        out.contains("\"cycles\":1"),
+        "the immediately-clean task ran a single review cycle: {out}"
     );
 
-    // The DESCRIPTORS are the strongest assertion: clean → готова к слиянию, findings → stays на
-    // ревью (the two DIFFERENT, state-tx-validated review transitions this task wires).
+    // The DESCRIPTORS are the strongest assertion: the fix cycle promotes BOTH to готова к слиянию,
+    // and the converging task's descriptor carries the persistent `Циклов-ревью: 2` counter.
     assert_eq!(
         sb.descriptor_status("T-501"),
         "готова к слиянию",
@@ -215,23 +232,33 @@ fn review_round_wires_clean_and_with_findings_branches() {
     );
     assert_eq!(
         sb.descriptor_status("T-502"),
-        "на ревью",
-        "the with-findings pass keeps the descriptor in review for the fix cycle"
+        "готова к слиянию",
+        "the converging fix cycle promotes the descriptor to ready"
+    );
+    let t502_desc = sb.read("tasks/T-502/task.md");
+    assert!(
+        t502_desc.contains("Циклов-ревью: 2"),
+        "the review-cycle counter is recorded on the descriptor: {t502_desc}"
     );
 
-    // The review phase emitted its events through outbox: the clean promotion carries the
-    // ASCII `gate` marker (host-agnostic — Cyrillic payload words are \u-escaped under WinPS).
+    // The fix cycle emitted its transitions through outbox, distinguishable by the ASCII `cycle`
+    // coordinate (host-agnostic — Cyrillic payload words are \u-escaped under WinPS). Cycle 1 is a
+    // findings self-transition; cycle 2 is the clean promotion.
     let events = sb.read("events.jsonl");
     assert!(
         events.contains("\"gate\":\"clean\""),
-        "the review promotion event was emitted through outbox: {events}"
+        "the clean promotion event was emitted through outbox: {events}"
+    );
+    assert!(
+        events.contains("\"cycle\":1") && events.contains("\"cycle\":2"),
+        "each review cycle is a distinct observable event keyed by cycle: {events}"
     );
 
-    // The queue was never escalated by the review round (neither task fail-closed).
+    // The queue was never escalated by the fix cycle (both tasks converged).
     let queue = sb.read("Tasks_Queue.md");
     assert!(
         !queue.contains("эскалирована"),
-        "no task was escalated by the review round: {queue}"
+        "no task was escalated by the converging fix cycle: {queue}"
     );
 
     // No dangling owner lease.
@@ -242,6 +269,103 @@ fn review_round_wires_clean_and_with_findings_branches() {
     assert!(
         out.contains("\"lease_released\":true"),
         "the lease is released: {out}"
+    );
+}
+
+#[test]
+fn review_fix_cycle_escalates_on_review_loop_max() {
+    let host = host_or_skip!();
+    let sb = Sandbox::new();
+
+    for (id, title) in [
+        ("T-511", "clean companion"),
+        ("T-512", "diverging findings"),
+    ] {
+        let out = queue_propose(&host, &sb.work, id, title);
+        assert!(out.status.success(), "propose {id}: {}", stderr_of(&out));
+    }
+    write_planned_descriptor(&sb.work, "T-511", "не начата", "engine/src/**");
+    write_planned_descriptor(&sb.work, "T-512", "не начата", "tui/**");
+
+    // T-512's findings NEVER converge (no `--converge-after`), so the fix cycle loops until it
+    // exhausts `REVIEW_LOOP_MAX`. A tight limit of 2 makes it escalate fast: cycles 1 and 2 run
+    // (review + fix each), the 3rd cycle is over budget → clean terminal escalation.
+    let run = engine_run(
+        &sb.work,
+        &[
+            "--batch",
+            "B-diverge",
+            "--cohort-size",
+            "2",
+            "--review",
+            "--inject-findings",
+            "T-512",
+            "--review-loop-max",
+            "2",
+            "--json",
+        ],
+    );
+    let out = stdout_of(&run);
+    assert!(
+        run.status.success(),
+        "engine run --review exits 0 even when a task escalates: {out} / {}",
+        stderr_of(&run)
+    );
+
+    // T-511 converged clean → готова к слиянию; T-512 exhausted the budget → эскалирована.
+    assert_eq!(
+        sb.descriptor_status("T-511"),
+        "готова к слиянию",
+        "the clean companion is still promoted while its cohort-mate escalates"
+    );
+    assert_eq!(
+        sb.descriptor_status("T-512"),
+        "эскалирована",
+        "the diverging task escalates on exhausting REVIEW_LOOP_MAX"
+    );
+    // The terminal descriptor records the completed cycle count (REVIEW_LOOP_MAX = 2).
+    let t512_desc = sb.read("tasks/T-512/task.md");
+    assert!(
+        t512_desc.contains("Циклов-ревью: 2"),
+        "the escalated descriptor records the completed cycle count: {t512_desc}"
+    );
+    assert!(
+        out.contains("\"to\":\"escalated\"") && out.contains("\"cycles\":2"),
+        "the JSON report surfaces the budget escalation after two cycles: {out}"
+    );
+
+    // The escalation went through the SAME transactional queue path (queue-tx escalate): the queue
+    // entry now reads `эскалирована`, and the reason names the loop-limit cause.
+    let queue = sb.read("Tasks_Queue.md");
+    let t512_line = queue
+        .lines()
+        .find(|l| l.contains("[T-512]"))
+        .unwrap_or_default();
+    assert!(
+        t512_line.contains("эскалирована"),
+        "the queue records the escalation transactionally: {t512_line}"
+    );
+    assert!(
+        t512_line.contains("не сходится ревью после 2 циклов"),
+        "the queue escalation reason names the loop-limit cause: {t512_line}"
+    );
+
+    // The budget-exhaustion event is emitted through outbox with the host-agnostic ASCII markers
+    // (Cyrillic reason/status words \u-escape under WinPS, so assert on the ASCII cap/limit).
+    let events = sb.read("events.jsonl");
+    assert!(
+        events.contains("\"cap\":\"REVIEW_LOOP_MAX\"") && events.contains("\"limit\":2"),
+        "the escalation event carries the REVIEW_LOOP_MAX cap marker: {events}"
+    );
+
+    // No dangling owner lease even though a task escalated.
+    assert!(
+        out.contains("\"lease_released\":true"),
+        "the lease is released after the escalating fix cycle: {out}"
+    );
+    assert!(
+        !sb.work.join("orchestrator.lock").exists(),
+        "no dangling lease"
     );
 }
 
