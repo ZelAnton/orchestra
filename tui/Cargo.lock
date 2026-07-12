@@ -254,6 +254,7 @@ dependencies = [
 name = "orchestra-engine"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "serde_json",
 ]
 

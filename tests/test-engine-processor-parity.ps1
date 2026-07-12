@@ -248,10 +248,23 @@ try {
     $null = New-Item -ItemType Directory -Force -Path $sandbox
     $script:TempDirs.Add($sandbox)
 
+    # Seed each task's on-disk descriptor with an explicit, NON-OVERLAPPING `Конфликт-домен:`
+    # BEFORE the engine's admission reads it. T-126 taught `engine run` to read the real
+    # conflict-domain from each `tasks/<id>/task.md` and, per its own acceptance criteria, to fail
+    # CLOSED on a missing/malformed domain (treat it as conflicting with everything) so two
+    # undomained tasks are never packed into one cohort by accident. `queue-tx propose` writes ONLY
+    # the queue entry (no descriptor), so without a seeded domain the engine sees two unknown
+    # domains and admits just ONE of T-101/T-102 - collapsing the shared phase-1 identity surface
+    # this oracle asserts. Disjoint domains (alpha/** vs beta/**) keep the round genuinely
+    # admitting BOTH into one cohort, now via real domain-based packing.
     $seedOk = $true
-    foreach ($seed in @(@('T-101', 'clean one'), @('T-102', 'clean two'))) {
+    foreach ($seed in @(@('T-101', 'clean one', 'alpha/**'), @('T-102', 'clean two', 'beta/**'))) {
         $p = Invoke-Ps $script:QueueTx @('propose', '--work', $sandbox, '--id', $seed[0], '--title', $seed[1])
-        if ($p.ExitCode -ne 0) { $script:Failures.Add("FAIL - seed propose $($seed[0]) exited $($p.ExitCode): $($p.Err.Trim())"); $seedOk = $false }
+        if ($p.ExitCode -ne 0) { $script:Failures.Add("FAIL - seed propose $($seed[0]) exited $($p.ExitCode): $($p.Err.Trim())"); $seedOk = $false; continue }
+        $descDir = Join-Path (Join-Path $sandbox 'tasks') $seed[0]
+        $null = New-Item -ItemType Directory -Force -Path $descDir
+        $descText = "# $($seed[0])`nСтатус: не начата`nБатч: $batchId`nКонфликт-домен: $($seed[2])`n"
+        [System.IO.File]::WriteAllText((Join-Path $descDir 'task.md'), $descText, $script:Utf8)
     }
 
     $engineEvents = Join-Path $sandbox 'events.jsonl'

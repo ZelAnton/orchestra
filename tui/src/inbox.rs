@@ -445,6 +445,7 @@ mod tests {
             state: Some(TaskState::Done),
             status_literal: Some("выполнена".to_string()),
             prerequisites: vec![],
+            conflict_domain: None,
         }];
         let snap = snapshot(q, d);
         let inbox = build(&snap, false, None, &BTreeSet::new());
