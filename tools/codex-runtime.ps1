@@ -32,7 +32,26 @@
       run               build-argv + spawn codex with the prompt on stdin, capturing
                         stdout / stderr / RC separately, then classify the outcome. The
                         structured result (argv, exit code, capture-file paths, failure
-                        class, sentinel) is written as JSON.
+                        class, sentinel) is written as JSON. `--emit-json` (opt-in, T-222)
+                        additionally adds `--json` to the codex invocation and parses the
+                        first `thread.started` event off captured stdout, surfacing its
+                        `thread_id` as `threadId` in the result - the ONLY supported way to
+                        capture a session id for a later `resume-image` call (never guess
+                        or reuse a stale one). Omitted (default), the call is byte-for-byte
+                        identical to before T-222.
+      resume-image      T-222: continue a session captured via `run --emit-json` and
+                        attach an image to the follow-up prompt, so a vision-capable codex
+                        model can actually inspect a file the FIRST call could only create
+                        blind (e.g. a rendered screenshot) - confirmed empirically against
+                        codex-cli 0.144.1 (`codex exec resume <thread-id> -i <image>`).
+                        Requires an explicit `--thread-id` (a UUID captured from THIS
+                        task's own prior `run --emit-json`, never `--last` - reusing/guessing
+                        a session id is exactly the fail-open path this guards against) and
+                        an `--image` that resolves inside `--worktree` (refuses to attach an
+                        arbitrary host file). Unlike `run`, the assembled argv never carries
+                        `--sandbox`: `codex exec resume` has no such flag (confirmed against
+                        --help) - the sandbox policy is inherited from the thread's original
+                        `run` invocation and cannot be loosened here.
       classify          Classify codex output/RC into a failure class (the ENV_LIMIT
                         table from T-062/T-067, extensible) - envLimit / broker /
                         recoverable flags included.
@@ -95,7 +114,7 @@ $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 # (same shape as tools/queue-tx.ps1)
 # --------------------------------------------------------------------------
 $Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('json', 'skip-git', 'fail-on-over', 'reset', 'main-tree')
+$BoolFlags = @('json', 'skip-git', 'fail-on-over', 'reset', 'main-tree', 'emit-json')
 $opts = @{}
 for ($i = 1; $i -lt $args.Count; $i++) {
     $a = [string]$args[$i]
@@ -210,7 +229,8 @@ function Build-CodexArgv {
         [string]$Model = '',
         [string]$Network = 'off',
         [string]$OutFile = '',
-        [bool]$SkipGit = $false
+        [bool]$SkipGit = $false,
+        [bool]$EmitJson = $false
     )
     if ($AllowedSandbox -notcontains $Sandbox) {
         Fail 2 "invalid --sandbox '$Sandbox' (allowed: $($AllowedSandbox -join ' | '))"
@@ -239,6 +259,13 @@ function Build-CodexArgv {
         [void]$argv.Add('-c'); [void]$argv.Add('shell_environment_policy.set={GIT_CONFIG_COUNT="1",GIT_CONFIG_KEY_0="http.sslBackend",GIT_CONFIG_VALUE_0="openssl"}')
     }
     [void]$argv.Add('-c'); [void]$argv.Add("model_reasoning_effort=$Reasoning")
+    if ($EmitJson) {
+        # T-222: opt-in JSONL event stream on stdout, solely so the caller can pull the
+        # `thread.started` event's `thread_id` back out (see Cmd-Run). This is independent
+        # of -o/OutFile (codex's final message still lands there unchanged) - captured
+        # stdout just gains a machine-readable event trailer instead of free-form text.
+        [void]$argv.Add('--json')
+    }
     if ($OutFile) { [void]$argv.Add('-o'); [void]$argv.Add($OutFile) }
     # The prompt is delivered on stdin; `-` marks stdin as the prompt source.
     [void]$argv.Add('-')
@@ -540,7 +567,8 @@ function Cmd-BuildArgv {
         -Model ([string](Opt 'model' '')) `
         -Network ([string](Opt 'network' 'off')) `
         -OutFile ([string](Opt 'out-file' '')) `
-        -SkipGit ([bool](Opt 'skip-git' $false))
+        -SkipGit ([bool](Opt 'skip-git' $false)) `
+        -EmitJson ([bool](Opt 'emit-json' $false))
     Emit-Json ([pscustomobject]@{ argv = $argv; approvalPolicy = $ApprovalPolicyOverride })
 }
 
@@ -676,6 +704,7 @@ function Cmd-Run {
             })
         exit 3
     }
+    $emitJson = [bool](Opt 'emit-json' $false)
     $argv = Build-CodexArgv `
         -Worktree (Require-Opt 'worktree') `
         -Sandbox (Require-Opt 'sandbox') `
@@ -683,7 +712,8 @@ function Cmd-Run {
         -Model ([string](Opt 'model' '')) `
         -Network ([string](Opt 'network' 'off')) `
         -OutFile ([string](Opt 'out-file' '')) `
-        -SkipGit ([bool](Opt 'skip-git' $false))
+        -SkipGit ([bool](Opt 'skip-git' $false)) `
+        -EmitJson $emitJson
 
     $prompt = ''
     if ($opts.ContainsKey('prompt-file')) { $prompt = Read-TextOrEmpty ([string]$opts['prompt-file']) }
@@ -706,6 +736,24 @@ function Cmd-Run {
     $classifyText = (Read-TextOrEmpty ([string](Opt 'out-file' ''))) + "`n" + $res.StdOut + "`n" + $res.StdErr
     $fc = Get-FailureClass -Text $classifyText -RC $res.ExitCode
 
+    # T-222: with --emit-json, stdout is the `codex exec --json` JSONL event stream;
+    # pull the session/thread id off its FIRST `thread.started` event. This is the ONLY
+    # supported way a caller obtains a --thread-id for `resume-image` - never `--last`,
+    # never a value from a different task's run. $null (not found / --emit-json not
+    # requested) means the caller must treat a later image-view need as unsupported for
+    # this run, not silently guess a session id.
+    $threadId = $null
+    if ($emitJson) {
+        foreach ($line in ($res.StdOut -split "`n")) {
+            $t = $line.Trim()
+            if (-not $t.StartsWith('{')) { continue }
+            try {
+                $ev = $t | ConvertFrom-Json
+                if ($ev.type -eq 'thread.started' -and $ev.thread_id) { $threadId = [string]$ev.thread_id; break }
+            } catch { }
+        }
+    }
+
     $sentinel = $null
     if ($res.TimedOut) {
         $sentinel = Get-Sentinel -Kind 'failed' -Detail "codex exec timed out after ${timeout}s"
@@ -722,6 +770,107 @@ function Cmd-Run {
         stdoutFile   = $stdoutFile
         stderrFile   = $stderrFile
         outFile      = [string](Opt 'out-file' '')
+        failureClass = $fc.class
+        envLimit     = $fc.envLimit
+        broker       = $fc.broker
+        sentinel     = $sentinel
+        threadId     = $threadId
+    }
+    $resultFile = [string](Opt 'result-file' '')
+    if ($resultFile) { Write-TextNoBom $resultFile ($result | ConvertTo-Json -Depth 12) }
+    Emit-Json $result
+}
+
+# --------------------------------------------------------------------------
+# T-222: resume a session captured via `run --emit-json` and attach an image to
+# the follow-up prompt, so codex's vision-capable model can actually inspect a
+# file the first (blind) call could only create - e.g. a rendered screenshot.
+# Confirmed empirically against codex-cli 0.144.1 that `codex exec resume
+# <thread-id> -i <image>` delivers the image as multimodal input to that turn.
+# `codex exec resume` has NO `--sandbox` flag (confirmed against --help): the
+# sandbox policy is inherited from the thread's original `run` and can neither be
+# re-specified nor loosened here - the argv below deliberately never adds one.
+# --------------------------------------------------------------------------
+function Cmd-ResumeImage {
+    $codexCmd = [string](Opt 'codex-cmd' 'codex')
+    $target = Resolve-CodexTarget -CodexCmd $codexCmd
+    if ($null -eq $target) {
+        Emit-Json ([pscustomobject]@{
+                ok       = $false
+                stage    = 'resolve'
+                sentinel = (Get-Sentinel -Kind 'unavailable' -Detail "codex command not found: $codexCmd")
+            })
+        exit 3
+    }
+
+    $wt = Require-Opt 'worktree'
+    if (-not (Test-Path -LiteralPath $wt)) { Fail 2 "--worktree '$wt' does not exist" }
+    $wtFull = (Resolve-Path -LiteralPath $wt).Path
+
+    $threadId = Require-Opt 'thread-id'
+    # A UUID (any RFC 4122 version, incl. the v7-shaped ids codex-cli 0.144.1 emits) -
+    # deliberately rejects anything else, including the literal string `last`, so a
+    # caller can never route this through `--last` semantics by accident.
+    if ($threadId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        Fail 2 "invalid --thread-id '$threadId' (expected a UUID captured from this task's own prior 'run --emit-json', never --last or a guessed value)"
+    }
+
+    $image = Require-Opt 'image'
+    if (-not (Test-Path -LiteralPath $image -PathType Leaf)) { Fail 2 "--image '$image' does not exist" }
+    $imageFull = (Resolve-Path -LiteralPath $image).Path
+    $wtPrefix = $wtFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $imageFull.StartsWith($wtPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Fail 2 "--image '$image' resolves outside --worktree '$wt' (refusing to attach a file outside the task's own working copy)"
+    }
+
+    $model = [string](Opt 'model' '')
+    $skipGit = [bool](Opt 'skip-git' $false)
+    $outFile = [string](Opt 'out-file' '')
+
+    $argv = [System.Collections.Generic.List[string]]::new()
+    [void]$argv.Add('codex'); [void]$argv.Add('exec'); [void]$argv.Add('resume'); [void]$argv.Add($threadId)
+    # Fail-closed approval policy re-pinned on this call too (T-069 invariant, unchanged).
+    [void]$argv.Add('-c'); [void]$argv.Add($ApprovalPolicyOverride)
+    if ($skipGit) { [void]$argv.Add('--skip-git-repo-check') }
+    if ($model) { [void]$argv.Add('-m'); [void]$argv.Add($model) }
+    [void]$argv.Add('-i'); [void]$argv.Add($imageFull)
+    if ($outFile) { [void]$argv.Add('-o'); [void]$argv.Add($outFile) }
+    [void]$argv.Add('-')
+
+    $prompt = ''
+    if ($opts.ContainsKey('prompt-file')) { $prompt = Read-TextOrEmpty ([string]$opts['prompt-file']) }
+    else { $prompt = [Console]::In.ReadToEnd() }
+
+    $timeout = [int]([string](Opt 'timeout-sec' '0'))
+    $spawnArgs = @($target.Prefix) + @($argv[1..($argv.Count - 1)])
+    $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText $prompt -TimeoutSec $timeout
+
+    $stdoutFile = [string](Opt 'stdout-file' '')
+    $stderrFile = [string](Opt 'stderr-file' '')
+    if ($stdoutFile) { Write-TextNoBom $stdoutFile $res.StdOut }
+    if ($stderrFile) { Write-TextNoBom $stderrFile $res.StdErr }
+
+    $classifyText = (Read-TextOrEmpty $outFile) + "`n" + $res.StdOut + "`n" + $res.StdErr
+    $fc = Get-FailureClass -Text $classifyText -RC $res.ExitCode
+
+    $sentinel = $null
+    if ($res.TimedOut) {
+        $sentinel = Get-Sentinel -Kind 'failed' -Detail "codex exec resume timed out after ${timeout}s"
+    } elseif ($fc.envLimit) {
+        $sentinel = Get-Sentinel -Kind 'failed' -Class $fc.class -Detail 'environment limit'
+    }
+
+    $result = [pscustomobject]@{
+        ok           = ($res.ExitCode -eq 0 -and -not $res.TimedOut)
+        stage        = 'resume-image'
+        codexArgv    = $argv
+        threadId     = $threadId
+        image        = $imageFull
+        exitCode     = $res.ExitCode
+        timedOut     = $res.TimedOut
+        stdoutFile   = $stdoutFile
+        stderrFile   = $stderrFile
+        outFile      = $outFile
         failureClass = $fc.class
         envLimit     = $fc.envLimit
         broker       = $fc.broker
@@ -745,6 +894,7 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 switch ($Command) {
     'build-argv'        { Cmd-BuildArgv }
     'run'               { Cmd-Run }
+    'resume-image'      { Cmd-ResumeImage }
     'classify'          { Cmd-Classify }
     'check-diff'        { Cmd-CheckDiff }
     'validate-reviewer' { Cmd-ValidateReviewer }
@@ -754,6 +904,6 @@ switch ($Command) {
     'cleanup'           { Cmd-Cleanup }
     'map-sentinel'      { Cmd-MapSentinel }
     default {
-        Fail 2 "unknown command '$Command'. Valid: build-argv, run, classify, check-diff, validate-reviewer, broker-validate, guard-head, guard-commit, cleanup, map-sentinel"
+        Fail 2 "unknown command '$Command'. Valid: build-argv, run, resume-image, classify, check-diff, validate-reviewer, broker-validate, guard-head, guard-commit, cleanup, map-sentinel"
     }
 }

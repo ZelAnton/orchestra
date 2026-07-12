@@ -530,6 +530,84 @@ if (-not $jj) {
 }
 
 # =============================================================================
+# 14. T-222: `run --emit-json` captures the thread id, and `resume-image`
+# attaches an image to a follow-up call in that same session - the runtime side
+# of the vision-viewing gap researched/documented in T-222 (agents/coder_codex.md,
+# knowledge.md). Confirmed against a real codex-cli 0.144.1 that
+# `codex exec resume <thread-id> -i <image>` is a real, working flow and that
+# `codex exec resume` has NO `--sandbox` flag; these tests exercise the runtime's
+# argv-shape and fail-closed validation against the fake codex, not the real CLI.
+# =============================================================================
+{
+    # (a) run --emit-json: parses `thread.started` off stdout, surfaces threadId.
+    $fake = New-FakeCodex
+    $threadJsonl = '{"type":"thread.started","thread_id":"019f573e-04f2-71e2-8f32-b70d71adc6d8"}' + "`n" +
+                   '{"type":"turn.completed"}'
+    $r = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile), '--emit-json'
+    ) -EnvVars @{ FAKE_CODEX_STDOUT = $threadJsonl; FAKE_CODEX_OUT_CONTENT = 'Done.'; FAKE_CODEX_EXIT = '0' }
+    Assert-True ($null -ne $r.Json) 'emit-json: JSON result present'
+    if ($r.Json) {
+        Assert-Equal '019f573e-04f2-71e2-8f32-b70d71adc6d8' $r.Json.threadId 'emit-json: thread_id extracted from thread.started event'
+    }
+
+    # (a') run WITHOUT --emit-json: threadId stays null (backward compatible - no behaviour
+    # change for existing callers that never pass the new opt-in flag), and --json is never
+    # added to the argv.
+    $argsCap2 = New-TempFile
+    $r2 = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{ FAKE_CODEX_ARGS_FILE = $argsCap2; FAKE_CODEX_EXIT = '0' }
+    Assert-True ($null -eq $r2.Json.threadId) 'no-emit-json: threadId is null when not requested'
+    Assert-True ((Get-ArgsCaptured $argsCap2) -notcontains '--json') 'no-emit-json: argv unchanged, no --json added'
+
+    # (b) resume-image: safe argv shape - `resume <thread-id>`, `-i <image>`, and
+    # deliberately NO --sandbox anywhere (codex exec resume has no such flag).
+    $wt = New-TempDir
+    $imgPath = Join-Path $wt 'shot.png'
+    [System.IO.File]::WriteAllText($imgPath, 'fake-png-bytes', $script:Utf8)
+    $argsCap3 = New-TempFile
+    $stdinCap3 = New-TempFile
+    $r3 = Invoke-Runtime -RuntimeArgs @(
+        'resume-image', '--codex-cmd', $fake, '--worktree', $wt,
+        '--thread-id', '019f573e-04f2-71e2-8f32-b70d71adc6d8', '--image', $imgPath,
+        '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{ FAKE_CODEX_ARGS_FILE = $argsCap3; FAKE_CODEX_STDIN_FILE = $stdinCap3; FAKE_CODEX_OUT_CONTENT = 'red'; FAKE_CODEX_EXIT = '0' }
+    Assert-True ($null -ne $r3.Json) 'resume-image: JSON result present'
+    if ($r3.Json) {
+        Assert-Equal $true $r3.Json.ok 'resume-image: ok true on a clean fake run'
+        Assert-Equal 'resume-image' $r3.Json.stage 'resume-image: stage is resume-image'
+    }
+    $cap3 = Get-ArgsCaptured $argsCap3
+    Assert-True ($cap3.Count -ge 2 -and $cap3[0] -eq 'exec' -and $cap3[1] -eq 'resume') 'resume-image: codex invoked as `exec resume ...`'
+    Assert-True ($cap3 -contains '019f573e-04f2-71e2-8f32-b70d71adc6d8') 'resume-image: argv carries the thread id'
+    Assert-True ($cap3 -contains 'approval_policy=never') 'resume-image: still pins the fail-closed approval policy'
+    Assert-True ($cap3 -notcontains '--sandbox') 'resume-image: NEVER adds --sandbox (codex exec resume has no such flag)'
+    Assert-True ($cap3 -contains '-i' -and $cap3 -contains $imgPath) 'resume-image: argv carries -i <image>'
+
+    # (c) resume-image: an image outside the worktree is refused (exit 2), never attached.
+    $outsideImg = New-TempFile
+    [System.IO.File]::WriteAllText($outsideImg, 'x', $script:Utf8)
+    $r4 = Invoke-Runtime -RuntimeArgs @(
+        'resume-image', '--codex-cmd', $fake, '--worktree', $wt,
+        '--thread-id', '019f573e-04f2-71e2-8f32-b70d71adc6d8', '--image', $outsideImg,
+        '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    )
+    Assert-Equal 2 $r4.ExitCode 'resume-image: image outside worktree rejected with exit 2'
+    Assert-True ($r4.Err -like '*outside*worktree*') 'resume-image: reports the confinement violation'
+
+    # (d) resume-image: a malformed/non-UUID thread id is rejected (never falls back to --last).
+    $r5 = Invoke-Runtime -RuntimeArgs @(
+        'resume-image', '--codex-cmd', $fake, '--worktree', $wt,
+        '--thread-id', 'last', '--image', $imgPath,
+        '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    )
+    Assert-Equal 2 $r5.ExitCode 'resume-image: non-UUID thread id (e.g. the literal "last") rejected with exit 2'
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($item in $script:TempItems) {

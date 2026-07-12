@@ -127,14 +127,20 @@ if ($defaultKeys.Count -eq 0) {
 # resolution - checkout vs cc-sync mirror - task T-114; not a .work/config.md key), plan/doc
 # filenames referenced in caps, git-config-via-environment variable names and a Windows
 # schannel error code quoted verbatim inside the codex adapter's network-override snippet,
-# and the naming-convention term itself. Reviewed by hand against current repo content;
-# extend this list if a genuinely new non-key token starts matching.
+# and the naming-convention term itself. `NEED_IMAGE_VIEW` (T-222) is the codex->adapter
+# vision-viewing-gap protocol token, emitted by codex as "NEED_IMAGE_VIEW: <path>" (a
+# .work/-config-independent signal, symmetric to NEED_NET) - not a .work/config.md key;
+# `THREAD_ID` / `PROMPT_RESUME` (T-222) are the coder_codex adapter's own local shell
+# variables for the resume-image follow-up call (holding the captured session id / the
+# follow-up prompt file path respectively - same nature as CODEX_RT/SKIP_GIT above), not
+# .work/config.md keys. Reviewed by hand against current repo content; extend this list if
+# a genuinely new non-key token starts matching.
 $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CC_CODEX_EXEC_GRANT', 'CODEX_FAILED', 'CODEX_RT', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
         'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
-        'LOOP_ORCHESTRA_ROADMAP', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
-        'OTHER_FAILURE', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
-        'UPPER_SNAKE_CASE'
+        'LOOP_ORCHESTRA_ROADMAP', 'NEED_IMAGE_VIEW', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
+        'OTHER_FAILURE', 'PROMPT_RESUME', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
+        'THREAD_ID', 'UPPER_SNAKE_CASE'
     ), [StringComparer]::Ordinal)
 
 $keyPattern = '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'
