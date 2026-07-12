@@ -19,15 +19,21 @@
 //!    per-task decision (reviewer tier via [`base_reviewer`]), validate the descriptor status
 //!    transition through `state-tx check-transition --kind task`, write the descriptor, and emit
 //!    the round/task events through `tools/outbox.ps1` in the §19 outbox format.
-//! 4. **Per-task review round (opt-in, `--review`).** After the execution round, every task that
-//!    reached `in-review` enters the phase-2.4…2.6 review round: the base reviewer tier is picked
-//!    by [`base_reviewer`] and the concrete reviewer by [`reelect_reviewer`], a supervised reviewer
-//!    stand-in writes the task's `review.md`, [`crate::contract::parse_review`] parses it, and
-//!    [`review_gate`] names the branch. A **clean** pass (`in-review -> ready`) and a **with-findings**
-//!    pass (`in-review -> in-review`, kept under the T-128 fix cycle) are DIFFERENT transitions,
-//!    each validated through `state-tx check-transition` before the descriptor is written; the
-//!    review round brackets and its promotions are emitted through `tools/outbox.ps1`. The phase is
-//!    off by default so the T-109 execution-only baseline (which stops at `in-review`) is unchanged.
+//! 4. **Per-task review fix cycle (opt-in, `--review`).** After the execution round, every task
+//!    that reached `in-review` enters the phase-2.4…2.9 review fix cycle: the base reviewer tier is
+//!    picked by [`base_reviewer`] and the concrete reviewer by [`reelect_reviewer`], a supervised
+//!    reviewer stand-in writes the task's `review.md`, [`crate::contract::parse_review`] parses it,
+//!    and [`review_gate`] names the branch. A **clean** pass promotes `in-review -> ready`;
+//!    **findings** dispatch a supervised deterministic coder fix round and RE-REVIEW, looping under
+//!    [`review_cycle_decision`] (`REVIEW_LOOP_MAX`); an **incomplete** pass re-runs the reviewer
+//!    unchanged (phase 2.7). Exhausting the cycle budget is a CLEAN terminal escalation
+//!    (`in-review -> escalated`, `не сходится ревью после N циклов`) through the SAME
+//!    `state-tx check-transition` + `queue-tx escalate` path the execution round uses — never a
+//!    re-interpretation. Every cycle transition is validated through `state-tx check-transition`
+//!    before the descriptor is written, is recorded on the descriptor as `Циклов-ревью: N`, and is
+//!    emitted through `tools/outbox.ps1` keyed by the cycle number (so each cycle is a DISTINCT
+//!    observable fact by fingerprint). The phase is off by default so the T-109 execution-only
+//!    baseline (which stops at `in-review`) is unchanged.
 //!
 //! **Boundaries this module keeps.** It touches ONLY the `.work` passed as `--work` (the run
 //! subcommand has NO default work dir, so it can never silently resolve the repo's live `.work`);
@@ -46,9 +52,9 @@ use crate::claude::{ClaudeCall, PermissionPosture};
 use crate::contract::{parse_changed_files, parse_outcome, parse_review};
 use crate::lease::{self, AcquireVerdict};
 use crate::resolvers::{
-    base_reviewer, is_ready, plan_admission, reelect_reviewer, review_gate, ActiveClass,
-    ActiveTask, AdmissionOutcome, BaseReviewer, Candidate, CloseReason, CodexReviewer, Domain,
-    ImplBy, Level, ReviewGate, ReviewerRoute,
+    base_reviewer, is_ready, plan_admission, reelect_reviewer, review_cycle_decision, review_gate,
+    ActiveClass, ActiveTask, AdmissionOutcome, BaseReviewer, Candidate, CloseReason, CodexReviewer,
+    CycleDecision, Domain, ImplBy, Level, ReviewGate, ReviewerRoute,
 };
 use crate::state::{Snapshot, TaskState};
 use crate::supervise::{self, Reason, SpawnSpec};
@@ -115,6 +121,14 @@ pub struct RunConfig {
     /// Optional task id whose reviewer stand-in writes an open `R-` finding instead of a fresh
     /// clean `SUMMARY-R` — deterministic fault-injection for the with-findings review branch.
     pub inject_findings: Option<String>,
+    /// The review-cycle limit (`REVIEW_LOOP_MAX`, default 8): how many review→fix→re-review cycles a
+    /// single task may run before the fix cycle escalates it `не сходится ревью после N циклов`.
+    pub review_loop_max: u32,
+    /// Optional convergence point for the `inject_findings` task: its reviewer stand-in yields
+    /// findings while `cycle < converge_after_cycles` and a clean pass from that cycle onward — the
+    /// deterministic "the fix worked at cycle N" knob for the CONVERGING branch. `None` = the fix
+    /// never converges, so persistent findings drive the DIVERGING (escalation) branch.
+    pub converge_after_cycles: Option<u32>,
     /// Wall-clock bound on one supervised leaf call.
     pub leaf_deadline: Duration,
 }
@@ -161,11 +175,15 @@ pub struct ReviewOutcome {
     pub reviewer: &'static str,
     /// The clean / findings / incomplete gate branch [`review_gate`] named.
     pub gate: &'static str,
-    /// The supervised reviewer-leaf stop reason (`ok` / `timeout` / …).
+    /// The supervised reviewer-leaf stop reason (`ok` / `timeout` / …) of the LAST review pass.
     pub supervised: &'static str,
-    /// The descriptor state the review round transitioned to: `ready` on a clean pass, `in-review`
-    /// when findings keep it under the fix cycle, `escalated` on a reviewer-supervision failure.
+    /// The descriptor state the review fix cycle finally transitioned to: `ready` on a converging
+    /// clean pass, `escalated` on exhausting `REVIEW_LOOP_MAX` (or a fail-closed supervision
+    /// failure). The cycle never leaves a task stuck at `in-review`.
     pub to: TaskState,
+    /// How many review cycles ran (the terminal `Циклов-ревью: N` value): the cycle a converging
+    /// clean pass landed on, or the number of cycles completed before the budget escalation.
+    pub cycles: u32,
 }
 
 /// The report of one `run --once`.
@@ -216,10 +234,11 @@ impl RunReport {
             if let Some(r) = &t.review {
                 let _ = writeln!(
                     s,
-                    "      review · reviewer={} · gate={} · leaf={} · {} -> {}",
+                    "      review · reviewer={} · gate={} · leaf={} · cycles={} · {} -> {}",
                     r.reviewer,
                     r.gate,
                     r.supervised,
+                    r.cycles,
                     t.to.as_str(),
                     r.to.as_str(),
                 );
@@ -256,6 +275,7 @@ impl RunReport {
                     "gate": r.gate,
                     "supervised": r.supervised,
                     "to": r.to.as_str(),
+                    "cycles": r.cycles,
                 })),
             })).collect::<Vec<_>>(),
         })
@@ -341,13 +361,18 @@ fn close_reason(admitted: usize, capacity: usize) -> CloseReason {
     }
 }
 
-/// Render the descriptor `task.md` the engine writes on capture / on a status transition.
+/// Render the descriptor `task.md` the engine writes on capture / on a status transition. When the
+/// task is inside the review fix cycle, `review_cycles` carries the current `Циклов-ревью: N` value
+/// (written as an ADDITIVE trailing field so the `Статус:` / `Предпосылки:` / `Конфликт-домен:`
+/// bytes are byte-for-byte unchanged; capture and the execution round pass `None`, so a
+/// pre-review descriptor never grows the field).
 fn descriptor_md(
     id: &str,
     state: TaskState,
     batch: &str,
     prerequisites: &[String],
     conflict_domain: Option<&[String]>,
+    review_cycles: Option<u32>,
 ) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "# {id}");
@@ -359,6 +384,9 @@ fn descriptor_md(
     }
     if let Some(domain) = conflict_domain {
         let _ = writeln!(s, "Конфликт-домен: {}", domain.join(", "));
+    }
+    if let Some(n) = review_cycles {
+        let _ = writeln!(s, "Циклов-ревью: {n}");
     }
     s
 }
@@ -715,6 +743,7 @@ impl<'a> Runner<'a> {
         state: TaskState,
         prerequisites: &[String],
         conflict_domain: Option<&[String]>,
+        review_cycles: Option<u32>,
     ) -> Result<(), RunError> {
         let dir = self.cfg.work.join("tasks").join(id);
         fs::create_dir_all(&dir)
@@ -728,6 +757,7 @@ impl<'a> Runner<'a> {
                 &self.cfg.batch_id,
                 prerequisites,
                 conflict_domain,
+                review_cycles,
             ),
         )
         .map_err(|e| RunError::new(exit::FAILED, format!("write {}: {e}", path.display())))
@@ -833,6 +863,7 @@ impl<'a> Runner<'a> {
                 TaskState::Working,
                 &prereqs_of(&snap, id),
                 descriptor_globs(&snap, id),
+                None,
             )?;
             self.emit(
                 &[
@@ -989,7 +1020,7 @@ impl<'a> Runner<'a> {
 
         // Validate working -> {in-review|escalated} through the state machine, then write it.
         self.check_transition("task", TaskState::Working.as_str(), to.as_str())?;
-        self.write_descriptor(id, to, prerequisites, conflict_domain)?;
+        self.write_descriptor(id, to, prerequisites, conflict_domain, None)?;
 
         // On an escalation, also reflect it in the queue transactionally (queue-tx escalate) so
         // the queue and descriptor agree; the happy path leaves the queue as captured (в работе).
@@ -1107,13 +1138,24 @@ impl<'a> Runner<'a> {
         Ok(())
     }
 
-    /// Review ONE `in-review` task (phases 2.4–2.6): pick the tier via [`base_reviewer`] and the
-    /// concrete reviewer via [`reelect_reviewer`]; take the freshness mark; run the supervised
-    /// reviewer stand-in (deterministic `__fake-agent --mode review`, which writes the task's
-    /// `review.md`); parse it with [`parse_review`]; name the branch with [`review_gate`]; validate
-    /// and write the resulting descriptor transition; and emit the review-phase events. A **clean**
-    /// pass promotes `in-review -> ready`, **findings** keep it `in-review` under the T-128 fix
-    /// cycle, and a reviewer that could not be supervised fail-closes to `escalated`.
+    /// Drive ONE `in-review` task through the phase-2.6…2.9 **review fix cycle** (task T-128).
+    ///
+    /// Resolver 1 (tiering) picks the base Claude reviewer tier for the level and resolver 2b
+    /// (reviewer re-election) the concrete reviewer — through the real resolvers, never a
+    /// hard-coded name; the sandbox is Claude-only (`CODEX_REVIEWER=off`), so this resolves to the
+    /// base Claude reviewer, deterministically the same every cycle.
+    ///
+    /// Each cycle runs a supervised reviewer pass ([`run_review_pass`]) and branches on the
+    /// [`review_gate`]: a **clean** pass promotes `in-review -> ready`; **findings** dispatch a
+    /// supervised deterministic coder fix round ([`run_fix_round`]) and re-review; an **incomplete**
+    /// pass re-runs the reviewer unchanged (phase 2.7 — never hands the coder an empty list). The
+    /// loop repeats under [`review_cycle_decision`] (`REVIEW_LOOP_MAX`); exhausting the budget is a
+    /// CLEAN terminal escalation (`не сходится ревью после N циклов`) through the SAME
+    /// `state-tx check-transition` + `queue-tx escalate` path the execution round uses, never a
+    /// re-interpretation. A reviewer or fix leaf that cannot be supervised is a fail-closed
+    /// escalation. The cycle number is written to the descriptor (`Циклов-ревью: N`) and is the
+    /// `round` coordinate of every emitted `task.status_changed`, so each cycle is a DISTINCT
+    /// observable fact by fingerprint.
     fn run_one_review(
         &mut self,
         id: &str,
@@ -1121,21 +1163,141 @@ impl<'a> Runner<'a> {
         prerequisites: &[String],
         conflict_domain: Option<&[String]>,
     ) -> Result<ReviewOutcome, RunError> {
-        // Resolver 1 (tiering): the base Claude reviewer tier for this level.
         let base = base_reviewer(self.cfg.reviewer_tiering, level);
-        // Resolver 2b (reviewer routing / re-election): elect the concrete reviewer off the range
-        // author. The sandbox is Claude-only (CODEX_REVIEWER=off, the last range authored by the
-        // Claude coder stand-in), so this resolves to the base Claude reviewer — but through the
-        // real resolver, never a hard-coded name.
         let route = reelect_reviewer(CodexReviewer::Off, base, level, &[ImplBy::Claude]);
         let reviewer_name = route_reviewer_name(route);
 
-        // The phase-2.6 freshness cutoff: the UTC mark taken JUST BEFORE the reviewer call. A
-        // clean `SUMMARY-R` must be newer than this. The clean stand-in stamps its summary one
-        // second later (a deterministic, always-fresh "the reviewer finished after the mark").
+        let mut cycle: u32 = 1;
+        loop {
+            // Resolver 4 (cycle limit) BEFORE running the cycle: an exhausted budget is a clean
+            // terminal escalation, not another loop iteration — the deterministic cycle handles
+            // exactly the encoded case and stops cleanly (intent doc §11, R2/R3).
+            if let CycleDecision::Escalate { after_cycles } =
+                review_cycle_decision(cycle, self.cfg.review_loop_max)
+            {
+                let reason = CycleDecision::Escalate { after_cycles }
+                    .escalation_reason()
+                    .unwrap_or_else(|| format!("не сходится ревью после {after_cycles} циклов"));
+                // `after_cycles` (= REVIEW_LOOP_MAX) cycles ran without converging; record that
+                // count as the terminal `Циклов-ревью`/`round` coordinate.
+                let esc_cycle = after_cycles.max(1);
+                self.commit_review_escalation(
+                    id,
+                    esc_cycle,
+                    prerequisites,
+                    conflict_domain,
+                    &reason,
+                    ReviewGate::Findings,
+                    Some(self.cfg.review_loop_max),
+                )?;
+                return Ok(ReviewOutcome {
+                    reviewer: reviewer_name,
+                    gate: "findings",
+                    supervised: "ok",
+                    to: TaskState::Escalated,
+                    cycles: esc_cycle,
+                });
+            }
+
+            let pass = self.run_review_pass(id, reviewer_name, cycle);
+            let to = decide_review_state(pass.supervised_ok, pass.gate);
+
+            match to {
+                TaskState::Ready => {
+                    // A converging clean pass: promote `in-review -> ready` at this cycle.
+                    self.commit_review_transition(
+                        id,
+                        TaskState::Ready,
+                        cycle,
+                        prerequisites,
+                        conflict_domain,
+                        pass.gate,
+                    )?;
+                    return Ok(ReviewOutcome {
+                        reviewer: reviewer_name,
+                        gate: review_gate_label(pass.gate),
+                        supervised: pass.supervised,
+                        to: TaskState::Ready,
+                        cycles: cycle,
+                    });
+                }
+                TaskState::Escalated => {
+                    // The reviewer leaf could not be supervised — fail-closed escalation.
+                    self.commit_review_escalation(
+                        id,
+                        cycle,
+                        prerequisites,
+                        conflict_domain,
+                        "reviewer leaf failed in sandbox review cycle",
+                        pass.gate,
+                        None,
+                    )?;
+                    return Ok(ReviewOutcome {
+                        reviewer: reviewer_name,
+                        gate: review_gate_label(pass.gate),
+                        supervised: pass.supervised,
+                        to: TaskState::Escalated,
+                        cycles: cycle,
+                    });
+                }
+                TaskState::InReview => {
+                    // Findings (2.8) dispatch a supervised coder fix before re-review; an
+                    // incomplete pass (2.7) re-runs the reviewer unchanged. A fix leaf that cannot
+                    // be supervised is itself a fail-closed escalation at this cycle.
+                    if pass.gate == ReviewGate::Findings && !self.run_fix_round(id) {
+                        self.commit_review_escalation(
+                            id,
+                            cycle,
+                            prerequisites,
+                            conflict_domain,
+                            "fix leaf failed in sandbox review cycle",
+                            pass.gate,
+                            None,
+                        )?;
+                        return Ok(ReviewOutcome {
+                            reviewer: reviewer_name,
+                            gate: review_gate_label(pass.gate),
+                            supervised: pass.supervised,
+                            to: TaskState::Escalated,
+                            cycles: cycle,
+                        });
+                    }
+                    // Record the cycle (`in-review -> in-review`, `Циклов-ревью: N`) and re-review.
+                    self.commit_review_transition(
+                        id,
+                        TaskState::InReview,
+                        cycle,
+                        prerequisites,
+                        conflict_domain,
+                        pass.gate,
+                    )?;
+                    cycle += 1;
+                    self.heartbeat()?;
+                }
+                _ => unreachable!("decide_review_state yields only ready/in-review/escalated"),
+            }
+        }
+    }
+
+    /// Run ONE supervised reviewer pass over an `in-review` task: take the phase-2.6 freshness mark,
+    /// spawn the deterministic offline reviewer stand-in (`__fake-agent --mode review`, which writes
+    /// the task's `review.md`), and name the [`review_gate`] branch off the parsed `review.md` — the
+    /// terminal `ИТОГ:` line is NOT what decides clean/with-findings. The `inject_findings` task
+    /// yields findings until it converges (`converge_after_cycles`), the deterministic
+    /// "the fix worked at cycle N" (or never) knob.
+    fn run_review_pass(&self, id: &str, reviewer_name: &str, cycle: u32) -> ReviewPass {
+        // The phase-2.6 freshness cutoff: the UTC mark taken JUST BEFORE the reviewer call. A clean
+        // `SUMMARY-R` must be newer than this; the clean stand-in stamps its summary one second
+        // later (a deterministic, always-fresh "the reviewer finished after the mark").
         let since = now_utc_iso();
         let summary_ts = epoch_to_iso(now_epoch_secs() + 1);
-        let want_findings = self.cfg.inject_findings.as_deref() == Some(id);
+        let want_findings = self.cfg.inject_findings.as_deref() == Some(id)
+            && match self.cfg.converge_after_cycles {
+                // Clean from `threshold` onward — the fix converged; findings before it.
+                Some(threshold) => cycle < threshold,
+                // No convergence point — persistent findings drive the escalation branch.
+                None => true,
+            };
 
         // Build the headless reviewer `claude` argv the engine WOULD spawn (proving the adapter is
         // on the real path), then spawn the deterministic, offline reviewer stand-in instead.
@@ -1172,75 +1334,190 @@ impl<'a> Runner<'a> {
         let parsed = crate::claude::parse_transcript(&v.stdout);
         let supervised_ok = v.reason == Reason::Ok && parsed.is_error != Some(true);
 
-        // The gate reads the `review.md` the reviewer wrote (phase 2.6), exactly like the
-        // processor — the terminal `ИТОГ:` line is NOT what decides clean/with-findings.
         let review_md = fs::read_to_string(self.cfg.work.join("tasks").join(id).join("review.md"))
             .unwrap_or_default();
         let gate = review_gate(&parse_review(&review_md), &since);
-        let to = decide_review_state(supervised_ok, gate);
 
-        // Validate `in-review -> {ready|in-review|escalated}` through the state machine, then write.
-        self.check_transition("task", TaskState::InReview.as_str(), to.as_str())?;
-        self.write_descriptor(id, to, prerequisites, conflict_domain)?;
-
-        // A reviewer that could not be supervised is a fail-closed escalation; reflect it in the
-        // queue transactionally (queue-tx escalate) so the queue and descriptor agree.
-        if to == TaskState::Escalated {
-            let esc_argv = vec![
-                "escalate".into(),
-                "--work".into(),
-                self.work_s.clone(),
-                "--id".into(),
-                id.to_string(),
-                "--reason".into(),
-                "reviewer leaf failed in sandbox review round".into(),
-            ];
-            self.tool_ok(
-                &self.cfg.queue_tx(),
-                &esc_argv,
-                &format!("queue-tx escalate {id}"),
-            )?;
-        }
-
-        // Emit the review-phase transition only when the descriptor status actually changes
-        // (`in-review -> ready` on a clean pass, `-> escalated` on a supervision failure). A
-        // with-findings pass keeps the task `in-review` (no status change) — the review-round
-        // bracket already records that the review phase ran.
-        if to != TaskState::InReview {
-            let from_lit = task_literal(TaskState::InReview);
-            let to_lit = task_literal(to);
-            let payload = format!(
-                "{{\"from\":\"{from_lit}\",\"to\":\"{to_lit}\",\"gate\":\"{}\"}}",
-                review_gate_label(gate)
-            );
-            self.emit(
-                &[
-                    "--type",
-                    "task.status_changed",
-                    "--task-id",
-                    id,
-                    "--from",
-                    from_lit,
-                    "--to",
-                    to_lit,
-                    "--attempt",
-                    "1",
-                    "--round",
-                    "1",
-                    "--payload",
-                    &payload,
-                ],
-                &format!("emit task.status_changed (review) {id}"),
-            )?;
-        }
-
-        Ok(ReviewOutcome {
-            reviewer: reviewer_name,
-            gate: review_gate_label(gate),
+        ReviewPass {
+            gate,
             supervised: v.reason.as_str(),
-            to,
-        })
+            supervised_ok,
+        }
     }
+
+    /// Run ONE coder-side fix round within the fix cycle: build the headless coder `claude` argv the
+    /// engine WOULD spawn, then supervise the deterministic offline coder stand-in
+    /// (`__fake-agent --mode leaf`, verdict `готово`). Returns whether the fix converged cleanly (a
+    /// supervised, cleanly-`готово` leaf); anything else fail-closes the task, exactly like the
+    /// execution round's [`decide_to_state`].
+    fn run_fix_round(&self, id: &str) -> bool {
+        let prompt = format!(
+            "Use the coder subagent to implement task {id}. Worktree={} WORK={}",
+            self.cfg.work.join("worktrees").join(id).display(),
+            self.cfg.work.display()
+        );
+        let mut call = ClaudeCall::new(prompt);
+        call.model = Some("sonnet".into());
+        call.max_turns = Some(40);
+        call.posture = PermissionPosture::BypassInSandbox;
+        let _would_argv = call.to_argv();
+
+        let spec = SpawnSpec::new(
+            &self.cfg.self_exe,
+            vec![
+                "__fake-agent".into(),
+                "--mode".into(),
+                "leaf".into(),
+                "--task".into(),
+                id.to_string(),
+                "--verdict".into(),
+                "готово".into(),
+            ],
+        )
+        .deadline(Some(self.cfg.leaf_deadline));
+        let v = supervise::run(&spec);
+        let parsed = crate::claude::parse_transcript(&v.stdout);
+        let report = parsed.result_text.unwrap_or_default();
+        let verdict = parse_outcome(&report)
+            .map(|o| o.verdict)
+            .unwrap_or_default();
+        v.reason == Reason::Ok && parsed.is_error != Some(true) && verdict == "готово"
+    }
+
+    /// Validate + write ONE review-cycle descriptor transition (`in-review -> {ready|in-review}`),
+    /// recording the cycle counter as `Циклов-ревью: N`, and emit its `task.status_changed` event
+    /// keyed by the cycle number (the `round` coordinate, so cycle N's transition is a DISTINCT
+    /// observable fact by fingerprint even when the status word is unchanged).
+    fn commit_review_transition(
+        &mut self,
+        id: &str,
+        to: TaskState,
+        cycle: u32,
+        prerequisites: &[String],
+        conflict_domain: Option<&[String]>,
+        gate: ReviewGate,
+    ) -> Result<(), RunError> {
+        self.check_transition("task", TaskState::InReview.as_str(), to.as_str())?;
+        self.write_descriptor(id, to, prerequisites, conflict_domain, Some(cycle))?;
+        let from_lit = task_literal(TaskState::InReview);
+        let to_lit = task_literal(to);
+        let round = cycle.to_string();
+        let payload = json!({
+            "from": from_lit,
+            "to": to_lit,
+            "gate": review_gate_label(gate),
+            "cycle": cycle,
+        })
+        .to_string();
+        self.emit(
+            &[
+                "--type",
+                "task.status_changed",
+                "--task-id",
+                id,
+                "--from",
+                from_lit,
+                "--to",
+                to_lit,
+                "--attempt",
+                "1",
+                "--round",
+                &round,
+                "--payload",
+                &payload,
+            ],
+            &format!("emit task.status_changed (review cycle {cycle}) {id}"),
+        )?;
+        Ok(())
+    }
+
+    /// Fail-closed escalation of a task inside the review fix cycle: validate `in-review ->
+    /// escalated`, write the descriptor (with the cycle counter), reflect it in the queue
+    /// transactionally (`queue-tx escalate`) so the queue and descriptor agree, and emit the
+    /// `task.status_changed` event keyed by the cycle number. `cap` carries the ASCII
+    /// `REVIEW_LOOP_MAX` marker + limit for the budget-exhaustion escalation (host-agnostic
+    /// observability; a supervision-failure escalation passes `None`).
+    #[allow(clippy::too_many_arguments)]
+    fn commit_review_escalation(
+        &mut self,
+        id: &str,
+        cycle: u32,
+        prerequisites: &[String],
+        conflict_domain: Option<&[String]>,
+        reason: &str,
+        gate: ReviewGate,
+        cap: Option<u32>,
+    ) -> Result<(), RunError> {
+        self.check_transition(
+            "task",
+            TaskState::InReview.as_str(),
+            TaskState::Escalated.as_str(),
+        )?;
+        self.write_descriptor(
+            id,
+            TaskState::Escalated,
+            prerequisites,
+            conflict_domain,
+            Some(cycle),
+        )?;
+        let esc_argv = vec![
+            "escalate".into(),
+            "--work".into(),
+            self.work_s.clone(),
+            "--id".into(),
+            id.to_string(),
+            "--reason".into(),
+            reason.to_string(),
+        ];
+        self.tool_ok(
+            &self.cfg.queue_tx(),
+            &esc_argv,
+            &format!("queue-tx escalate {id}"),
+        )?;
+        let from_lit = task_literal(TaskState::InReview);
+        let to_lit = task_literal(TaskState::Escalated);
+        let round = cycle.to_string();
+        let mut payload = json!({
+            "from": from_lit,
+            "to": to_lit,
+            "gate": review_gate_label(gate),
+            "cycle": cycle,
+            "reason": reason,
+        });
+        if let Some(limit) = cap {
+            payload["cap"] = json!("REVIEW_LOOP_MAX");
+            payload["limit"] = json!(limit);
+        }
+        let payload = payload.to_string();
+        self.emit(
+            &[
+                "--type",
+                "task.status_changed",
+                "--task-id",
+                id,
+                "--from",
+                from_lit,
+                "--to",
+                to_lit,
+                "--attempt",
+                "1",
+                "--round",
+                &round,
+                "--payload",
+                &payload,
+            ],
+            &format!("emit task.status_changed (review escalate cycle {cycle}) {id}"),
+        )?;
+        Ok(())
+    }
+}
+
+/// The outcome of ONE reviewer pass inside the fix cycle (the [`review_gate`] branch plus the
+/// reviewer-leaf supervision result).
+struct ReviewPass {
+    gate: ReviewGate,
+    supervised: &'static str,
+    supervised_ok: bool,
 }
 
 /// The set of completed task ids for readiness: every `[T-NNN]` in `Tasks_Done.md` plus any
@@ -1378,16 +1655,44 @@ mod tests {
 
     #[test]
     fn descriptor_md_parses_back() {
+        // No review-cycle counter on a pre-review (captured/executed) descriptor.
         let md = descriptor_md(
             "T-201",
             TaskState::Working,
             "B-1",
             &["T-200".to_string()],
             Some(&["engine/src/**".to_string()]),
+            None,
         );
         let d = crate::state::parse_descriptor("T-201", &md);
         assert_eq!(d.state, Some(TaskState::Working));
         assert_eq!(d.prerequisites, vec!["T-200"]);
+        assert!(
+            !md.contains("Циклов-ревью:"),
+            "a pre-review descriptor carries no cycle counter"
+        );
+        assert_eq!(crate::state::parse_review_cycles(&md), None);
+    }
+
+    #[test]
+    fn descriptor_md_records_review_cycle_counter() {
+        // Inside the review fix cycle the counter is written as an additive `Циклов-ревью: N` field
+        // and round-trips through the state-layer reader, WITHOUT disturbing the existing fields.
+        let md = descriptor_md(
+            "T-201",
+            TaskState::InReview,
+            "B-1",
+            &[],
+            Some(&["engine/src/**".to_string()]),
+            Some(3),
+        );
+        assert_eq!(crate::state::parse_review_cycles(&md), Some(3));
+        let d = crate::state::parse_descriptor("T-201", &md);
+        assert_eq!(d.state, Some(TaskState::InReview));
+        assert_eq!(
+            d.conflict_domain.as_deref(),
+            Some(&["engine/src/**".to_string()][..])
+        );
     }
 
     #[test]

@@ -49,6 +49,20 @@ fn parse_conflict_domain(value: &str) -> Option<Vec<String>> {
     .then_some(globs)
 }
 
+/// The persistent review-cycle counter `Циклов-ревью: N` a task's descriptor carries once it
+/// enters the review fix cycle (`agents/processor.md` phases 2.5 / 2.8; `REVIEW_LOOP_MAX`). It is
+/// the inverse of the writer the engine's review round emits, and — like the queue `попытка=N` and
+/// the cohort wave — is the durable coordinate `docs/queue_contract.md` §19 reconstructs the
+/// per-cycle `task.status_changed` event fingerprint from. Absent / non-numeric reads as `None`
+/// (a task that has not yet been reviewed carries no counter), never an error.
+pub fn parse_review_cycles(text: &str) -> Option<u32> {
+    line_field(text, "Циклов-ревью:")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Decode one descriptor's Markdown text under the given `id`.
 pub fn parse_descriptor(id: &str, text: &str) -> Descriptor {
     let status_literal = line_field(text, "Статус:").map(str::to_string);
@@ -133,6 +147,23 @@ mod tests {
         assert_eq!(d.state, None);
         assert_eq!(d.status_literal, None);
         assert!(d.prerequisites.is_empty());
+    }
+
+    #[test]
+    fn review_cycles_counter_parses_and_is_optional() {
+        // Present + numeric: the review round wrote `Циклов-ревью: N`.
+        let text = "# T-1\nСтатус: на ревью\nЦиклов-ревью: 3\n";
+        assert_eq!(parse_review_cycles(text), Some(3));
+        // A trailing inline note after the number is tolerated (first token wins).
+        let noted = "# T-1\nСтатус: на ревью\nЦиклов-ревью: 2 (fix cycle)\n";
+        assert_eq!(parse_review_cycles(noted), Some(2));
+        // Absent (a not-yet-reviewed task) or non-numeric reads as None, never an error.
+        assert_eq!(parse_review_cycles("# T-1\nСтатус: в работе\n"), None);
+        assert_eq!(parse_review_cycles("# T-1\nЦиклов-ревью: many\n"), None);
+        // Adding the counter does not disturb the existing descriptor fields.
+        let d = parse_descriptor("T-1", text);
+        assert_eq!(d.state, Some(TaskState::InReview));
+        assert_eq!(d.status_literal.as_deref(), Some("на ревью"));
     }
 
     #[test]

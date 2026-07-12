@@ -1025,7 +1025,8 @@ fn cmd_run(args: &[String]) {
         eprintln!(
             "usage: run --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]\n\
              \x20          [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>]\n\
-             \x20          [--review] [--inject-findings <T-ID>] [--json]\n\
+             \x20          [--review] [--inject-findings <T-ID>] [--review-loop-max <n>]\n\
+             \x20          [--converge-after <n>] [--json]\n\
              (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work)"
         );
         exit(run::exit::USAGE);
@@ -1062,6 +1063,11 @@ fn cmd_run(args: &[String]) {
     let inject_escalate = opt(args, "--inject-escalate").filter(|s| !s.is_empty());
     let review = args.iter().any(|a| a == "--review");
     let inject_findings = opt(args, "--inject-findings").filter(|s| !s.is_empty());
+    let review_loop_max = opt(args, "--review-loop-max")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(8)
+        .max(1);
+    let converge_after_cycles = opt(args, "--converge-after").and_then(|s| s.parse::<u32>().ok());
     let json = args.iter().any(|a| a == "--json");
 
     let cfg = RunConfig {
@@ -1077,6 +1083,8 @@ fn cmd_run(args: &[String]) {
         inject_escalate,
         review,
         inject_findings,
+        review_loop_max,
+        converge_after_cycles,
         leaf_deadline: Duration::from_secs(60),
     };
 

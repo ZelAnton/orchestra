@@ -34,7 +34,7 @@ pub mod snapshot;
 pub use batch::{load_batch, parse_batch, BatchState, BatchTask};
 pub use canonical::{CohortAdmission, IntegrationState, TaskState};
 pub use cohort::{load_cohort, parse_cohort, CohortState};
-pub use descriptor::{load_descriptors, parse_descriptor, Descriptor};
+pub use descriptor::{load_descriptors, parse_descriptor, parse_review_cycles, Descriptor};
 pub use integration::{load_integration, parse_integration, IntegrationSnapshot};
 pub use queue::{parse_queue, QueueEntry};
 pub use snapshot::Snapshot;
