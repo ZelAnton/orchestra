@@ -43,10 +43,16 @@
       broker-validate   Validate a NEED_NET / dependency-broker command against the
                         canonical allowlist (T-063), rejecting shell metacharacters and
                         non-allowlisted tool/subcommand pairs.
-      guard-commit      No-commit guard: compare the worktree HEAD against a pre-run
-                        commit id; optionally soft-reset (git) so the processor still
-                        commits the leftover working-tree changes. Never --hard, never
-                        touches a path outside the given worktree.
+      guard-head        Print the pre-run "head" fingerprint the no-commit guard compares
+                        (git: `rev-parse HEAD`; jj: the stable `change_id` of `@` plus its
+                        bookmarks - NOT the per-edit `commit_id`, so a plain file edit is
+                        never mistaken for a commit, T-120). The single source both the
+                        PRE capture and guard-commit's POST use, so they cannot diverge.
+      guard-commit      No-commit guard: compare the worktree head (see guard-head)
+                        against a pre-run value; optionally soft-reset (git) so the
+                        processor still commits the leftover working-tree changes. For jj
+                        a moved change_id / bookmark is reported as `jj-drift` (never a
+                        rewrite). Never --hard, never touches a path outside the worktree.
       cleanup           Discard the call's own working-copy changes after a failure so a
                         Claude fallback starts clean. In a main-tree call (Phase 5.4)
                         never runs `git clean -fd` (that would delete the untracked
@@ -493,11 +499,28 @@ function Get-Sentinel {
 # VCS helpers (read-only unless --reset, and even then only soft, only in the
 # given worktree).
 # --------------------------------------------------------------------------
+# The "head" fingerprint the no-commit guard compares pre-run vs post-run. It MUST be
+# stable across an ordinary file edit (which is not a commit) yet change the instant a
+# real commit / history move happens, so a false positive never discards a salvageable
+# codex result while a genuine drift stays fail-closed.
+#
+#   git: `rev-parse HEAD` - HEAD only moves on an actual commit.
+#   jj : the working copy `@` is ALWAYS the tip of a revision whose content-addressed
+#        `commit_id` is auto-snapshotted (rewritten) on EVERY file edit, so `commit_id`
+#        is the wrong signal - it flips on a plain edit and false-positives as `jj-drift`
+#        even though nothing was committed (T-120; KB K-005). The STABLE identity is the
+#        `change_id` of `@`: it survives file edits and only changes when a new revision
+#        is created (`jj new` / `jj commit`). We append `@`'s own bookmarks so a bookmark
+#        set/moved ONTO the working copy (another way codex could "commit" its work) is
+#        caught too; scoping that to `@` keeps the fingerprint immune to an unrelated
+#        bookmark (e.g. `main`) moving in a sibling workspace during the run. `-R
+#        $Worktree` targets THIS workspace's `@` regardless of the process cwd, mirroring
+#        git's `-C $Worktree` - PRE and POST are otherwise different workspaces' heads.
 function Get-Head {
     param([string]$Worktree, [string]$Vcs)
     try {
         if ($Vcs -eq 'jj') {
-            $r = & jj --no-pager log -r '@' --no-graph -T 'commit_id' 2>$null
+            $r = & jj -R $Worktree --no-pager log -r '@' --no-graph -T 'change_id ++ " " ++ bookmarks' 2>$null
             return ([string]$r).Trim()
         }
         $r = & git -C $Worktree rev-parse HEAD 2>$null
@@ -577,6 +600,16 @@ function Cmd-MapSentinel {
     Write-Output (Get-Sentinel -Kind (Require-Opt 'kind') -Class ([string](Opt 'class' '')) -Detail ([string](Opt 'detail' '')))
 }
 
+function Cmd-Head {
+    # Print the bare pre-run head fingerprint (Get-Head) so the caller can capture PRE
+    # through the SAME code path guard-commit uses for POST - PRE and POST can then never
+    # diverge (no duplicated jj template / revset to drift out of sync). Emits a raw
+    # string (not JSON): the adapter captures it directly into a shell variable.
+    $wt = Require-Opt 'worktree'
+    $vcs = [string](Opt 'vcs' 'git')
+    Write-Output (Get-Head -Worktree $wt -Vcs $vcs)
+}
+
 function Cmd-GuardCommit {
     $wt = Require-Opt 'worktree'
     $vcs = [string](Opt 'vcs' 'git')
@@ -586,7 +619,10 @@ function Cmd-GuardCommit {
     $action = 'none'
     if ($committed -and [bool](Opt 'reset' $false)) {
         if ($vcs -eq 'jj') {
-            # A moved jj commit_id must not be rewritten (unattached risk) - just report.
+            # committed=true here means the `change_id` of `@` (or a bookmark on it) moved
+            # - a genuine history drift, NOT a mere file edit (Get-Head fingerprints the
+            # stable change_id, not the per-edit commit_id). A jj revision must not be
+            # rewritten from here (unattached risk) - just report the drift to escalate.
             $action = 'jj-drift'
         } else {
             & git -C $wt reset --soft $pre 2>$null | Out-Null
@@ -713,10 +749,11 @@ switch ($Command) {
     'check-diff'        { Cmd-CheckDiff }
     'validate-reviewer' { Cmd-ValidateReviewer }
     'broker-validate'   { Cmd-BrokerValidate }
+    'guard-head'        { Cmd-Head }
     'guard-commit'      { Cmd-GuardCommit }
     'cleanup'           { Cmd-Cleanup }
     'map-sentinel'      { Cmd-MapSentinel }
     default {
-        Fail 2 "unknown command '$Command'. Valid: build-argv, run, classify, check-diff, validate-reviewer, broker-validate, guard-commit, cleanup, map-sentinel"
+        Fail 2 "unknown command '$Command'. Valid: build-argv, run, classify, check-diff, validate-reviewer, broker-validate, guard-head, guard-commit, cleanup, map-sentinel"
     }
 }
