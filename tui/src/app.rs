@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use orchestra_engine_spike::events::{Event, EventType};
+use orchestra_engine::events::{Event, EventType};
 use serde_json::{Map, Value};
 
 use crate::commands::LeaseStatus;
@@ -573,7 +573,7 @@ fn pstrs(p: &Map<String, Value>, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestra_engine_spike::events::parse_line;
+    use orchestra_engine::events::parse_line;
 
     /// Decode fixture lines (real `.work/events.jsonl` shape) into typed events, like the reader
     /// would hand them over.

@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BIN: &str = env!("CARGO_BIN_EXE_orchestra-engine-spike");
+const BIN: &str = env!("CARGO_BIN_EXE_orchestra-engine");
 
 // Real-format lines (shape copied from `.work/events.jsonl`).
 const A: &str = r#"{"schema_version":1,"event_id":"evt-a","occurred_at":"2026-07-08T12:24:10Z","type":"cohort.opened","batch_id":"B-1","actor":{"kind":"agent","name":"processor"},"payload":{"wave":1,"tasks":["T-1"]}}"#;

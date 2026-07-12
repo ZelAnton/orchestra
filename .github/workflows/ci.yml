@@ -230,6 +230,35 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Run engine/processor parity oracle (pre-cutover equivalence)
+        # tests/test-engine-processor-parity.ps1 (T-110): the pre-cutover EQUIVALENCE ORACLE
+        # of intent doc §9.2/§13. It runs ONE clean cohort scenario two ways - the
+        # processor-prose control loop via tools/harness.ps1, and the deterministic Rust
+        # engine `run --once` (engine/src/run.rs) - over equivalent hermetic sandboxes, and
+        # asserts both converge on the SAME timestamp/event-id-independent phase-1 outbox
+        # fingerprint tools/harness.ps1 already computes; a drift fails the build (non-zero
+        # exit). It lives in `validate` (NOT engine-tui) because it is a pwsh tests/test-*.ps1
+        # that drives tools/harness.ps1 + tools/queue-tx.ps1, so it belongs with the pwsh
+        # suite and must not compromise engine-tui's documented independence from pwsh
+        # tooling. Both prerequisites it needs are present on this matrix's windows-latest +
+        # ubuntu-latest runner images: git (the harness path and checkout use it) and the
+        # Rust toolchain (the test builds the engine bin once via `cargo build --locked` when
+        # it is not already present - the same preinstalled cargo engine-tui relies on), so
+        # the oracle actually runs here rather than self-skipping into a vacuous no-op. The
+        # engine crate's own build/test/lint gate stays the separate engine-tui job. Purely
+        # additive: it does not modify agents/processor.md, tools/harness.ps1 or any other
+        # tools/*.ps1.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-engine-processor-parity.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
   crash-matrix:
     name: Extended crash matrix (non-blocking)
     # The fuller fault-injection enumeration over tools/harness.ps1 is deliberately

@@ -20,7 +20,7 @@ publish = false
 ratatui = "0.29"
 crossterm = "0.28"
 serde_json = "1"
-orchestra-engine-spike = { path = "../engine" }
+orchestra-engine = { path = "../engine" }
 
 [[bin]]
 name = "orchestra-tui"

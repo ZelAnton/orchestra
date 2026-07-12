@@ -251,7 +251,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "orchestra-engine-spike"
+name = "orchestra-engine"
 version = "0.0.1"
 dependencies = [
  "serde_json",
@@ -262,7 +262,7 @@ name = "orchestra-tui"
 version = "0.0.1"
 dependencies = [
  "crossterm",
- "orchestra-engine-spike",
+ "orchestra-engine",
  "ratatui",
  "serde_json",
 ]

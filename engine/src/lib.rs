@@ -1,4 +1,4 @@
-//! orchestra-engine-spike — T-097 Stage 1 de-risking spike.
+//! orchestra-engine — T-097 Stage 1 de-risking spike.
 //!
 //! Purpose (intent doc §8.1, risk R1): prove, OUTSIDE Claude Code, that a compiled engine
 //! can spawn and supervise ONE `claude` leaf-agent call and ONE `codex exec` call with a

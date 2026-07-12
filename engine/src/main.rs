@@ -69,18 +69,18 @@ use std::path::Path;
 use std::process::exit;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use orchestra_engine_spike::claude::{ClaudeCall, PermissionPosture};
-use orchestra_engine_spike::codex::{CodexCall, Sandbox};
-use orchestra_engine_spike::events::TailReader;
-use orchestra_engine_spike::lease::{self, exit as lease_exit, AcquireVerdict, LeaseOp};
-use orchestra_engine_spike::resolvers::{
+use orchestra_engine::claude::{ClaudeCall, PermissionPosture};
+use orchestra_engine::codex::{CodexCall, Sandbox};
+use orchestra_engine::events::TailReader;
+use orchestra_engine::lease::{self, exit as lease_exit, AcquireVerdict, LeaseOp};
+use orchestra_engine::resolvers::{
     admission_gate, base_reviewer, is_ready, plan_admission, unmet_prerequisites, ActiveClass,
     ActiveTask, AdmissionGate, AdmissionOutcome, Candidate, CohortCounters, CohortThresholds,
     Domain, Level,
 };
-use orchestra_engine_spike::run::{self, RunConfig};
-use orchestra_engine_spike::state::{Snapshot, TaskState};
-use orchestra_engine_spike::supervise::{self, SpawnSpec};
+use orchestra_engine::run::{self, RunConfig};
+use orchestra_engine::state::{Snapshot, TaskState};
+use orchestra_engine::supervise::{self, SpawnSpec};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -96,10 +96,10 @@ fn main() {
         "lease" => cmd_lease(&args),
         "run" => cmd_run(&args),
         "__fake-agent" => cmd_fake_agent(&args),
-        "version" | "--version" => println!("orchestra-engine-spike 0.0.1"),
+        "version" | "--version" => println!("orchestra-engine 0.0.1"),
         _ => {
             eprintln!(
-                "usage: orchestra-engine-spike <selfcheck|argv|claude|codex|events|state|plan|lease|run|version>\n\
+                "usage: orchestra-engine <selfcheck|argv|claude|codex|events|state|plan|lease|run|version>\n\
                  (see src/main.rs; live model calls require --live and are opt-in)"
             );
             exit(2);
@@ -112,7 +112,7 @@ fn self_exe() -> String {
     env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "orchestra-engine-spike".to_string())
+        .unwrap_or_else(|| "orchestra-engine".to_string())
 }
 
 /// Hermetic proof: supervise a stand-in child that emits a stream-json transcript, then
@@ -128,7 +128,7 @@ fn cmd_selfcheck() {
     )
     .deadline(Some(Duration::from_secs(30)));
     let v = supervise::run(&spec);
-    let parsed = orchestra_engine_spike::claude::parse_transcript(&v.stdout);
+    let parsed = orchestra_engine::claude::parse_transcript(&v.stdout);
     let success_ok = v.reason == supervise::Reason::Ok
         && parsed.result_seen
         && parsed.is_error == Some(false)
@@ -220,7 +220,7 @@ fn cmd_claude(args: &[String]) {
     let argv = call.to_argv();
     let spec = SpawnSpec::new("claude", argv).deadline(Some(Duration::from_secs(600)));
     let v = supervise::run(&spec);
-    let parsed = orchestra_engine_spike::claude::parse_transcript(&v.stdout);
+    let parsed = orchestra_engine::claude::parse_transcript(&v.stdout);
     println!(
         "reason={} exit={:?} duration_ms={} result_seen={} is_error={:?} subtype={:?}",
         v.reason.as_str(),

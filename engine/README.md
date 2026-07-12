@@ -1,4 +1,4 @@
-# orchestra-engine-spike — T-097 Stage 1 de-risking spike
+# orchestra-engine — foundation of the deterministic orchestrator
 
 This directory (`engine/`) is the top-level home of the future deterministic orchestrator
 engine described in [`plans/DETERMINISTIC_ORCHESTRATOR_INTENT.md`](../plans/DETERMINISTIC_ORCHESTRATOR_INTENT.md).

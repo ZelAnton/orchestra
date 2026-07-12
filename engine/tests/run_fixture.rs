@@ -16,7 +16,7 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BIN: &str = env!("CARGO_BIN_EXE_orchestra-engine-spike");
+const BIN: &str = env!("CARGO_BIN_EXE_orchestra-engine");
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 

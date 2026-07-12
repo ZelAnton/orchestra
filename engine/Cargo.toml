@@ -1,9 +1,9 @@
 [package]
-name = "orchestra-engine-spike"
+name = "orchestra-engine"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.74"
-description = "T-097 Stage 1 de-risking spike: spawn and supervise ONE claude leaf-agent call and ONE codex exec call OUTSIDE Claude Code, with a deadline, maxTurns, structured-output capture and per-invocation permission handling. Proves (or disproves) the subagent spawn/supervise environment (intent doc risk R1) before any headless engine is built."
+description = "Initial deterministic-engine primitives: spawn and supervise ONE claude leaf-agent call and ONE codex exec call OUTSIDE Claude Code, with a deadline, maxTurns, structured-output capture and per-invocation permission handling. Validates the subagent spawn/supervise environment (intent doc risk R1) before the headless engine expands."
 license = "MIT"
 publish = false
 
@@ -18,11 +18,11 @@ publish = false
 serde_json = "1"
 
 [lib]
-name = "orchestra_engine_spike"
+name = "orchestra_engine"
 path = "src/lib.rs"
 
 [[bin]]
-name = "orchestra-engine-spike"
+name = "orchestra-engine"
 path = "src/main.rs"
 
 [profile.release]
