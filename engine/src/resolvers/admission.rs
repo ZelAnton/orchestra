@@ -82,14 +82,19 @@ fn matchers_overlap(a: &Matcher, b: &Matcher) -> bool {
 }
 
 /// A conflict-domain: the set of path globs a task is expected to touch (`Конфликт-домен`).
+/// `unknown` is distinct from a known empty set: it intersects every domain so callers cannot
+/// accidentally pack a task whose descriptor did not provide a usable domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Domain {
     matchers: Vec<Matcher>,
+    unknown: bool,
 }
 
 impl Domain {
-    /// Parse a `Конфликт-домен` value — comma- and/or whitespace-separated globs
-    /// (`engine/src/state/**, engine/src/lib.rs`) — into a domain.
+    /// Parse a known `Конфликт-домен` value — comma- and/or whitespace-separated globs
+    /// (`engine/src/state/**, engine/src/lib.rs`) — into a domain. An empty string remains a
+    /// known empty set for resolver-level callers; descriptor readers use [`Domain::unknown`] for
+    /// missing or invalid fields.
     pub fn parse(spec: &str) -> Domain {
         let matchers = spec
             .split([',', ' ', '\t', '\n', '\r'])
@@ -97,21 +102,48 @@ impl Domain {
             .filter(|s| !s.is_empty())
             .map(matcher)
             .collect();
-        Domain { matchers }
+        Domain {
+            matchers,
+            unknown: false,
+        }
     }
 
-    /// True if this domain shares any path with `other` (any pattern-pair overlaps). An **empty**
-    /// domain (no known paths, e.g. a fresh candidate whose domain the snapshot cannot derive)
-    /// intersects nothing.
+    /// Build a known domain from the typed glob list decoded by the state layer.
+    pub fn from_globs(globs: &[String]) -> Domain {
+        Domain {
+            matchers: globs.iter().map(|glob| matcher(glob)).collect(),
+            unknown: false,
+        }
+    }
+
+    /// A descriptor did not carry a usable `Конфликт-домен`; fail closed by treating it as
+    /// potentially intersecting every other domain.
+    pub fn unknown() -> Domain {
+        Domain {
+            matchers: Vec::new(),
+            unknown: true,
+        }
+    }
+
+    /// True if this domain shares any path with `other` (any pattern-pair overlaps), or either
+    /// side is unknown and therefore must be treated conservatively.
     pub fn intersects(&self, other: &Domain) -> bool {
-        self.matchers
-            .iter()
-            .any(|a| other.matchers.iter().any(|b| matchers_overlap(a, b)))
+        self.unknown
+            || other.unknown
+            || self
+                .matchers
+                .iter()
+                .any(|a| other.matchers.iter().any(|b| matchers_overlap(a, b)))
     }
 
-    /// True if the domain carries no known path (conflicts with nothing).
+    /// True if the domain is a known empty set (and therefore conflicts with nothing).
     pub fn is_empty(&self) -> bool {
-        self.matchers.is_empty()
+        !self.unknown && self.matchers.is_empty()
+    }
+
+    /// True when the descriptor did not provide a usable domain.
+    pub fn is_unknown(&self) -> bool {
+        self.unknown
     }
 }
 

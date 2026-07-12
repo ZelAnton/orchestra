@@ -159,6 +159,9 @@ impl Snapshot {
             if !d.prerequisites.is_empty() {
                 let _ = write!(s, " · prereqs=[{}]", d.prerequisites.join(", "));
             }
+            if let Some(domain) = &d.conflict_domain {
+                let _ = write!(s, " · domain=[{}]", domain.join(", "));
+            }
             let _ = writeln!(s);
         }
         s
@@ -184,6 +187,7 @@ fn descriptor_json(d: &Descriptor) -> Value {
         "state": d.state.map(|s| s.as_str()),
         "status_literal": d.status_literal,
         "prerequisites": d.prerequisites,
+        "conflict_domain": d.conflict_domain,
     })
 }
 

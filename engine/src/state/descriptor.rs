@@ -1,5 +1,6 @@
-//! Parse a task descriptor `.work/tasks/<T-ID>/task.md` — its `Статус:` field (§13.1) and
-//! `Предпосылки:` list — and enumerate all descriptors under `.work/tasks/`.
+//! Parse a task descriptor `.work/tasks/<T-ID>/task.md` — its `Статус:` field (§13.1),
+//! `Предпосылки:` list, and planner-provided `Конфликт-домен:` globs — and enumerate all
+//! descriptors under `.work/tasks/`.
 //!
 //! The descriptor is the processor-owned per-task lifecycle record; its `Статус:` is the
 //! authoritative task state once a task is captured (`не начата` lives only in the queue, before
@@ -22,6 +23,30 @@ pub struct Descriptor {
     pub status_literal: Option<String>,
     /// T-ids from the descriptor's `Предпосылки:` line.
     pub prerequisites: Vec<String>,
+    /// Path globs from `Конфликт-домен:`. `None` means the field was absent or malformed, so a
+    /// caller admitting work must conservatively treat this task as conflicting with everything.
+    pub conflict_domain: Option<Vec<String>>,
+}
+
+/// Decode one planner-provided conflict-domain into individual relative glob/path patterns.
+/// A descriptor with an absent, empty, or non-path-shaped field stays unknown so admission fails
+/// closed rather than packing it as conflict-free.
+fn parse_conflict_domain(value: &str) -> Option<Vec<String>> {
+    let globs: Vec<String> = value
+        .split([',', ' ', '\t'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    (!globs.is_empty()
+        && globs.iter().all(|glob| {
+            !glob.starts_with(['/', '\\'])
+                && !glob.contains(':')
+                && !glob.contains(['<', '>'])
+                && !glob.split(['/', '\\']).any(|part| part == "..")
+        }))
+    .then_some(globs)
 }
 
 /// Decode one descriptor's Markdown text under the given `id`.
@@ -31,11 +56,13 @@ pub fn parse_descriptor(id: &str, text: &str) -> Descriptor {
     let prerequisites = line_field(text, "Предпосылки:")
         .map(parse_task_id_list)
         .unwrap_or_default();
+    let conflict_domain = line_field(text, "Конфликт-домен:").and_then(parse_conflict_domain);
     Descriptor {
         id: id.to_string(),
         state,
         status_literal,
         prerequisites,
+        conflict_domain,
     }
 }
 
