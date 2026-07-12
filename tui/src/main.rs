@@ -187,9 +187,8 @@ fn handle_modal_key(app: &mut AppState, work_dir: &Path, k: KeyEvent) {
                     Ok(true) => {
                         "force-lock: .work/orchestrator.lock удалён (замок снят)".to_string()
                     }
-                    Ok(false) => {
-                        "force-lock: замка не было — .work/orchestrator.lock отсутствует".to_string()
-                    }
+                    Ok(false) => "force-lock: замка не было — .work/orchestrator.lock отсутствует"
+                        .to_string(),
                     Err(e) => format!("force-lock не удался: {e}"),
                 });
             }

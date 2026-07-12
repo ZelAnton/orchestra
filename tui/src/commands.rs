@@ -137,12 +137,18 @@ impl LeaseStatus {
     pub fn summary(&self) -> String {
         match self {
             LeaseStatus::Unavailable(why) => format!("аренда: запрос недоступен ({why})"),
-            LeaseStatus::Absent => "аренда: свободна — .work/orchestrator.lock отсутствует".to_string(),
+            LeaseStatus::Absent => {
+                "аренда: свободна — .work/orchestrator.lock отсутствует".to_string()
+            }
             LeaseStatus::Degraded(detail) => format!("аренда: нечитаемый замок ({detail})"),
             LeaseStatus::Present(l) => {
                 let who = l.owner_id.as_deref().unwrap_or("?");
                 let role = l.role.as_deref().unwrap_or("?");
-                let liveness = if l.live { "жива" } else { "устарела" };
+                let liveness = if l.live {
+                    "жива"
+                } else {
+                    "устарела"
+                };
                 format!("аренда: {liveness} · владелец {who} · роль {role}")
             }
         }
@@ -173,7 +179,11 @@ pub fn parse_lease_status(stdout: &str) -> LeaseStatus {
             .and_then(|x| x.as_str())
             .unwrap_or("нет деталей");
         let legacy = v.get("legacy").and_then(|x| x.as_bool()).unwrap_or(false);
-        let kind = if legacy { "legacy-lock" } else { "corrupt-lease" };
+        let kind = if legacy {
+            "legacy-lock"
+        } else {
+            "corrupt-lease"
+        };
         return LeaseStatus::Degraded(format!("{kind}: {err}"));
     }
     LeaseStatus::Present(LeasePresent {
@@ -419,9 +429,14 @@ mod tests {
     #[test]
     fn parse_lease_status_maps_absent_legacy_and_corrupt() {
         // No lease at all (state-tx exit 14).
-        assert_eq!(parse_lease_status(r#"{"present":false}"#), LeaseStatus::Absent);
+        assert_eq!(
+            parse_lease_status(r#"{"present":false}"#),
+            LeaseStatus::Absent
+        );
         // Legacy mkdir lock (exit 19).
-        match parse_lease_status(r#"{"present":true,"valid":false,"legacy":true,"error":"no lease.json in lock dir"}"#) {
+        match parse_lease_status(
+            r#"{"present":true,"valid":false,"legacy":true,"error":"no lease.json in lock dir"}"#,
+        ) {
             LeaseStatus::Degraded(d) => {
                 assert!(d.starts_with("legacy-lock"));
                 assert!(d.contains("no lease.json"));
@@ -429,7 +444,9 @@ mod tests {
             other => panic!("expected Degraded(legacy), got {other:?}"),
         }
         // Corrupt lease.json (exit 18).
-        match parse_lease_status(r#"{"present":true,"valid":false,"error":"unparseable heartbeat timestamp"}"#) {
+        match parse_lease_status(
+            r#"{"present":true,"valid":false,"error":"unparseable heartbeat timestamp"}"#,
+        ) {
             LeaseStatus::Degraded(d) => assert!(d.starts_with("corrupt-lease")),
             other => panic!("expected Degraded(corrupt), got {other:?}"),
         }
@@ -437,7 +454,10 @@ mod tests {
 
     #[test]
     fn parse_lease_status_degrades_on_garbage() {
-        assert!(matches!(parse_lease_status(""), LeaseStatus::Unavailable(_)));
+        assert!(matches!(
+            parse_lease_status(""),
+            LeaseStatus::Unavailable(_)
+        ));
         assert!(matches!(
             parse_lease_status("not json at all"),
             LeaseStatus::Unavailable(_)

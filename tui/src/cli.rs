@@ -55,9 +55,13 @@ never touches the queue,\ntask descriptors, or code, and never runs the processo
 Decision-Inbox approve/decisions\nare NOT included (that backend does not yet exist).\n\n",
     );
     s.push_str("KEYS:\n");
-    s.push_str("    q / Esc  quit (Esc first closes an open lease popup)   ·   Tab  switch screen\n");
+    s.push_str(
+        "    q / Esc  quit (Esc first closes an open lease popup)   ·   Tab  switch screen\n",
+    );
     s.push_str("    r        reload status.md\n");
-    s.push_str("    p        pause      — create <WORK_DIR>/PAUSE (kill switch, mirrors cc-pause)\n");
+    s.push_str(
+        "    p        pause      — create <WORK_DIR>/PAUSE (kill switch, mirrors cc-pause)\n",
+    );
     s.push_str("    u        resume     — remove <WORK_DIR>/PAUSE (mirrors cc-unpause)\n");
     s.push_str(
         "    s        lease      — show orchestrator.lock owner / liveness (tools/state-tx.ps1 status)\n",

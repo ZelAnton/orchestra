@@ -604,7 +604,10 @@ fn render_inbox_footer(f: &mut Frame, area: Rect, app: &AppState) {
         Style::default().fg(DIM),
     ));
     spans.extend(notice_spans(app));
-    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Left), area);
+    f.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
+        area,
+    );
 }
 
 // ---- command overlays: lease-status popup + force-lock confirmation modal -------------------
@@ -639,14 +642,21 @@ fn render_lease_overlay(f: &mut Frame, lease: &LeaseStatus) {
     if let LeaseStatus::Present(l) = lease {
         lines.push(Line::from(""));
         lines.push(field_line("  роль: ", l.role.as_deref().unwrap_or("?")));
-        lines.push(field_line("  владелец: ", l.owner_id.as_deref().unwrap_or("?")));
+        lines.push(field_line(
+            "  владелец: ",
+            l.owner_id.as_deref().unwrap_or("?"),
+        ));
         if let Some(host) = &l.host {
             lines.push(field_line("  хост: ", host));
         }
         if let Some(pid) = l.pid {
             lines.push(field_line("  pid: ", &pid.to_string()));
         }
-        let liveness = if l.live { "жива" } else { "устарела" };
+        let liveness = if l.live {
+            "жива"
+        } else {
+            "устарела"
+        };
         lines.push(Line::from(vec![
             Span::styled("  состояние: ", Style::default().fg(DIM)),
             Span::styled(
@@ -699,7 +709,9 @@ fn render_force_lock_modal(f: &mut Frame) {
         Line::from(Span::raw(
             "иначе два управляющих цикла столкнутся на одном .work/. Зеркалит",
         )),
-        Line::from(Span::raw("cc-processor.sh --force-lock (rm -rf каталога замка целиком).")),
+        Line::from(Span::raw(
+            "cc-processor.sh --force-lock (rm -rf каталога замка целиком).",
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled(" y ", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
