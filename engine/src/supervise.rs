@@ -9,11 +9,26 @@
 //!
 //!   ok=0  timeout=3  cancelled=4  crash=5  error=6
 //!
-//! SPIKE SCOPE. Tree termination here is `taskkill /T /F` on Windows (reaches children)
-//! and a direct `child.kill()` elsewhere. The production engine should use the Rust
-//! line's `processkit` crate, whose kill-on-drop container (Windows Job Object /
-//! Linux cgroup v2 / POSIX process group) guarantees no descendant outlives the parent —
-//! exactly the guarantee `supervisor.ps1` gets from `Process.Kill($true)`.
+//! TREE TERMINATION (no-orphan guarantee). On timeout / cooperative cancel we tear down the
+//! child's WHOLE process tree, never just the direct child:
+//!   * Windows — `taskkill /PID <pid> /T /F` reaches every descendant (mirrors
+//!     `supervisor.ps1`'s 5.1 path).
+//!   * Unix (Linux / macOS) — the child is spawned as the leader of its OWN process group
+//!     (`Command::process_group(0)`, so its PGID equals its PID and every descendant inherits
+//!     that group), and `kill_tree` signals the whole group (`killpg` SIGTERM then SIGKILL). A
+//!     bare `child.kill()` would reap only the direct child and orphan its grandchildren — the
+//!     exact spike-grade gap this closes. This is the POSIX-process-group form of the guarantee
+//!     `supervisor.ps1` gets from `Process.Kill($true)`.
+//!
+//! The Rust line's async `processkit` crate (kill-on-drop Job Object / cgroup v2 / process
+//! group) remains the intended substrate once the engine itself goes async on tokio; it is
+//! deliberately NOT pulled in here, because this supervisor is synchronous and dependency-lean
+//! while `processkit` is tokio-async and `edition = "2024"` (above this crate's MSRV) — adopting
+//! it would mean an async rewrite plus a large runtime for one syscall's worth of teardown.
+//! Residual limitation shared with any pure process-group approach: if the engine process is
+//! itself hard-killed BEFORE `kill_tree` runs, the group can outlive it — closing that last
+//! window needs the Job Object / cgroup GC net that `processkit` (or a future cgroup-v2 path)
+//! provides. The deterministic timeout / cancel teardown is fully covered.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -126,6 +141,17 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
         use std::os::windows::process::CommandExt;
 
         cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // Spawn the child as the leader of a NEW process group (pgroup 0 => group id equals
+        // the child PID), so every descendant it later spawns inherits that group and a single
+        // `killpg` in `kill_tree` tears the whole tree down — the POSIX no-orphan guarantee.
+        // This is paired with `kill_tree`'s `killpg(child.id(), …)`, which relies on PGID==PID.
+        cmd.process_group(0);
     }
 
     let mut child: Child = match cmd.spawn() {
@@ -269,6 +295,33 @@ fn kill_tree(child: &mut Child) {
             .stderr(Stdio::null())
             .status();
     }
+    #[cfg(unix)]
+    {
+        // The child leads its own process group (`process_group(0)` in `run`), so its PGID
+        // equals its PID and every descendant inherits it. Signalling the GROUP reaches the
+        // whole tree; a bare `child.kill()` would orphan grandchildren. Graceful SIGTERM first
+        // (let a well-behaved child flush and exit), a short grace, then SIGKILL forces any
+        // survivor down. `child.id()` is the positive group id — `killpg` must never receive 0
+        // (that would hit OUR own group), and a spawned child's PID is always > 1, so it can't.
+        let pgid = child.id() as libc::pid_t;
+        // SAFETY: `killpg` is a plain libc call with no memory effects; a failure (typically
+        // ESRCH once the group is already gone) is expected here and safely ignored.
+        unsafe {
+            let _ = libc::killpg(pgid, libc::SIGTERM);
+        }
+        let grace = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < grace {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                _ => thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        // SAFETY: same as above; SIGKILL cannot be caught or ignored, so this guarantees the
+        // whole group is torn down even if a member ignored SIGTERM.
+        unsafe {
+            let _ = libc::killpg(pgid, libc::SIGKILL);
+        }
+    }
     // Direct kill of the immediate child on every platform (also a Windows backstop).
     let _ = child.kill();
     // Bounded wait so we do not hang if the OS is slow to reap.
@@ -304,5 +357,41 @@ mod tests {
         let v = run(&spec);
         assert_eq!(v.reason, Reason::Crash);
         assert!(v.outcome_reason.starts_with("spawn failed"));
+    }
+
+    // The no-orphan guarantee outside Windows: a supervised child that spawns a longer-lived
+    // grandchild must, on deadline, have its WHOLE process group torn down. The old spike
+    // behaviour (a bare `child.kill()`) killed only the shell and left the grandchild running
+    // — under that behaviour the grandchild here would outlive the kill and create its marker
+    // file; with the process-group kill it is terminated mid-sleep and the marker never appears.
+    #[cfg(unix)]
+    #[test]
+    fn kill_tree_reaps_grandchildren_no_orphans() {
+        // The parent shell backgrounds a "grandchild" subshell that writes MARKER only *after* a
+        // 2s sleep, then blocks on `wait`. A 300ms deadline forces the supervisor to time out and
+        // tear the whole group down well before that 2s elapses, so a correctly-killed grandchild
+        // never reaches the write. We assert on that *side effect* (did later code run?) rather
+        // than on PID existence — `kill(pid, 0)` cannot tell a live process from an unreaped
+        // zombie, and in some environments (e.g. a container whose PID 1 is not a reaper) a
+        // correctly-killed grandchild lingers as a zombie and would fool a bare existence probe.
+        let marker =
+            std::env::temp_dir().join(format!("orchestra-t130-{}.marker", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("( sleep 2 && : > '{}' ) & wait", marker.display());
+        let spec = SpawnSpec::new("/bin/sh", vec!["-c".into(), script])
+            .deadline(Some(Duration::from_millis(300)));
+
+        let v = run(&spec);
+        assert_eq!(v.reason, Reason::Timeout, "expected the deadline to fire");
+
+        // Wait past the grandchild's 2s sleep: if the tree-kill missed it, it is still running
+        // and will have created MARKER by now; if the group was torn down, MARKER never appears.
+        thread::sleep(Duration::from_millis(2600));
+        let orphan_ran = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(
+            !orphan_ran,
+            "grandchild kept running after tree-kill — descendant was orphaned"
+        );
     }
 }
