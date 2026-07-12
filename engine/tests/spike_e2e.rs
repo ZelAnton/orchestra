@@ -7,7 +7,7 @@
 use std::process::Command;
 use std::time::Instant;
 
-const BIN: &str = env!("CARGO_BIN_EXE_orchestra-engine-spike");
+const BIN: &str = env!("CARGO_BIN_EXE_orchestra-engine");
 
 #[test]
 fn selfcheck_reports_pass() {

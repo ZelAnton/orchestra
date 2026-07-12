@@ -14,7 +14,7 @@
 //!   already-absent file — that is *not* an error).
 //! * **lease-status** — read who owns `.work/orchestrator.lock` and whether the lease is live,
 //!   strictly through the **existing owner-checked read path**: the engine crate's `lease` module
-//!   (`orchestra_engine_spike::lease`, task T-107) which delegates to `tools/state-tx.ps1 status
+//!   (`orchestra_engine::lease`, task T-107) which delegates to `tools/state-tx.ps1 status
 //!   --json` and *nothing else* (KB K-003). We reuse its argv builder + supervised spawn rather
 //!   than shelling out to a separate `engine` binary or re-implementing any `lease.json` reading.
 //! * **force-lock** — remove the whole `.work/orchestrator.lock` directory, mirroring exactly what
@@ -36,7 +36,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use orchestra_engine_spike::lease;
+use orchestra_engine::lease;
 
 /// The pause kill switch, relative to the `.work/` directory.
 const PAUSE_FILE: &str = "PAUSE";

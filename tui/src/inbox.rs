@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use orchestra_engine_spike::state::{Snapshot, TaskState};
+use orchestra_engine::state::{Snapshot, TaskState};
 
 /// One escalated task — terminal, requires an explicit operator decision (§6.2 Q1/Q2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,9 +212,7 @@ fn dependents_of(id: &str, snapshot: &Snapshot) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestra_engine_spike::state::{
-        Descriptor, IntegrationSnapshot, IntegrationState, QueueEntry,
-    };
+    use orchestra_engine::state::{Descriptor, IntegrationSnapshot, IntegrationState, QueueEntry};
     use std::path::PathBuf;
 
     fn queue_entry(

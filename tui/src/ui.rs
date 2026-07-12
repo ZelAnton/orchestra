@@ -779,7 +779,7 @@ fn short_time(iso: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestra_engine_spike::events::parse_line;
+    use orchestra_engine::events::parse_line;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 

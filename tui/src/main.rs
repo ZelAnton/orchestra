@@ -3,11 +3,11 @@
 //! screens (`Tab`): the §6.1 overview and the §6.2 Decision Inbox.
 //!
 //! It tails `<work>/events.jsonl` through the engine crate's cursor reader
-//! ([`orchestra_engine_spike::events::TailReader`] — the SAME reader the future engine uses, so
+//! ([`orchestra_engine::events::TailReader`] — the SAME reader the future engine uses, so
 //! there is no duplicated tail/dedup/torn-tail logic) and folds the `cohort.*` / `task.*` stream
 //! into the current batch/cohort/task projection ([`app::AppState`]), overlaying human context
 //! from `<work>/status.md` ([`status`]). The Decision Inbox ([`inbox`]) is rebuilt on the same
-//! cadence from a fresh [`orchestra_engine_spike::state::Snapshot`] (queue + task descriptors),
+//! cadence from a fresh [`orchestra_engine::state::Snapshot`] (queue + task descriptors),
 //! whether `<work>/PAUSE` exists, and the task ids already archived to `<work>/Tasks_Done.md`
 //! (used only to confirm, not invent, a predecessor's completion — see [`done_task_ids`]).
 //!
@@ -37,8 +37,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use orchestra_engine_spike::events::TailReader;
-use orchestra_engine_spike::state::Snapshot;
+use orchestra_engine::events::TailReader;
+use orchestra_engine::state::Snapshot;
 
 use app::{AppState, Screen};
 use cli::{Cli, Config};
@@ -249,7 +249,7 @@ fn load_inbox(work_dir: &Path) -> inbox::DecisionInbox {
 
 /// Task ids already archived to `.work/Tasks_Done.md`, decoded from that file's `### [T-NNN]
 /// <title>` headers (same shape as `Tasks_Queue.md`'s own headers, see
-/// `orchestra_engine_spike::state`). Read-only, best-effort: a missing/unreadable file degrades
+/// `orchestra_engine::state`). Read-only, best-effort: a missing/unreadable file degrades
 /// to an empty set, matching the rest of this observer's "total loading" convention (see
 /// `Snapshot::load`) — used only by `inbox::build` to confirm, not to invent, a predecessor's
 /// completion (R-2).
