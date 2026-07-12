@@ -133,6 +133,16 @@ policy, обязательные проверки, пороги, human-review к
 источник правила — `knowledge.md` / `docs/queue_contract.md`, «Резолвинг раннеров
 `tools/*.ps1`».
 
+**Резолвинг контракта очереди (без обхода диска).** Ссылки `docs/queue_contract.md`/
+`Tasks_Queue_Format.md` (в т.ч. форма «см. …, §N», как §18 выше) — **не** команда искать файл на
+диске: читай их по точному пути `$ROOT/docs/queue_contract.md` (полная спецификация —
+`$HOME/.claude/specs/Tasks_Queue_Format.md`, в PowerShell
+`$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
+`find / -maxdepth N` — как и любой другой неограниченный от корня обход: `-maxdepth N` от `/` на
+Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
+может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
+ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+
 # Сверка риска задачи (`Риск:`)
 
 В дескрипторе `task.md` объявлено поле `Риск: low | medium | high` (проставил planner).

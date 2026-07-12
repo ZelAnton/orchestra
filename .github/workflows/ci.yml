@@ -131,6 +131,28 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check queue-contract path resolution guard
+        # tools/check-queue-contract-path-guard.ps1 (T-122): every agents/*.md (and both
+        # *.template.md, from which generate-coders.ps1 produces the coder*/reviewer*
+        # variants) that cites docs/queue_contract.md / Tasks_Queue_Format.md must carry the
+        # canonical resolution+ban guard - the exact absolute paths plus the explicit ban on
+        # `find /`, `find C:/` and `find / -maxdepth N` (a `-maxdepth N` from `/` is NOT a
+        # sufficient mitigation on Windows). T-118 relied on a manual read-vs-citation split
+        # that a live agent defeated by improvising `find / -maxdepth 6 -iname
+        # queue_contract.md`; this guard replaces that manual audit so no future citation can
+        # regress into a disk-wide `find`. knowledge.md and docs/queue_contract.md are checked
+        # too, so the normative docs cannot drop the extension either.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tools/check-queue-contract-path-guard.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY validator $p is missing on ${{ matrix.os }} - a missing mandatory validator is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check reviewer_codex clean-pass / SUMMARY-R gate contract
         # tests/test-reviewer-codex-gate.ps1 (T-074): a reference implementation of the
         # "clean pass" / SUMMARY-R gate rules described in agents/reviewer_codex.md.

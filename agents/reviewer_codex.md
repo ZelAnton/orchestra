@@ -76,6 +76,16 @@ codex не читает и не должен трогать `.work/`.
 запуск ещё и требует предвыданного Bash-гранта (classifier auto-режима отклоняет автономный
 codex), тогда как прочие локальные `pwsh -File …`-раннеры гранта не требуют.
 
+**Резолвинг контракта очереди (без обхода диска).** Ссылки `docs/queue_contract.md`/
+`Tasks_Queue_Format.md` (в т.ч. форма «см. …, §N») — **не** команда искать файл на диске: читай
+их по точному пути `$ROOT/docs/queue_contract.md` (полная спецификация —
+`$HOME/.claude/specs/Tasks_Queue_Format.md`, в PowerShell
+`$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
+`find / -maxdepth N` — как и любой другой неограниченный от корня обход: `-maxdepth N` от `/` на
+Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
+может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
+ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+
 Реально исполняемая Bash-строка адаптера — это не голая `codex exec`, а runtime-обёртка
 `pwsh -File <runtime> …` (см. «Вызов codex (read-only) и прогоны»), где `<runtime>` — путь к
 `codex-runtime.ps1`. Он существует в **двух** раскладках, и голый относительный путь

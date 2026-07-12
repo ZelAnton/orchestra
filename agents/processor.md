@@ -130,6 +130,16 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 нужен предвыданный грант — см. «Разрешение на запуск codex»). Единый источник правила —
 `knowledge.md` / `docs/queue_contract.md`, «Резолвинг раннеров `tools/*.ps1`».
 
+**Резолвинг контракта очереди (без обхода диска).** Ссылки `docs/queue_contract.md`/
+`Tasks_Queue_Format.md` (в т.ч. форма «см. …, §N») — **не** команда искать файл на диске: читай
+их по точному пути `$ROOT/docs/queue_contract.md` (полная спецификация —
+`$HOME/.claude/specs/Tasks_Queue_Format.md`, в PowerShell
+`$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
+`find / -maxdepth N` — как и любой другой неограниченный от корня обход: `-maxdepth N` от `/` на
+Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
+может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
+ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+
 # Одновременно — один оркестратор (аренда владельца)
 
 **Сначала проверь VCS** (см. «Определение VCS» ниже) — если репозиторий не
