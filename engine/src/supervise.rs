@@ -21,6 +21,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Keep PowerShell and console-based tool invocations invisible when the engine is itself
+// started without a console. This is the Win32 CREATE_NO_WINDOW creation flag.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// The four supervised stop reasons (plus `ok`), matching tools/supervisor.ps1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
@@ -115,6 +120,13 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let mut child: Child = match cmd.spawn() {
         Ok(c) => c,
