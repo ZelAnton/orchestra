@@ -1,12 +1,13 @@
 <#
 .SYNOPSIS
-    The pre-cutover EQUIVALENCE ORACLE (task T-110): run ONE cohort scenario two ways -
-    (a) the prose control loop `agents/processor.md` as exercised by `tools/harness.ps1`,
-    and (b) the deterministic Rust engine (`engine run --once`, engine/src/run.rs) - over
-    equivalent hermetic sandboxes, and assert both converge to the SAME timestamp- and
-    event-id-independent final-state fingerprint that `tools/harness.ps1` already computes
-    (the deduplicated set of event IDENTITIES: type + entity + transition, NOT occurred_at /
-    event_id). A drift between the two paths fails the check (non-zero exit).
+    The pre-cutover EQUIVALENCE ORACLE (task T-110, extended by T-129 to the per-task review
+    and fix-cycle surface): run cohort scenarios TWO ways - (a) the prose control loop
+    `agents/processor.md` as exercised by `tools/harness.ps1`, and (b) the deterministic Rust
+    engine (`engine run --once`, engine/src/run.rs) - over equivalent hermetic sandboxes, and
+    assert both converge to the SAME timestamp- and event-id-independent final-state fingerprint
+    that `tools/harness.ps1` already computes (the deduplicated set of event IDENTITIES: type +
+    entity + transition, NOT occurred_at / event_id). A drift between the two paths fails the
+    check (non-zero exit).
 
 .DESCRIPTION
     Intent doc plans/DETERMINISTIC_ORCHESTRATOR_INTENT.md §9.2 makes this the cutover
@@ -21,32 +22,54 @@
     header explains it drives the REAL queue-tx/state-tx/outbox tools that mediate every
     critical processor transition) drives the WHOLE cohort lifecycle (capture -> review ->
     ready -> integrate -> publish -> archive), whereas `engine run --once` (T-109) is the
-    engine's FIRST composed control loop and deliberately covers only ONE cohort/phase: take
-    the lease, open the cohort, capture each admitted task, run ONE supervised round that
-    advances `в работе -> на ревью`, then close admission. The `.work/events.jsonl` outbox is
-    append-only, so the events of that shared "phase 1" prefix survive verbatim inside a full
-    harness run; the outbox event-identity set is therefore the one fingerprint dimension both
-    paths produce identically today. (The queue/descriptor/tree dimensions of the harness's
-    combined fingerprint diverge only because the harness run CONTINUES past phase 1 to archive
-    the tasks and mutate a real VCS trunk - state the engine's one-round run has not reached.)
+    engine's FIRST composed control loop and deliberately covers only the phases it has grown
+    to implement so far: take the lease, open the cohort, capture each admitted task, run ONE
+    supervised round that advances `в работе -> на ревью`, then - as of T-128, opt-in via
+    `--review` - drive the per-task review FIX CYCLE (a clean pass promotes `на ревью -> готова
+    к слиянию`; findings loop `на ревью -> на ревью` under a `REVIEW_LOOP_MAX` cap before
+    escalating `на ревью -> эскалирована`), then close admission. The `.work/events.jsonl`
+    outbox is append-only, so the events of that shared, growing prefix survive verbatim inside
+    a full harness run; the outbox event-identity set is therefore the one fingerprint dimension
+    both paths produce identically today. (The queue/descriptor/tree dimensions of the harness's
+    combined fingerprint diverge only because the harness run CONTINUES past this prefix to
+    integrate, publish, archive the tasks and mutate a real VCS trunk - state the engine's
+    one-round run has not reached.)
 
     So the oracle compares the harness's own event-identity digest and the engine's, each
-    RESTRICTED to the phase-1 vocabulary both implement:
+    RESTRICTED to the vocabulary both implement:
         * cohort.opened
         * task.captured
-        * task.status_changed with transition `в работе>на ревью`
+        * task.status_changed with transition `в работе>на ревью`               (T-110, phase 1)
+        * task.status_changed with transition `на ревью>готова к слиянию`       (T-128, clean pass)
+        * task.status_changed with transition `на ревью>на ревью`               (T-128, incomplete/
+          findings cycle - re-review, `Циклов-ревью: N`)
+        * task.status_changed with transition `на ревью>эскалирована`           (T-128,
+          `REVIEW_LOOP_MAX` exhaustion - a CLEAN terminal escalation, not a re-interpretation)
     and asserts the two restricted sets (hence their SHA-256 fingerprint) are byte-equal. This
     is exactly the equivalence guarantee that must hold before any cutover, computed the same
     way the harness computes its fingerprint (Get-OutboxDigest: identity = type|batch|task|
     from>to, deduplicated by event_id, sorted). As the engine grows to cover later phases, the
     shared vocabulary widens and this oracle tightens - without ever licensing a big-bang.
 
+    TWO PAIRED HERMETIC RUNS. The `на ревью>готова к слиянию` identities come for free from the
+    SAME clean two-task scenario the T-110 oracle already drove (harness scenario `clean` /
+    engine `run --once --review` over T-101+T-102 - both simply reach a clean review pass at
+    cycle 1). The incomplete-cycle and REVIEW_LOOP_MAX-escalation identities need a task whose
+    review never converges, so a SECOND, independent hermetic pairing exercises exactly that:
+    harness scenario `review-cycle` (a single task T-101, one incomplete cycle then escalation)
+    against `engine run --once --review --inject-findings T-101 --review-loop-max 1` (the same
+    deterministic "findings persist, budget of 1" shape) over a FRESH sandbox/fixture. Each
+    path's identity set is the UNION of what its two runs produced (the outbox is append-only
+    within a run, but here the two runs are separate fixtures entirely); the shared task id
+    `T-101` recurring across the two independent fixtures is expected (harness convention:
+    every scenario function names its primary task `T-101`) and harmless - the compared surface
+    is a set of `type|batch|task|from>to` tuples, and the tuples differ by transition.
+
     FAITHFULNESS. The identity extractor here reproduces `tools/harness.ps1`'s Get-OutboxDigest
-    byte-for-byte; a hard assertion cross-checks that running it over the harness's own kept
-    events.jsonl reproduces the harness's self-reported `outbox` digest exactly, so "the same
-    fingerprint the harness already computes" is not merely claimed but proven each run. A
-    deliberate negative self-check perturbs one identity and confirms the fingerprint changes,
-    so a real drift cannot slip through as a false green.
+    byte-for-byte; a hard assertion cross-checks that running it over EACH harness run's own kept
+    events.jsonl reproduces THAT run's self-reported `outbox` digest exactly, so "the same
+    fingerprint the harness already computes" is not merely claimed but proven each run - for
+    both the `clean` and the `review-cycle` pairing.
 
     HERMETIC / OFFLINE. Both runs are against throwaway temp fixtures: the harness builds its
     own disposable, offline, never-pushed git repo + isolated .work; the engine runs over a
@@ -65,7 +88,7 @@
     Runs under PowerShell 7 (pwsh) and Windows PowerShell 5.1, like the rest of tests/*.ps1.
 
     Exit codes:
-      0   the two paths converged on the shared phase-1 fingerprint (or the check self-skipped
+      0   the two paths converged on the shared fingerprint (or the check self-skipped
           because a prerequisite - git / cargo / a buildable engine crate - was absent)
       1   a drift was detected, or a run failed unexpectedly
 
@@ -89,8 +112,12 @@ $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPla
 $script:Failures = [System.Collections.Generic.List[string]]::new()
 $script:TempDirs = [System.Collections.Generic.List[string]]::new()
 
-# The exact phase-1 status transition both paths emit (в работе -> на ревью).
-$script:ReviewTransition = 'в работе>на ревью'
+# The exact status transitions both paths emit today (T-110 phase 1 + T-128 per-task review /
+# fix-cycle, extended by T-129).
+$script:ReviewTransition = 'в работе>на ревью'                 # T-110: working -> in-review
+$script:ReadyTransition = 'на ревью>готова к слиянию'          # T-128: clean review pass
+$script:ReviewLoopTransition = 'на ревью>на ревью'             # T-128: incomplete/findings cycle
+$script:ReviewEscalateTransition = 'на ревью>эскалирована'     # T-128: REVIEW_LOOP_MAX exhausted
 
 function Assert-True { param([bool]$Cond, [string]$Msg) if (-not $Cond) { $script:Failures.Add("FAIL - $Msg") } }
 function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ("$Expected" -cne "$Actual") { $script:Failures.Add("FAIL - ${Msg}: expected [$Expected], got [$Actual]") } }
@@ -167,8 +194,9 @@ function Get-OutboxIdentities {
 # The harness's own digest form: sorted identities joined by ';' (Get-OutboxDigest output).
 function Digest-Of { param($Ids) return ((@($Ids) | Sort-Object) -join ';') }
 
-# Restrict an identity list to the phase-1 vocabulary both paths implement today.
-function Select-PhaseOne {
+# Restrict an identity list to the vocabulary both paths implement today: the T-110 phase-1
+# prefix PLUS the T-128 per-task review / fix-cycle transitions extended by T-129.
+function Select-Compared {
     param($Ids)
     $out = New-Object System.Collections.Generic.List[string]
     foreach ($id in @($Ids)) {
@@ -176,13 +204,19 @@ function Select-PhaseOne {
         $type = $parts[0]
         $trans = if ($parts.Count -ge 4) { $parts[3] } else { '' }
         if ($type -eq 'cohort.opened' -or $type -eq 'task.captured') { $out.Add([string]$id); continue }
-        if ($type -eq 'task.status_changed' -and $trans -eq $script:ReviewTransition) { $out.Add([string]$id); continue }
+        if ($type -eq 'task.status_changed' -and (
+                $trans -eq $script:ReviewTransition -or
+                $trans -eq $script:ReadyTransition -or
+                $trans -eq $script:ReviewLoopTransition -or
+                $trans -eq $script:ReviewEscalateTransition)) {
+            $out.Add([string]$id); continue
+        }
     }
     return $out
 }
-# The timestamp/event-id-independent phase-1 fingerprint: SHA-256 of the sorted, unique
-# phase-1 identity set.
-function PhaseOne-Fingerprint { param($Ids) return (Sha256Hex ((@(Select-PhaseOne $Ids) | Sort-Object -Unique) -join ';')) }
+# The timestamp/event-id-independent compared-surface fingerprint: SHA-256 of the sorted,
+# unique identity set restricted to the shared vocabulary.
+function Compared-Fingerprint { param($Ids) return (Sha256Hex ((@(Select-Compared $Ids) | Sort-Object -Unique) -join ';')) }
 
 # --------------------------------------------------------------------------
 # Cleanup of every temp fixture we created (best-effort, always runs).
@@ -218,35 +252,34 @@ if (-not (Test-Path -LiteralPath $script:EngineBin)) {
     }
 }
 
-# ==========================================================================
-# Path (a): the processor-prose control loop via tools/harness.ps1 (clean scenario).
-# --keep so we can read (and cross-check) its events.jsonl; we remove it ourselves.
-# ==========================================================================
-$harnessJson = $null
-$harnessEvents = ''
+$batchId = 'B-20260101T000000Z'   # tools/harness.ps1 New-Fixture's fixed BatchId (every scenario).
+
 try {
-    $hr = Invoke-Ps $script:Harness @('scenario', '--vcs', 'git', '--name', 'clean', '--keep', '--json')
-    if ($hr.ExitCode -ne 0) {
-        $script:Failures.Add("FAIL - harness clean scenario exited $($hr.ExitCode): $($hr.Err.Trim())")
+    # ======================================================================
+    # PAIRING 1 (T-110 phase 1 + T-128 clean review pass): harness scenario `clean` (T-101 +
+    # T-102, both converge cleanly) vs `engine run --once --review` over an equivalently-seeded
+    # sandbox. --keep so we can read (and cross-check) the harness's events.jsonl.
+    # ======================================================================
+    $harnessJson1 = $null
+    $harnessEvents1 = ''
+    $hr1 = Invoke-Ps $script:Harness @('scenario', '--vcs', 'git', '--name', 'clean', '--keep', '--json')
+    if ($hr1.ExitCode -ne 0) {
+        $script:Failures.Add("FAIL - harness clean scenario exited $($hr1.ExitCode): $($hr1.Err.Trim())")
     } else {
-        try { $harnessJson = $hr.Out.Trim() | ConvertFrom-Json }
-        catch { $script:Failures.Add("FAIL - harness produced unparseable JSON: $($hr.Out)") }
+        try { $harnessJson1 = $hr1.Out.Trim() | ConvertFrom-Json }
+        catch { $script:Failures.Add("FAIL - harness clean scenario produced unparseable JSON: $($hr1.Out)") }
     }
-    if ($harnessJson) {
-        $script:TempDirs.Add([string]$harnessJson.fixture)
-        $harnessEvents = Join-Path ([string]$harnessJson.fixture) 'repo/.work/events.jsonl'
-        Assert-True (Test-Path -LiteralPath $harnessEvents) 'harness kept fixture exposes its events.jsonl outbox'
+    if ($harnessJson1) {
+        $script:TempDirs.Add([string]$harnessJson1.fixture)
+        $harnessEvents1 = Join-Path ([string]$harnessJson1.fixture) 'repo/.work/events.jsonl'
+        Assert-True (Test-Path -LiteralPath $harnessEvents1) 'harness clean fixture exposes its events.jsonl outbox'
     }
 
-    # ======================================================================
-    # Path (b): the deterministic engine over a fresh, equivalently-seeded sandbox.
-    # Seed the SAME task ids and batch id the harness clean scenario uses so the two
-    # phase-1 identity sets are directly comparable.
-    # ======================================================================
-    $batchId = 'B-20260101T000000Z'   # tools/harness.ps1 New-Fixture's fixed BatchId.
-    $sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ('orc-parity-engine-' + [guid]::NewGuid().ToString('N'))
-    $null = New-Item -ItemType Directory -Force -Path $sandbox
-    $script:TempDirs.Add($sandbox)
+    # Seed the SAME task ids and batch id the harness clean scenario uses so the two identity
+    # sets are directly comparable.
+    $sandbox1 = Join-Path ([System.IO.Path]::GetTempPath()) ('orc-parity-engine-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Force -Path $sandbox1
+    $script:TempDirs.Add($sandbox1)
 
     # Seed each task's on-disk descriptor with an explicit, NON-OVERLAPPING `Конфликт-домен:`
     # BEFORE the engine's admission reads it. T-126 taught `engine run` to read the real
@@ -254,76 +287,154 @@ try {
     # CLOSED on a missing/malformed domain (treat it as conflicting with everything) so two
     # undomained tasks are never packed into one cohort by accident. `queue-tx propose` writes ONLY
     # the queue entry (no descriptor), so without a seeded domain the engine sees two unknown
-    # domains and admits just ONE of T-101/T-102 - collapsing the shared phase-1 identity surface
-    # this oracle asserts. Disjoint domains (alpha/** vs beta/**) keep the round genuinely
-    # admitting BOTH into one cohort, now via real domain-based packing.
-    $seedOk = $true
+    # domains and admits just ONE of T-101/T-102 - collapsing the shared identity surface this
+    # oracle asserts. Disjoint domains (alpha/** vs beta/**) keep the round genuinely admitting
+    # BOTH into one cohort, now via real domain-based packing.
+    $seedOk1 = $true
     foreach ($seed in @(@('T-101', 'clean one', 'alpha/**'), @('T-102', 'clean two', 'beta/**'))) {
-        $p = Invoke-Ps $script:QueueTx @('propose', '--work', $sandbox, '--id', $seed[0], '--title', $seed[1])
-        if ($p.ExitCode -ne 0) { $script:Failures.Add("FAIL - seed propose $($seed[0]) exited $($p.ExitCode): $($p.Err.Trim())"); $seedOk = $false; continue }
-        $descDir = Join-Path (Join-Path $sandbox 'tasks') $seed[0]
+        $p = Invoke-Ps $script:QueueTx @('propose', '--work', $sandbox1, '--id', $seed[0], '--title', $seed[1])
+        if ($p.ExitCode -ne 0) { $script:Failures.Add("FAIL - seed propose $($seed[0]) exited $($p.ExitCode): $($p.Err.Trim())"); $seedOk1 = $false; continue }
+        $descDir = Join-Path (Join-Path $sandbox1 'tasks') $seed[0]
         $null = New-Item -ItemType Directory -Force -Path $descDir
         $descText = "# $($seed[0])`nСтатус: не начата`nБатч: $batchId`nКонфликт-домен: $($seed[2])`n"
         [System.IO.File]::WriteAllText((Join-Path $descDir 'task.md'), $descText, $script:Utf8)
     }
 
-    $engineEvents = Join-Path $sandbox 'events.jsonl'
-    if ($seedOk) {
-        $er = Invoke-Proc $script:EngineBin @(
+    # `--review`: run the T-128 per-task review round too (T-129) - both tasks pass clean at
+    # cycle 1 and promote `на ревью -> готова к слиянию`, matching what the harness clean
+    # scenario's own Step-ToReady already emits for T-101/T-102.
+    $engineEvents1 = Join-Path $sandbox1 'events.jsonl'
+    if ($seedOk1) {
+        $er1 = Invoke-Proc $script:EngineBin @(
             'run', '--once',
-            '--work', $sandbox,
+            '--work', $sandbox1,
             '--tools', $script:ToolsDir,
             '--base', 'sandbox-base',
             '--batch', $batchId,
             '--cohort-size', '2',
+            '--review',
             '--json')
-        if ($er.ExitCode -ne 0) {
-            $script:Failures.Add("FAIL - engine run --once exited $($er.ExitCode): $($er.Err.Trim())$($er.Out.Trim())")
+        if ($er1.ExitCode -ne 0) {
+            $script:Failures.Add("FAIL - engine run --once (clean pairing) exited $($er1.ExitCode): $($er1.Err.Trim())$($er1.Out.Trim())")
         } else {
-            Assert-True (Test-Path -LiteralPath $engineEvents) 'engine run wrote its events.jsonl outbox'
+            Assert-True (Test-Path -LiteralPath $engineEvents1) 'engine run (clean pairing) wrote its events.jsonl outbox'
+        }
+    }
+
+    # ======================================================================
+    # PAIRING 2 (T-128 review fix cycle -> REVIEW_LOOP_MAX escalation, T-129): harness scenario
+    # `review-cycle` (a single task T-101 whose review never converges) vs
+    # `engine run --once --review --inject-findings T-101 --review-loop-max 1` over a FRESH,
+    # independent sandbox. Same deterministic shape: findings persist, the budget is 1, so the
+    # task takes exactly ONE incomplete cycle (`на ревью -> на ревью`) then escalates
+    # (`на ревью -> эскалирована`).
+    # ======================================================================
+    $harnessJson2 = $null
+    $harnessEvents2 = ''
+    $hr2 = Invoke-Ps $script:Harness @('scenario', '--vcs', 'git', '--name', 'review-cycle', '--keep', '--json')
+    if ($hr2.ExitCode -ne 0) {
+        $script:Failures.Add("FAIL - harness review-cycle scenario exited $($hr2.ExitCode): $($hr2.Err.Trim())")
+    } else {
+        try { $harnessJson2 = $hr2.Out.Trim() | ConvertFrom-Json }
+        catch { $script:Failures.Add("FAIL - harness review-cycle scenario produced unparseable JSON: $($hr2.Out)") }
+    }
+    if ($harnessJson2) {
+        $script:TempDirs.Add([string]$harnessJson2.fixture)
+        $harnessEvents2 = Join-Path ([string]$harnessJson2.fixture) 'repo/.work/events.jsonl'
+        Assert-True (Test-Path -LiteralPath $harnessEvents2) 'harness review-cycle fixture exposes its events.jsonl outbox'
+    }
+
+    $sandbox2 = Join-Path ([System.IO.Path]::GetTempPath()) ('orc-parity-engine-review-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Force -Path $sandbox2
+    $script:TempDirs.Add($sandbox2)
+
+    $seedOk2 = $true
+    $p2 = Invoke-Ps $script:QueueTx @('propose', '--work', $sandbox2, '--id', 'T-101', '--title', 'review-cycle one')
+    if ($p2.ExitCode -ne 0) { $script:Failures.Add("FAIL - seed propose T-101 (review pairing) exited $($p2.ExitCode): $($p2.Err.Trim())"); $seedOk2 = $false }
+    else {
+        $descDir2 = Join-Path (Join-Path $sandbox2 'tasks') 'T-101'
+        $null = New-Item -ItemType Directory -Force -Path $descDir2
+        $descText2 = "# T-101`nСтатус: не начата`nБатч: $batchId`nКонфликт-домен: zeta/**`n"
+        [System.IO.File]::WriteAllText((Join-Path $descDir2 'task.md'), $descText2, $script:Utf8)
+    }
+
+    $engineEvents2 = Join-Path $sandbox2 'events.jsonl'
+    if ($seedOk2) {
+        $er2 = Invoke-Proc $script:EngineBin @(
+            'run', '--once',
+            '--work', $sandbox2,
+            '--tools', $script:ToolsDir,
+            '--base', 'sandbox-base',
+            '--batch', $batchId,
+            '--cohort-size', '1',
+            '--review',
+            '--inject-findings', 'T-101',
+            '--review-loop-max', '1',
+            '--json')
+        if ($er2.ExitCode -ne 0) {
+            $script:Failures.Add("FAIL - engine run --once (review-cycle pairing) exited $($er2.ExitCode): $($er2.Err.Trim())$($er2.Out.Trim())")
+        } else {
+            Assert-True (Test-Path -LiteralPath $engineEvents2) 'engine run (review-cycle pairing) wrote its events.jsonl outbox'
         }
     }
 
     # ======================================================================
     # Compare the fingerprints.
     # ======================================================================
-    if ($harnessJson -and (Test-Path -LiteralPath $harnessEvents) -and (Test-Path -LiteralPath $engineEvents)) {
-        $harnessIds = Get-OutboxIdentities $harnessEvents
-        $engineIds = Get-OutboxIdentities $engineEvents
+    if ($harnessJson1 -and $harnessJson2 -and (Test-Path -LiteralPath $harnessEvents1) -and (Test-Path -LiteralPath $harnessEvents2) -and
+        (Test-Path -LiteralPath $engineEvents1) -and (Test-Path -LiteralPath $engineEvents2)) {
+        $harnessIds1 = Get-OutboxIdentities $harnessEvents1
+        $harnessIds2 = Get-OutboxIdentities $harnessEvents2
+        $engineIds1 = Get-OutboxIdentities $engineEvents1
+        $engineIds2 = Get-OutboxIdentities $engineEvents2
 
-        # Faithfulness: our extractor reproduces the harness's own Get-OutboxDigest byte-for-byte,
-        # so "the same fingerprint the harness already computes" is proven, not merely asserted.
-        Assert-Equal ([string]$harnessJson.outbox) (Digest-Of $harnessIds) `
-            'our identity extractor reproduces harness Get-OutboxDigest byte-for-byte over the same events.jsonl'
+        # Faithfulness: our extractor reproduces the harness's own Get-OutboxDigest byte-for-byte
+        # over EACH run's own events.jsonl, so "the same fingerprint the harness already
+        # computes" is proven, not merely asserted - for both pairings.
+        Assert-Equal ([string]$harnessJson1.outbox) (Digest-Of $harnessIds1) `
+            'our identity extractor reproduces harness Get-OutboxDigest byte-for-byte (clean pairing)'
+        Assert-Equal ([string]$harnessJson2.outbox) (Digest-Of $harnessIds2) `
+            'our identity extractor reproduces harness Get-OutboxDigest byte-for-byte (review-cycle pairing)'
 
-        $harnessPhaseOne = @(Select-PhaseOne $harnessIds | Sort-Object -Unique)
-        $enginePhaseOne = @(Select-PhaseOne $engineIds | Sort-Object -Unique)
+        # The compared surface is the UNION of both pairings' identities (each pairing is its own
+        # independent hermetic fixture; the outbox itself is never shared between them).
+        $harnessAll = @($harnessIds1) + @($harnessIds2)
+        $engineAll = @($engineIds1) + @($engineIds2)
+        $harnessCompared = @(Select-Compared $harnessAll | Sort-Object -Unique)
+        $engineCompared = @(Select-Compared $engineAll | Sort-Object -Unique)
 
-        # Vacuous-pass guard: the shared phase-1 surface is exactly these five identities
-        # (cohort.opened + two task.captured + two task.status_changed в работе->на ревью),
-        # so an empty-vs-empty match can never masquerade as convergence.
+        # Vacuous-pass guard: the shared surface is exactly these nine identities - two
+        # cohort-opens collapse to one (both pairings reuse the harness's fixed BatchId), so does
+        # T-101's `в работе>на ревью` (T-101 recurs, by harness convention, as the primary task id
+        # of both the `clean` and `review-cycle` scenarios) - so an empty-vs-empty match can never
+        # masquerade as convergence, and a missing transition is caught explicitly.
         $expected = @(
             "cohort.opened|$batchId||",
             "task.captured|$batchId|T-101|",
             "task.captured|$batchId|T-102|",
             "task.status_changed||T-101|$script:ReviewTransition",
-            "task.status_changed||T-102|$script:ReviewTransition"
+            "task.status_changed||T-102|$script:ReviewTransition",
+            "task.status_changed||T-101|$script:ReadyTransition",
+            "task.status_changed||T-102|$script:ReadyTransition",
+            "task.status_changed||T-101|$script:ReviewLoopTransition",
+            "task.status_changed||T-101|$script:ReviewEscalateTransition"
         ) | Sort-Object
-        Assert-Equal ($expected -join "`n") ($harnessPhaseOne -join "`n") 'processor-prose (harness) emits exactly the shared phase-1 identity set'
-        Assert-Equal ($expected -join "`n") ($enginePhaseOne -join "`n") 'the engine emits exactly the shared phase-1 identity set'
+        Assert-Equal ($expected -join "`n") ($harnessCompared -join "`n") 'processor-prose (harness) emits exactly the shared compared identity set'
+        Assert-Equal ($expected -join "`n") ($engineCompared -join "`n") 'the engine emits exactly the shared compared identity set'
 
-        # THE ORACLE: both paths converge on the SAME phase-1 fingerprint.
-        $harnessFp = PhaseOne-Fingerprint $harnessIds
-        $engineFp = PhaseOne-Fingerprint $engineIds
-        Assert-Equal $harnessFp $engineFp 'engine and processor-prose converge on the SAME phase-1 final-state fingerprint (cutover oracle, intent §9.2)'
-        Write-Host "phase-1 fingerprint (processor-prose): $harnessFp"
-        Write-Host "phase-1 fingerprint (engine)         : $engineFp"
+        # THE ORACLE: both paths converge on the SAME compared-surface fingerprint.
+        $harnessFp = Compared-Fingerprint $harnessAll
+        $engineFp = Compared-Fingerprint $engineAll
+        Assert-Equal $harnessFp $engineFp 'engine and processor-prose converge on the SAME final-state fingerprint over the shared vocabulary (cutover oracle, intent §9.2)'
+        Write-Host "compared-surface fingerprint (processor-prose): $harnessFp"
+        Write-Host "compared-surface fingerprint (engine)         : $engineFp"
 
         # Negative self-check: the detector has teeth. Perturbing ONE identity (a drifted
-        # transition) must change the fingerprint, so a real divergence cannot pass green.
-        $perturbed = @($enginePhaseOne) + @("task.status_changed||T-999|$script:ReviewTransition")
+        # review/fix-cycle transition) must change the fingerprint, so a real divergence cannot
+        # pass green.
+        $perturbed = @($engineCompared) + @("task.status_changed||T-999|$script:ReviewEscalateTransition")
         $perturbedFp = Sha256Hex ((@($perturbed) | Sort-Object -Unique) -join ';')
-        Assert-True ($perturbedFp -cne $engineFp) 'a perturbed identity set yields a DIFFERENT fingerprint (drift detector has teeth)'
+        Assert-True ($perturbedFp -cne $engineFp) 'a perturbed review/fix-cycle identity yields a DIFFERENT fingerprint (drift detector has teeth)'
     }
 } finally {
     Cleanup
@@ -333,7 +444,7 @@ try {
 # Report.
 # ==========================================================================
 if ($script:Failures.Count -eq 0) {
-    Write-Host 'OK - engine and processor-prose converge on the shared phase-1 fingerprint (pre-cutover equivalence oracle).'
+    Write-Host 'OK - engine and processor-prose converge on the shared fingerprint (pre-cutover equivalence oracle, T-110 + T-128 surface).'
     exit 0
 }
 Write-Host "FAILED - $($script:Failures.Count) assertion(s):"

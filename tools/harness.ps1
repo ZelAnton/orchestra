@@ -682,7 +682,8 @@ function Seed-Task {
 # transition steps, so any of them can be run with any --fault target it exercises.
 # ==========================================================================
 $script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-    'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')
+    'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout',
+    'approval-stale', 'review-cycle')
 
 function Scenario-Clean {
     param($Fx)
@@ -1019,6 +1020,40 @@ function Scenario-Policy {
     return [pscustomobject]@{ Outcome = 'escalated'; Notes = 'policy denylist hit -> safe escalation halt' }
 }
 
+function Scenario-ReviewCycle {
+    param($Fx)
+    # T-129: the per-task review FIX CYCLE surface (task T-128) that `engine run --once --review`
+    # implements once a task reaches `на ревью` - an INCOMPLETE/findings cycle that re-reviews
+    # (`на ревью -> на ревью`, the `Циклов-ревью: N` coordinate) and, once REVIEW_LOOP_MAX is
+    # exhausted, a CLEAN terminal escalation (`на ревью -> эскалирована`) through the SAME
+    # queue-tx escalate path every other escalating scenario here uses - never a manual halt, never
+    # a re-interpretation. A review-loop limit of 1 (findings persist and never converge) reaches
+    # escalation after exactly ONE incomplete cycle - the SAME deterministic shape
+    # tests/test-engine-processor-parity.ps1 drives on the engine side with
+    # `--review --inject-findings T-101 --review-loop-max 1`, so the two paths' review/fix-cycle
+    # event identities (mirroring engine/src/run.rs's commit_review_transition /
+    # commit_review_escalation) are directly comparable.
+    $t1 = 'T-101'
+    Seed-Task $Fx $t1 'review-cycle one'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1)
+    Vcs-TaskCommit $Fx $t1 3 'V'
+    Step-Capture $Fx $t1
+    Step-ToReview $Fx $t1
+    # Cycle 1: findings dispatch a (modelled) coder fix round and re-review; the incomplete cycle
+    # is recorded as `на ревью -> на ревью` (round=1), mirroring commit_review_transition.
+    Emit-Event $Fx $null @('--type', 'task.status_changed', '--task-id', $t1, '--from', 'на ревью', '--to', 'на ревью', '--attempt', '1', '--round', '1', '--payload', '{"from":"на ревью","to":"на ревью","gate":"findings","cycle":1}')
+    Set-Descriptor $Fx $t1 'на ревью'
+    # Cycle 2 would exceed review-loop-max=1: a CLEAN terminal escalation (never another loop
+    # iteration), reflected in the queue transactionally, mirroring commit_review_escalation.
+    $esc = Invoke-Tool $script:QueueTx @('escalate', '--work', $Fx.Work, '--id', $t1, '--reason', 'не сходится ревью после 1 циклов')
+    if ($esc.ExitCode -ne 0) { Fail 4 "review-cycle escalate failed: $($esc.Err)" }
+    Set-Descriptor $Fx $t1 'эскалирована'
+    Emit-Event $Fx $null @('--type', 'task.status_changed', '--task-id', $t1, '--from', 'на ревью', '--to', 'эскалирована', '--attempt', '1', '--round', '1', '--payload', '{"from":"на ревью","to":"эскалирована","gate":"findings","cycle":1,"cap":"REVIEW_LOOP_MAX","limit":1,"reason":"не сходится ревью после 1 циклов"}')
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":0,"quarantined":0,"escalated":1}')
+    return [pscustomobject]@{ Outcome = 'escalated'; Notes = 'review fix cycle: 1 incomplete cycle then REVIEW_LOOP_MAX exhausted -> escalated' }
+}
+
 # --------------------------------------------------------------------------
 # Publish-gate (T-095) helpers: drive the REAL tools/policy.ps1 check-gate /
 # approval-* verbs deterministically (fixed sha, elapsed, deadline, now) so a
@@ -1269,6 +1304,7 @@ function Invoke-Scenario {
         'reject'           { return (Scenario-Reject $Fx) }
         'approval-timeout' { return (Scenario-ApprovalTimeout $Fx) }
         'approval-stale'   { return (Scenario-ApprovalStale $Fx) }
+        'review-cycle'     { return (Scenario-ReviewCycle $Fx) }
         default            { Fail 2 "unknown scenario '$Name' (valid: $($script:Scenarios -join ', '))" }
     }
 }
