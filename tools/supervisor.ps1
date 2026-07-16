@@ -206,34 +206,11 @@ function Resolve-Target {
 
 # --------------------------------------------------------------------------
 # Terminate the whole child process TREE (so a call that itself spawned workers
-# leaves nothing behind on cancel/timeout).
+# leaves nothing behind on cancel/timeout). Single-sourced in tools/proc-tree.ps1
+# so this and tools/codex-runtime.ps1 share one hardened implementation rather than
+# a per-file copy that could drift (T-256).
 # --------------------------------------------------------------------------
-function Stop-ProcessTree {
-    param($Proc)
-    if ($null -eq $Proc) { return }
-    try { if ($Proc.HasExited) { return } } catch { return }
-    $killedTree = $false
-    try {
-        # .NET 5+ (pwsh): Kill(true) terminates the entire process tree atomically.
-        $treeKill = $Proc.GetType().GetMethod('Kill', [type[]]@([bool]))
-        if ($null -ne $treeKill) {
-            $Proc.Kill($true)
-            $killedTree = $true
-        }
-    } catch {
-        # fall through to the taskkill / bare-Kill fallback below.
-        $killedTree = $false
-    }
-    if (-not $killedTree) {
-        # Windows PowerShell 5.1 has no tree overload: use taskkill /T /F to reach children.
-        $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
-        if ($onWindows) {
-            try { & taskkill /PID $Proc.Id /T /F 2>$null | Out-Null } catch { }
-        }
-        try { if (-not $Proc.HasExited) { $Proc.Kill() } } catch { }
-    }
-    try { $Proc.WaitForExit(5000) | Out-Null } catch { }
-}
+. (Join-Path $PSScriptRoot 'proc-tree.ps1')
 
 # --------------------------------------------------------------------------
 # Cap a captured stream to $MaxBytes (0 = unlimited) on a UTF-8 byte budget, reporting
