@@ -684,7 +684,12 @@ UUID-генератора (degraded без PowerShell) допустим fallback
 
 Типы namespaced: `cohort.*` (`opened`, `round_started`, `round_closed`, `admission_closed`,
 `join_started`, `published`, `closed`), `task.*` (`captured`, `status_changed`), `codex.attempt`.
-Смены статуса — это `task.status_changed` с `from`/`to` в payload (не отдельные типы). `payload` —
+Смены статуса — это `task.status_changed` с `from`/`to` в payload (не отдельные типы). Ранняя
+эскалация по **стагнации** цикла ревью (детектор `STAGNATION_LIMIT`, `agents/processor.md` 2.8)
+использует **этот же** `task.status_changed` (`to: эскалирована`), лишь неся в `reason` причину
+стагнации, отличимую от исчерпания счётчика циклов — **нового типа события для стагнации не
+вводится**; батч-уровневые стагнации F-цикла/CI-фикса (5.2/5.4) фиксируются в `journal.md`/полем
+`ci` события `cohort.published`. `payload` —
 свободная форма по типу, **кроме** `codex.attempt`: у него строгий scalar-allowlist полей
 (`task_id`, `role`, `mode`, `attempt_number`, `started_at`, `ended_at`, `duration_ms`,
 `effective_*`, `exit_code`, `outcome`, `outcome_reason`). Фазовые метрики длительности несут

@@ -52,7 +52,10 @@ pub use coder::{
     network_need, route_coder, CoderRoute, CoderRouteInput, CodexCoder, Ecosystem, EnvLimitClass,
     NetworkNeed, StayClaude,
 };
-pub use cycles::{review_cycle_decision, CycleDecision};
+pub use cycles::{
+    normalize_signature_text, review_cycle_decision, stagnation_decision, AttemptSignature,
+    CycleDecision, StagnationDecision,
+};
 pub use gate::{review_gate, ReviewGate};
 pub use reviewer::{
     reelect_reviewer, route_reviewer, CodexReviewer, ReviewerRoute, ReviewerRouteInput,

@@ -86,6 +86,7 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'REVIEW_LOOP_MAX'         'int'    '8'                                -Min 1)
         (New-ConfigKey 'INTEGRATION_LOOP_MAX'    'int'    '8'                                -Min 1)
         (New-ConfigKey 'CI_FIX_MAX'              'int'    '5'                                -Min 1)
+        (New-ConfigKey 'STAGNATION_LIMIT'        'int'    '2'                                -Min 2)
         (New-ConfigKey 'QUARANTINE_MAX_ATTEMPTS' 'int'    '3'                                -Min 1)
         (New-ConfigKey 'CALL_DEADLINE_SEC'       'int'    '1800'                             -Min 1  -Sensitivity 'medium')
         (New-ConfigKey 'CALL_MAX_ATTEMPTS'       'int'    '2'                                -Min 1)
