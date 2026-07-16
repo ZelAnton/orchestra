@@ -299,6 +299,15 @@ function Get-IdsFromText {
     foreach ($m in [regex]::Matches($Text, 'T-0*(\d+)')) { [void]$ids.Add([int]$m.Groups[1].Value) }
     return ,$ids
 }
+function Get-ArchiveHeaderIds {
+    param([string]$Text)
+    $ids = New-Object System.Collections.Generic.HashSet[int]
+    foreach ($line in ($Text -split "`r?`n")) {
+        $m = [regex]::Match($line, '^\s*###\s*\[\s*T-0*(\d+)\s*\]')
+        if ($m.Success) { [void]$ids.Add([int]$m.Groups[1].Value) }
+    }
+    return ,$ids
+}
 function Get-ActiveIds {
     param([string]$TasksDir)
     $ids = New-Object System.Collections.Generic.HashSet[int]
@@ -407,7 +416,7 @@ function Find-Cycle {
     return $null
 }
 
-function Get-DoneIds { param($Paths) return ,(Get-IdsFromText (Read-TextOrEmpty $Paths.Done)) }
+function Get-DoneIds { param($Paths) return ,(Get-ArchiveHeaderIds (Read-TextOrEmpty $Paths.Done)) }
 
 function Validate-Graph {
     param($Paths, $QueueTasks)

@@ -132,6 +132,27 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Match $r.Output 'not-ready: T-003' '[chain] C still waits on B'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 3b: archive body mentions do not satisfy prerequisites ----
+    $W = New-Work
+    try {
+        $q = @(
+            '# Очередь задач', '',
+            '### [T-101] Pending prerequisite — статус: не начата', 'body', '',
+            '### [T-102] Dependent task — статус: не начата', 'body', 'Предпосылки: T-101'
+        ) -join "`n"
+        $done = @(
+            '# Архив выполненных задач', '',
+            '### [T-100] Completed task — статус: завершена',
+            'Prerequisites: T-101'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Done.md'), $done, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('ready', '--work', $W)
+        Assert-Match $r.Output 'ready: T-101' '[archive-header] pending prerequisite itself remains ready'
+        Assert-Match $r.Output 'not-ready: T-102.*waiting on T-101' '[archive-header] body mention does not complete T-101'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 4: fan-in (one task waits on several predecessors) --------
     $W = New-Work
     try {
@@ -143,7 +164,7 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Match $r.Output 'not-ready: T-003.*waiting on T-001.*waiting on T-002' '[fan-in] C waits on both'
 
         # archive only A -> C still not ready (still waits on B)
-        Set-Content -LiteralPath (Join-Path $W 'Tasks_Done.md') -Value '[T-001]' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $W 'Tasks_Done.md') -Value '### [T-001] FanIn A — статус: завершена' -Encoding utf8
         Run-Tool @('archive', '--work', $W, '--id', 'T-001') | Out-Null
         $r = Run-Tool @('ready', '--work', $W, '--id', 'T-003')
         Assert-Equal 6 $r.ExitCode '[fan-in] C not ready with one predecessor still open'
@@ -161,7 +182,7 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Match $r.Output 'not-ready: T-002.*T-001' '[fan-out] B waits on A'
         Assert-Match $r.Output 'not-ready: T-003.*T-001' '[fan-out] C waits on A'
 
-        Set-Content -LiteralPath (Join-Path $W 'Tasks_Done.md') -Value '[T-001]' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $W 'Tasks_Done.md') -Value '### [T-001] FanOut A — статус: завершена' -Encoding utf8
         Run-Tool @('archive', '--work', $W, '--id', 'T-001') | Out-Null
         $r = Run-Tool @('ready', '--work', $W)
         Assert-Match $r.Output 'ready: T-002 T-003' '[fan-out] both dependents ready once A archived'

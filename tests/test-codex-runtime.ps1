@@ -530,7 +530,44 @@ if (-not $jj) {
 }
 
 # =============================================================================
-# 14. T-222: `run --emit-json` captures the thread id, and `resume-image`
+# 14. jj cleanup targets the requested worktree even when invoked elsewhere
+# =============================================================================
+{
+    $fakeBin = New-TempDir
+    $fakeJj = Join-Path $fakeBin 'jj.ps1'
+    $argsCap = New-TempFile
+    $wt = New-TempDir
+    $callerDir = New-TempDir
+    $fakeJjBody = @'
+if ($env:FAKE_JJ_ARGS_FILE) {
+    Set-Content -LiteralPath $env:FAKE_JJ_ARGS_FILE -Value $args -Encoding utf8
+}
+'@
+    [System.IO.File]::WriteAllText($fakeJj, $fakeJjBody, $script:Utf8)
+
+    Assert-True ((Resolve-Path $callerDir).Path -ne (Resolve-Path $wt).Path) 'cleanup(jj): caller directory differs from requested worktree'
+    Push-Location $callerDir
+    try {
+        $r = Invoke-Runtime -RuntimeArgs @('cleanup', '--worktree', $wt, '--vcs', 'jj') -EnvVars @{
+            PATH = $fakeBin + [System.IO.Path]::PathSeparator + $env:PATH
+            FAKE_JJ_ARGS_FILE = $argsCap
+        }
+    } finally {
+        Pop-Location
+    }
+
+    Assert-Equal 0 $r.ExitCode 'cleanup(jj): runtime exits successfully'
+    $cap = Get-ArgsCaptured $argsCap
+    Assert-Equal 3 $cap.Count 'cleanup(jj): jj receives exactly the repository selector and restore command'
+    if ($cap.Count -eq 3) {
+        Assert-Equal '-R' $cap[0] 'cleanup(jj): jj argv starts with -R'
+        Assert-Equal $wt $cap[1] 'cleanup(jj): -R targets the requested worktree'
+        Assert-Equal 'restore' $cap[2] 'cleanup(jj): restore follows the worktree selector'
+    }
+}.Invoke()
+
+# =============================================================================
+# 15. T-222: `run --emit-json` captures the thread id, and `resume-image`
 # attaches an image to a follow-up call in that same session - the runtime side
 # of the vision-viewing gap researched/documented in T-222 (agents/coder_codex.md,
 # knowledge.md). Confirmed against a real codex-cli 0.144.1 that

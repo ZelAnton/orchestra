@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Testable, cross-platform runtime for the Codex adapters (task T-075).
 
@@ -666,7 +666,7 @@ function Cmd-Cleanup {
     $mainTree = [bool](Opt 'main-tree' $false)
     $actions = New-Object System.Collections.Generic.List[string]
     if ($vcs -eq 'jj') {
-        & jj restore 2>$null | Out-Null
+        & jj -R $wt restore 2>$null | Out-Null
         [void]$actions.Add('jj-restore')
     } else {
         & git -C $wt checkout -- . 2>$null | Out-Null
