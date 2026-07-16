@@ -196,7 +196,9 @@ workspace, коммитит результаты листовых агентов
   worktree, отказ на `..`/escape/подмену), `check-paths` (фактические пути против denylist
   после каждого возврата исполнителя и перед commit/merge/publication) и `check-publish`
   (allowed branch/remote + push/merge policy как технический precondition, не текстовый
-  отчёт). processor встраивает эти вызовы в Фазы 1.5/5.3, merger — в свой merge-self-check.
+  отчёт). `Get-PathComparer` применяется только к файловым путям; git refs, remotes и SHA
+  сравниваются ordinal case-sensitive на всех ОС. processor встраивает эти вызовы в Фазы
+  1.5/5.3, merger — в свой merge-self-check.
   Список ключей и Codex-enum'ы схемы **машинно-сверяются** с `config.example.md`
   (`tools/check-consistency.ps1`, класс 5), а та — с `cc-doctor` (класс 4): движок
   `cc-doctor` (`tools/doctor-runtime.ps1`) держит копию хардкодом (mirror-совместимость),
