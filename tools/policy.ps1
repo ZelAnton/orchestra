@@ -663,10 +663,10 @@ function Cmd-CheckGate {
         # last record in input order.
         $recsForName = $byName[$name]
         $pick = $recsForName[$recsForName.Count - 1]
-        $best = -1
+        [long]$best = -1
         foreach ($rec in $recsForName) {
             $rid = JProp $rec 'run_id'
-            if ($rid -match '^\d+$' -and [int]$rid -ge $best) { $best = [int]$rid; $pick = $rec }
+            if ($rid -match '^\d+$' -and [long]$rid -ge $best) { $best = [long]$rid; $pick = $rec }
         }
         $cls = Get-CiCheckClass (JProp $pick 'status') (JProp $pick 'conclusion')
         switch ($cls) {

@@ -556,10 +556,23 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 10 'check-gate: green runs for another sha do not satisfy the gate (still pending)'
     Assert-Equal 2 (CGJson $r).missing.Count 'check-gate: other-sha runs count as missing'
 
-    # rerun: a required check first failed then re-ran green (higher run_id wins) -> ready
-    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"failure`",`"run_id`":11}`n{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":22}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":5}`n"
+    # Real GitHub Actions run IDs exceed Int32.MaxValue and must still produce a verdict.
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":29199450670}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":29199450669}`n"
     $r = CG @('--checks-from', $checks, '--elapsed-sec', '10')
-    Assert-Exit $r 0 'check-gate: rerun of a failed check to green (latest run wins) -> ready'
+    Assert-Exit $r 0 'check-gate: realistic 11-digit run IDs -> ready without overflow'
+    Assert-Equal 'ready' (CGJson $r).verdict 'check-gate: large run ID verdict ready'
+
+    # rerun: a required check failed then re-ran green; the higher large run_id wins even
+    # when the input records are reversed, rather than falling back to input order.
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":29199450671}`n{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"failure`",`"run_id`":29199450670}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":29199450672}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10')
+    Assert-Exit $r 0 'check-gate: rerun with large run IDs selects the latest -> ready'
+    Assert-Equal 'ready' (CGJson $r).verdict 'check-gate: large run ID rerun verdict ready'
+
+    # Without run_id, preserve the documented fallback to the last record in input order.
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"failure`"}`n{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10')
+    Assert-Exit $r 0 'check-gate: absent run IDs fall back to the last record -> ready'
 
     # no required-checks section at all -> degrade to OK (CI_WATCH governs)
     $bare = New-Sandbox
