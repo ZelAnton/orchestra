@@ -455,17 +455,26 @@ mod tests {
     fn stagnation_different_signatures_in_a_row_is_progress() {
         // Default STAGNATION_LIMIT = 2: three DIFFERENT findings back to back is progress.
         let hist = [sig("finding a"), sig("finding b"), sig("finding c")];
-        assert_eq!(stagnation_decision(&hist, 2), StagnationDecision::Progressing);
+        assert_eq!(
+            stagnation_decision(&hist, 2),
+            StagnationDecision::Progressing
+        );
     }
 
     #[test]
     fn stagnation_repeat_below_limit_is_progress() {
         // One occurrence (the first time a finding appears) is below the default limit of 2.
         let hist = [sig("finding a")];
-        assert_eq!(stagnation_decision(&hist, 2), StagnationDecision::Progressing);
+        assert_eq!(
+            stagnation_decision(&hist, 2),
+            StagnationDecision::Progressing
+        );
         // A prior different finding then the current one once = trailing run of 1 < 2.
         let hist = [sig("finding a"), sig("finding b")];
-        assert_eq!(stagnation_decision(&hist, 2), StagnationDecision::Progressing);
+        assert_eq!(
+            stagnation_decision(&hist, 2),
+            StagnationDecision::Progressing
+        );
     }
 
     #[test]
@@ -484,7 +493,10 @@ mod tests {
         );
         // Only the TRAILING run counts: an earlier repeat that was then broken does not.
         let hist = [sig("finding a"), sig("finding a"), sig("finding b")];
-        assert_eq!(stagnation_decision(&hist, 2), StagnationDecision::Progressing);
+        assert_eq!(
+            stagnation_decision(&hist, 2),
+            StagnationDecision::Progressing
+        );
     }
 
     #[test]
@@ -495,7 +507,10 @@ mod tests {
             AttemptSignature::of_finding("missing null check", "file.rs:12"),
             AttemptSignature::of_finding("missing null check", "file.rs:40"),
         ];
-        assert_eq!(stagnation_decision(&hist, 2), StagnationDecision::Progressing);
+        assert_eq!(
+            stagnation_decision(&hist, 2),
+            StagnationDecision::Progressing
+        );
         // Same wording AND same evidence twice in a row is a genuine stall.
         let hist = [
             AttemptSignature::of_finding("missing null check", "file.rs:12"),
@@ -523,7 +538,10 @@ mod tests {
         assert_eq!(stagnation_decision(&[], 2), StagnationDecision::Progressing);
         // limit 0 (never a valid STAGNATION_LIMIT) is inert even on an identical run.
         let hist = [sig("a"), sig("a"), sig("a")];
-        assert_eq!(stagnation_decision(&hist, 0), StagnationDecision::Progressing);
+        assert_eq!(
+            stagnation_decision(&hist, 0),
+            StagnationDecision::Progressing
+        );
         // A tight limit of 1 stagnates on the first occurrence (degenerate but consistent).
         assert_eq!(
             stagnation_decision(&[sig("a")], 1),
