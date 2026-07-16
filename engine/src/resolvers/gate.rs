@@ -38,6 +38,21 @@ pub fn review_gate(parse: &ReviewParse, since: &str) -> ReviewGate {
     }
 }
 
+/// The **integration-review** gate (`agents/processor.md` phase 5.2): the same three-way branch as
+/// [`review_gate`], but over the batch-level integration findings (`F-` / `SUMMARY-F`) instead of
+/// the per-task ones (`R-` / `SUMMARY-R`). Open `F-` findings take precedence; else a fresh clean
+/// pass (a `SUMMARY-F` newer than `since` and no open `F-`); else the pass is incomplete (the
+/// `full_reviewer` was cut short — re-run it unchanged, never fabricate an empty fix list).
+pub fn integration_gate(parse: &ReviewParse, since: &str) -> ReviewGate {
+    if !parse.open_integration_findings().is_empty() {
+        ReviewGate::Findings
+    } else if parse.is_clean_integration_pass(since) {
+        ReviewGate::Clean
+    } else {
+        ReviewGate::Incomplete
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,6 +108,38 @@ mod tests {
         let resolved = "### [R-01] done — статус: исправлено\n";
         assert_eq!(
             review_gate(&parse_review(resolved), SINCE),
+            ReviewGate::Incomplete
+        );
+    }
+
+    #[test]
+    fn integration_gate_mirrors_review_gate_over_f_findings() {
+        // Open F- → Findings, even with a fresh SUMMARY-F.
+        let dirty = "\
+### [F-02] build break — статус: новая\n\
+### [SUMMARY-F-2026-07-10T18:00:00Z] Итог — статус: готово к слиянию\n";
+        assert_eq!(
+            integration_gate(&parse_review(dirty), SINCE),
+            ReviewGate::Findings
+        );
+        // Fresh SUMMARY-F, no open F- → Clean.
+        let clean = "\
+### [F-01] fixed — статус: исправлено\n\
+### [SUMMARY-F-2026-07-10T18:00:00Z] Итог — статус: готово к слиянию\n";
+        assert_eq!(
+            integration_gate(&parse_review(clean), SINCE),
+            ReviewGate::Clean
+        );
+        // No fresh SUMMARY-F, no open F- (interrupted full_reviewer) → Incomplete.
+        let stale = "### [SUMMARY-F-2026-07-10T16:00:00Z] Итог — статус: готово к слиянию\n";
+        assert_eq!(
+            integration_gate(&parse_review(stale), SINCE),
+            ReviewGate::Incomplete
+        );
+        // A per-task SUMMARY-R must NOT satisfy the integration gate.
+        let cross = "### [SUMMARY-R-2026-07-10T18:00:00Z] Итог — статус: готово к слиянию\n";
+        assert_eq!(
+            integration_gate(&parse_review(cross), SINCE),
             ReviewGate::Incomplete
         );
     }
