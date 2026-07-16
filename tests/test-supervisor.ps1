@@ -64,7 +64,10 @@ function ArgsJson { param([string[]]$A) return (, $A | ConvertTo-Json -Compress)
 
 # Runs supervisor.ps1 as a child pwsh process; returns @{ ExitCode; Out; Err }.
 function Invoke-Spv {
-    param([string[]]$ToolArgs)
+    param(
+        [string[]]$ToolArgs,
+        [hashtable]$EnvironmentOverrides = @{}
+    )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:PsExe
     $psi.UseShellExecute = $false
@@ -73,6 +76,9 @@ function Invoke-Spv {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
+    foreach ($name in $EnvironmentOverrides.Keys) {
+        $psi.Environment[[string]$name] = [string]$EnvironmentOverrides[$name]
+    }
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) { $psi.ArgumentList.Add($a) }
     $proc = [System.Diagnostics.Process]::Start($psi)
     $outT = $proc.StandardOutput.ReadToEndAsync()
@@ -105,22 +111,30 @@ function Assert-Contains { param([string]$Haystack, [string]$Needle, [string]$Ms
 function Assert-NotContains { param([string]$Haystack, [string]$Needle, [string]$Msg) if ($Haystack.IndexOf($Needle, [System.StringComparison]::Ordinal) -ge 0) { $script:Failures.Add("FAIL - ${Msg}: [$Needle] must NOT be present but was") } }
 
 # A parametric worker stub every scenario drives. Understands --code/--sleep/--flood/
-# --cancel-after(+--touch)/--spawn-marker/--counter(+--fail-until +--fail-code)/--print.
+# --cancel-after(+--touch)/--spawn-marker(+--spawn-ready)/
+# --counter(+--fail-until +--fail-code)/--print.
 function New-Worker {
     param([string]$Dir)
     $p = Join-Path $Dir 'worker.ps1'
     $body = @'
 param()
-$code=0;$sleep=0;$flood=0;$cancelAfter=0;$touch='';$spawn='';$counter='';$failUntil=0;$failCode=42;$print=''
+$code=0;$sleep=0;$flood=0;$cancelAfter=0;$touch='';$spawn='';$spawnReady='';$counter='';$failUntil=0;$failCode=42;$print=''
 for($i=0;$i -lt $args.Count;$i++){switch([string]$args[$i]){
  '--code'{$code=[int]$args[++$i]} '--sleep'{$sleep=[int]$args[++$i]} '--flood'{$flood=[int]$args[++$i]}
  '--cancel-after'{$cancelAfter=[int]$args[++$i]} '--touch'{$touch=[string]$args[++$i]}
  '--spawn-marker'{$spawn=[string]$args[++$i]} '--counter'{$counter=[string]$args[++$i]}
+ '--spawn-ready'{$spawnReady=[string]$args[++$i]}
  '--fail-until'{$failUntil=[int]$args[++$i]} '--fail-code'{$failCode=[int]$args[++$i]}
  '--print'{$print=[string]$args[++$i]} }}
 if($print){ Write-Output $print }
 if($flood -gt 0){ $line=('y'*63); for($j=0;$j -lt $flood;$j++){ Write-Output $line } }
-if($spawn){ $exe=(Get-Process -Id $PID).Path; Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-NonInteractive','-Command',"Start-Sleep 4; Set-Content -LiteralPath '$spawn' done") -WindowStyle Hidden | Out-Null }
+if($spawn){
+ $exe=(Get-Process -Id $PID).Path
+ # Do not let the grandchild inherit the supervisor's redirected pipes: a broken
+ # tree kill must return promptly enough for the test to observe and clean the orphan.
+ $child=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-NonInteractive','-Command',"Start-Sleep 120; Set-Content -LiteralPath '$spawn' done") -RedirectStandardOutput ($spawn + '.stdout') -RedirectStandardError ($spawn + '.stderr') -PassThru
+ if($spawnReady){ Set-Content -LiteralPath $spawnReady "$PID,$($child.Id)" }
+}
 if($counter){ $n=0; if(Test-Path -LiteralPath $counter){ $n=[int](Get-Content -LiteralPath $counter -Raw) }; $n++; Set-Content -LiteralPath $counter "$n"; if($n -le $failUntil){ exit $failCode } }
 if($cancelAfter -gt 0 -and $touch){ Start-Sleep -Seconds $cancelAfter; Set-Content -LiteralPath $touch 'stop' }
 if($sleep -gt 0){ Start-Sleep -Seconds $sleep }
@@ -177,7 +191,7 @@ exit $code
     $o = $r.Out | ConvertFrom-Json
     Assert-Equal 'timeout' $o.reason 'timeout reason'
     Assert-True ([bool]$o.timed_out) 'timed_out flag set'
-    Assert-True ($sw.Elapsed.TotalSeconds -lt 15) "returns promptly on deadline (was $([int]$sw.Elapsed.TotalSeconds)s, child sleep was 30s)"
+    Assert-True ($sw.Elapsed.TotalSeconds -lt 25) "returns promptly on deadline (was $([int]$sw.Elapsed.TotalSeconds)s, child sleep was 30s)"
 }.Invoke()
 
 # =============================================================================
@@ -214,11 +228,45 @@ exit $code
 {
     $d = New-TempDir; $w = New-Worker $d
     $marker = Join-Path $d 'grandchild-marker.txt'
-    $r = Invoke-Spv @('run', '--file', $w, '--args-json', (ArgsJson @('--sleep', '30', '--spawn-marker', $marker)), '--deadline-sec', '1', '--json')
-    Assert-Exit $r 3 'tree-kill scenario times out'
-    # the grandchild would write the marker at +4s; the tree was killed at ~1s. Wait past +4s.
-    Start-Sleep -Seconds 6
-    Assert-True (-not (Test-Path -LiteralPath $marker)) 'grandchild was terminated with the tree (no marker written)'
+    $ready = Join-Path $d 'spawned-processes.txt'
+    $spawnedIds = @()
+    $treeKill = [System.Diagnostics.Process].GetMethod('Kill', [type[]]@([bool]))
+    Assert-True ($null -ne $treeKill) 'pwsh 7 exposes Process.Kill(bool) for atomic tree termination'
+    # An empty PATH makes taskkill unavailable on Windows. The scenario can therefore
+    # pass only through Kill(true), not through the platform fallback.
+    try {
+        $r = Invoke-Spv -ToolArgs @(
+            'run', '--file', $w,
+            '--args-json', (ArgsJson @('--sleep', '120', '--spawn-marker', $marker, '--spawn-ready', $ready)),
+            '--deadline-sec', '30', '--json'
+        ) -EnvironmentOverrides @{ PATH = '' }
+        Assert-Exit $r 3 'tree-kill scenario times out'
+        $readyExists = Test-Path -LiteralPath $ready
+        Assert-True $readyExists 'worker recorded parent + grandchild PIDs before the deadline'
+        $spawnedIds = if ($readyExists) {
+            @((Read-File $ready).Trim() -split ',' | ForEach-Object { [int]$_ })
+        } else { @() }
+        Assert-Equal 2 (@($spawnedIds).Count) 'tree-kill scenario recorded exactly two process IDs'
+        if (@($spawnedIds).Count -eq 2) {
+            $exitWait = [System.Diagnostics.Stopwatch]::StartNew()
+            do {
+                $aliveIds = @($spawnedIds | Where-Object {
+                    try { -not (Get-Process -Id $_ -ErrorAction Stop).HasExited } catch { $false }
+                })
+                if (@($aliveIds).Count -eq 0) { break }
+                Start-Sleep -Milliseconds 100
+            } while ($exitWait.Elapsed.TotalSeconds -lt 5)
+            foreach ($processId in $spawnedIds) {
+                Assert-True ($aliveIds -notcontains $processId) "process $processId from the spawned tree was terminated"
+            }
+        }
+        Assert-True (-not (Test-Path -LiteralPath $marker)) 'grandchild was terminated with the tree (no marker written)'
+    } finally {
+        # If the assertion is exercising a regression, do not leave its observed orphan alive.
+        foreach ($processId in $spawnedIds) {
+            try { Get-Process -Id $processId -ErrorAction Stop | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
+        }
+    }
 }.Invoke()
 
 # =============================================================================

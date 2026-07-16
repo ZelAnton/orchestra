@@ -215,11 +215,10 @@ function Stop-ProcessTree {
     $killedTree = $false
     try {
         # .NET 5+ (pwsh): Kill(true) terminates the entire process tree atomically.
-        $m = $Proc | Get-Member -Name 'Kill' -MemberType Method -ErrorAction SilentlyContinue
-        if ($m) {
-            $hasTreeOverload = $false
-            foreach ($ov in $m.Definitions) { if ($ov -match '\[bool\]|Boolean') { $hasTreeOverload = $true; break } }
-            if ($hasTreeOverload) { $Proc.Kill($true); $killedTree = $true }
+        $treeKill = $Proc.GetType().GetMethod('Kill', [type[]]@([bool]))
+        if ($null -ne $treeKill) {
+            $Proc.Kill($true)
+            $killedTree = $true
         }
     } catch {
         # fall through to the taskkill / bare-Kill fallback below.
