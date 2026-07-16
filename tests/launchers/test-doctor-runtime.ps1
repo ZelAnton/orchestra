@@ -340,6 +340,7 @@ Write-File (Join-Path $c.Proj '.work/orchestrator.lock/lease.json') $lease
 
 $r = Invoke-Doctor -Case $c
 Assert-Contains $r.Out 'OK   orchestrator.lock: owner=OWNER-A role=processor heartbeat ' 'lock lease checkout: owner/role/heartbeat reported'
+Assert-Contains $r.Out '/900s (live)' 'lock lease checkout: TTL threshold reported'
 Assert-Contains $r.Out 's (live)' 'lock lease checkout: live status reported'
 Assert-NotContains $r.Out 'WARN orchestrator.lock' 'lock lease checkout: healthy lease does not WARN'
 
@@ -349,6 +350,7 @@ Copy-Item -LiteralPath $script:Runtime -Destination (Join-Path $mirrorDir 'docto
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'state-tx.ps1') -Destination (Join-Path $mirrorDir 'state-tx.ps1')
 $r = Invoke-Doctor -Case $c -Runtime (Join-Path $mirrorDir 'doctor-runtime.ps1')
 Assert-Contains $r.Out 'OK   orchestrator.lock: owner=OWNER-A role=processor heartbeat ' 'lock lease mirror: owner/role/heartbeat reported'
+Assert-Contains $r.Out '/900s (live)' 'lock lease mirror: TTL threshold reported'
 Assert-Contains $r.Out 's (live)' 'lock lease mirror: live status reported'
 Assert-NotContains $r.Out 'WARN orchestrator.lock' 'lock lease mirror: healthy lease does not WARN'
 Remove-Case $c

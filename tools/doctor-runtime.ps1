@@ -463,7 +463,7 @@ if (Test-Path -LiteralPath $lockDir) {
             if ($leaseStatus -and $leaseStatus.present -and $leaseStatus.valid) {
                 $liveLabel = if ([bool]$leaseStatus.live) { 'live' } else { 'stale' }
                 $verdict = if ([bool]$leaseStatus.live) { 'OK  ' } else { 'WARN' }
-                Write-Host ('{0} orchestrator.lock: owner={1} role={2} heartbeat {3}s ({4})' -f $verdict, $leaseStatus.owner_id, $leaseStatus.role, $leaseStatus.heartbeat_age_secs, $liveLabel)
+                Write-Host ('{0} orchestrator.lock: owner={1} role={2} heartbeat {3}s/{4}s ({5})' -f $verdict, $leaseStatus.owner_id, $leaseStatus.role, $leaseStatus.heartbeat_age_secs, $leaseStatus.ttl_seconds, $liveLabel)
                 $leaseReported = $true
             }
         }
