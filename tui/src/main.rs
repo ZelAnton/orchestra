@@ -93,7 +93,8 @@ fn run(cfg: Config) -> io::Result<()> {
         }
 
         // 2. Refresh the status.md overlay and the Decision Inbox on a gentle cadence (small
-        // reads, cheap, read-only — no lock, never writes).
+        // reads, cheap, read-only — no lock, never writes). `replace_inbox` also invalidates an
+        // approve/reject modal if its captured one-time approval disappeared during the flow.
         if last_status_reload.elapsed() >= status_reload_every {
             app.status = status::load(&status_path);
             app.replace_inbox(load_inbox(&cfg.work_dir));
@@ -241,6 +242,9 @@ fn handle_modal_key(app: &mut AppState, work_dir: &Path, k: KeyEvent) {
                     // policy.ps1 may have consumed the card or found it expired/consumed by
                     // another operator. Reload immediately so no stale actionable card remains.
                     app.replace_inbox(load_inbox(work_dir));
+                } else if app.notice.is_none() {
+                    // Defensive fallback: AppState normally supplies the specific mismatch notice.
+                    app.notice = Some("выбор approval изменился; попробуйте снова".to_string());
                 }
             }
             _ => app.dismiss_modal(),

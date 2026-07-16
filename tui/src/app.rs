@@ -210,6 +210,9 @@ pub struct AppState {
     pub inbox_scroll: [u16; 4],
     /// Selected pending approval card; clamped whenever the inbox refreshes.
     pub approval_selected: usize,
+    /// Approval id captured when an approve/reject flow is armed. The confirmation gate is bound
+    /// to this immutable id rather than whichever card happens to be selected after a refresh.
+    approval_modal_id: Option<String>,
     /// Rejection explanation being entered in the modal.
     pub rejection_reason: String,
     /// An open modal overlay capturing input for a destructive command.
@@ -516,7 +519,8 @@ impl AppState {
 
     /// Replace the periodically rebuilt inbox while preserving the selected approval by id when
     /// possible. A consumed/expired card disappears or moves out of `approvals`, so selection is
-    /// clamped immediately rather than pointing at stale data.
+    /// clamped immediately rather than pointing at stale data. If that card has an active
+    /// approve/reject modal, dismiss the modal before the clamped neighbour can become its target.
     pub fn replace_inbox(&mut self, inbox: DecisionInbox) {
         let selected_id = self.pending_approval().map(|card| card.id.clone());
         self.inbox = inbox;
@@ -528,6 +532,23 @@ impl AppState {
                     .min(self.inbox.approvals.len().saturating_sub(1))
             });
         self.sync_approval_scroll();
+
+        if self.approval_modal_active() {
+            if let Some(captured_id) = self.approval_modal_id.as_deref() {
+                if !self
+                    .inbox
+                    .approvals
+                    .iter()
+                    .any(|card| card.id == captured_id)
+                {
+                    let captured_id = captured_id.to_string();
+                    self.dismiss_modal();
+                    self.notice = Some(format!(
+                        "approval {captured_id} больше не pending; выбор изменился, попробуйте снова"
+                    ));
+                }
+            }
+        }
     }
 
     /// Currently selected actionable approval, if any.
@@ -558,9 +579,11 @@ impl AppState {
 
     /// Arm approval of the selected pending card. Returns false when there is no actionable card.
     pub fn arm_approve(&mut self) -> bool {
-        if self.pending_approval().is_none() {
+        let Some(id) = self.pending_approval().map(|card| card.id.clone()) else {
             return false;
-        }
+        };
+        self.approval_modal_id = Some(id);
+        self.rejection_reason.clear();
         self.modal = Modal::ConfirmApprove;
         true
     }
@@ -568,9 +591,10 @@ impl AppState {
     /// Start the reject flow for the selected pending card. The reason is entered before the
     /// separate confirmation step.
     pub fn arm_reject(&mut self) -> bool {
-        if self.pending_approval().is_none() {
+        let Some(id) = self.pending_approval().map(|card| card.id.clone()) else {
             return false;
-        }
+        };
+        self.approval_modal_id = Some(id);
         self.rejection_reason.clear();
         self.modal = Modal::EnterRejectReason;
         true
@@ -600,20 +624,32 @@ impl AppState {
     }
 
     /// Consume an explicitly confirmed approve/reject modal and return the immutable command
-    /// request. A bare `y` without a previously armed modal can never produce an action.
+    /// request. The selected card must still match the id captured when the flow was armed; a
+    /// changed selection dismisses the modal and fails closed. A bare `y` without a previously
+    /// armed modal can never produce an action.
     pub fn take_approval_confirmation(&mut self) -> Option<ConfirmedApproval> {
         let decision = match self.modal {
             Modal::ConfirmApprove => ApprovalDecision::Approve,
             Modal::ConfirmReject => ApprovalDecision::Reject,
             _ => return None,
         };
-        let id = self.pending_approval()?.id.clone();
+        let captured_id = self.approval_modal_id.clone();
+        let selection_matches = captured_id
+            .as_deref()
+            .is_some_and(|id| self.pending_approval().is_some_and(|card| card.id == id));
+        if !selection_matches {
+            self.dismiss_modal();
+            self.notice = Some("выбор approval изменился; попробуйте снова".to_string());
+            return None;
+        }
+        let id = captured_id.expect("captured approval id checked above");
         let rejection_reason = if decision == ApprovalDecision::Reject {
             Some(self.rejection_reason.clone())
         } else {
             None
         };
         self.modal = Modal::None;
+        self.approval_modal_id = None;
         Some(ConfirmedApproval {
             id,
             decision,
@@ -626,6 +662,7 @@ impl AppState {
     /// removes the lock by itself — only [`AppState::take_force_lock_confirmation`], after an
     /// explicit second keystroke, does (§6.2).
     pub fn arm_force_lock(&mut self) {
+        self.approval_modal_id = None;
         self.modal = Modal::ConfirmForceLock;
     }
 
@@ -646,6 +683,15 @@ impl AppState {
     /// Dismiss any open modal without acting (Esc / n).
     pub fn dismiss_modal(&mut self) {
         self.modal = Modal::None;
+        self.approval_modal_id = None;
+        self.rejection_reason.clear();
+    }
+
+    fn approval_modal_active(&self) -> bool {
+        matches!(
+            self.modal,
+            Modal::ConfirmApprove | Modal::EnterRejectReason | Modal::ConfirmReject
+        )
     }
 
     /// Whether a modal is currently capturing input.
@@ -932,6 +978,63 @@ mod tests {
         assert_eq!(app.approval_selected, 0);
         assert!(app.pending_approval().is_none());
     }
+
+    #[test]
+    fn reload_during_approve_modal_does_not_confirm_clamped_neighbour() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a"), approval("apr-b")];
+        assert!(app.arm_approve());
+
+        app.replace_inbox(DecisionInbox {
+            approvals: vec![approval("apr-b")],
+            ..DecisionInbox::default()
+        });
+
+        assert_eq!(app.pending_approval().map(|a| a.id.as_str()), Some("apr-b"));
+        assert_eq!(app.modal, Modal::None);
+        assert!(app.take_approval_confirmation().is_none());
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("выбор изменился")));
+    }
+
+    #[test]
+    fn reload_during_reject_modal_does_not_apply_reason_to_clamped_neighbour() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a"), approval("apr-b")];
+        assert!(app.arm_reject());
+        for ch in "причина для apr-a".chars() {
+            app.push_rejection_char(ch);
+        }
+        assert!(app.confirm_rejection_reason());
+
+        app.replace_inbox(DecisionInbox {
+            approvals: vec![approval("apr-b")],
+            ..DecisionInbox::default()
+        });
+
+        assert_eq!(app.pending_approval().map(|a| a.id.as_str()), Some("apr-b"));
+        assert_eq!(app.modal, Modal::None);
+        assert!(app.take_approval_confirmation().is_none());
+        assert!(app.rejection_reason.is_empty());
+    }
+
+    #[test]
+    fn confirmation_rejects_live_selection_divergence() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a"), approval("apr-b")];
+        assert!(app.arm_approve());
+        app.approval_selected = 1;
+
+        assert!(app.take_approval_confirmation().is_none());
+        assert_eq!(app.modal, Modal::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("выбор approval изменился")));
+    }
+
     #[test]
     fn force_lock_needs_arming_then_explicit_confirmation() {
         let mut app = AppState::new();
