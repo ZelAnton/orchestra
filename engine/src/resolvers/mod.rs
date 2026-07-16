@@ -56,7 +56,7 @@ pub use cycles::{
     normalize_signature_text, review_cycle_decision, stagnation_decision, AttemptSignature,
     CycleDecision, StagnationDecision,
 };
-pub use gate::{review_gate, ReviewGate};
+pub use gate::{integration_gate, review_gate, ReviewGate};
 pub use reviewer::{
     reelect_reviewer, route_reviewer, CodexReviewer, ReviewerRoute, ReviewerRouteInput,
 };

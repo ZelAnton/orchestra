@@ -34,12 +34,29 @@
 //!    emitted through `tools/outbox.ps1` keyed by the cycle number (so each cycle is a DISTINCT
 //!    observable fact by fingerprint). The phase is off by default so the T-109 execution-only
 //!    baseline (which stops at `in-review`) is unchanged.
+//! 5. **Join barrier (opt-in, `--join`, implies `--review`; task T-243).** After the review round
+//!    promotes the ready tasks, drive `agents/processor.md` phases 4–6 in the SAME hermetic
+//!    sandbox: enter the join (integration `none -> in-progress`, `cohort.join_started`), merge the
+//!    ready branches sequentially through a supervised `merger` stand-in whose `merge_report.md`
+//!    the engine decides off ([`crate::contract::parse_merge_report`]) — `ready -> merged` per
+//!    merged branch, `ready -> conflict` + `queue-tx return` per quarantined one — then run the
+//!    bounded integration review cycle (a supervised `full_reviewer` stand-in + [`integration_gate`]
+//!    over `F-`/`SUMMARY-F`, capped by `INTEGRATION_LOOP_MAX` via the SAME [`review_cycle_decision`]
+//!    as the per-task cycle). A converged review publishes (integration `reviewed -> published`,
+//!    each task `merged -> published`, `cohort.published`) and archives (`published -> done`,
+//!    `queue-tx archive`, integration `published -> cleaned`); a non-converged one STOPS unpublished
+//!    (integration `-> failed`, tasks stay `merged`). One `cohort.closed` terminally processes the
+//!    cohort in every case. Every integration transition is validated through
+//!    `state-tx check-transition --kind integration` before it is written; the merge/publish is
+//!    hermetically SIMULATED (the sandbox `.work` has no repository — no live VCS mutation). Off by
+//!    default so the T-127/T-128 review baseline (which stops at `ready`) is unchanged.
 //!
 //! **Boundaries this module keeps.** It touches ONLY the `.work` passed as `--work` (the run
 //! subcommand has NO default work dir, so it can never silently resolve the repo's live `.work`);
 //! it CALLS `tools/*.ps1` as they are and never edits them; every mutation of the queue / lease /
 //! outbox goes through those transactional tools; and it is not wired into `agents/processor.md`
-//! or any launcher. It is exercised by `engine run --once` and the hermetic `run_fixture` e2e test.
+//! or any launcher. It is exercised by `engine run --once` and the hermetic `run_fixture` /
+//! `review_fixture` / `join_fixture` e2e tests.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -49,12 +66,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 
 use crate::claude::{ClaudeCall, PermissionPosture};
-use crate::contract::{parse_changed_files, parse_outcome, parse_review};
+use crate::contract::{
+    parse_changed_files, parse_merge_report, parse_outcome, parse_review, MergeOutcome,
+};
 use crate::lease::{self, AcquireVerdict};
 use crate::resolvers::{
-    base_reviewer, is_ready, plan_admission, reelect_reviewer, review_cycle_decision, review_gate,
-    ActiveClass, ActiveTask, AdmissionOutcome, BaseReviewer, Candidate, CloseReason, CodexReviewer,
-    CycleDecision, Domain, ImplBy, Level, ReviewGate, ReviewerRoute,
+    base_reviewer, integration_gate, is_ready, plan_admission, reelect_reviewer,
+    review_cycle_decision, review_gate, ActiveClass, ActiveTask, AdmissionOutcome, BaseReviewer,
+    Candidate, CloseReason, CodexReviewer, CycleDecision, Domain, ImplBy, Level, ReviewGate,
+    ReviewerRoute,
 };
 use crate::state::{Snapshot, TaskState};
 use crate::supervise::{self, Reason, SpawnSpec};
@@ -130,6 +150,28 @@ pub struct RunConfig {
     /// deterministic "the fix worked at cycle N" knob for the CONVERGING branch. `None` = the fix
     /// never converges, so persistent findings drive the DIVERGING (escalation) branch.
     pub converge_after_cycles: Option<u32>,
+    /// Whether the join-barrier segment (phases 4–6: sequential merge into `_integration`, the
+    /// bounded integration review cycle, ff-merge/publication and archival) runs after the review
+    /// round. Off by default (implies `--review`), so the T-127/T-128 review-only baseline (which
+    /// stops at `готова к слиянию`) is unchanged. Every step is hermetic — deterministic
+    /// `__fake-agent` stand-ins for the `merger` and `full_reviewer`, no live model call and no real
+    /// VCS mutation (the sandbox `.work` has no repository).
+    pub join: bool,
+    /// The integration review-cycle limit (`INTEGRATION_LOOP_MAX`, default 8): how many
+    /// integration review→fix→re-review cycles the join barrier may run before it stops WITHOUT
+    /// publishing (batch left unpublished, integration state `failed`).
+    pub integration_loop_max: u32,
+    /// Optional task id whose branch the merger stand-in quarantines (`quarantined=…`) instead of
+    /// merging — deterministic fault-injection for the merge/quarantine decision branch.
+    pub inject_merge_conflict: Option<String>,
+    /// Whether the `full_reviewer` stand-in yields an open integration `F-` finding instead of a
+    /// fresh clean `SUMMARY-F` — deterministic fault-injection for the with-findings integration
+    /// review branch.
+    pub inject_f_findings: bool,
+    /// Optional convergence point for `inject_f_findings`: the integration review yields findings
+    /// while `cycle < integration_converge_after` and a clean pass from that cycle onward. `None`
+    /// with `inject_f_findings` = never converges → drives the `INTEGRATION_LOOP_MAX` stop branch.
+    pub integration_converge_after: Option<u32>,
     /// Wall-clock bound on one supervised leaf call.
     pub leaf_deadline: Duration,
 }
@@ -187,6 +229,25 @@ pub struct ReviewOutcome {
     pub cycles: u32,
 }
 
+/// The outcome of the join-barrier segment (phases 4–6), when it ran (`--join`).
+#[derive(Debug, Clone)]
+pub struct JoinReport {
+    /// The tasks that entered the join (`готова к слиянию` after the review round).
+    pub ready: Vec<String>,
+    /// The tasks the merger stand-in merged clean into the integration branch.
+    pub merged: Vec<String>,
+    /// The tasks the merger stand-in quarantined (`quarantined=…`) — not merged.
+    pub quarantined: Vec<String>,
+    /// The merged tasks that were published (ff-merged into main) and archived (`выполнена`).
+    pub published: Vec<String>,
+    /// The terminal integration state (§13.3 canonical name): `cleaned` on a fully published +
+    /// archived batch, `failed` if the integration review did not converge (batch unpublished),
+    /// `none` if the join ran but nothing was ready to merge.
+    pub integration: &'static str,
+    /// How many integration review cycles ran before the gate resolved.
+    pub integration_cycles: u32,
+}
+
 /// The report of one `run --once`.
 #[derive(Debug, Clone)]
 pub struct RunReport {
@@ -196,6 +257,8 @@ pub struct RunReport {
     /// Set when nothing was admitted: the planner/close reason.
     pub idle_reason: Option<String>,
     pub tasks: Vec<TaskOutcome>,
+    /// The join-barrier outcome, when the join segment (`--join`) ran.
+    pub join: Option<JoinReport>,
     pub events_appended: usize,
     pub lease_released: bool,
 }
@@ -245,6 +308,18 @@ impl RunReport {
                 );
             }
         }
+        if let Some(j) = &self.join {
+            let _ = writeln!(
+                s,
+                "Join barrier · integration={} · ready=[{}] · merged=[{}] · quarantined=[{}] · published=[{}] · integration_cycles={}",
+                j.integration,
+                j.ready.join(", "),
+                j.merged.join(", "),
+                j.quarantined.join(", "),
+                j.published.join(", "),
+                j.integration_cycles,
+            );
+        }
         let _ = writeln!(
             s,
             "Events appended: {} · lease released: {}",
@@ -262,6 +337,14 @@ impl RunReport {
             "idle_reason": self.idle_reason,
             "events_appended": self.events_appended,
             "lease_released": self.lease_released,
+            "join": self.join.as_ref().map(|j| json!({
+                "integration": j.integration,
+                "ready": j.ready,
+                "merged": j.merged,
+                "quarantined": j.quarantined,
+                "published": j.published,
+                "integration_cycles": j.integration_cycles,
+            })),
             "tasks": self.tasks.iter().map(|t| json!({
                 "id": t.id,
                 "level": t.level.as_str(),
@@ -416,6 +499,17 @@ fn cohort_md(batch: &str, admission_literal: &str, admitted: usize) -> String {
     let _ = writeln!(s, "Приём: {admission_literal}");
     let _ = writeln!(s, "Волна: 1");
     let _ = writeln!(s, "Admitted всего: {admitted}");
+    s
+}
+
+/// Render `integration_state.md` (§13.3 join bookkeeping): `Ревью-SHA:` (the integration tip the
+/// reviewer saw) and `F-циклов:` (the integration review-cycle counter). In the hermetic sandbox
+/// the SHA is a fixed placeholder (there is no real repository); the counter is load-bearing.
+fn integration_state_md(batch: &str, f_cycles: u32) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "# Integration state — Batch {batch}");
+    let _ = writeln!(s, "Ревью-SHA: sandbox-integration-tip");
+    let _ = writeln!(s, "F-циклов: {f_cycles}");
     s
 }
 
@@ -792,6 +886,7 @@ impl<'a> Runner<'a> {
                     admitted: Vec::new(),
                     idle_reason: Some(reason.as_str().to_string()),
                     tasks: Vec::new(),
+                    join: None,
                     events_appended: self.events,
                     lease_released: false,
                 });
@@ -924,12 +1019,16 @@ impl<'a> Runner<'a> {
             "emit cohort.admission_closed",
         )?;
 
+        // --- the opt-in join barrier (phases 4–6) ---------------------------------------
+        let join = self.run_join_barrier(&snap, &outcomes)?;
+
         Ok(RunReport {
             owner: self.owner.clone(),
             batch_id: self.cfg.batch_id.clone(),
             admitted,
             idle_reason: None,
             tasks: outcomes,
+            join,
             events_appended: self.events,
             lease_released: false,
         })
@@ -1488,6 +1587,465 @@ impl<'a> Runner<'a> {
         )?;
         Ok(())
     }
+
+    // --- the opt-in join barrier (phases 4–6) ------------------------------------------
+
+    /// Drive the batch through the **join barrier** (`agents/processor.md` phases 4–6) after the
+    /// review round, over the hermetic sandbox `.work`. A no-op when `--join` is off. Every step
+    /// runs a deterministic `__fake-agent` stand-in (the `merger` and `full_reviewer`); the sandbox
+    /// `.work` has NO repository, so the merge and ff-publish are hermetically SIMULATED — the
+    /// engine drives the §13 state transitions and §19 events, never a real VCS mutation.
+    ///
+    /// * **4.1** enter the join — integration `none → in-progress`, seed `integration_state.md`,
+    ///   emit `cohort.join_started` (payload: the ready task list).
+    /// * **4.2/4.3** sequential merge — the merger stand-in writes `merge_report.md`; the engine
+    ///   decides merged (`готова к слиянию → слита`) vs quarantined (`→ конфликт`, re-queued via
+    ///   `queue-tx return`) per task off that report, never free text.
+    /// * **5.1/5.2** the bounded integration review cycle ([`run_integration_review`]) with the
+    ///   `INTEGRATION_LOOP_MAX` cap and the same clean/findings/incomplete gate as the per-task
+    ///   cycle (adapted to `F-`/`SUMMARY-F` via [`integration_gate`]).
+    /// * **5.3** publish — integration `reviewed → published`, each task `слита → опубликована`,
+    ///   one `cohort.published`.
+    /// * **6.1** archive — each task `опубликована → выполнена` (`queue-tx archive`), integration
+    ///   `published → cleaned`.
+    /// * **6** one `cohort.closed` closes the cohort regardless of outcome (even when nothing was
+    ///   ready to merge — the terminal batch event).
+    fn run_join_barrier(
+        &mut self,
+        snap: &Snapshot,
+        outcomes: &[TaskOutcome],
+    ) -> Result<Option<JoinReport>, RunError> {
+        if !self.cfg.join {
+            return Ok(None);
+        }
+
+        // Ready = the tasks the review round promoted to `готова к слиянию`; escalated = anything
+        // that fell out in the execution OR review round. Both in stable admitted order.
+        let ready: Vec<String> = outcomes
+            .iter()
+            .filter(|o| matches!(&o.review, Some(r) if r.to == TaskState::Ready))
+            .map(|o| o.id.clone())
+            .collect();
+        let escalated = outcomes
+            .iter()
+            .filter(|o| {
+                o.to == TaskState::Escalated
+                    || matches!(&o.review, Some(r) if r.to == TaskState::Escalated)
+            })
+            .count();
+
+        let mut merged: Vec<String> = Vec::new();
+        let mut quarantined: Vec<String> = Vec::new();
+        let mut published: Vec<String> = Vec::new();
+        let mut integration: &'static str = "none";
+        let mut integration_cycles: u32 = 0;
+
+        if !ready.is_empty() {
+            // --- 4.1: enter the join --------------------------------------------------------
+            self.check_transition("integration", "none", "in-progress")?;
+            self.write_integration_state(1)?;
+            let started_payload = json!({ "ready_tasks": ready.clone() }).to_string();
+            self.emit(
+                &[
+                    "--type",
+                    "cohort.join_started",
+                    "--batch-id",
+                    &self.cfg.batch_id,
+                    "--payload",
+                    &started_payload,
+                ],
+                "emit cohort.join_started",
+            )?;
+            self.heartbeat()?;
+
+            // --- 4.2/4.3: sequential merge, decided off merge_report.md ----------------------
+            let report = self.run_merge_round(&ready)?;
+            for line in &report {
+                let prereqs = prereqs_of(snap, &line.id);
+                let domain = descriptor_globs(snap, &line.id);
+                match &line.outcome {
+                    MergeOutcome::Merged { .. } => {
+                        self.check_transition(
+                            "task",
+                            TaskState::Ready.as_str(),
+                            TaskState::Merged.as_str(),
+                        )?;
+                        self.write_descriptor(&line.id, TaskState::Merged, &prereqs, domain, None)?;
+                        self.emit_join_task_status(&line.id, TaskState::Ready, TaskState::Merged)?;
+                        merged.push(line.id.clone());
+                    }
+                    MergeOutcome::Quarantined { reason } => {
+                        // Rolled-back merge: `готова к слиянию → конфликт`, then re-queued
+                        // transactionally (bounded requeue) and the descriptor dropped (Phase 6.2).
+                        self.check_transition(
+                            "task",
+                            TaskState::Ready.as_str(),
+                            TaskState::Conflict.as_str(),
+                        )?;
+                        self.write_descriptor(
+                            &line.id,
+                            TaskState::Conflict,
+                            &prereqs,
+                            domain,
+                            None,
+                        )?;
+                        self.emit_join_task_status(
+                            &line.id,
+                            TaskState::Ready,
+                            TaskState::Conflict,
+                        )?;
+                        let ret_argv = vec![
+                            "return".into(),
+                            "--work".into(),
+                            self.work_s.clone(),
+                            "--id".into(),
+                            line.id.clone(),
+                            "--reason".into(),
+                            reason.clone(),
+                            "--max-attempts".into(),
+                            "3".into(),
+                        ];
+                        self.tool_ok(
+                            &self.cfg.queue_tx(),
+                            &ret_argv,
+                            &format!("queue-tx return {}", line.id),
+                        )?;
+                        let _ = fs::remove_dir_all(self.cfg.work.join("tasks").join(&line.id));
+                        quarantined.push(line.id.clone());
+                    }
+                }
+            }
+            self.heartbeat()?;
+
+            if merged.is_empty() {
+                // Every ready branch was quarantined — nothing to review/publish.
+                self.check_transition("integration", "in-progress", "failed")?;
+                integration = "failed";
+            } else {
+                // --- 5.1/5.2: the bounded integration review cycle --------------------------
+                let (clean, cycles) = self.run_integration_review(&merged)?;
+                integration_cycles = cycles;
+                if !clean {
+                    // Did not converge within INTEGRATION_LOOP_MAX (or a stand-in failed): stop
+                    // WITHOUT publishing — merged tasks stay `слита`, branch/worktree kept.
+                    self.check_transition("integration", "in-progress", "failed")?;
+                    integration = "failed";
+                } else {
+                    self.check_transition("integration", "in-progress", "reviewed")?;
+                    // --- 5.3: publish -------------------------------------------------------
+                    self.check_transition("integration", "reviewed", "published")?;
+                    for id in &merged {
+                        let prereqs = prereqs_of(snap, id);
+                        let domain = descriptor_globs(snap, id);
+                        self.check_transition(
+                            "task",
+                            TaskState::Merged.as_str(),
+                            TaskState::Published.as_str(),
+                        )?;
+                        self.write_descriptor(id, TaskState::Published, &prereqs, domain, None)?;
+                        self.emit_join_task_status(id, TaskState::Merged, TaskState::Published)?;
+                    }
+                    let published_payload =
+                        json!({ "pushed": false, "tasks": merged.clone() }).to_string();
+                    self.emit(
+                        &[
+                            "--type",
+                            "cohort.published",
+                            "--batch-id",
+                            &self.cfg.batch_id,
+                            "--payload",
+                            &published_payload,
+                        ],
+                        "emit cohort.published",
+                    )?;
+                    self.heartbeat()?;
+
+                    // --- 6.1: archive each published task -----------------------------------
+                    for id in merged.clone() {
+                        self.archive_task(&id)?;
+                        published.push(id);
+                    }
+                    self.check_transition("integration", "published", "cleaned")?;
+                    integration = "cleaned";
+                }
+            }
+        }
+
+        // --- 6: cohort.closed (batch processing complete for this run) ----------------------
+        let closed_payload = json!({
+            "merged": merged.len(),
+            "quarantined": quarantined.len(),
+            "escalated": escalated,
+        })
+        .to_string();
+        self.emit(
+            &[
+                "--type",
+                "cohort.closed",
+                "--batch-id",
+                &self.cfg.batch_id,
+                "--payload",
+                &closed_payload,
+            ],
+            "emit cohort.closed",
+        )?;
+
+        Ok(Some(JoinReport {
+            ready,
+            merged,
+            quarantined,
+            published,
+            integration,
+            integration_cycles,
+        }))
+    }
+
+    /// Run ONE supervised merger pass: build the headless `merger` `claude` argv the engine WOULD
+    /// spawn (proving the adapter is on the real path), then spawn the deterministic offline merger
+    /// stand-in (`__fake-agent --mode merge`, which writes `merge_report.md`), and return that
+    /// report's parsed per-task lines. The `inject_merge_conflict` task (if any of the ready set)
+    /// is quarantined by the stand-in — the deterministic "this branch conflicted" knob.
+    fn run_merge_round(
+        &self,
+        ready: &[String],
+    ) -> Result<Vec<crate::contract::MergeLine>, RunError> {
+        let prompt = format!(
+            "Use the merger subagent to integrate the ready task branches of this batch into integration/{} in {}. WORK={}",
+            self.cfg.batch_id,
+            self.cfg.work.join("worktrees").join("_integration").display(),
+            self.cfg.work.display()
+        );
+        let mut call = ClaudeCall::new(prompt);
+        call.model = Some("sonnet".into());
+        call.max_turns = Some(100);
+        call.posture = PermissionPosture::BypassInSandbox;
+        let _would_argv = call.to_argv();
+
+        let mut args: Vec<String> = vec![
+            "__fake-agent".into(),
+            "--mode".into(),
+            "merge".into(),
+            "--work".into(),
+            self.work_s.clone(),
+            "--batch".into(),
+            self.cfg.batch_id.clone(),
+            "--tasks".into(),
+            ready.join(","),
+        ];
+        if let Some(q) = self.cfg.inject_merge_conflict.as_deref() {
+            if ready.iter().any(|id| id == q) {
+                args.push("--quarantine".into());
+                args.push(q.to_string());
+            }
+        }
+        let spec = SpawnSpec::new(&self.cfg.self_exe, args).deadline(Some(self.cfg.leaf_deadline));
+        let v = supervise::run(&spec);
+        let parsed = crate::claude::parse_transcript(&v.stdout);
+        if v.reason != Reason::Ok || parsed.is_error == Some(true) {
+            return Err(RunError::new(
+                exit::FAILED,
+                format!(
+                    "merger stand-in did not complete cleanly ({})",
+                    v.reason.as_str()
+                ),
+            ));
+        }
+        let report = fs::read_to_string(self.cfg.work.join("merge_report.md"))
+            .map_err(|e| RunError::new(exit::FAILED, format!("read merge_report.md: {e}")))?;
+        Ok(parse_merge_report(&report))
+    }
+
+    /// Drive the **integration review fix cycle** (`agents/processor.md` phase 5.2) over the merged
+    /// batch: each cycle runs a supervised `full_reviewer` pass ([`run_integration_review_pass`]) and
+    /// branches on the [`integration_gate`] — a **clean** pass (fresh `SUMMARY-F`, no open `F-`)
+    /// converges; **findings** dispatch a supervised deterministic integration fix (a coder stand-in
+    /// in `_integration`) and re-review; an **incomplete** pass re-runs the reviewer unchanged. The
+    /// loop is bounded by `INTEGRATION_LOOP_MAX` ([`review_cycle_decision`], the SAME resolver the
+    /// per-task cycle uses); exhausting it — or a stand-in that cannot be supervised — is a
+    /// fail-closed stop that leaves the batch UNPUBLISHED. Returns `(clean, cycles)`.
+    fn run_integration_review(&mut self, merged: &[String]) -> Result<(bool, u32), RunError> {
+        let _ = merged;
+        let mut cycle: u32 = 1;
+        loop {
+            if let CycleDecision::Escalate { after_cycles } =
+                review_cycle_decision(cycle, self.cfg.integration_loop_max)
+            {
+                // INTEGRATION_LOOP_MAX exhausted: do NOT publish; record the completed count.
+                let done = after_cycles.max(1);
+                self.write_integration_state(done)?;
+                return Ok((false, done));
+            }
+            let pass = self.run_integration_review_pass(cycle);
+            if !pass.supervised_ok {
+                // full_reviewer stand-in failed — fail-closed, batch unpublished.
+                return Ok((false, cycle));
+            }
+            match pass.gate {
+                ReviewGate::Clean => {
+                    self.write_integration_state(cycle)?;
+                    return Ok((true, cycle));
+                }
+                ReviewGate::Findings => {
+                    // Dispatch a deterministic integration fix in `_integration`, then re-review.
+                    // A fix leaf that cannot be supervised is itself a fail-closed stop.
+                    if !self.run_fix_round("_integration") {
+                        return Ok((false, cycle));
+                    }
+                    self.write_integration_state(cycle + 1)?;
+                    cycle += 1;
+                    self.heartbeat()?;
+                }
+                ReviewGate::Incomplete => {
+                    // full_reviewer cut short — re-run it unchanged (never fabricate a fix list).
+                    // The deterministic stand-in always writes a fresh summary OR an open F-, so
+                    // this is defensive; bump the counter to keep the loop INTEGRATION_LOOP_MAX-bounded.
+                    self.write_integration_state(cycle + 1)?;
+                    cycle += 1;
+                    self.heartbeat()?;
+                }
+            }
+        }
+    }
+
+    /// Run ONE supervised `full_reviewer` pass over the integration branch: take the phase-5.2
+    /// freshness mark, spawn the deterministic offline reviewer stand-in
+    /// (`__fake-agent --mode integration-review`, which writes `review_integration.md`), and name
+    /// the [`integration_gate`] branch off the parsed `F-`/`SUMMARY-F`. The `inject_f_findings` knob
+    /// yields findings until it converges (`integration_converge_after`), or never.
+    fn run_integration_review_pass(&self, cycle: u32) -> IntegrationPass {
+        let since = now_utc_iso();
+        let summary_ts = epoch_to_iso(now_epoch_secs() + 1);
+        let want_findings = self.cfg.inject_f_findings
+            && match self.cfg.integration_converge_after {
+                Some(threshold) => cycle < threshold,
+                None => true,
+            };
+
+        let prompt = format!(
+            "Use the full_reviewer subagent to review the integration branch integration/{} in worktree {}. WORK={}",
+            self.cfg.batch_id,
+            self.cfg.work.join("worktrees").join("_integration").display(),
+            self.cfg.work.display()
+        );
+        let mut call = ClaudeCall::new(prompt);
+        call.model = Some("opus".into());
+        call.max_turns = Some(40);
+        call.posture = PermissionPosture::BypassInSandbox;
+        let _would_argv = call.to_argv();
+
+        let outcome_arg = if want_findings { "findings" } else { "clean" };
+        let spec = SpawnSpec::new(
+            &self.cfg.self_exe,
+            vec![
+                "__fake-agent".into(),
+                "--mode".into(),
+                "integration-review".into(),
+                "--work".into(),
+                self.work_s.clone(),
+                "--outcome".into(),
+                outcome_arg.to_string(),
+                "--summary-ts".into(),
+                summary_ts,
+            ],
+        )
+        .deadline(Some(self.cfg.leaf_deadline));
+        let v = supervise::run(&spec);
+        let parsed = crate::claude::parse_transcript(&v.stdout);
+        let supervised_ok = v.reason == Reason::Ok && parsed.is_error != Some(true);
+
+        let review_md =
+            fs::read_to_string(self.cfg.work.join("review_integration.md")).unwrap_or_default();
+        let gate = integration_gate(&parse_review(&review_md), &since);
+        IntegrationPass {
+            gate,
+            supervised_ok,
+        }
+    }
+
+    /// Phase-6.1 archive of ONE published task: validate `опубликована → выполнена`, emit the
+    /// `task.status_changed` event BEFORE removing the descriptor dir, archive the queue entry
+    /// transactionally (`queue-tx archive`), record the id in `Tasks_Done.md`, and drop the
+    /// descriptor dir.
+    fn archive_task(&mut self, id: &str) -> Result<(), RunError> {
+        self.check_transition(
+            "task",
+            TaskState::Published.as_str(),
+            TaskState::Done.as_str(),
+        )?;
+        self.emit_join_task_status(id, TaskState::Published, TaskState::Done)?;
+        let archive_argv = vec![
+            "archive".into(),
+            "--work".into(),
+            self.work_s.clone(),
+            "--id".into(),
+            id.to_string(),
+        ];
+        self.tool_ok(
+            &self.cfg.queue_tx(),
+            &archive_argv,
+            &format!("queue-tx archive {id}"),
+        )?;
+        self.append_done(id)?;
+        let _ = fs::remove_dir_all(self.cfg.work.join("tasks").join(id));
+        Ok(())
+    }
+
+    /// Append `### [T-ID] done` to `Tasks_Done.md` (idempotent — never a duplicate id), the
+    /// header-anchored archive record `completed_ids` reads back.
+    fn append_done(&self, id: &str) -> Result<(), RunError> {
+        let path = self.cfg.work.join("Tasks_Done.md");
+        let mut cur = fs::read_to_string(&path).unwrap_or_default();
+        if cur.contains(&format!("[{id}]")) {
+            return Ok(());
+        }
+        if !cur.is_empty() && !cur.ends_with('\n') {
+            cur.push('\n');
+        }
+        cur.push_str(&format!("### [{id}] done\n"));
+        fs::write(&path, cur)
+            .map_err(|e| RunError::new(exit::FAILED, format!("write Tasks_Done.md: {e}")))
+    }
+
+    /// Write `integration_state.md` (§13.3 join bookkeeping): a stable sandbox `Ревью-SHA:` marker
+    /// and the `F-циклов:` integration review-cycle counter (the `INTEGRATION_LOOP_MAX` guard).
+    fn write_integration_state(&self, f_cycles: u32) -> Result<(), RunError> {
+        self.write_file(
+            "integration_state.md",
+            &integration_state_md(&self.cfg.batch_id, f_cycles),
+        )
+    }
+
+    /// Emit one join-barrier `task.status_changed` (`from → to`), keyed `attempt=1 round=1` — the
+    /// §19 envelope the publication/archival transitions share with the execution round.
+    fn emit_join_task_status(
+        &mut self,
+        id: &str,
+        from: TaskState,
+        to: TaskState,
+    ) -> Result<(), RunError> {
+        let from_lit = task_literal(from);
+        let to_lit = task_literal(to);
+        let payload = format!("{{\"from\":\"{from_lit}\",\"to\":\"{to_lit}\"}}");
+        self.emit(
+            &[
+                "--type",
+                "task.status_changed",
+                "--task-id",
+                id,
+                "--from",
+                from_lit,
+                "--to",
+                to_lit,
+                "--attempt",
+                "1",
+                "--round",
+                "1",
+                "--payload",
+                &payload,
+            ],
+            &format!("emit task.status_changed (join {from_lit}->{to_lit}) {id}"),
+        )
+    }
 }
 
 /// The outcome of ONE reviewer pass inside the fix cycle (the [`review_gate`] branch plus the
@@ -1495,6 +2053,13 @@ impl<'a> Runner<'a> {
 struct ReviewPass {
     gate: ReviewGate,
     supervised: &'static str,
+    supervised_ok: bool,
+}
+
+/// The outcome of ONE `full_reviewer` pass inside the integration review cycle (the
+/// [`integration_gate`] branch plus the reviewer-leaf supervision result).
+struct IntegrationPass {
+    gate: ReviewGate,
     supervised_ok: bool,
 }
 

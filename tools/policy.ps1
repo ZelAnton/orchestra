@@ -518,13 +518,11 @@ function Cmd-CheckPublish {
     $allowedRemotes = Get-PublishTargets $lines 'Remotes'
 
     if ($branch -and $allowedBranches.Count -gt 0) {
-        $cmp = Get-PathComparer
-        $ok = $false; foreach ($b in $allowedBranches) { if ([string]::Equals($b, $branch, $cmp)) { $ok = $true } }
+        $ok = $false; foreach ($b in $allowedBranches) { if ([string]::Equals($b, $branch, [System.StringComparison]::Ordinal)) { $ok = $true } }
         if (-not $ok) { $rejects.Add("branch '$branch' is not in the allowed publish branches: $($allowedBranches -join ', ')") }
     }
     if ($remote -and $allowedRemotes.Count -gt 0) {
-        $cmp = Get-PathComparer
-        $ok = $false; foreach ($r in $allowedRemotes) { if ([string]::Equals($r, $remote, $cmp)) { $ok = $true } }
+        $ok = $false; foreach ($r in $allowedRemotes) { if ([string]::Equals($r, $remote, [System.StringComparison]::Ordinal)) { $ok = $true } }
         if (-not $ok) { $rejects.Add("remote '$remote' is not in the allowed remotes: $($allowedRemotes -join ', ')") }
     }
 
@@ -646,11 +644,10 @@ function Cmd-CheckGate {
     # (a record without a head_sha cannot be confirmed bound and is ignored). This is the
     # guard against "first run wins" - a run for another commit never satisfies the gate.
     $observed = Get-ObservedChecks
-    $cmp = Get-PathComparer
     $byName = @{}
     foreach ($rec in $observed) {
         $rsha = JProp $rec 'head_sha'
-        if ($rsha -eq '' -or -not [string]::Equals($rsha, $sha, $cmp)) { continue }
+        if ($rsha -eq '' -or -not [string]::Equals($rsha, $sha, [System.StringComparison]::Ordinal)) { continue }
         $name = JProp $rec 'name'
         if ($name -eq '') { continue }
         if (-not $byName.ContainsKey($name)) { $byName[$name] = [System.Collections.Generic.List[object]]::new() }

@@ -196,7 +196,9 @@ workspace, коммитит результаты листовых агентов
   worktree, отказ на `..`/escape/подмену), `check-paths` (фактические пути против denylist
   после каждого возврата исполнителя и перед commit/merge/publication) и `check-publish`
   (allowed branch/remote + push/merge policy как технический precondition, не текстовый
-  отчёт). processor встраивает эти вызовы в Фазы 1.5/5.3, merger — в свой merge-self-check.
+  отчёт). `Get-PathComparer` применяется только к файловым путям; git refs, remotes и SHA
+  сравниваются ordinal case-sensitive на всех ОС. processor встраивает эти вызовы в Фазы
+  1.5/5.3, merger — в свой merge-self-check.
   Список ключей и Codex-enum'ы схемы **машинно-сверяются** с `config.example.md`
   (`tools/check-consistency.ps1`, класс 5), а та — с `cc-doctor` (класс 4): движок
   `cc-doctor` (`tools/doctor-runtime.ps1`) держит копию хардкодом (mirror-совместимость),
@@ -636,7 +638,8 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/Tasks_Done.md` | архив завершённых задач; источник «предпосылка завершена» для readiness-резолвера |
 | `.work/queue_state.json` | счётчик поколения очереди (generation/CAS) транзакционного интерфейса `tools/queue-tx.ps1`; см. `docs/queue_contract.md`, §10 |
 | `.work/queue-tx.lock` | краткоживущий атомарный лок мутации очереди (отдельный от `orchestrator.lock`); держит `queue-tx.ps1` на время одной транзакции |
-| `.work/queue_inbox/` | предложения популяторов, поданные при активном `orchestrator.lock` (`queue-tx inbox-add`); processor вливает их `inbox-drain` на границе когорты (`docs/queue_contract.md`, §7/§9) |
+| `.work/queue_inbox/` | горячие, ещё не обработанные предложения популяторов, поданные при активном `orchestrator.lock` (`queue-tx inbox-add`); processor вливает их `inbox-drain` на границе когорты (`docs/queue_contract.md`, §7/§9) |
+| `.work/queue_inbox/rejected/` | append-only audit-карантин записей inbox с неверными зависимостями или неразбираемым JSON; `inbox-drain` сохраняет исходный `.json` и companion `.metadata.txt` с точной ошибкой/UTC-временем и больше их не сканирует (`docs/queue_contract.md`, §7) |
 | `.work/Github_Sync.md` | таблица соответствия GitHub issues/PR и задач очереди; ведёт `github_sync` |
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
 | `.work/constraints.md` | человекочитаемая политика ограничений проекта (denylist путей, ветки/remotes, push/merge policy, обязательные проверки, пороги, human-review категории); шаблон — `constraints.example.md`, сеет `cc-config`; читают processor/planner/coder/reviewer, нет файла — деградация без ошибок |
