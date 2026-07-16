@@ -336,14 +336,42 @@ exit $code
 {
     $d = New-TempDir; $w = New-Worker $d
     $counter = Join-Path $d 'attempts.txt'
+    $resultFile = Join-Path $d 'result.json'
+    $budgetFile = Join-Path $d 'budget.json'
+    $bi = Invoke-Spv @('budget', '--budget-file', $budgetFile, '--budget-sec', '60', '--json')
+    Assert-Exit $bi 0 'retry scenario budget init rc=0'
     # crash (exit 42) on attempts 1..2, succeed on attempt 3.
     $r = Invoke-Spv @('supervise', '--file', $w,
         '--args-json', (ArgsJson @('--counter', $counter, '--fail-until', '2', '--fail-code', '42')),
-        '--crash-exit-codes', '42', '--max-attempts', '3', '--json')
+        '--crash-exit-codes', '42', '--max-attempts', '3', '--budget-file', $budgetFile,
+        '--result-file', $resultFile, '--json')
     Assert-Exit $r 0 'supervise recovers a transient crash within max-attempts -> exit 0'
     $o = $r.Out | ConvertFrom-Json
     Assert-Equal 'ok' $o.reason 'final reason ok after retries'
     Assert-Equal 3 $o.attempts 'used exactly 3 attempts (2 crashes + 1 success)'
+
+    # The durable verdict must be the same final verdict as stdout, not the old
+    # Save-CallArtifacts defaults (attempts=1 and no budget/total duration).
+    $durable = Read-File $resultFile | ConvertFrom-Json
+    Assert-Equal 3 $durable.attempts 'retry result-file persists all 3 attempts'
+    Assert-Equal $o.budget_remaining_ms $durable.budget_remaining_ms 'retry result-file persists the stdout budget remaining'
+    Assert-Equal $o.total_duration_ms $durable.total_duration_ms 'retry result-file persists the stdout total duration'
+
+    $obs = Invoke-Spv @('observe', '--result-file', $resultFile, '--task-id', 'T-230', '--role', 'coder', '--mode', 'full', '--json')
+    Assert-Exit $obs 0 'observe accepts the retry result-file'
+    $obsObj = $obs.Out | ConvertFrom-Json
+    Assert-Equal 3 $obsObj.attempts 'observe reports the durable retry attempt count'
+    Assert-Equal $durable.budget_remaining_ms $obsObj.budget_remaining_ms 'observe reports the durable remaining budget'
+    $eventArgs = @($obsObj.event_args | ForEach-Object { [string]$_ })
+    $attemptArg = [Array]::IndexOf($eventArgs, '--attempt-number')
+    Assert-True ($attemptArg -ge 0) 'observe event args contain --attempt-number'
+    if ($attemptArg -ge 0) { Assert-Equal '3' $eventArgs[$attemptArg + 1] 'observe event args use the real retry attempt number' }
+
+    $id3 = Invoke-Outbox (@('event-id') + $eventArgs)
+    Assert-Exit $id3 0 'outbox computes the retry attempt event id'
+    $id1 = Invoke-Outbox @('event-id', '--type', 'codex.attempt', '--task-id', 'T-230', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    Assert-Exit $id1 0 'outbox computes the first attempt event id'
+    Assert-True ($id3.Out.Trim() -ne $id1.Out.Trim()) 'retry attempt event id differs from the first attempt event id'
 
     # a substantive error (exit 1) is NOT retried: attempts stays 1.
     $d2 = New-TempDir; $w2 = New-Worker $d2

@@ -636,6 +636,19 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 0 'approval-status: fresh approval -> approved'
     Assert-Equal 'approved' (APJson $r).verdict 'approval-status: verdict approved'
 
+    # FAIL-CLOSED (T-235): querying an APPROVED id with no inputs to recompute the current
+    # fingerprint (bare --id, no --paths-from/--path/--fingerprint) must NOT silently report
+    # `approved` - freshness cannot be verified, so refuse (exit 2), never a fail-open pass.
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--now', '2026-01-01T00:30:10Z', '--json')
+    Assert-Exit $r 2 'approval-status: approved id without freshness inputs -> refused (fail-closed, not approved)'
+    Assert-Equal 'unverifiable' (APJson $r).verdict 'approval-status: verdict unverifiable when freshness cannot be checked'
+    # the refusal is exactly the missing fingerprint inputs: supplying --fingerprint alone (a
+    # precomputed current fingerprint that matches the stored one) restores the approved verdict,
+    # proving the guard gates on verifiability, not on rejecting bare --id per se.
+    $r = AP @('approval-status', '--work', $work, '--id', $id, '--fingerprint', $req.fingerprint, '--now', '2026-01-01T00:30:20Z', '--json')
+    Assert-Exit $r 0 'approval-status: approved id with an explicit matching --fingerprint -> approved'
+    Assert-Equal 'approved' (APJson $r).verdict 'approval-status: explicit matching fingerprint verifies freshness'
+
     # eol re-materialization only (LF -> CRLF) must NOT expire the approval - content is
     # normalized before hashing, so a benign eol churn stays fresh (avoids false-stale).
     Write-Utf8 (Join-Path $sb 'src/app.js') "console.log('v1');`r`n"

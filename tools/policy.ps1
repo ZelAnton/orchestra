@@ -63,7 +63,11 @@
                          approve/reject consume the id EXACTLY once (a spent id is refused).
                          `approval-status` is the consumer: it re-derives the CURRENT
                          fingerprint/policy and reports `approved` only when a fresh approve is
-                         still valid; a decision goes stale (exit 11) once the affected code or
+                         still valid - so checking an approved id REQUIRES the inputs to
+                         recompute that fingerprint/policy (--fingerprint or --paths-from/--path
+                         (+ --root), and --work/--policy); a bare `--id` query that cannot
+                         recompute them is refused (exit 2), never a silent `approved`. A
+                         decision goes stale (exit 11) once the affected code or
                          constraints.md/policy-schema changes, and no answer by the deadline is
                          a fail-closed rejection (exit 11), never a default approval. Exit 12 =
                          pending (awaiting the operator).
@@ -873,9 +877,14 @@ function Cmd-ApprovalStatus {
         Say "NONE no approval request '$id' on file - one must be requested (fail-closed: not approved)"
         Fail 11 "no approval request '$id'"
     }
-    # Freshness: recompute current fingerprint/policy when the inputs are available, else fall
-    # back to explicit --fingerprint/--policy-hash; when neither is given, freshness is unknown
-    # and treated conservatively as fresh==true only if it matches the stored values trivially.
+    # Freshness inputs: recompute the CURRENT fingerprint/policy when the caller supplied the
+    # inputs to derive them (or take the explicit --fingerprint/--policy-hash). If an input is
+    # absent the corresponding current value stays '' = freshness UNKNOWN for that dimension -
+    # NOT "assume fresh". Below, the approve branch REFUSES to report `approved` while either
+    # value is unknown (fail-closed), so a bare `--id` query can never pass off an unchecked
+    # approval as still valid. For a still-open or rejected request an unknown value stays inert
+    # (an unknown '' below reads as "no evidence it changed", never a manufactured stale verdict):
+    # such requests are non-approvals regardless, so freshness inputs are not forced on them.
     if ($curFp -eq '') { if ($opts.ContainsKey('fingerprint') -or $opts.ContainsKey('paths-from') -or $opts.ContainsKey('path')) { $curFp = Resolve-Fingerprint } }
     if ($curPh -eq '') { if ($opts.ContainsKey('policy-hash') -or $opts.ContainsKey('policy') -or $opts.ContainsKey('work')) { $curPh = Resolve-PolicyHash } }
     $storedFp = JProp $rec 'fingerprint'
@@ -890,6 +899,19 @@ function Cmd-ApprovalStatus {
     if ($deadline -ne '') { try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { } }
 
     if ($decision -eq 'approve') {
+        # Fail-closed freshness guard (the regression this closes): an approved decision may be
+        # reported `approved` (exit 0 = proceed) ONLY once its freshness has actually been
+        # RE-CHECKED against the current change set + policy. Recomputing the fingerprint needs
+        # --fingerprint or --paths-from/--path (+ --root); the policy snapshot needs --work or
+        # --policy/--policy-hash. With an input missing the current value is '' (UNKNOWN) and the
+        # earlier $fpFresh/$phFresh would degenerate to true - i.e. report approved without
+        # checking anything. Refuse instead (exit 2, a usage error) exactly as Resolve-Fingerprint
+        # refuses a missing --root, so a stale approval can never look fresh for want of inputs.
+        if ($curFp -eq '' -or $curPh -eq '') {
+            Write-ApprovalStatus 'unverifiable' $id $rec $false $pastDeadline
+            Say "REFUSE approval '$id' is approved but its freshness was not checked (no inputs to recompute the current fingerprint/policy) - fail-closed, refusing to report approved"
+            Fail 2 "approval-status of the approved id '$id' needs the inputs to recompute the CURRENT fingerprint (--fingerprint or --paths-from/--path (+ --root)) and policy (--work or --policy/--policy-hash) so freshness is actually verified; refusing to report 'approved' unchecked"
+        }
         if (-not $fresh) {
             Write-ApprovalStatus 'expired-stale' $id $rec $fresh $pastDeadline
             Say "STALE approval '$id' granted but the affected code/policy changed since issuance - decision expired (fail-closed); re-request"
