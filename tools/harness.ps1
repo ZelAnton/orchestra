@@ -587,7 +587,9 @@ function Queue-Status {
     param($Fx, [string]$TaskId)
     $q = Read-Text (Join-Path $Fx.Work 'Tasks_Queue.md')
     $m = [regex]::Match($q, "###\s+\[$([regex]::Escape($TaskId))\].*?—\s*статус:\s*([^\r`n]+)")
-    if ($m.Success) { return $m.Groups[1].Value } else { return '' }
+    if (-not $m.Success) { return '' }
+    $parts = $m.Groups[1].Value -split ' · ', 2
+    return $parts[0].Trim()
 }
 
 # --------------------------------------------------------------------------
@@ -622,7 +624,7 @@ function Step-Capture {
     param($Fx, [string]$TaskId)
     Guarded-ToolCall $Fx 'capture' $script:QueueTx `
         @('capture', '--work', $Fx.Work, '--id', $TaskId, '--batch', $Fx.BatchId) `
-        { (Queue-Status $Fx $TaskId) -match 'в работе' } | Out-Null
+        { (Queue-Status $Fx $TaskId) -eq 'в работе' } | Out-Null
     Set-Descriptor $Fx $TaskId 'в работе'
     Emit-Event $Fx $null @('--type', 'task.captured', '--batch-id', $Fx.BatchId, '--task-id', $TaskId, '--attempt', '1', '--payload', '{"level":"coder"}')
 }
@@ -988,7 +990,7 @@ function Scenario-Quarantine {
         $ret = Invoke-Tool $script:QueueTx @('return', '--work', $Fx.Work, '--id', $t1, '--reason', 'сломала проверку', '--max-attempts', "$max")
         if ($ret.ExitCode -ne 0) { Fail 4 "quarantine return #$n failed: $($ret.Err)" }
         Remove-Descriptor $Fx $t1
-        if ((Queue-Status $Fx $t1) -match 'эскалирована') { $escalated = $true; break }
+        if ((Queue-Status $Fx $t1) -eq 'эскалирована') { $escalated = $true; break }
     }
     if (-not $escalated) { Fail 4 'quarantine: task never escalated after exhausting attempts (possible infinite requeue)' }
     Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":0,"quarantined":0,"escalated":1}')

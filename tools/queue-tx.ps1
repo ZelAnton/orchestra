@@ -363,14 +363,19 @@ function Get-KnownTitles {
 # --------------------------------------------------------------------------
 # Status classification
 # --------------------------------------------------------------------------
-function Is-NotStarted { param([string]$Status) return ($Status -match 'не начата') }
-function Is-Escalated  { param([string]$Status) return ($Status -match 'эскалирована') }
-function Is-Captured   { param([string]$Status) return ($Status -match 'в работе') }
+function Is-NotStarted { param([string]$Status) return (Get-BaseWord $Status) -eq 'не начата' }
+function Is-Escalated  { param([string]$Status) return (Get-BaseWord $Status) -eq 'эскалирована' }
+function Is-Captured   { param([string]$Status) return (Get-BaseWord $Status) -eq 'в работе' }
 function Get-Attempt {
     param([string]$Status)
     $m = [regex]::Match($Status, 'попытка=(\d+)')
     if ($m.Success) { return [int]$m.Groups[1].Value }
     return 1
+}
+function Get-BaseWord {
+    param([string]$Status)
+    $parts = $Status -split ' · ', 2
+    return $parts[0].Trim()
 }
 
 # --------------------------------------------------------------------------
