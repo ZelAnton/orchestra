@@ -60,6 +60,16 @@ impl Finding {
     pub fn summary_timestamp(&self) -> Option<&str> {
         self.id.strip_prefix("SUMMARY-R-")
     }
+    /// The integration-review clean-pass summary (`SUMMARY-F-<UTC>`), the join-barrier analogue
+    /// of `SUMMARY-R` (`agents/processor.md` phase 5.2). Distinct prefix from `SUMMARY-R`, so a
+    /// per-task summary never satisfies the integration gate and vice versa.
+    pub fn is_integration_summary(&self) -> bool {
+        self.id.starts_with("SUMMARY-F")
+    }
+    /// The UTC ISO-8601 timestamp embedded in a `SUMMARY-F` id (after the `SUMMARY-F-` prefix).
+    pub fn integration_summary_timestamp(&self) -> Option<&str> {
+        self.id.strip_prefix("SUMMARY-F-")
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -92,6 +102,105 @@ impl ReviewParse {
             .unwrap_or(false);
         fresh_summary && self.open_review_findings().is_empty()
     }
+
+    /// The freshest `SUMMARY-F` (integration-review clean-pass summary; ISO-8601 sorts lexically).
+    pub fn latest_integration_summary(&self) -> Option<&Finding> {
+        self.findings
+            .iter()
+            .filter(|f| f.is_integration_summary())
+            .max_by(|a, b| {
+                a.integration_summary_timestamp()
+                    .cmp(&b.integration_summary_timestamp())
+            })
+    }
+    /// Open integration findings = `F-` entries with status `новая`.
+    pub fn open_integration_findings(&self) -> Vec<&Finding> {
+        self.findings
+            .iter()
+            .filter(|f| f.is_integration() && f.status == Status::New)
+            .collect()
+    }
+    /// The processor's phase-5.2 integration clean gate, made deterministic: a `SUMMARY-F` newer
+    /// than `since` (the mark taken just before the `full_reviewer` call) AND no open `F-`. The
+    /// batch-level twin of [`is_clean_pass`](Self::is_clean_pass).
+    pub fn is_clean_integration_pass(&self, since: &str) -> bool {
+        let fresh_summary = self
+            .latest_integration_summary()
+            .and_then(|f| f.integration_summary_timestamp())
+            .map(|ts| ts > since)
+            .unwrap_or(false);
+        fresh_summary && self.open_integration_findings().is_empty()
+    }
+}
+
+/// One task's line in `merge_report.md` (`agents/merger.md`, "Формат `merge_report.md`"): a task
+/// is either `merged=<SHA>` (optionally `conflict-resolved`) or `quarantined=<причина>`. Parsed
+/// deterministically so the engine's Phase 4.3 merge/quarantine decision reads the merger's own
+/// report, never free text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// The branch merged into the integration branch; `sha` is its merge-commit SHA / change id.
+    /// `conflict_resolved` marks a hand-stitched seam (the `conflict-resolved` suffix).
+    Merged {
+        sha: String,
+        conflict_resolved: bool,
+    },
+    /// The branch was NOT merged (its code is absent from the integration branch).
+    Quarantined { reason: String },
+}
+
+/// One `- [T-ID] merged=…|quarantined=…` line decoded from `merge_report.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeLine {
+    pub id: String,
+    pub outcome: MergeOutcome,
+}
+
+/// Parse `merge_report.md` into its per-task result lines (`agents/merger.md` format). Each result
+/// is a bullet `- [T-ID] merged=<SHA>[ conflict-resolved]` or `- [T-ID] quarantined=<причина>`;
+/// any other line (heading, `База:`, `Итоговая сборка …`) is ignored. Order preserved.
+pub fn parse_merge_report(text: &str) -> Vec<MergeLine> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix("- [") else {
+            continue;
+        };
+        let Some(close) = rest.find(']') else {
+            continue;
+        };
+        let id = rest[..close].trim().to_string();
+        let is_task_id = match id.strip_prefix("T-") {
+            Some(d) => !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()),
+            None => false,
+        };
+        if !is_task_id {
+            continue;
+        }
+        let after = rest[close + 1..].trim();
+        if let Some(v) = after.strip_prefix("merged=") {
+            let mut parts = v.split_whitespace();
+            let sha = parts.next().unwrap_or("").to_string();
+            if sha.is_empty() {
+                continue;
+            }
+            let conflict_resolved = parts.any(|p| p == "conflict-resolved");
+            out.push(MergeLine {
+                id,
+                outcome: MergeOutcome::Merged {
+                    sha,
+                    conflict_resolved,
+                },
+            });
+        } else if let Some(v) = after.strip_prefix("quarantined=") {
+            let reason = v.trim().to_string();
+            out.push(MergeLine {
+                id,
+                outcome: MergeOutcome::Quarantined { reason },
+            });
+        }
+    }
+    out
 }
 
 /// Parse a review.md / review_integration.md body into its findings.
@@ -132,6 +241,7 @@ fn is_marker_id(id: &str) -> bool {
     id.strip_prefix("R-").is_some_and(two_digits)
         || id.strip_prefix("F-").is_some_and(two_digits)
         || id.strip_prefix("SUMMARY-R-").is_some_and(is_utc_timestamp)
+        || id.strip_prefix("SUMMARY-F-").is_some_and(is_utc_timestamp)
 }
 
 fn is_utc_timestamp(timestamp: &str) -> bool {
@@ -393,6 +503,93 @@ mod tests {
         let p = parse_review(text);
         assert!(p.findings[0].is_integration());
         assert_eq!(p.findings[0].status, Status::New);
+    }
+
+    #[test]
+    fn integration_clean_pass_requires_fresh_summary_f_and_zero_open_f() {
+        // A fresh SUMMARY-F with no open F- is a clean integration pass (phase 5.2 gate).
+        let clean = "\
+### [F-01] build break — статус: исправлено\n\
+### [SUMMARY-F-2026-07-12T18:00:00Z] Итог интеграционного ревью — статус: готово к слиянию\n";
+        let p = parse_review(clean);
+        assert!(p.latest_integration_summary().is_some());
+        assert_eq!(p.open_integration_findings().len(), 0);
+        assert!(p.is_clean_integration_pass("2026-07-12T17:00:00Z"));
+        // A stale SUMMARY-F (review started AFTER it) is not a fresh clean pass.
+        assert!(!p.is_clean_integration_pass("2026-07-12T19:00:00Z"));
+        // An open F- blocks the clean pass even with a fresh summary.
+        let dirty = format!("{clean}### [F-09] still broken — статус: новая\n");
+        let d = parse_review(&dirty);
+        assert_eq!(d.open_integration_findings().len(), 1);
+        assert!(!d.is_clean_integration_pass("2026-07-12T17:00:00Z"));
+    }
+
+    #[test]
+    fn summary_r_and_summary_f_do_not_cross_satisfy() {
+        // A per-task SUMMARY-R never satisfies the integration gate, and a SUMMARY-F never the
+        // per-task gate — the two summaries have distinct prefixes.
+        let r =
+            parse_review("### [SUMMARY-R-2026-07-12T18:00:00Z] Итог — статус: готово к слиянию\n");
+        assert!(r.latest_summary().is_some());
+        assert!(r.latest_integration_summary().is_none());
+        assert!(!r.is_clean_integration_pass("2026-07-12T17:00:00Z"));
+        let f =
+            parse_review("### [SUMMARY-F-2026-07-12T18:00:00Z] Итог — статус: готово к слиянию\n");
+        assert!(f.latest_integration_summary().is_some());
+        assert!(f.latest_summary().is_none());
+        assert!(!f.is_clean_pass("2026-07-12T17:00:00Z"));
+    }
+
+    #[test]
+    fn merge_report_parses_merged_and_quarantined_lines() {
+        let text = "\
+# Merge Report — Batch B-1\n\
+Интеграционная ветка: integration/B-1\n\
+База: base-sha\n\
+\n\
+## Результаты\n\
+- [T-101] merged=abc123\n\
+- [T-102] merged=def456 conflict-resolved\n\
+- [T-103] quarantined=сломала сборку интеграции\n\
+\n\
+Итоговая сборка интеграционной ветки: ok\n";
+        let lines = parse_merge_report(text);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].id, "T-101");
+        assert_eq!(
+            lines[0].outcome,
+            MergeOutcome::Merged {
+                sha: "abc123".to_string(),
+                conflict_resolved: false
+            }
+        );
+        assert_eq!(
+            lines[1].outcome,
+            MergeOutcome::Merged {
+                sha: "def456".to_string(),
+                conflict_resolved: true
+            }
+        );
+        assert_eq!(
+            lines[2].outcome,
+            MergeOutcome::Quarantined {
+                reason: "сломала сборку интеграции".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn merge_report_ignores_noise_and_malformed_lines() {
+        let text = "\
+# heading\n\
+- [not-a-task] merged=x\n\
+- [T-200] merged=\n\
+- [T-201] неизвестно=y\n\
+- [T-202] merged=ok\n";
+        let lines = parse_merge_report(text);
+        // Only the well-formed T-202 line survives (bad id, empty sha, unknown verb dropped).
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].id, "T-202");
     }
 
     #[test]

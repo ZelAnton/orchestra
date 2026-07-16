@@ -1,10 +1,9 @@
 //! The TUI's small, safe **command channel "downward"** to a running orchestrator (intent doc
 //! §5 / §6.2). Everything else in this crate only *observes* `.work/`; this module is the sole
-//! exception, and it is deliberately narrow: it may touch **only** `.work/PAUSE` and
-//! `.work/orchestrator.lock`, and it does so by *mirroring the existing launchers/tools* rather
-//! than inventing a parallel backend.
+//! mutation boundary. Pause/force-lock mirror their established control files; approval decisions
+//! delegate to `tools/policy.ps1`, never to direct Rust writes of approval artifacts.
 //!
-//! Four commands, each a faithful mirror of a mechanism that already exists:
+//! Six commands, each a faithful mirror of a mechanism that already exists:
 //!
 //! * **pause** — create `.work/PAUSE` (the kill switch checked at a phase/round boundary), the
 //!   same file `launchers/cc-pause.sh` writes. A running processor only checks that the file
@@ -24,17 +23,23 @@
 //!   the `engine lease` API: that path is owner-checked and never force-removes a lease (K-003), so
 //!   the operator-only "processor is definitely dead, take the lock by hand" action must mirror the
 //!   launcher directly.
+//! * **approval-approve / approval-reject** — consume a pending human-gate request strictly via
+//!   `tools/policy.ps1`, resolved through the same checkout-vs-cc-sync rule and launched through
+//!   the same engine supervisor as `state-tx status`. Rust never writes `.work/approvals/`
+//!   directly. The structured result distinguishes an applied approval/rejection from a request
+//!   that another operator already consumed, an expired request, and an execution failure.
 //!
 //! **Testable core.** As with [`crate::app`], the decision/format/parse logic here is pure and
 //! unit-tested without a terminal; the only impure pieces are the three thin filesystem writes
-//! (`pause` / `resume` / `force_lock`) and the supervised `state-tx.ps1` spawn in
-//! [`query_lease_status`]. Callers never issue any command implicitly — a keystroke in `main.rs`
-//! is what triggers one, and force-lock additionally requires the confirmation gate.
+//! (`pause` / `resume` / `force_lock`) and the supervised PowerShell spawns in
+//! [`query_lease_status`] / [`decide_approval`]. Callers never issue any command implicitly — a
+//! keystroke in `main.rs` is what triggers one, and every destructive decision additionally
+//! requires the confirmation gate.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use orchestra_engine::{lease, time::epoch_to_iso};
 
@@ -42,6 +47,9 @@ use orchestra_engine::{lease, time::epoch_to_iso};
 const PAUSE_FILE: &str = "PAUSE";
 /// The owner-lease directory, relative to the `.work/` directory.
 const LOCK_DIR: &str = "orchestrator.lock";
+/// A policy decision is a tiny local PowerShell transaction; keep the same bounded supervision
+/// window as the state-tx command channel.
+const POLICY_DEADLINE: Duration = Duration::from_secs(120);
 
 // ---------------------------------------------------------------------------------------------
 // pause / resume — direct `.work/PAUSE` writes mirroring cc-pause.sh / cc-unpause.sh
@@ -213,21 +221,7 @@ fn json_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
 /// at `~/.claude/scripts/state-tx.ps1`. `None` if neither exists — the caller surfaces that as
 /// [`LeaseStatus::Unavailable`] instead of guessing.
 pub fn resolve_state_tx_script(work_dir: &Path) -> Option<PathBuf> {
-    if let Some(root) = work_dir.parent() {
-        let checkout = root.join("tools").join("state-tx.ps1");
-        if checkout.exists() {
-            return Some(checkout);
-        }
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)?;
-    let mirror = home.join(".claude").join("scripts").join("state-tx.ps1");
-    if mirror.exists() {
-        Some(mirror)
-    } else {
-        None
-    }
+    resolve_tool_script(work_dir, "state-tx.ps1")
 }
 
 /// **lease-status** (impure): run `state-tx.ps1 status --work <dir> --json` through the engine
@@ -274,7 +268,220 @@ pub fn query_lease_status(work_dir: &Path) -> LeaseStatus {
 }
 
 // ---------------------------------------------------------------------------------------------
-// ISO-8601 UTC timestamp — reuse the engine's dependency-free civil-from-days converter.
+// approval decisions — supervised tools/policy.ps1, never direct approval-artifact writes
+// ---------------------------------------------------------------------------------------------
+
+/// The irreversible operator decision requested by a pending approval card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    Approve,
+    Reject,
+}
+
+impl ApprovalDecision {
+    fn command(self) -> &'static str {
+        match self {
+            ApprovalDecision::Approve => "approval-approve",
+            ApprovalDecision::Reject => "approval-reject",
+        }
+    }
+
+    fn policy_value(self) -> &'static str {
+        match self {
+            ApprovalDecision::Approve => "approve",
+            ApprovalDecision::Reject => "reject",
+        }
+    }
+}
+
+/// Structured command outcome. `Rejected` is a successfully applied operator rejection even
+/// though `policy.ps1` deliberately exits 11 after persisting it to keep downstream gates closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    Approved,
+    Rejected,
+    AlreadyConsumed,
+    Expired,
+    Failed,
+}
+
+/// Result shown by the Decision Inbox immediately after a supervised policy transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalCommandResult {
+    pub id: String,
+    pub outcome: ApprovalOutcome,
+    pub reason: String,
+}
+
+impl ApprovalCommandResult {
+    pub fn summary(&self) -> String {
+        match self.outcome {
+            ApprovalOutcome::Approved => format!("approval {} одобрен и потреблён", self.id),
+            ApprovalOutcome::Rejected => format!("approval {} отклонён и потреблён", self.id),
+            ApprovalOutcome::AlreadyConsumed => {
+                format!("approval {} уже потреблён: {}", self.id, self.reason)
+            }
+            ApprovalOutcome::Expired => {
+                format!("approval {} просрочен: {}", self.id, self.reason)
+            }
+            ApprovalOutcome::Failed => {
+                format!(
+                    "решение по approval {} не применено: {}",
+                    self.id, self.reason
+                )
+            }
+        }
+    }
+}
+
+/// Resolve `policy.ps1` through the same checkout-vs-cc-sync mirror rule as `state-tx.ps1`.
+pub fn resolve_policy_script(work_dir: &Path) -> Option<PathBuf> {
+    resolve_tool_script(work_dir, "policy.ps1")
+}
+
+fn resolve_tool_script(work_dir: &Path, name: &str) -> Option<PathBuf> {
+    if let Some(root) = work_dir.parent() {
+        let checkout = root.join("tools").join(name);
+        if checkout.exists() {
+            return Some(checkout);
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+    let mirror = home.join(".claude").join("scripts").join(name);
+    if mirror.exists() {
+        Some(mirror)
+    } else {
+        None
+    }
+}
+
+/// Build the arguments after `policy.ps1`. Values stay distinct argv elements, including an
+/// arbitrary rejection explanation; no shell command string is ever concatenated.
+pub fn approval_decision_argv(
+    work_dir: &Path,
+    id: &str,
+    decision: ApprovalDecision,
+    rejection_reason: Option<&str>,
+) -> Vec<String> {
+    let mut argv = vec![
+        decision.command().to_string(),
+        "--work".to_string(),
+        work_dir.to_string_lossy().into_owned(),
+        "--id".to_string(),
+        id.to_string(),
+        "--by".to_string(),
+        "orchestra-tui".to_string(),
+    ];
+    // policy.ps1 stores the operator's reject explanation in the approval artifact's `note`
+    // field. The UI calls it a reason; mapping it here keeps the persisted policy schema intact.
+    if decision == ApprovalDecision::Reject {
+        if let Some(reason) = rejection_reason.filter(|s| !s.trim().is_empty()) {
+            argv.push("--note".to_string());
+            argv.push(reason.trim().to_string());
+        }
+    }
+    argv.push("--json".to_string());
+    argv
+}
+
+/// Parse one supervised policy invocation. A freshly persisted rejection is identified from the
+/// JSON output before inspecting the non-zero exit code; all other non-zero outcomes are refusals.
+pub fn parse_approval_result(
+    id: &str,
+    requested: ApprovalDecision,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    supervision_reason: &str,
+) -> ApprovalCommandResult {
+    let json = serde_json::from_str::<serde_json::Value>(stdout.trim()).ok();
+    let applied = json.as_ref().map(|v| {
+        v.get("id").and_then(|x| x.as_str()) == Some(id)
+            && v.get("decision").and_then(|x| x.as_str()) == Some(requested.policy_value())
+            && v.get("state")
+                .and_then(|x| x.as_str())
+                .map(|s| s == format!("decided-{}", requested.policy_value()))
+                .unwrap_or(false)
+    });
+    if applied == Some(true) && (requested == ApprovalDecision::Reject || exit_code == Some(0)) {
+        return ApprovalCommandResult {
+            id: id.to_string(),
+            outcome: match requested {
+                ApprovalDecision::Approve => ApprovalOutcome::Approved,
+                ApprovalDecision::Reject => ApprovalOutcome::Rejected,
+            },
+            reason: String::new(),
+        };
+    }
+
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .or_else(|| stdout.lines().map(str::trim).find(|line| !line.is_empty()))
+        .unwrap_or(supervision_reason)
+        .to_string();
+    let lower = detail.to_ascii_lowercase();
+    let outcome = if lower.contains("already") && lower.contains("one-time") {
+        ApprovalOutcome::AlreadyConsumed
+    } else if lower.contains("approval id")
+        && (lower.contains("expired at") || lower.contains("by the deadline"))
+    {
+        ApprovalOutcome::Expired
+    } else {
+        ApprovalOutcome::Failed
+    };
+    ApprovalCommandResult {
+        id: id.to_string(),
+        outcome,
+        reason: if detail.is_empty() {
+            format!("policy.ps1 завершился с кодом {:?}", exit_code)
+        } else {
+            detail
+        },
+    }
+}
+
+/// Apply approve/reject through the supervised PowerShell command channel. This function never
+/// opens or writes an approval JSON file itself.
+pub fn decide_approval(
+    work_dir: &Path,
+    id: &str,
+    decision: ApprovalDecision,
+    rejection_reason: Option<&str>,
+) -> ApprovalCommandResult {
+    let script = match resolve_policy_script(work_dir) {
+        Some(path) => path,
+        None => {
+            return ApprovalCommandResult {
+                id: id.to_string(),
+                outcome: ApprovalOutcome::Failed,
+                reason: "policy.ps1 не найден (ни в <root>/tools, ни в зеркале ~/.claude/scripts)"
+                    .to_string(),
+            }
+        }
+    };
+    let argv = approval_decision_argv(work_dir, id, decision, rejection_reason);
+    match lease::run_state_tx(&script.to_string_lossy(), &argv, POLICY_DEADLINE) {
+        Ok(verdict) => parse_approval_result(
+            id,
+            decision,
+            verdict.exit_code,
+            &verdict.stdout,
+            &verdict.stderr,
+            &verdict.outcome_reason,
+        ),
+        Err(error) => ApprovalCommandResult {
+            id: id.to_string(),
+            outcome: ApprovalOutcome::Failed,
+            reason: error,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------------------------// ISO-8601 UTC timestamp — reuse the engine's dependency-free civil-from-days converter.
 // ---------------------------------------------------------------------------------------------
 
 /// The current instant as `YYYY-MM-DDTHH:MM:SSZ` (the same shape `cc-pause.sh`'s `date -u` emits).
@@ -448,6 +655,75 @@ mod tests {
             .contains("недоступен"));
     }
 
+    #[test]
+    fn approval_argv_keeps_reject_reason_as_one_argument() {
+        let argv = approval_decision_argv(
+            Path::new("/repo/.work"),
+            "apr-123",
+            ApprovalDecision::Reject,
+            Some("неверный scope; $(do-not-run)"),
+        );
+        assert_eq!(argv[0], "approval-reject");
+        assert!(argv.windows(2).any(|w| w == ["--id", "apr-123"]));
+        assert!(argv
+            .windows(2)
+            .any(|w| w == ["--note", "неверный scope; $(do-not-run)"]));
+        assert_eq!(argv.last().map(String::as_str), Some("--json"));
+    }
+
+    #[test]
+    fn parses_approve_reject_consumed_and_expired_results() {
+        let approved = parse_approval_result(
+            "apr-a",
+            ApprovalDecision::Approve,
+            Some(0),
+            r#"{"state":"decided-approve","id":"apr-a","decision":"approve"}"#,
+            "",
+            "ok",
+        );
+        assert_eq!(approved.outcome, ApprovalOutcome::Approved);
+
+        // policy.ps1 persists rejection, emits JSON, then exits 11 intentionally.
+        let rejected = parse_approval_result(
+            "apr-r",
+            ApprovalDecision::Reject,
+            Some(11),
+            r#"{"state":"decided-reject","id":"apr-r","decision":"reject"}"#,
+            "policy: approval id 'apr-r' rejected by 'orchestra-tui'",
+            "error",
+        );
+        assert_eq!(rejected.outcome, ApprovalOutcome::Rejected);
+
+        let consumed = parse_approval_result(
+            "apr-a",
+            ApprovalDecision::Reject,
+            Some(11),
+            "",
+            "policy: approval id 'apr-a' is already approve; a one-time id cannot be decided twice",
+            "error",
+        );
+        assert_eq!(consumed.outcome, ApprovalOutcome::AlreadyConsumed);
+
+        let expired = parse_approval_result(
+            "apr-x",
+            ApprovalDecision::Approve,
+            Some(11),
+            "",
+            "policy: approval id 'apr-x' expired at 2026-07-16T00:00:00Z",
+            "error",
+        );
+        assert_eq!(expired.outcome, ApprovalOutcome::Expired);
+
+        let supervisor_timeout = parse_approval_result(
+            "apr-x",
+            ApprovalDecision::Approve,
+            None,
+            "",
+            "",
+            "supervisor deadline exceeded",
+        );
+        assert_eq!(supervisor_timeout.outcome, ApprovalOutcome::Failed);
+    }
     #[test]
     fn now_iso8601_has_the_expected_shape() {
         let s = now_iso8601();

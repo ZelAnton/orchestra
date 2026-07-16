@@ -12,7 +12,7 @@
 #     dependency edge + increments попытка), escalation on exhausted attempts
 #   - optimistic generation compare-and-swap (stale writer rejected)
 #   - crash/retry mid-transaction (fault injection leaves queue+gen intact)
-#   - inbox add/drain (safe acceptance while the queue owner is busy)
+#   - inbox add/drain, including immutable quarantine of rejected records
 #   - several concurrent writers with no lost update / no duplicate id
 #
 # The tool is invoked with pwsh (PowerShell 7) when available, else the current
@@ -320,6 +320,83 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         $r = Run-Tool @('inbox-drain', '--work', $W)
         Assert-Match $r.Output 'skipped-dup' '[inbox] duplicate proposal skipped on drain'
         Assert-Equal 2 (Get-QueueIds $W).Count '[inbox] no duplicate inserted'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 11a: dependency rejection is quarantined and non-blocking -
+    $W = New-Work
+    try {
+        Run-Tool @('inbox-add', '--work', $W, '--title', 'Rejected Dependency', '--body', 'bad', '--predecessors', 'T-999') | Out-Null
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-rejected-dep] rejection is a successfully processed record'
+        Assert-Match $r.Output 'rejected: .*DEP:missing predecessor T-999' '[inbox-rejected-dep] exact dependency error reported'
+
+        $inbox = Join-Path $W 'queue_inbox'
+        $rejectedDir = Join-Path $inbox 'rejected'
+        Assert-True (Test-Path -LiteralPath $rejectedDir -PathType Container) '[inbox-rejected-dep] rejected path is a directory'
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $inbox -Filter '*.json' -File).Count '[inbox-rejected-dep] rejected record removed from hot inbox'
+        $rejectedRecords = @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.json' -File)
+        $metadata = @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.metadata.txt' -File)
+        Assert-Equal 1 $rejectedRecords.Count '[inbox-rejected-dep] rejected JSON retained in audit trail'
+        Assert-Equal 1 $metadata.Count '[inbox-rejected-dep] companion metadata retained'
+        Assert-Match $rejectedRecords[0].Name '^\d{8}T\d{6}-.+\.json$' '[inbox-rejected-dep] sortable timestamp prefixes rejected filename'
+        $metadataText = [System.IO.File]::ReadAllText($metadata[0].FullName)
+        Assert-Match $metadataText 'Rejection reason: DEP:missing predecessor T-999' '[inbox-rejected-dep] exact rejection reason preserved'
+        Assert-Match $metadataText 'Timestamp of rejection: \d{4}-\d{2}-\d{2}T' '[inbox-rejected-dep] rejection timestamp preserved'
+
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-rejected-dep] repeated drain stays successful'
+        Assert-Match $r.Output 'inbox empty' '[inbox-rejected-dep] repeated drain does not re-process quarantine'
+        Assert-Equal 1 @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.json' -File).Count '[inbox-rejected-dep] audit trail is append-only across repeated drain'
+
+        Run-Tool @('inbox-add', '--work', $W, '--title', 'Valid After Dependency Rejection', '--body', 'good') | Out-Null
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-rejected-dep] later valid drain succeeds'
+        Assert-Match $r.Output 'added: T-001' '[inbox-rejected-dep] rejection does not consume an id'
+        Assert-Match (Read-Queue $W) 'Valid After Dependency Rejection' '[inbox-rejected-dep] later valid record reaches queue'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 11b: unreadable JSON is quarantined and non-blocking -------
+    $W = New-Work
+    try {
+        $inbox = Join-Path $W 'queue_inbox'
+        New-Item -ItemType Directory -Force -Path $inbox | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $inbox 'broken.json'), '{"title":', (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-rejected-json] unreadable JSON is a successfully processed record'
+        Assert-Match $r.Output 'rejected: broken\.json' '[inbox-rejected-json] unreadable JSON reported'
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $inbox -Filter '*.json' -File).Count '[inbox-rejected-json] unreadable JSON removed from hot inbox'
+        $rejectedDir = Join-Path $inbox 'rejected'
+        $rejectedRecords = @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.json' -File)
+        $metadata = @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.metadata.txt' -File)
+        Assert-Equal 1 $rejectedRecords.Count '[inbox-rejected-json] unreadable JSON retained in audit trail'
+        Assert-Equal 1 $metadata.Count '[inbox-rejected-json] parse diagnostic metadata retained'
+        $metadataText = [System.IO.File]::ReadAllText($metadata[0].FullName)
+        Assert-Match $metadataText 'Rejection reason: .+' '[inbox-rejected-json] parser error message preserved'
+        Assert-Match $metadataText 'Timestamp of rejection: \d{4}-\d{2}-\d{2}T' '[inbox-rejected-json] rejection timestamp preserved'
+
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-rejected-json] repeated drain stays successful'
+        Assert-Match $r.Output 'inbox empty' '[inbox-rejected-json] repeated drain does not re-process quarantine'
+
+        Run-Tool @('inbox-add', '--work', $W, '--title', 'Valid After Broken JSON', '--body', 'good') | Out-Null
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-rejected-json] later valid drain succeeds'
+        Assert-Match (Read-Queue $W) 'Valid After Broken JSON' '[inbox-rejected-json] later valid record reaches queue'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 11c: valid and rejected records share one successful drain -
+    $W = New-Work
+    try {
+        Run-Tool @('inbox-add', '--work', $W, '--title', 'Mixed Rejected', '--body', 'bad', '--predecessors', 'T-999') | Out-Null
+        Run-Tool @('inbox-add', '--work', $W, '--title', 'Mixed Valid', '--body', 'good') | Out-Null
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-mixed] accepted and rejected records are fully processed'
+        Assert-Match $r.Output 'added: T-001' '[inbox-mixed] valid record is added normally'
+        Assert-Match $r.Output 'rejected: .*DEP:missing predecessor T-999' '[inbox-mixed] invalid record is quarantined'
+        Assert-Equal 1 (Get-QueueIds $W).Count '[inbox-mixed] only valid record reaches queue'
+        Assert-Match (Read-Queue $W) 'Mixed Valid' '[inbox-mixed] valid title preserved'
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath (Join-Path $W 'queue_inbox') -Filter '*.json' -File).Count '[inbox-mixed] hot inbox fully drained'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
     # --- Scenario 12: concurrent writers, no lost update / no duplicate id --

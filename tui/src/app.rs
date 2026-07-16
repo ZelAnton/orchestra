@@ -10,7 +10,8 @@
 //! lock, or emits an event: it only *consumes* the typed [`Event`] values handed over by the engine
 //! crate's cursor reader, plus a little UI state (screen, inbox focus, the force-lock confirmation
 //! modal, the last command notice). The one place the crate may write is the deliberately narrow
-//! §5/§6.2 command channel in [`crate::commands`] (pause / resume / lease-status / force-lock),
+//! §5/§6.2 command channel in [`crate::commands`] (pause / resume / lease-status / force-lock /
+//! approval decisions),
 //! driven only by an explicit keystroke. The events are the source of truth for the
 //! batch/cohort/task projection; `status.md` (see [`crate::status`]) is folded in separately as
 //! human context.
@@ -20,8 +21,8 @@ use std::collections::BTreeMap;
 use orchestra_engine::events::{Event, EventType};
 use serde_json::{Map, Value};
 
-use crate::commands::LeaseStatus;
-use crate::inbox::DecisionInbox;
+use crate::commands::{ApprovalDecision, LeaseStatus};
+use crate::inbox::{ApprovalCard, DecisionInbox};
 
 /// Which of the two screens (§6.1 overview / §6.2 Decision Inbox) is currently drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -31,30 +32,41 @@ pub enum Screen {
     DecisionInbox,
 }
 
-/// Which Decision Inbox panel currently holds scroll focus (R-3: each of the three panels —
-/// escalated/quarantined/blocked — scrolls independently, since a fixed-height layout would
-/// otherwise silently clip cards beyond the terminal's height). `←`/`→` in `main.rs` cycle
-/// focus; `↑`/`↓` scroll whichever panel is focused. Fieldless, so `as usize` indexes
-/// `AppState::inbox_scroll` in declaration order.
+/// Which Decision Inbox panel currently holds focus: pending approvals plus the existing
+/// escalated/quarantined/blocked panels. `←`/`→` cycles focus; `↑`/`↓` selects an approval card
+/// or scrolls the other panels. Fieldless, so `as usize` indexes `AppState::inbox_scroll` in
+/// declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InboxPanel {
     #[default]
+    Approvals,
     Escalated,
     Quarantined,
     Blocked,
 }
 
-/// A modal overlay that captures input until dismissed. The only modal is the destructive
-/// **force-lock** confirmation: force-lock (removing `.work/orchestrator.lock`, mirroring
-/// `cc-processor.sh --force-lock`) must never fire from a single stray keystroke, so *arming* it
-/// opens this modal and only an explicit *second* confirmation keystroke (see `main.rs`) actually
-/// removes the lock (§6.2 "опасные операции — с явным confirm").
+/// A modal overlay that captures input until dismissed. Every irreversible operation requires a
+/// second explicit confirmation; rejection additionally captures a non-empty operator reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Modal {
     #[default]
     None,
     /// Force-lock armed: awaiting the explicit confirm keystroke.
     ConfirmForceLock,
+    /// Approval armed: awaiting `y`/Enter.
+    ConfirmApprove,
+    /// Reject armed: capture a reason, then Enter advances to the confirmation step.
+    EnterRejectReason,
+    /// Reject reason captured: awaiting `y`/Enter before applying it.
+    ConfirmReject,
+}
+
+/// A fully confirmed approval decision ready for the command channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedApproval {
+    pub id: String,
+    pub decision: ApprovalDecision,
+    pub rejection_reason: Option<String>,
 }
 
 /// The stage a task's status maps to, for the "deviations first, green collapsed" §6.1 layout.
@@ -195,8 +207,15 @@ pub struct AppState {
     /// Which Decision Inbox panel currently holds scroll focus (R-3, see `InboxPanel`).
     pub inbox_focus: InboxPanel,
     /// Per-panel scroll offset (lines), indexed by `InboxPanel as usize` (R-3).
-    pub inbox_scroll: [u16; 3],
-    /// An open modal overlay capturing input (currently only the force-lock confirmation, §6.2).
+    pub inbox_scroll: [u16; 4],
+    /// Selected pending approval card; clamped whenever the inbox refreshes.
+    pub approval_selected: usize,
+    /// Approval id captured when an approve/reject flow is armed. The confirmation gate is bound
+    /// to this immutable id rather than whichever card happens to be selected after a refresh.
+    approval_modal_id: Option<String>,
+    /// Rejection explanation being entered in the modal.
+    pub rejection_reason: String,
+    /// An open modal overlay capturing input for a destructive command.
     pub modal: Modal,
     /// The most recent lease-status query result (§5 lease-status command), shown as an overlay
     /// until dismissed; `None` before the operator ever queries it.
@@ -472,16 +491,18 @@ impl AppState {
     /// Move Decision Inbox scroll focus to the next panel (R-3; wraps around).
     pub fn focus_next_inbox_panel(&mut self) {
         self.inbox_focus = match self.inbox_focus {
+            InboxPanel::Approvals => InboxPanel::Escalated,
             InboxPanel::Escalated => InboxPanel::Quarantined,
             InboxPanel::Quarantined => InboxPanel::Blocked,
-            InboxPanel::Blocked => InboxPanel::Escalated,
+            InboxPanel::Blocked => InboxPanel::Approvals,
         };
     }
 
     /// Move Decision Inbox scroll focus to the previous panel (R-3; wraps around).
     pub fn focus_prev_inbox_panel(&mut self) {
         self.inbox_focus = match self.inbox_focus {
-            InboxPanel::Escalated => InboxPanel::Blocked,
+            InboxPanel::Approvals => InboxPanel::Blocked,
+            InboxPanel::Escalated => InboxPanel::Approvals,
             InboxPanel::Quarantined => InboxPanel::Escalated,
             InboxPanel::Blocked => InboxPanel::Quarantined,
         };
@@ -496,12 +517,152 @@ impl AppState {
         self.inbox_scroll[idx] = (cur + i32::from(delta)).max(0) as u16;
     }
 
+    /// Replace the periodically rebuilt inbox while preserving the selected approval by id when
+    /// possible. A consumed/expired card disappears or moves out of `approvals`, so selection is
+    /// clamped immediately rather than pointing at stale data. If that card has an active
+    /// approve/reject modal, dismiss the modal before the clamped neighbour can become its target.
+    pub fn replace_inbox(&mut self, inbox: DecisionInbox) {
+        let selected_id = self.pending_approval().map(|card| card.id.clone());
+        self.inbox = inbox;
+        self.approval_selected = selected_id
+            .as_deref()
+            .and_then(|id| self.inbox.approvals.iter().position(|card| card.id == id))
+            .unwrap_or_else(|| {
+                self.approval_selected
+                    .min(self.inbox.approvals.len().saturating_sub(1))
+            });
+        self.sync_approval_scroll();
+
+        if self.approval_modal_active() {
+            if let Some(captured_id) = self.approval_modal_id.as_deref() {
+                if !self
+                    .inbox
+                    .approvals
+                    .iter()
+                    .any(|card| card.id == captured_id)
+                {
+                    let captured_id = captured_id.to_string();
+                    self.dismiss_modal();
+                    self.notice = Some(format!(
+                        "approval {captured_id} больше не pending; выбор изменился, попробуйте снова"
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Currently selected actionable approval, if any.
+    pub fn pending_approval(&self) -> Option<&ApprovalCard> {
+        self.inbox.approvals.get(self.approval_selected)
+    }
+
+    /// Move selection among pending approval cards. Unlike other panels this changes the card
+    /// selected for approve/reject instead of merely scrolling rendered lines.
+    pub fn select_approval(&mut self, delta: i16) {
+        if self.inbox.approvals.is_empty() {
+            self.approval_selected = 0;
+            return;
+        }
+        let max = self.inbox.approvals.len().saturating_sub(1) as i32;
+        self.approval_selected =
+            (self.approval_selected as i32 + i32::from(delta)).clamp(0, max) as usize;
+        self.sync_approval_scroll();
+    }
+
+    fn sync_approval_scroll(&mut self) {
+        let offset = self
+            .approval_selected
+            .saturating_mul(5)
+            .min(u16::MAX as usize) as u16;
+        self.inbox_scroll[InboxPanel::Approvals as usize] = offset;
+    }
+
+    /// Arm approval of the selected pending card. Returns false when there is no actionable card.
+    pub fn arm_approve(&mut self) -> bool {
+        let Some(id) = self.pending_approval().map(|card| card.id.clone()) else {
+            return false;
+        };
+        self.approval_modal_id = Some(id);
+        self.rejection_reason.clear();
+        self.modal = Modal::ConfirmApprove;
+        true
+    }
+
+    /// Start the reject flow for the selected pending card. The reason is entered before the
+    /// separate confirmation step.
+    pub fn arm_reject(&mut self) -> bool {
+        let Some(id) = self.pending_approval().map(|card| card.id.clone()) else {
+            return false;
+        };
+        self.approval_modal_id = Some(id);
+        self.rejection_reason.clear();
+        self.modal = Modal::EnterRejectReason;
+        true
+    }
+
+    pub fn push_rejection_char(&mut self, ch: char) {
+        if self.modal == Modal::EnterRejectReason && !ch.is_control() {
+            self.rejection_reason.push(ch);
+        }
+    }
+
+    pub fn pop_rejection_char(&mut self) {
+        if self.modal == Modal::EnterRejectReason {
+            self.rejection_reason.pop();
+        }
+    }
+
+    /// Advance a non-empty reject explanation to the independent confirmation step.
+    pub fn confirm_rejection_reason(&mut self) -> bool {
+        if self.modal == Modal::EnterRejectReason && !self.rejection_reason.trim().is_empty() {
+            self.rejection_reason = self.rejection_reason.trim().to_string();
+            self.modal = Modal::ConfirmReject;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consume an explicitly confirmed approve/reject modal and return the immutable command
+    /// request. The selected card must still match the id captured when the flow was armed; a
+    /// changed selection dismisses the modal and fails closed. A bare `y` without a previously
+    /// armed modal can never produce an action.
+    pub fn take_approval_confirmation(&mut self) -> Option<ConfirmedApproval> {
+        let decision = match self.modal {
+            Modal::ConfirmApprove => ApprovalDecision::Approve,
+            Modal::ConfirmReject => ApprovalDecision::Reject,
+            _ => return None,
+        };
+        let captured_id = self.approval_modal_id.clone();
+        let selection_matches = captured_id
+            .as_deref()
+            .is_some_and(|id| self.pending_approval().is_some_and(|card| card.id == id));
+        if !selection_matches {
+            self.dismiss_modal();
+            self.notice = Some("выбор approval изменился; попробуйте снова".to_string());
+            return None;
+        }
+        let id = captured_id.expect("captured approval id checked above");
+        let rejection_reason = if decision == ApprovalDecision::Reject {
+            Some(self.rejection_reason.clone())
+        } else {
+            None
+        };
+        self.modal = Modal::None;
+        self.approval_modal_id = None;
+        Some(ConfirmedApproval {
+            id,
+            decision,
+            rejection_reason,
+        })
+    }
     // ---- command channel state (§5/§6.2 safe command subset) ------------------------------
 
     /// Arm the destructive force-lock command: open its confirmation modal (step 1). This never
     /// removes the lock by itself — only [`AppState::take_force_lock_confirmation`], after an
     /// explicit second keystroke, does (§6.2).
     pub fn arm_force_lock(&mut self) {
+        self.approval_modal_id = None;
         self.modal = Modal::ConfirmForceLock;
     }
 
@@ -522,6 +683,15 @@ impl AppState {
     /// Dismiss any open modal without acting (Esc / n).
     pub fn dismiss_modal(&mut self) {
         self.modal = Modal::None;
+        self.approval_modal_id = None;
+        self.rejection_reason.clear();
+    }
+
+    fn approval_modal_active(&self) -> bool {
+        matches!(
+            self.modal,
+            Modal::ConfirmApprove | Modal::EnterRejectReason | Modal::ConfirmReject
+        )
     }
 
     /// Whether a modal is currently capturing input.
@@ -716,13 +886,15 @@ mod tests {
     #[test]
     fn inbox_panel_focus_cycles_and_wraps() {
         let mut app = AppState::new();
+        assert_eq!(app.inbox_focus, InboxPanel::Approvals);
+        app.focus_next_inbox_panel();
         assert_eq!(app.inbox_focus, InboxPanel::Escalated);
         app.focus_next_inbox_panel();
         assert_eq!(app.inbox_focus, InboxPanel::Quarantined);
         app.focus_next_inbox_panel();
         assert_eq!(app.inbox_focus, InboxPanel::Blocked);
         app.focus_next_inbox_panel();
-        assert_eq!(app.inbox_focus, InboxPanel::Escalated);
+        assert_eq!(app.inbox_focus, InboxPanel::Approvals);
         app.focus_prev_inbox_panel();
         assert_eq!(app.inbox_focus, InboxPanel::Blocked);
     }
@@ -730,6 +902,7 @@ mod tests {
     #[test]
     fn inbox_scroll_is_per_panel_and_saturates_at_zero() {
         let mut app = AppState::new();
+        app.inbox_focus = InboxPanel::Escalated;
         app.scroll_inbox(5);
         assert_eq!(app.inbox_scroll[InboxPanel::Escalated as usize], 5);
         app.focus_next_inbox_panel();
@@ -740,6 +913,126 @@ mod tests {
         // scrolling up past 0 saturates instead of underflowing.
         app.scroll_inbox(-100);
         assert_eq!(app.inbox_scroll[InboxPanel::Quarantined as usize], 0);
+    }
+
+    fn approval(id: &str) -> ApprovalCard {
+        ApprovalCard {
+            id: id.to_string(),
+            subject: "task:T-250|batch:".to_string(),
+            task: Some("T-250".to_string()),
+            batch: None,
+            reason: "human-review".to_string(),
+            created_at: None,
+            deadline: Some("2026-07-17T00:00:00Z".to_string()),
+            fingerprint: Some("aa".to_string()),
+            policy_hash: Some("bb".to_string()),
+        }
+    }
+
+    #[test]
+    fn approve_and_reject_require_explicit_confirmation() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a")];
+
+        assert!(app.arm_approve());
+        assert_eq!(app.modal, Modal::ConfirmApprove);
+        let action = app.take_approval_confirmation().unwrap();
+        assert_eq!(action.id, "apr-a");
+        assert_eq!(action.decision, ApprovalDecision::Approve);
+        assert!(action.rejection_reason.is_none());
+        assert!(app.take_approval_confirmation().is_none());
+
+        app.inbox.approvals.push(approval("apr-b"));
+        app.inbox.approvals.push(approval("apr-c"));
+        app.select_approval(2);
+        assert_eq!(app.approval_selected, 2);
+        assert_eq!(app.inbox_scroll[InboxPanel::Approvals as usize], 10);
+        app.approval_selected = 0;
+        app.sync_approval_scroll();
+
+        assert!(app.arm_reject());
+        assert!(!app.confirm_rejection_reason());
+        for ch in "неверный scope".chars() {
+            app.push_rejection_char(ch);
+        }
+        assert!(app.confirm_rejection_reason());
+        assert_eq!(app.modal, Modal::ConfirmReject);
+        let action = app.take_approval_confirmation().unwrap();
+        assert_eq!(action.decision, ApprovalDecision::Reject);
+        assert_eq!(action.rejection_reason.as_deref(), Some("неверный scope"));
+    }
+
+    #[test]
+    fn inbox_refresh_preserves_or_clamps_approval_selection() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a"), approval("apr-b")];
+        app.approval_selected = 1;
+        let refreshed = DecisionInbox {
+            approvals: vec![approval("apr-b"), approval("apr-c")],
+            ..DecisionInbox::default()
+        };
+        app.replace_inbox(refreshed);
+        assert_eq!(app.pending_approval().map(|a| a.id.as_str()), Some("apr-b"));
+
+        app.replace_inbox(DecisionInbox::default());
+        assert_eq!(app.approval_selected, 0);
+        assert!(app.pending_approval().is_none());
+    }
+
+    #[test]
+    fn reload_during_approve_modal_does_not_confirm_clamped_neighbour() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a"), approval("apr-b")];
+        assert!(app.arm_approve());
+
+        app.replace_inbox(DecisionInbox {
+            approvals: vec![approval("apr-b")],
+            ..DecisionInbox::default()
+        });
+
+        assert_eq!(app.pending_approval().map(|a| a.id.as_str()), Some("apr-b"));
+        assert_eq!(app.modal, Modal::None);
+        assert!(app.take_approval_confirmation().is_none());
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("выбор изменился")));
+    }
+
+    #[test]
+    fn reload_during_reject_modal_does_not_apply_reason_to_clamped_neighbour() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a"), approval("apr-b")];
+        assert!(app.arm_reject());
+        for ch in "причина для apr-a".chars() {
+            app.push_rejection_char(ch);
+        }
+        assert!(app.confirm_rejection_reason());
+
+        app.replace_inbox(DecisionInbox {
+            approvals: vec![approval("apr-b")],
+            ..DecisionInbox::default()
+        });
+
+        assert_eq!(app.pending_approval().map(|a| a.id.as_str()), Some("apr-b"));
+        assert_eq!(app.modal, Modal::None);
+        assert!(app.take_approval_confirmation().is_none());
+        assert!(app.rejection_reason.is_empty());
+    }
+
+    #[test]
+    fn confirmation_rejects_live_selection_divergence() {
+        let mut app = AppState::new();
+        app.inbox.approvals = vec![approval("apr-a"), approval("apr-b")];
+        assert!(app.arm_approve());
+        app.approval_selected = 1;
+
+        assert!(app.take_approval_confirmation().is_none());
+        assert_eq!(app.modal, Modal::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("выбор approval изменился")));
     }
 
     #[test]

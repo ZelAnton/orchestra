@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
     The pre-cutover EQUIVALENCE ORACLE (task T-110, extended by T-129 to the per-task review
-    and fix-cycle surface): run cohort scenarios TWO ways - (a) the prose control loop
+    and fix-cycle surface, and by T-243 to the join-barrier surface — merge / integration
+    review / publication / archival): run cohort scenarios TWO ways - (a) the prose control loop
     `agents/processor.md` as exercised by `tools/harness.ps1`, and (b) the deterministic Rust
     engine (`engine run --once`, engine/src/run.rs) - over equivalent hermetic sandboxes, and
     assert both converge to the SAME timestamp- and event-id-independent final-state fingerprint
@@ -27,7 +28,12 @@
     supervised round that advances `в работе -> на ревью`, then - as of T-128, opt-in via
     `--review` - drive the per-task review FIX CYCLE (a clean pass promotes `на ревью -> готова
     к слиянию`; findings loop `на ревью -> на ревью` under a `REVIEW_LOOP_MAX` cap before
-    escalating `на ревью -> эскалирована`), then close admission. The `.work/events.jsonl`
+    escalating `на ревью -> эскалирована`), close admission, and - as of T-243, opt-in via
+    `--join` - drive the JOIN BARRIER (phases 4-6): sequential merge of the ready branches into
+    `_integration` (decided off `merge_report.md`), the bounded integration review cycle
+    (`INTEGRATION_LOOP_MAX`, the same clean/findings gate over `F-`/`SUMMARY-F`), the ff-merge into
+    main and per-task publication/archival, and one `cohort.closed` that terminally processes the
+    cohort even when nothing was ready to merge. The `.work/events.jsonl`
     outbox is append-only, so the events of that shared, growing prefix survive verbatim inside
     a full harness run; the outbox event-identity set is therefore the one fingerprint dimension
     both paths produce identically today. (The queue/descriptor/tree dimensions of the harness's
@@ -45,6 +51,14 @@
           findings cycle - re-review, `Циклов-ревью: N`)
         * task.status_changed with transition `на ревью>эскалирована`           (T-128,
           `REVIEW_LOOP_MAX` exhaustion - a CLEAN terminal escalation, not a re-interpretation)
+        * cohort.join_started                                                   (T-243, join barrier
+          entered - integration `none>in-progress`, ready branches handed to the merger)
+        * cohort.published                                                      (T-243, batch
+          ff-merged into main / publication pinned)
+        * cohort.closed                                                         (T-243, cohort
+          terminally processed - emitted in BOTH pairings, even when nothing was published)
+        * task.status_changed with transition `опубликована>выполнена`          (T-243, Phase 6.1
+          archival - the one per-task publication identity both paths emit byte-for-byte)
     and asserts the two restricted sets (hence their SHA-256 fingerprint) are byte-equal. This
     is exactly the equivalence guarantee that must hold before any cutover, computed the same
     way the harness computes its fingerprint (Get-OutboxDigest: identity = type|batch|task|
@@ -113,11 +127,12 @@ $script:Failures = [System.Collections.Generic.List[string]]::new()
 $script:TempDirs = [System.Collections.Generic.List[string]]::new()
 
 # The exact status transitions both paths emit today (T-110 phase 1 + T-128 per-task review /
-# fix-cycle, extended by T-129).
+# fix-cycle, extended by T-129; T-243 adds the join-barrier publication->done transition).
 $script:ReviewTransition = 'в работе>на ревью'                 # T-110: working -> in-review
 $script:ReadyTransition = 'на ревью>готова к слиянию'          # T-128: clean review pass
 $script:ReviewLoopTransition = 'на ревью>на ревью'             # T-128: incomplete/findings cycle
 $script:ReviewEscalateTransition = 'на ревью>эскалирована'     # T-128: REVIEW_LOOP_MAX exhausted
+$script:PublishTransition = 'опубликована>выполнена'           # T-243: join barrier — publication -> done (Phase 6.1 archive)
 
 function Assert-True { param([bool]$Cond, [string]$Msg) if (-not $Cond) { $script:Failures.Add("FAIL - $Msg") } }
 function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ("$Expected" -cne "$Actual") { $script:Failures.Add("FAIL - ${Msg}: expected [$Expected], got [$Actual]") } }
@@ -195,7 +210,14 @@ function Get-OutboxIdentities {
 function Digest-Of { param($Ids) return ((@($Ids) | Sort-Object) -join ';') }
 
 # Restrict an identity list to the vocabulary both paths implement today: the T-110 phase-1
-# prefix PLUS the T-128 per-task review / fix-cycle transitions extended by T-129.
+# prefix PLUS the T-128 per-task review / fix-cycle transitions extended by T-129, PLUS the T-243
+# join-barrier surface (the cohort-level `cohort.join_started`/`cohort.published`/`cohort.closed`
+# events and the per-task `опубликована>выполнена` archival transition). The intermediate
+# publication transitions differ by construction between the two paths and are deliberately NOT
+# compared: the engine advances `готова к слиянию -> слита -> опубликована` through the real §13.1
+# state machine (`ready -> merged -> published`), while the processor-prose harness simplifies its
+# per-task publication to a single `готова к слиянию -> опубликована` step — so only the shared
+# `опубликована -> выполнена` archival step is a byte-equal per-task identity.
 function Select-Compared {
     param($Ids)
     $out = New-Object System.Collections.Generic.List[string]
@@ -203,12 +225,17 @@ function Select-Compared {
         $parts = [string]$id -split '\|', 4
         $type = $parts[0]
         $trans = if ($parts.Count -ge 4) { $parts[3] } else { '' }
-        if ($type -eq 'cohort.opened' -or $type -eq 'task.captured') { $out.Add([string]$id); continue }
+        if ($type -eq 'cohort.opened' -or $type -eq 'task.captured' -or
+            $type -eq 'cohort.join_started' -or $type -eq 'cohort.published' -or
+            $type -eq 'cohort.closed') {
+            $out.Add([string]$id); continue
+        }
         if ($type -eq 'task.status_changed' -and (
                 $trans -eq $script:ReviewTransition -or
                 $trans -eq $script:ReadyTransition -or
                 $trans -eq $script:ReviewLoopTransition -or
-                $trans -eq $script:ReviewEscalateTransition)) {
+                $trans -eq $script:ReviewEscalateTransition -or
+                $trans -eq $script:PublishTransition)) {
             $out.Add([string]$id); continue
         }
     }
@@ -313,6 +340,7 @@ try {
             '--batch', $batchId,
             '--cohort-size', '2',
             '--review',
+            '--join',
             '--json')
         if ($er1.ExitCode -ne 0) {
             $script:Failures.Add("FAIL - engine run --once (clean pairing) exited $($er1.ExitCode): $($er1.Err.Trim())$($er1.Out.Trim())")
@@ -368,6 +396,7 @@ try {
             '--batch', $batchId,
             '--cohort-size', '1',
             '--review',
+            '--join',
             '--inject-findings', 'T-101',
             '--review-loop-max', '1',
             '--json')
@@ -403,11 +432,16 @@ try {
         $harnessCompared = @(Select-Compared $harnessAll | Sort-Object -Unique)
         $engineCompared = @(Select-Compared $engineAll | Sort-Object -Unique)
 
-        # Vacuous-pass guard: the shared surface is exactly these nine identities - two
-        # cohort-opens collapse to one (both pairings reuse the harness's fixed BatchId), so does
-        # T-101's `в работе>на ревью` (T-101 recurs, by harness convention, as the primary task id
-        # of both the `clean` and `review-cycle` scenarios) - so an empty-vs-empty match can never
-        # masquerade as convergence, and a missing transition is caught explicitly.
+        # Vacuous-pass guard: the shared surface is exactly these fourteen identities. Cohort-level
+        # events collapse across the two pairings that reuse the harness's fixed BatchId: the two
+        # `cohort.opened` collapse to one, and so does `cohort.closed` (both the `clean` pairing and
+        # the `review-cycle` pairing emit it — the latter closes the cohort even though its single
+        # task escalated and nothing was published), while `cohort.join_started`/`cohort.published`
+        # come ONLY from the `clean` pairing (the `review-cycle` pairing has no ready task to merge,
+        # so its join barrier emits only `cohort.closed`). T-101's `в работе>на ревью` also collapses
+        # (T-101 recurs, by harness convention, as the primary task id of both scenarios). So an
+        # empty-vs-empty match can never masquerade as convergence, and a missing transition is
+        # caught explicitly.
         $expected = @(
             "cohort.opened|$batchId||",
             "task.captured|$batchId|T-101|",
@@ -417,7 +451,12 @@ try {
             "task.status_changed||T-101|$script:ReadyTransition",
             "task.status_changed||T-102|$script:ReadyTransition",
             "task.status_changed||T-101|$script:ReviewLoopTransition",
-            "task.status_changed||T-101|$script:ReviewEscalateTransition"
+            "task.status_changed||T-101|$script:ReviewEscalateTransition",
+            "cohort.join_started|$batchId||",
+            "cohort.published|$batchId||",
+            "cohort.closed|$batchId||",
+            "task.status_changed||T-101|$script:PublishTransition",
+            "task.status_changed||T-102|$script:PublishTransition"
         ) | Sort-Object
         Assert-Equal ($expected -join "`n") ($harnessCompared -join "`n") 'processor-prose (harness) emits exactly the shared compared identity set'
         Assert-Equal ($expected -join "`n") ($engineCompared -join "`n") 'the engine emits exactly the shared compared identity set'

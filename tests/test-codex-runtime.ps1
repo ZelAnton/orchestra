@@ -66,7 +66,12 @@ function Invoke-Runtime {
     param(
         [Parameter(Mandatory)][string[]]$RuntimeArgs,
         [string]$StdinText = $null,
-        [hashtable]$EnvVars = @{}
+        [hashtable]$EnvVars = @{},
+        # A watchdog (ms): 0 = wait indefinitely (default, unchanged for existing callers).
+        # >0 bounds the wait so a REGRESSION that wedges the runtime host (e.g. on a leaked
+        # pipe-inheriting descendant) FAILS the test instead of hanging the suite; on overrun
+        # the whole runtime tree is killed and TimedOut is set.
+        [int]$TimeoutMs = 0
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:PsExe
@@ -90,17 +95,28 @@ function Invoke-Runtime {
     $errTask = $proc.StandardError.ReadToEndAsync()
     if ($null -ne $StdinText) { $proc.StandardInput.Write($StdinText) }
     $proc.StandardInput.Close()
-    $proc.WaitForExit()
+    $timedOut = $false
+    if ($TimeoutMs -gt 0) {
+        # Timed overload waits only on process exit (not on redirected-stream EOF), so a
+        # wedged host is caught here rather than blocking us the same way it blocked it.
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            $timedOut = $true
+            try { $proc.Kill($true) } catch { }   # reap the whole runtime tree incl. the offending descendant
+            try { $proc.WaitForExit(5000) | Out-Null } catch { }
+        }
+    } else {
+        $proc.WaitForExit()
+    }
     $out = $outTask.GetAwaiter().GetResult()
     $err = $errTask.GetAwaiter().GetResult()
-    $exit = $proc.ExitCode
+    $exit = try { $proc.ExitCode } catch { -1 }
     $proc.Dispose()
 
     $json = $null
     if ($out -and $out.TrimStart().StartsWith('{')) {
         try { $json = $out | ConvertFrom-Json } catch { $json = $null }
     }
-    return [pscustomobject]@{ ExitCode = $exit; Out = $out; Err = $err; Json = $json }
+    return [pscustomobject]@{ ExitCode = $exit; Out = $out; Err = $err; Json = $json; TimedOut = $timedOut }
 }
 
 $script:FakeCodexBody = @'
@@ -682,6 +698,163 @@ if ($env:FAKE_JJ_ARGS_FILE) {
         '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
     )
     Assert-Equal 2 $r5.ExitCode 'resume-image: non-UUID thread id (e.g. the literal "last") rejected with exit 2'
+}.Invoke()
+
+# =============================================================================
+# 16. T-256: no hung host and no orphaned descendant after a run whose codex
+# leaked a helper that INHERITED the runtime's redirected stdout/stderr pipe.
+# Reproduces the observed accumulation: such a descendant keeps the runtime host
+# blocked forever on its async stream read (unless the tree is killed) and lingers
+# as an orphan .NET process. Asserted for (a) a SUCCESSFUL exit, (b) a NON-ZERO
+# (substantive-error) exit, and (c) a TIMEOUT (нештатное завершение) - each must
+# return PROMPTLY (never wedge the host) AND leave the leaked descendant terminated.
+# =============================================================================
+
+# A fake codex that spawns a grandchild inheriting THIS process's std handles (= the
+# runtime's captured pipes) and sleeps long, records the grandchild's identity, then
+# returns per FAKE_CODEX_EXIT / FAKE_CODEX_SLEEP_MS. Single-quoted here-string: the
+# $-tokens are evaluated when the fake itself runs, not at definition time.
+$script:FakeCodexTreeBody = @'
+$stdin = [Console]::In.ReadToEnd()
+$oIdx = [array]::IndexOf($args, '-o')
+if ($oIdx -ge 0 -and ($oIdx + 1) -lt $args.Count -and $env:FAKE_CODEX_OUT_CONTENT) {
+    [System.IO.File]::WriteAllText($args[$oIdx + 1], $env:FAKE_CODEX_OUT_CONTENT, (New-Object System.Text.UTF8Encoding($false)))
+}
+if ($env:FAKE_CODEX_STDOUT) { [Console]::Out.Write($env:FAKE_CODEX_STDOUT) }
+$gcSleepMs = if ($env:FAKE_CODEX_GC_SLEEP_MS) { [int]$env:FAKE_CODEX_GC_SLEEP_MS } else { 120000 }
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = (Get-Process -Id $PID).Path
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+# Deliberately DO NOT redirect the grandchild: it inherits THIS process's std handles,
+# which are the runtime's captured pipes - that inherited, still-open write end is the leak.
+foreach ($a in @('-NoProfile', '-NonInteractive', '-Command', "Start-Sleep -Milliseconds $gcSleepMs")) { $psi.ArgumentList.Add($a) }
+$gc = [System.Diagnostics.Process]::Start($psi)
+if ($env:FAKE_CODEX_GC_PIDFILE) {
+    $startTicks = $gc.StartTime.ToUniversalTime().Ticks
+    [System.IO.File]::WriteAllText($env:FAKE_CODEX_GC_PIDFILE, "$($gc.Id)|$startTicks", (New-Object System.Text.UTF8Encoding($false)))
+}
+if ($env:FAKE_CODEX_SLEEP_MS) { Start-Sleep -Milliseconds ([int]$env:FAKE_CODEX_SLEEP_MS) }
+$code = 0
+if ($env:FAKE_CODEX_EXIT) { $code = [int]$env:FAKE_CODEX_EXIT }
+exit $code
+'@
+function New-FakeCodexTree {
+    $p = (New-TempFile) + '.ps1'
+    [System.IO.File]::WriteAllText($p, $script:FakeCodexTreeBody, $script:Utf8)
+    return $p
+}
+# PID-reuse-safe liveness (match Id AND creation time, like tests/test-supervisor.ps1 #4).
+function Read-GcIdentity {
+    param([string]$File)
+    if (-not (Test-Path -LiteralPath $File)) { return $null }
+    $raw = ([System.IO.File]::ReadAllText($File)).Trim()
+    $parts = $raw -split '\|', 2
+    if ($parts.Count -ne 2) { return $null }
+    return [pscustomobject]@{ Id = [int]$parts[0]; StartTimeUtc = [DateTime]::new([long]$parts[1], [DateTimeKind]::Utc) }
+}
+function Test-GcAlive {
+    param($Gc)
+    if ($null -eq $Gc) { return $false }
+    try {
+        $p = Get-Process -Id $Gc.Id -ErrorAction Stop
+        return ((-not $p.HasExited) -and ($p.StartTime.ToUniversalTime() -eq $Gc.StartTimeUtc))
+    } catch { return $false }
+}
+function Wait-GcGone {
+    param($Gc, [int]$TimeoutSec = 6)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while (($sw.Elapsed.TotalSeconds -lt $TimeoutSec) -and (Test-GcAlive $Gc)) { Start-Sleep -Milliseconds 100 }
+    return (-not (Test-GcAlive $Gc))
+}
+function Stop-GcIfAlive {
+    param($Gc)
+    if (Test-GcAlive $Gc) { try { & taskkill /PID $Gc.Id /T /F 2>$null | Out-Null } catch { } }
+}
+
+# (a) SUCCESS: codex exits 0 but leaks a pipe-inheriting grandchild.
+{
+    $fake = New-FakeCodexTree
+    $gcPidFile = New-TempFile
+    $gc = $null
+    try {
+        $r = Invoke-Runtime -RuntimeArgs @(
+            'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+            '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+        ) -EnvVars @{
+            FAKE_CODEX_GC_PIDFILE = $gcPidFile; FAKE_CODEX_GC_SLEEP_MS = '30000'
+            FAKE_CODEX_OUT_CONTENT = 'Done.'; FAKE_CODEX_STDOUT = 'progress'; FAKE_CODEX_EXIT = '0'
+        } -TimeoutMs 30000
+        Assert-True (-not $r.TimedOut) 'leak(success): runtime returns promptly, host not wedged by the inherited pipe'
+        Assert-Equal 0 $r.ExitCode 'leak(success): runtime exit code 0'
+        Assert-True ($null -ne $r.Json) 'leak(success): emits parseable JSON result'
+        if ($r.Json) { Assert-Equal $true $r.Json.ok 'leak(success): result.ok true' }
+        $gc = Read-GcIdentity $gcPidFile
+        Assert-True ($null -ne $gc) 'leak(success): fake codex recorded the leaked grandchild identity'
+        Assert-True (Wait-GcGone $gc) 'leak(success): the leaked grandchild was terminated with the tree'
+    } finally {
+        Stop-GcIfAlive $gc
+    }
+}.Invoke()
+
+# (b) NON-ZERO exit (substantive error) with the same leaked grandchild.
+{
+    $fake = New-FakeCodexTree
+    $gcPidFile = New-TempFile
+    $gc = $null
+    try {
+        $r = Invoke-Runtime -RuntimeArgs @(
+            'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+            '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+        ) -EnvVars @{
+            FAKE_CODEX_GC_PIDFILE = $gcPidFile; FAKE_CODEX_GC_SLEEP_MS = '30000'
+            FAKE_CODEX_STDERR = 'boom'; FAKE_CODEX_EXIT = '1'
+        } -TimeoutMs 30000
+        Assert-True (-not $r.TimedOut) 'leak(error): runtime returns promptly despite the leaked pipe holder'
+        Assert-True ($null -ne $r.Json) 'leak(error): JSON result present'
+        if ($r.Json) {
+            Assert-Equal $false $r.Json.ok 'leak(error): result.ok false'
+            Assert-Equal 1 $r.Json.exitCode 'leak(error): captured exitCode 1'
+        }
+        $gc = Read-GcIdentity $gcPidFile
+        Assert-True ($null -ne $gc) 'leak(error): fake codex recorded the leaked grandchild identity'
+        Assert-True (Wait-GcGone $gc) 'leak(error): the leaked grandchild was terminated with the tree'
+    } finally {
+        Stop-GcIfAlive $gc
+    }
+}.Invoke()
+
+# (c) TIMEOUT (нештатное завершение): codex itself hangs past the deadline AND leaked a
+# pipe-inheriting grandchild - the whole tree (codex + grandchild) must be killed. This
+# also exercises the tree-kill on the timeout branch (a bare $proc.Kill() left the tree, T-234).
+{
+    $fake = New-FakeCodexTree
+    $gcPidFile = New-TempFile
+    $gc = $null
+    try {
+        # --timeout-sec is set comfortably above a (possibly slow-CI) pwsh cold start so the
+        # fake reliably spawns AND records its grandchild before the deadline trips; the fake
+        # then sleeps well past the deadline so the runtime actually times out on it.
+        $r = Invoke-Runtime -RuntimeArgs @(
+            'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+            '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile),
+            '--timeout-sec', '8'
+        ) -EnvVars @{
+            FAKE_CODEX_GC_PIDFILE = $gcPidFile; FAKE_CODEX_GC_SLEEP_MS = '30000'
+            FAKE_CODEX_SLEEP_MS = '30000'; FAKE_CODEX_EXIT = '0'
+        } -TimeoutMs 30000
+        Assert-True (-not $r.TimedOut) 'leak(timeout): runtime honors its own --timeout-sec and returns (test watchdog not tripped)'
+        Assert-True ($null -ne $r.Json) 'leak(timeout): JSON result present'
+        if ($r.Json) {
+            Assert-Equal $true $r.Json.timedOut 'leak(timeout): result marks the codex call timed out'
+            Assert-True ($null -ne $r.Json.sentinel -and $r.Json.sentinel -like '*CODEX_FAILED*timed out*') 'leak(timeout): CODEX_FAILED timeout sentinel'
+        }
+        $gc = Read-GcIdentity $gcPidFile
+        Assert-True ($null -ne $gc) 'leak(timeout): fake codex recorded the leaked grandchild identity'
+        Assert-True (Wait-GcGone $gc) 'leak(timeout): codex AND its leaked grandchild were terminated with the tree'
+    } finally {
+        Stop-GcIfAlive $gc
+    }
 }.Invoke()
 
 # =============================================================================

@@ -111,6 +111,13 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
+# Shared whole-process-tree kill primitive (Stop-ProcessTree). Dot-sourced (never a
+# local copy) so this runtime and tools/supervisor.ps1 use ONE hardened implementation
+# (T-256). Loaded up here, before the CLI-dispatch guard, so it is also present when a
+# caller dot-sources this file (e.g. tools/codex-preflight.ps1, which itself drives
+# Invoke-Captured). proc-tree.ps1 is a pure library with no top-level side effects.
+. (Join-Path $PSScriptRoot 'proc-tree.ps1')
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # (same shape as tools/queue-tx.ps1)
@@ -349,7 +356,9 @@ function Resolve-CodexTarget {
 # --------------------------------------------------------------------------
 # Spawn a process, write $StdinText to its stdin, and capture stdout / stderr /
 # exit code separately, with an optional timeout. Uses async stream reads so a
-# large stdout/stderr cannot deadlock against the stdin write.
+# large stdout/stderr cannot deadlock against the stdin write. On EVERY exit path
+# the whole child process tree is terminated (Stop-ProcessTree) so a leaked codex
+# helper descendant cannot linger as an orphan or wedge this host on the pipe (T-256).
 # --------------------------------------------------------------------------
 function Invoke-Captured {
     param(
@@ -398,20 +407,37 @@ function Invoke-Captured {
 
     $timedOut = $false
     if ($TimeoutSec -gt 0) {
-        if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-            $timedOut = $true
-            try { $proc.Kill() } catch { }
-            try { $proc.WaitForExit(5000) | Out-Null } catch { }
-        }
+        if (-not $proc.WaitForExit($TimeoutSec * 1000)) { $timedOut = $true }
     } else {
-        $proc.WaitForExit()
+        # No caller timeout: wait indefinitely for the process ITSELF to exit, but via the
+        # timed overload in a loop. The parameterless WaitForExit() additionally blocks
+        # until the redirected stdout/stderr streams reach EOF - and a `codex exec` helper
+        # that inherited our pipe and outlived codex holds that pipe open, so parameterless
+        # WaitForExit() (like the async reads below) would wedge this pwsh host forever.
+        # That hung-host accumulation is exactly the T-256 leak; the timed overload waits
+        # only on process exit, so we regain control the moment codex exits.
+        while (-not $proc.WaitForExit(1000)) { }
     }
+
+    # Capture the exit code now - before the tree kill - so nothing about reaping any
+    # leaked descendants can perturb it (on the non-timeout path the process has exited).
+    $rc = if ($timedOut) { 124 } else { $proc.ExitCode }
+
+    # Belt-and-suspenders (T-256): unconditionally terminate the whole child process TREE
+    # on EVERY exit path (clean, non-zero, or timeout) BEFORE draining the captured
+    # streams. A single `codex exec` may spawn helper descendants; if one inherits our
+    # redirected stdout/stderr pipe and outlives codex it would (a) keep the async reads
+    # below (and hence this host) blocked forever and (b) linger as an orphan .NET
+    # process - the observed accumulation. Reusing the hardened Stop-ProcessTree (shared
+    # via proc-tree.ps1) reaps that subtree even when codex itself already exited; a clean
+    # run has no surviving subtree so this is a no-op. Never a bare $proc.Kill(), which
+    # left the tree behind on the timeout branch (T-234).
+    Stop-ProcessTree $proc
 
     $stdout = ''
     $stderr = ''
     try { $stdout = $outTask.GetAwaiter().GetResult() } catch { }
     try { $stderr = $errTask.GetAwaiter().GetResult() } catch { }
-    $rc = if ($timedOut) { 124 } else { $proc.ExitCode }
     $proc.Dispose()
 
     return [pscustomobject]@{ StdOut = $stdout; StdErr = $stderr; ExitCode = $rc; TimedOut = $timedOut }

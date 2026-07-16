@@ -217,6 +217,22 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check operational metrics aggregation
+        # tests/test-metrics.ps1 (T-249): drives the read-only metrics tool as a child
+        # pwsh process and checks averages/p95, journal fallback, lenient JSONL parsing,
+        # empty input, selection filters and the no-write/no-lock invariant. K-007:
+        # tests/test-*.ps1 files are not discovered automatically, so this wiring is explicit.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-metrics.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check execution supervisor
         # tests/test-supervisor.ps1 (T-093): drives tools/supervisor.ps1 - the four-way
         # stop classification (ok / timeout / cancelled / crash / error) with distinct exit
