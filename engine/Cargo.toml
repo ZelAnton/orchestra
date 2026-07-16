@@ -25,6 +25,10 @@ serde_json = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[dev-dependencies]
+# Keep the crate's declared Rust 1.74 MSRV: newer proptest releases require newer compilers.
+proptest = { version = "=1.0.0", default-features = false, features = ["std"] }
+
 [lib]
 name = "orchestra_engine"
 path = "src/lib.rs"

@@ -114,15 +114,67 @@ fn parse_heading(line: &str) -> Option<Finding> {
     let lb = l.find('[')?;
     let rb = l[lb + 1..].find(']')? + lb + 1;
     let id = l[lb + 1..rb].trim().to_string();
-    if id.is_empty() {
+    if !is_marker_id(&id) {
         return None;
     }
     // status after the last "статус:"
-    let status = match l.rfind("статус:") {
-        Some(p) => Status::parse(&l[p + "статус:".len()..]),
-        None => Status::Other(String::new()),
-    };
+    let p = l.rfind("статус:")?;
+    let status_literal = l[p + "статус:".len()..].trim();
+    if status_literal.is_empty() {
+        return None;
+    }
+    let status = Status::parse(status_literal);
     Some(Finding { id, status })
+}
+
+fn is_marker_id(id: &str) -> bool {
+    let two_digits = |rest: &str| rest.len() == 2 && rest.as_bytes().iter().all(u8::is_ascii_digit);
+    id.strip_prefix("R-").is_some_and(two_digits)
+        || id.strip_prefix("F-").is_some_and(two_digits)
+        || id.strip_prefix("SUMMARY-R-").is_some_and(is_utc_timestamp)
+}
+
+fn is_utc_timestamp(timestamp: &str) -> bool {
+    let b = timestamp.as_bytes();
+    if b.len() < 20 {
+        return false;
+    }
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let lit = |i: usize, expected: u8| b.get(i) == Some(&expected);
+    if !(digit(0)
+        && digit(1)
+        && digit(2)
+        && digit(3)
+        && lit(4, b'-')
+        && digit(5)
+        && digit(6)
+        && lit(7, b'-')
+        && digit(8)
+        && digit(9)
+        && lit(10, b'T')
+        && digit(11)
+        && digit(12)
+        && lit(13, b':')
+        && digit(14)
+        && digit(15)
+        && lit(16, b':')
+        && digit(17)
+        && digit(18))
+    {
+        return false;
+    }
+    let mut end = 19;
+    if lit(end, b'.') {
+        let start = end + 1;
+        end = start;
+        while end < b.len() && b[end].is_ascii_digit() {
+            end += 1;
+        }
+        if !(1..=3).contains(&(end - start)) {
+            return false;
+        }
+    }
+    b.get(end) == Some(&b'Z') && end + 1 == b.len()
 }
 
 /// A Codex adapter sentinel found in a leaf-agent report.
@@ -136,16 +188,41 @@ pub enum Sentinel {
 /// Detect the FIRST Codex sentinel present (order: escalation, unavailable, failed).
 /// These are whole-token contracts, not free text.
 pub fn detect_sentinel(text: &str) -> Option<Sentinel> {
-    if text.contains("ЭСКАЛАЦИЯ codex") {
+    if contains_phrase(text, "ЭСКАЛАЦИЯ codex:") {
         return Some(Sentinel::Escalation);
     }
-    if text.contains("CODEX_UNAVAILABLE") {
+    if contains_token(text, "CODEX_UNAVAILABLE") {
         return Some(Sentinel::Unavailable);
     }
-    if text.contains("CODEX_FAILED") {
+    if contains_token(text, "CODEX_FAILED") {
         return Some(Sentinel::Failed);
     }
     None
+}
+
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase)
+        .any(|(start, _)| token_boundary_before(text, start))
+}
+
+fn contains_token(text: &str, token: &str) -> bool {
+    text.match_indices(token).any(|(start, _)| {
+        token_boundary_before(text, start) && token_boundary_after(text, start + token.len())
+    })
+}
+
+fn token_boundary_before(text: &str, byte_index: usize) -> bool {
+    text[..byte_index]
+        .chars()
+        .next_back()
+        .map_or(true, |c| !c.is_alphanumeric() && c != '_')
+}
+
+fn token_boundary_after(text: &str, byte_index: usize) -> bool {
+    text[byte_index..]
+        .chars()
+        .next()
+        .map_or(true, |c| !c.is_alphanumeric() && c != '_')
 }
 
 /// Parse the coder Mode-3 tail `Изменённые файлы: a, b, c` into a file list. The mode-3
@@ -159,7 +236,7 @@ pub fn parse_changed_files(text: &str) -> Option<Vec<String>> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            return Some(files);
+            return (!files.is_empty()).then_some(files);
         }
     }
     None
