@@ -133,7 +133,11 @@ if($spawn){
  # Do not let the grandchild inherit the supervisor's redirected pipes: a broken
  # tree kill must return promptly enough for the test to observe and clean the orphan.
  $child=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-NonInteractive','-Command',"Start-Sleep 120; Set-Content -LiteralPath '$spawn' done") -RedirectStandardOutput ($spawn + '.stdout') -RedirectStandardError ($spawn + '.stderr') -PassThru
- if($spawnReady){ Set-Content -LiteralPath $spawnReady "$PID,$($child.Id)" }
+ if($spawnReady){
+  $parentStartTime=(Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks
+  $childStartTime=$child.StartTime.ToUniversalTime().Ticks
+  Set-Content -LiteralPath $spawnReady "$PID|$parentStartTime,$($child.Id)|$childStartTime"
+ }
 }
 if($counter){ $n=0; if(Test-Path -LiteralPath $counter){ $n=[int](Get-Content -LiteralPath $counter -Raw) }; $n++; Set-Content -LiteralPath $counter "$n"; if($n -le $failUntil){ exit $failCode } }
 if($cancelAfter -gt 0 -and $touch){ Start-Sleep -Seconds $cancelAfter; Set-Content -LiteralPath $touch 'stop' }
@@ -229,7 +233,7 @@ exit $code
     $d = New-TempDir; $w = New-Worker $d
     $marker = Join-Path $d 'grandchild-marker.txt'
     $ready = Join-Path $d 'spawned-processes.txt'
-    $spawnedIds = @()
+    $spawnedProcesses = @()
     $treeKill = [System.Diagnostics.Process].GetMethod('Kill', [type[]]@([bool]))
     Assert-True ($null -ne $treeKill) 'pwsh 7 exposes Process.Kill(bool) for atomic tree termination'
     # An empty PATH makes taskkill unavailable on Windows. The scenario can therefore
@@ -243,28 +247,44 @@ exit $code
         Assert-Exit $r 3 'tree-kill scenario times out'
         $readyExists = Test-Path -LiteralPath $ready
         Assert-True $readyExists 'worker recorded parent + grandchild PIDs before the deadline'
-        $spawnedIds = if ($readyExists) {
-            @((Read-File $ready).Trim() -split ',' | ForEach-Object { [int]$_ })
+        $spawnedProcesses = if ($readyExists) {
+            @((Read-File $ready).Trim() -split ',' | ForEach-Object {
+                $identity = $_ -split '\|', 2
+                [pscustomobject]@{
+                    Id = [int]$identity[0]
+                    StartTime = [DateTime]::new([long]$identity[1], [DateTimeKind]::Utc)
+                }
+            })
         } else { @() }
-        Assert-Equal 2 (@($spawnedIds).Count) 'tree-kill scenario recorded exactly two process IDs'
-        if (@($spawnedIds).Count -eq 2) {
+        Assert-Equal 2 (@($spawnedProcesses).Count) 'tree-kill scenario recorded exactly two process identities'
+        if (@($spawnedProcesses).Count -eq 2) {
             $exitWait = [System.Diagnostics.Stopwatch]::StartNew()
             do {
-                $aliveIds = @($spawnedIds | Where-Object {
-                    try { -not (Get-Process -Id $_ -ErrorAction Stop).HasExited } catch { $false }
+                $aliveIds = @($spawnedProcesses | ForEach-Object {
+                    try {
+                        $process = Get-Process -Id $_.Id -ErrorAction Stop
+                        if ((-not $process.HasExited) -and ($process.StartTime.ToUniversalTime() -eq $_.StartTime)) {
+                            $_.Id
+                        }
+                    } catch { }
                 })
                 if (@($aliveIds).Count -eq 0) { break }
                 Start-Sleep -Milliseconds 100
             } while ($exitWait.Elapsed.TotalSeconds -lt 5)
-            foreach ($processId in $spawnedIds) {
-                Assert-True ($aliveIds -notcontains $processId) "process $processId from the spawned tree was terminated"
+            foreach ($spawnedProcess in $spawnedProcesses) {
+                Assert-True ($aliveIds -notcontains $spawnedProcess.Id) "process $($spawnedProcess.Id) from the spawned tree was terminated"
             }
         }
         Assert-True (-not (Test-Path -LiteralPath $marker)) 'grandchild was terminated with the tree (no marker written)'
     } finally {
         # If the assertion is exercising a regression, do not leave its observed orphan alive.
-        foreach ($processId in $spawnedIds) {
-            try { Get-Process -Id $processId -ErrorAction Stop | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
+        foreach ($spawnedProcess in $spawnedProcesses) {
+            try {
+                $process = Get-Process -Id $spawnedProcess.Id -ErrorAction Stop
+                if ($process.StartTime.ToUniversalTime() -eq $spawnedProcess.StartTime) {
+                    $process | Stop-Process -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
         }
     }
 }.Invoke()
