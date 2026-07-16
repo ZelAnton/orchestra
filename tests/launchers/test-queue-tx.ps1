@@ -260,6 +260,22 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Match $q 'статус: эскалирована · причина=карантин повторился 2 раз' '[return] escalates when attempts exhausted'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 8c: escalated task with "не начата" inside reason does NOT get captured ---
+    $W = New-Work
+    try {
+        Propose $W 'Escalate Trap A' 'a' | Out-Null
+        # Manually set task to escalated with a reason that contains "не начата".
+        $q = @(
+            '# Очередь задач', '',
+            '### [T-001] Escalate Trap A — статус: эскалирована · причина=карантин повторился 3 раз: задача не начата корректно'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-20260101T000000Z')
+        Assert-Equal 8 $r.ExitCode '[escalated-trap] capture of escalated task fails with exit 8'
+        Assert-Match $r.Output 'cannot capture T-001.*status is' '[escalated-trap] error message confirms status classification'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 9: optimistic generation compare-and-swap -----------------
     $W = New-Work
     try {
