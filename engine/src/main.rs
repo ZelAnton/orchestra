@@ -1026,7 +1026,9 @@ fn cmd_run(args: &[String]) {
             "usage: run --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]\n\
              \x20          [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>]\n\
              \x20          [--review] [--inject-findings <T-ID>] [--review-loop-max <n>]\n\
-             \x20          [--converge-after <n>] [--json]\n\
+             \x20          [--converge-after <n>] [--join] [--integration-loop-max <n>]\n\
+             \x20          [--inject-merge-conflict <T-ID>] [--inject-f-findings]\n\
+             \x20          [--integration-converge-after <n>] [--json]\n\
              (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work)"
         );
         exit(run::exit::USAGE);
@@ -1068,6 +1070,18 @@ fn cmd_run(args: &[String]) {
         .unwrap_or(8)
         .max(1);
     let converge_after_cycles = opt(args, "--converge-after").and_then(|s| s.parse::<u32>().ok());
+    // The join barrier (phases 4–6) is opt-in and implies --review (it consumes the ready tasks the
+    // review round produces).
+    let join = args.iter().any(|a| a == "--join");
+    let review = review || join;
+    let integration_loop_max = opt(args, "--integration-loop-max")
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(8)
+        .max(1);
+    let inject_merge_conflict = opt(args, "--inject-merge-conflict").filter(|s| !s.is_empty());
+    let inject_f_findings = args.iter().any(|a| a == "--inject-f-findings");
+    let integration_converge_after =
+        opt(args, "--integration-converge-after").and_then(|s| s.parse::<u32>().ok());
     let json = args.iter().any(|a| a == "--json");
 
     let cfg = RunConfig {
@@ -1085,6 +1099,11 @@ fn cmd_run(args: &[String]) {
         inject_findings,
         review_loop_max,
         converge_after_cycles,
+        join,
+        integration_loop_max,
+        inject_merge_conflict,
+        inject_f_findings,
+        integration_converge_after,
         leaf_deadline: Duration::from_secs(60),
     };
 
@@ -1114,6 +1133,14 @@ fn cmd_run(args: &[String]) {
 ///                    `--task <id>` names the task; `--outcome clean|findings` selects a fresh
 ///                    `SUMMARY-R` (clean) vs an open `R-` (with-findings); `--summary-ts <iso>` is
 ///                    the fresh clean-pass summary timestamp the engine hands it.
+///   --mode merge     the merger stand-in for `run`'s join barrier: write `merge_report.md` under
+///                    `--work` (one `- [T-ID] merged=<SHA>` line per `--tasks T-101,T-102`, or
+///                    `quarantined=<reason>` for each id in `--quarantine`), then emit a merger
+///                    transcript. Deterministic, offline; no real VCS.
+///   --mode integration-review  the full_reviewer stand-in for `run`'s integration review cycle:
+///                    write `review_integration.md` under `--work` (a fresh `SUMMARY-F` for
+///                    `--outcome clean`, an open `F-` for `findings`; `--summary-ts <iso>` is the
+///                    fresh clean-pass timestamp), then emit a reviewer transcript.
 ///   --exit N         override the exit code
 fn cmd_fake_agent(args: &[String]) {
     let mode = opt(args, "--mode").unwrap_or_else(|| "success".to_string());
@@ -1199,6 +1226,110 @@ fn cmd_fake_agent(args: &[String]) {
                 "ИТОГ: готово к слиянию \u{00B7} режим=ревью \u{00B7} открытых=0"
             };
             let report = format!("Ревью {task} в песочнице.\n{itog}");
+            println!(r#"{{"type":"system","subtype":"init","model":"fake"}}"#);
+            println!(r#"{{"type":"assistant","message":{{"type":"message","role":"assistant"}}}}"#);
+            let result_line = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "num_turns": 3,
+                "result": report,
+            });
+            println!("{result_line}");
+            exit(exit_code);
+        }
+        "merge" => {
+            // The merger stand-in for `run`'s join barrier. It writes `merge_report.md` (the Phase
+            // 4.3 decision input the engine reads back) in the `agents/merger.md` format: one line
+            // per task, `merged=<SHA>` by default or `quarantined=<reason>` for a `--quarantine` id.
+            // Offline, token-free; no real VCS.
+            let work = opt(args, "--work").unwrap_or_default();
+            let batch = opt(args, "--batch").unwrap_or_else(|| "B-sandbox".to_string());
+            let tasks: Vec<String> = opt(args, "--tasks")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let quarantine: Vec<String> = opt(args, "--quarantine")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut report_md = format!(
+                "# Merge Report — Batch {batch}\nИнтеграционная ветка: integration/{batch}\nБаза: sandbox-base\n\n## Результаты\n"
+            );
+            let mut any_quarantine = false;
+            for t in &tasks {
+                if quarantine.iter().any(|q| q == t) {
+                    any_quarantine = true;
+                    report_md.push_str(&format!(
+                        "- [{t}] quarantined=конфликт слияния в песочнице\n"
+                    ));
+                } else {
+                    report_md.push_str(&format!("- [{t}] merged=sandbox-{t}\n"));
+                }
+            }
+            report_md.push_str("\nИтоговая сборка интеграционной ветки: ok\n");
+            if !work.is_empty() {
+                let _ = fs::write(Path::new(&work).join("merge_report.md"), &report_md);
+            }
+            let merged_n = tasks
+                .len()
+                .saturating_sub(quarantine.iter().filter(|q| tasks.contains(q)).count());
+            let itog = if any_quarantine {
+                format!(
+                    "ИТОГ: есть карантин \u{00B7} слито={merged_n} \u{00B7} карантин={} \u{00B7} сборка=ok",
+                    quarantine.iter().filter(|q| tasks.contains(q)).count()
+                )
+            } else {
+                format!("ИТОГ: слито всё \u{00B7} слито={merged_n} \u{00B7} карантин=0 \u{00B7} сборка=ok")
+            };
+            let report = format!("Слил ветки батча {batch} в песочнице.\n{itog}");
+            println!(r#"{{"type":"system","subtype":"init","model":"fake"}}"#);
+            println!(r#"{{"type":"assistant","message":{{"type":"message","role":"assistant"}}}}"#);
+            let result_line = serde_json::json!({
+                "type": "result",
+                "subtype": "success",
+                "is_error": false,
+                "num_turns": 3,
+                "result": report,
+            });
+            println!("{result_line}");
+            exit(exit_code);
+        }
+        "integration-review" => {
+            // The full_reviewer stand-in for `run`'s integration review cycle. It writes
+            // `review_integration.md` (the phase-5.2 gate input the engine reads back): a fresh
+            // `SUMMARY-F` for a clean pass, an open `F-` for a with-findings pass. Offline.
+            let work = opt(args, "--work").unwrap_or_default();
+            let outcome = opt(args, "--outcome").unwrap_or_else(|| "clean".to_string());
+            let summary_ts =
+                opt(args, "--summary-ts").unwrap_or_else(|| "2026-01-01T00:00:00Z".to_string());
+            let findings = outcome == "findings";
+            let review_md = if findings {
+                "# Integration review\n\
+                 ### [F-01] Build break after integrating the batch — статус: новая\n\
+                 - Область: интеграционная ветка\n"
+                    .to_string()
+            } else {
+                format!(
+                    "# Integration review\n\
+                     ### [F-01] Minor integration nit (addressed) — статус: исправлено\n\
+                     ### [SUMMARY-F-{summary_ts}] Итог интеграционного ревью — статус: готово к слиянию\n\
+                     - Открытых F-: 0\n"
+                )
+            };
+            if !work.is_empty() {
+                let _ = fs::write(Path::new(&work).join("review_integration.md"), &review_md);
+            }
+            let itog = if findings {
+                "ИТОГ: есть находки \u{00B7} режим=ревью \u{00B7} открытых=1"
+            } else {
+                "ИТОГ: готово к слиянию \u{00B7} режим=ревью \u{00B7} открытых=0"
+            };
+            let report = format!("Интеграционное ревью в песочнице.\n{itog}");
             println!(r#"{{"type":"system","subtype":"init","model":"fake"}}"#);
             println!(r#"{{"type":"assistant","message":{{"type":"message","role":"assistant"}}}}"#);
             let result_line = serde_json::json!({

@@ -41,7 +41,7 @@
       2  usage / argument error
       3  generation mismatch (caller's --expected-generation is stale)
       4  duplicate (dedup rejected the proposal)
-      5  invalid dependency (missing / self-ref / cycle / infeasible)
+      5  invalid dependency, or inbox processing / I/O error
       6  not ready (from `ready --id`, used as a capture gate)
       7  could not acquire the queue lock (timeout)
       8  illegal status transition
@@ -108,6 +108,7 @@ function Resolve-Paths {
         State    = Join-Path $work 'queue_state.json'
         Lock     = Join-Path $work 'queue-tx.lock'
         Inbox    = Join-Path $work 'queue_inbox'
+        Rejected = Join-Path (Join-Path $work 'queue_inbox') 'rejected'
     }
 }
 
@@ -743,48 +744,133 @@ function Cmd-InboxAdd {
     Write-Output "inbox=$name"
 }
 
+function Initialize-InboxRejectedDirectory {
+    param($Paths)
+    if (Test-Path -LiteralPath $Paths.Inbox) {
+        if (-not (Test-Path -LiteralPath $Paths.Inbox -PathType Container)) {
+            throw "inbox path is not a directory: $($Paths.Inbox)"
+        }
+    } else {
+        $null = New-Item -ItemType Directory -Path $Paths.Inbox
+    }
+    if (Test-Path -LiteralPath $Paths.Rejected) {
+        if (-not (Test-Path -LiteralPath $Paths.Rejected -PathType Container)) {
+            throw "rejected path is not a directory: $($Paths.Rejected)"
+        }
+    } else {
+        $null = New-Item -ItemType Directory -Path $Paths.Rejected
+    }
+}
+
+function Move-InboxRecordToRejected {
+    param($Paths, [System.IO.FileInfo]$Entry, [string]$Reason)
+    $rejectedAt = [DateTime]::UtcNow
+    $stamp = $rejectedAt.ToString('yyyyMMddTHHmmss')
+    $originalBase = [System.IO.Path]::GetFileNameWithoutExtension($Entry.Name)
+    $rejectedBase = "$stamp-$originalBase"
+    $recordName = "$rejectedBase.json"
+    $metadataName = "$rejectedBase.metadata.txt"
+    $recordPath = Join-Path $Paths.Rejected $recordName
+    $metadataPath = Join-Path $Paths.Rejected $metadataName
+    if ((Test-Path -LiteralPath $recordPath) -or (Test-Path -LiteralPath $metadataPath)) {
+        throw "rejected audit target already exists for '$($Entry.Name)'"
+    }
+    $metadata = @(
+        "Rejection reason: $Reason"
+        "Timestamp of rejection: $($rejectedAt.ToString('o'))"
+        ''
+    ) -join [Environment]::NewLine
+    Write-TextAtomic $metadataPath $metadata
+    Move-Item -LiteralPath $Entry.FullName -Destination $recordPath
+    return [pscustomobject]@{ RecordName = $recordName; MetadataName = $metadataName }
+}
+
 function Cmd-InboxDrain {
     $paths = Resolve-Paths
-    if (-not (Test-Path -LiteralPath $paths.Inbox)) { Write-Output 'inbox empty'; return }
-    $entries = @(Get-ChildItem -LiteralPath $paths.Inbox -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name)
-    if ($entries.Count -eq 0) { Write-Output 'inbox empty'; return }
+    try {
+        Initialize-InboxRejectedDirectory $paths
+    } catch {
+        Fail 5 "cannot initialize inbox: $($_.Exception.Message)"
+    }
 
-    $hadRejected = $false
     Acquire-Lock $paths.Lock
     try {
-        $state = Read-QueueState $paths
-        $known = Get-KnownTitles $paths $state.Tasks
-        $maxId = [ref](Get-MaxKnownId $paths $state.Tasks)
+        try {
+            $entries = @(Get-ChildItem -LiteralPath $paths.Inbox -Filter '*.json' -File -ErrorAction Stop | Sort-Object Name)
+        } catch {
+            Fail 5 "cannot read inbox: $($_.Exception.Message)"
+        }
+        if ($entries.Count -eq 0) { Write-Output 'inbox empty'; return }
+        try {
+            $state = Read-QueueState $paths
+            $known = Get-KnownTitles $paths $state.Tasks
+            $maxId = [ref](Get-MaxKnownId $paths $state.Tasks)
+        } catch {
+            Fail 5 "cannot read queue state for inbox drain: $($_.Exception.Message)"
+        }
         $added = New-Object System.Collections.Generic.List[string]
         $skipped = New-Object System.Collections.Generic.List[string]
         $rejected = New-Object System.Collections.Generic.List[string]
         $consume = New-Object System.Collections.Generic.List[string]
+        $processingErrors = New-Object System.Collections.Generic.List[string]
         foreach ($e in $entries) {
-            try { $rec = (Read-TextOrEmpty $e.FullName) | ConvertFrom-Json }
-            catch { [void]$rejected.Add("$($e.Name): unreadable json"); continue }
-            $recPreds = @()
-            if (($rec.PSObject.Properties.Name -contains 'predecessors') -and $rec.predecessors) {
-                $recPreds = @($rec.predecessors | ForEach-Object { [int]([regex]::Match([string]$_, '\d+').Value) })
-            }
-            $recBody = ''
-            if ($rec.PSObject.Properties.Name -contains 'body') { $recBody = [string]$rec.body }
             try {
+                $rec = (Read-TextOrEmpty $e.FullName) | ConvertFrom-Json -ErrorAction Stop
+                if ($null -eq $rec) { throw 'JSON content is empty' }
+            }
+            catch {
+                $reason = [string]$_.Exception.Message
+                try {
+                    $moved = Move-InboxRecordToRejected $paths $e $reason
+                    [void]$rejected.Add("$($e.Name) -> $($moved.RecordName): $reason")
+                } catch {
+                    [void]$processingErrors.Add("$($e.Name): could not quarantine unreadable JSON: $($_.Exception.Message)")
+                }
+                continue
+            }
+            $taskCountBefore = @($state.Tasks).Count
+            $maxIdBefore = [int]$maxId.Value
+            try {
+                $recPreds = @()
+                if (($rec.PSObject.Properties.Name -contains 'predecessors') -and $rec.predecessors) {
+                    $recPreds = @($rec.predecessors | ForEach-Object { [int]([regex]::Match([string]$_, '\d+').Value) })
+                }
+                $recBody = ''
+                if ($rec.PSObject.Properties.Name -contains 'body') { $recBody = [string]$rec.body }
                 $nt = Add-Proposal $paths $state ([string]$rec.title) $recBody $recPreds 0 $false $known $maxId
                 [void]$added.Add($nt.IdStr); [void]$consume.Add($e.FullName)
             } catch {
                 $msg = [string]$_.Exception.Message
+                $maxId.Value = $maxIdBefore
+                if ($taskCountBefore -eq 0) { $state.Tasks = @() }
+                else { $state.Tasks = @($state.Tasks | Select-Object -First $taskCountBefore) }
                 if ($msg -like 'DUP:*') { [void]$skipped.Add("$($e.Name): duplicate"); [void]$consume.Add($e.FullName) }
-                elseif ($msg -like 'DEP:*') { [void]$rejected.Add("$($e.Name): $($msg.Substring(4))") }
-                else { [void]$rejected.Add("$($e.Name): $msg") }
+                elseif ($msg -like 'DEP:*') {
+                    try {
+                        $moved = Move-InboxRecordToRejected $paths $e $msg
+                        [void]$rejected.Add("$($e.Name) -> $($moved.RecordName): $msg")
+                    } catch {
+                        [void]$processingErrors.Add("$($e.Name): could not quarantine rejected record: $($_.Exception.Message)")
+                    }
+                }
+                else { [void]$processingErrors.Add("$($e.Name): $msg") }
             }
         }
-        if ($added.Count -gt 0) { [void](Commit-QueueState $paths $state $added.Count) }
-        foreach ($f in $consume) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        if ($added.Count -gt 0) {
+            try { [void](Commit-QueueState $paths $state $added.Count) }
+            catch { Fail 5 "inbox queue commit failed: $($_.Exception.Message)" }
+        }
+        foreach ($f in $consume) {
+            try { Remove-Item -LiteralPath $f -Force -ErrorAction Stop }
+            catch { [void]$processingErrors.Add("$([System.IO.Path]::GetFileName($f)): could not consume record: $($_.Exception.Message)") }
+        }
         Write-Output ("added: " + (@($added.ToArray()) -join ' '))
         if ($skipped.Count -gt 0) { Write-Output ("skipped-dup: " + (@($skipped.ToArray()) -join '; ')) }
-        if ($rejected.Count -gt 0) { $hadRejected = $true; foreach ($r in $rejected) { Write-Output "rejected: $r" } }
+        foreach ($r in $rejected) { Write-Output "rejected: $r" }
+        if ($processingErrors.Count -gt 0) {
+            Fail 5 ("inbox processing errors: " + (@($processingErrors.ToArray()) -join '; '))
+        }
     } finally { Release-Lock $paths.Lock }
-    if ($hadRejected) { exit 5 }
 }
 
 # --------------------------------------------------------------------------
