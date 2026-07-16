@@ -362,13 +362,23 @@ function Invoke-SupervisedCall {
 # Persist the (non-sensitive) verdict + the (transient) captured streams.
 # --------------------------------------------------------------------------
 function Save-CallArtifacts {
-    param($Res)
+    param(
+        $Res,
+        [int]$Attempt = 1,
+        [int]$BudgetRemainingMs = -1,
+        [int]$TotalDurationMs = -1,
+        [string]$Checkpoint = ''
+    )
     $stdoutFile = [string](Opt 'stdout-file' '')
     $stderrFile = [string](Opt 'stderr-file' '')
     if ($stdoutFile) { Write-TextNoBom $stdoutFile $Res.stdout }
     if ($stderrFile) { Write-TextNoBom $stderrFile $Res.stderr }
+    $verdict = New-Verdict $Res $Attempt $BudgetRemainingMs
+    if ($TotalDurationMs -ge 0) { $verdict['total_duration_ms'] = $TotalDurationMs }
+    if ($Checkpoint) { $verdict['checkpoint'] = $Checkpoint }
     $resultFile = [string](Opt 'result-file' '')
-    if ($resultFile) { Write-JsonAtomic $resultFile (New-Verdict $Res) }
+    if ($resultFile) { Write-JsonAtomic $resultFile $verdict }
+    return $verdict
 }
 # The DURABLE verdict: scalars only, NO raw stdout/stderr (privacy).
 function New-Verdict {
@@ -502,9 +512,9 @@ function Cmd-Run {
     $res = Invoke-SupervisedCall -FilePath $target.FilePath -CallArgs $target.Args -StdinText $co.Stdin `
         -DeadlineSec $co.Deadline -CancelFile $co.CancelFile -OutputMaxBytes $co.OutputMax `
         -CrashExitCodes $co.Crash -ErrorExitCodes $co.ErrorCodes
-    Save-CallArtifacts $res
+    $verdict = Save-CallArtifacts $res 1 -1
     if ($res.reason -in @('cancelled', 'timeout')) { [void](Write-Checkpoint $res 1) }
-    Emit-Verdict (New-Verdict $res)
+    Emit-Verdict $verdict
     exit ([int]$script:ReasonExit[$res.reason])
 }
 
@@ -525,8 +535,8 @@ function Cmd-Supervise {
         $remaining = Get-BudgetRemainingMs $budget
         if ($remaining -le 0) {
             $res = [pscustomobject]@{ reason = 'budget'; exit_code = $null; timed_out = $false; cancelled = $false; duration_ms = 0; output_bytes = 0; output_truncated = $false; output_sha256 = (Sha256Hex ([byte[]]@())); stdout = ''; stderr = ''; outcome_reason = 'cohort budget exhausted'; pid = $null }
-            Save-CallArtifacts $res
-            Emit-Verdict (New-Verdict $res 0 0)
+            $verdict = Save-CallArtifacts $res 0 0 0
+            Emit-Verdict $verdict
             exit ([int]$script:ReasonExit['budget'])
         }
     }
@@ -564,13 +574,11 @@ function Cmd-Supervise {
         $attempt = 0
     }
 
-    Save-CallArtifacts $res
     $budgetRemaining = if ($null -ne $budget) { [int][math]::Max(0, (Get-BudgetRemainingMs $budget)) } else { -1 }
     $cp = $null
     if ($res.reason -in @('cancelled', 'timeout', 'crash')) { $cp = Write-Checkpoint $res $attempt }
-    $verdict = New-Verdict $res $attempt $budgetRemaining
-    $verdict['total_duration_ms'] = $totalMs
-    if ($cp) { $verdict['checkpoint'] = (Split-Path -Leaf $cp) }
+    $checkpointName = if ($cp) { Split-Path -Leaf $cp } else { '' }
+    $verdict = Save-CallArtifacts $res $attempt $budgetRemaining $totalMs $checkpointName
     Emit-Verdict $verdict
     exit ([int]$script:ReasonExit[$res.reason])
 }
