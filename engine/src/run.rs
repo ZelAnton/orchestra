@@ -1520,23 +1520,17 @@ struct ReviewPass {
     supervised_ok: bool,
 }
 
-/// The set of completed task ids for readiness: every `[T-NNN]` in `Tasks_Done.md` plus any
-/// descriptor already `done`/`published`. Mirrors the same computation `plan --dry-run` uses.
+/// The set of completed task ids for readiness: every `### [T-NNN]` record header in
+/// `Tasks_Done.md` plus any descriptor already `done`/`published`. Mirrors the same computation
+/// `plan --dry-run` uses.
 fn completed_ids(work: &Path, snap: &Snapshot) -> std::collections::BTreeSet<String> {
     let mut set = std::collections::BTreeSet::new();
     if let Ok(text) = fs::read_to_string(work.join("Tasks_Done.md")) {
-        for seg in text.split('[') {
-            if let Some(end) = seg.find(']') {
-                let id = &seg[..end];
-                if id
-                    .strip_prefix("T-")
-                    .and_then(|r| r.chars().next())
-                    .is_some_and(|c| c.is_ascii_digit())
-                {
-                    set.insert(id.to_string());
-                }
-            }
-        }
+        set.extend(
+            text.lines()
+                .filter_map(archive_header_task_id)
+                .map(str::to_owned),
+        );
     }
     for d in &snap.descriptors {
         if matches!(d.state, Some(TaskState::Done) | Some(TaskState::Published)) {
@@ -1544,6 +1538,15 @@ fn completed_ids(work: &Path, snap: &Snapshot) -> std::collections::BTreeSet<Str
         }
     }
     set
+}
+
+fn archive_header_task_id(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("###")?.trim_start();
+    let rest = rest.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let id = rest[..close].trim();
+    let digits = id.strip_prefix("T-")?;
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(id)
 }
 
 #[cfg(test)]
@@ -1565,6 +1568,32 @@ mod tests {
         ] {
             assert_eq!(TaskState::from_markdown(task_literal(st)), Some(st));
         }
+    }
+
+    #[test]
+    fn completed_ids_ignore_task_mentions_in_archive_body() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let work = std::env::temp_dir().join(format!(
+            "orchestra-completed-ids-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&work).expect("create test work directory");
+        fs::write(
+            work.join("Tasks_Done.md"),
+            "### [T-100] Archived task — статус: готово\n\nPrerequisites: T-101\nCross-reference: [T-102]\n",
+        )
+        .expect("write archive fixture");
+
+        let snapshot = Snapshot::load(&work);
+        let completed = completed_ids(&work, &snapshot);
+        fs::remove_dir_all(&work).expect("remove test work directory");
+
+        assert!(completed.contains("T-100"));
+        assert!(!completed.contains("T-101"));
+        assert!(!completed.contains("T-102"));
     }
 
     #[test]

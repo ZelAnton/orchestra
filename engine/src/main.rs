@@ -701,19 +701,17 @@ fn config_bool(text: &str, key: &str) -> Option<bool> {
     }
 }
 
-/// The set of completed task ids for readiness: every `[T-NNN]` listed in `Tasks_Done.md` (done
-/// tasks are removed from the queue) plus any descriptor already at `done`/`published`. Read-only.
+/// The set of completed task ids for readiness: every `### [T-NNN]` record header in
+/// `Tasks_Done.md` (done tasks are removed from the queue) plus any descriptor already at
+/// `done`/`published`. Read-only.
 fn completed_ids(work: &str, snap: &Snapshot) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     if let Ok(text) = fs::read_to_string(Path::new(work).join("Tasks_Done.md")) {
-        for seg in text.split('[') {
-            if let Some(end) = seg.find(']') {
-                let id = &seg[..end];
-                if is_task_id(id) {
-                    set.insert(id.to_string());
-                }
-            }
-        }
+        set.extend(
+            text.lines()
+                .filter_map(archive_header_task_id)
+                .map(str::to_owned),
+        );
     }
     for d in &snap.descriptors {
         if matches!(d.state, Some(TaskState::Done) | Some(TaskState::Published)) {
@@ -723,11 +721,13 @@ fn completed_ids(work: &str, snap: &Snapshot) -> BTreeSet<String> {
     set
 }
 
-/// `^T-\d` — a T-id is `T-` followed by at least one digit.
-fn is_task_id(s: &str) -> bool {
-    s.strip_prefix("T-")
-        .and_then(|r| r.chars().next())
-        .is_some_and(|c| c.is_ascii_digit())
+fn archive_header_task_id(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("###")?.trim_start();
+    let rest = rest.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let id = rest[..close].trim();
+    let digits = id.strip_prefix("T-")?;
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(id)
 }
 
 /// `engine lease <acquire|heartbeat|release|status>` — take / renew / release / inspect the
