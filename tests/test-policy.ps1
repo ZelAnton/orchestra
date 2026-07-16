@@ -416,6 +416,14 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 8 'check-publish: disallowed branch rejected'
     $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'upstream')
     Assert-Exit $r 8 'check-publish: disallowed remote rejected'
+    foreach ($caseVariant in @('MAIN', 'Main')) {
+        $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', $caseVariant, '--remote', 'origin')
+        Assert-Exit $r 8 "check-publish: branch comparison is ordinal and rejects '$caseVariant' on every platform"
+    }
+    foreach ($caseVariant in @('ORIGIN', 'Origin')) {
+        $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', $caseVariant)
+        Assert-Exit $r 8 "check-publish: remote comparison is ordinal and rejects '$caseVariant' on every platform"
+    }
 
     # manual push confirmation blocks the push
     Write-Utf8 $constraints "## Push/merge policy`n`n**Активные ограничения**:`n`n- Публикация (push): требует ручного подтверждения`n"
@@ -555,6 +563,13 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     $r = CG @('--checks-from', $checks, '--elapsed-sec', '10', '--deadline-sec', '600')
     Assert-Exit $r 10 'check-gate: green runs for another sha do not satisfy the gate (still pending)'
     Assert-Equal 2 (CGJson $r).missing.Count 'check-gate: other-sha runs count as missing'
+
+    # SHA identity is an ordinal comparison too: do not inherit filesystem case rules.
+    $upperSha = $sha.ToUpperInvariant()
+    Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$upperSha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$upperSha`",`"status`":`"completed`",`"conclusion`":`"success`"}`n"
+    $r = CG @('--checks-from', $checks, '--elapsed-sec', '10', '--deadline-sec', '600')
+    Assert-Exit $r 10 'check-gate: SHA comparison is ordinal on every platform'
+    Assert-Equal 2 (CGJson $r).missing.Count 'check-gate: differently cased SHA records count as missing'
 
     # Real GitHub Actions run IDs exceed Int32.MaxValue and must still produce a verdict.
     Write-Utf8 $checks "{`"name`":`"validate`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":29199450670}`n{`"name`":`"crash-matrix`",`"head_sha`":`"$sha`",`"status`":`"completed`",`"conclusion`":`"success`",`"run_id`":29199450669}`n"
