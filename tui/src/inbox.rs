@@ -1,11 +1,14 @@
 //! Aggregate the Decision Inbox (plan §6.2) — the main human-in-the-loop screen — from a
 //! read-only `engine::state::Snapshot` (T-103) plus the out-of-band `.work/PAUSE` marker.
 //!
-//! Like [`crate::app`], this module is pure data + a build function and carries no terminal /
-//! ratatui dependency: it only *reads* facts already decoded by `Snapshot` (the queue and task
-//! descriptors) and never writes a file, takes a lock, or emits an event.
+//! Like [`crate::app`], this module carries no terminal / ratatui dependency and never writes a
+//! file, takes a lock, or emits an event. `build` projects the decoded `Snapshot`; `load_approvals`
+//! adds a best-effort read-only projection of persistent human-gate JSON artifacts.
 //!
-//! Three categories are surfaced, each mapping onto one queue/descriptor fact family:
+//! Four categories are surfaced:
+//!
+//! * **Approvals** — undecided one-time requests from `.work/approvals/*.json`; unexpired requests
+//!   are actionable, expired requests and malformed artifacts stay visible but are not actionable.
 //!
 //! * **Escalated** — queue entries whose status is the terminal `эскалирована · причина=…`
 //!   (§13.1): these can never proceed without an operator decision.
@@ -26,6 +29,8 @@
 //! the corresponding suffix (`причина=`, `попытка=`, …) is itself absent from the artifact.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
 
 use orchestra_engine::state::{Snapshot, TaskState};
 
@@ -69,6 +74,30 @@ pub struct BlockedCard {
     pub blocking_unknown: bool,
 }
 
+/// One persistent human-gate request decoded from `.work/approvals/<id>.json`. Only undecided
+/// records are loaded: decided records are one-time consumed and disappear from the pending list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalCard {
+    pub id: String,
+    pub subject: String,
+    pub task: Option<String>,
+    pub batch: Option<String>,
+    pub reason: String,
+    pub created_at: Option<String>,
+    pub deadline: Option<String>,
+    pub fingerprint: Option<String>,
+    pub policy_hash: Option<String>,
+}
+
+/// Read-only projection of approval artifacts. Expired undecided requests remain visible as
+/// expired outcomes but are not actionable; malformed artifacts are surfaced instead of silently
+/// disappearing from the operator's inbox.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalProjection {
+    pub pending: Vec<ApprovalCard>,
+    pub expired: Vec<ApprovalCard>,
+    pub errors: Vec<String>,
+}
 /// The full Decision Inbox projection (§6.2), built from one `Snapshot` plus the pause marker.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionInbox {
@@ -77,6 +106,12 @@ pub struct DecisionInbox {
     /// The pause marker's own content, if any (informational only — see `agents/processor.md`
     /// "Пауза — kill switch `.work/PAUSE`": only the file's *existence* gates the processor).
     pub pause_note: Option<String>,
+    /// Undecided, unexpired one-time human-gate requests, newest deadline first.
+    pub approvals: Vec<ApprovalCard>,
+    /// Undecided requests whose deadline has passed. Visible but never actionable.
+    pub expired_approvals: Vec<ApprovalCard>,
+    /// Approval-directory / JSON errors surfaced to the operator.
+    pub approval_errors: Vec<String>,
     pub escalated: Vec<EscalatedCard>,
     pub quarantined: Vec<QuarantineCard>,
     pub blocked: Vec<BlockedCard>,
@@ -86,6 +121,9 @@ impl DecisionInbox {
     /// Nothing at all currently needs the operator.
     pub fn is_empty(&self) -> bool {
         !self.paused
+            && self.approvals.is_empty()
+            && self.expired_approvals.is_empty()
+            && self.approval_errors.is_empty()
             && self.escalated.is_empty()
             && self.quarantined.is_empty()
             && self.blocked.is_empty()
@@ -93,10 +131,140 @@ impl DecisionInbox {
 
     /// Total number of cards (excludes the pause banner, which is a state, not a card).
     pub fn card_count(&self) -> usize {
-        self.escalated.len() + self.quarantined.len() + self.blocked.len()
+        self.approvals.len()
+            + self.expired_approvals.len()
+            + self.approval_errors.len()
+            + self.escalated.len()
+            + self.quarantined.len()
+            + self.blocked.len()
     }
 }
 
+/// Load persistent approval requests read-only. Decided artifacts are consumed and intentionally
+/// omitted; an undecided request moves from `pending` to `expired` as soon as its canonical UTC
+/// deadline is no later than `now_iso8601`.
+pub fn load_approvals(work_dir: &Path, now_iso8601: &str) -> ApprovalProjection {
+    let dir = work_dir.join("approvals");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ApprovalProjection::default()
+        }
+        Err(error) => {
+            return ApprovalProjection {
+                errors: vec![format!("approvals/: {error}")],
+                ..ApprovalProjection::default()
+            }
+        }
+    };
+
+    let mut projection = ApprovalProjection::default();
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) if entry.path().extension().and_then(|x| x.to_str()) == Some("json") => {
+                paths.push(entry.path())
+            }
+            Ok(_) => {}
+            Err(error) => projection.errors.push(format!("approvals/: {error}")),
+        }
+    }
+    paths.sort();
+
+    for path in paths {
+        let name = path
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or("<неизвестный файл>")
+            .to_string();
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) => {
+                projection.errors.push(format!("{name}: {error}"));
+                continue;
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(error) => {
+                projection
+                    .errors
+                    .push(format!("{name}: нераспознанный JSON: {error}"));
+                continue;
+            }
+        };
+        if value.get("schema").and_then(|x| x.as_str()) != Some("orchestra/approval@1") {
+            projection
+                .errors
+                .push(format!("{name}: неподдерживаемая schema approval"));
+            continue;
+        }
+        let id = match value.get("id").and_then(|x| x.as_str()) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => {
+                projection.errors.push(format!("{name}: отсутствует id"));
+                continue;
+            }
+        };
+        if path.file_stem().and_then(|x| x.to_str()) != Some(id.as_str()) {
+            projection
+                .errors
+                .push(format!("{name}: id '{id}' не совпадает с именем файла"));
+            continue;
+        }
+        // A non-empty decision means policy.ps1 already consumed this one-time id.
+        if value
+            .get("decision")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_some()
+        {
+            continue;
+        }
+
+        let card = ApprovalCard {
+            id,
+            subject: approval_string(&value, "subject").unwrap_or_else(|| "не указан".into()),
+            task: approval_string(&value, "task"),
+            batch: approval_string(&value, "batch"),
+            reason: approval_string(&value, "reason").unwrap_or_else(|| "не указана".into()),
+            created_at: approval_string(&value, "created_at"),
+            deadline: approval_string(&value, "deadline"),
+            fingerprint: approval_string(&value, "fingerprint"),
+            policy_hash: approval_string(&value, "policy_hash"),
+        };
+        let expired = card
+            .deadline
+            .as_deref()
+            .map(|deadline| deadline < now_iso8601)
+            .unwrap_or(false);
+        if expired {
+            projection.expired.push(card);
+        } else {
+            projection.pending.push(card);
+        }
+    }
+
+    projection.pending.sort_by(|a, b| {
+        a.deadline
+            .as_deref()
+            .unwrap_or("")
+            .cmp(b.deadline.as_deref().unwrap_or(""))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    projection.expired.sort_by(|a, b| a.id.cmp(&b.id));
+    projection
+}
+
+fn approval_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
 /// Build the Decision Inbox from a snapshot plus whether `.work/PAUSE` currently exists (and its
 /// optional note), plus `done_ids` — task ids already archived to `Tasks_Done.md` (decoded by the
 /// caller, see `main.rs::done_task_ids`), used only to positively confirm a predecessor absent
@@ -165,6 +333,9 @@ pub fn build(
     DecisionInbox {
         paused,
         pause_note,
+        approvals: Vec::new(),
+        expired_approvals: Vec::new(),
+        approval_errors: Vec::new(),
         escalated,
         quarantined,
         blocked,
@@ -452,6 +623,56 @@ mod tests {
         assert!(inbox.blocked.is_empty());
     }
 
+    #[test]
+    fn approval_loader_lists_pending_separates_expired_and_hides_consumed() {
+        let root = std::env::temp_dir().join(format!(
+            "orchestra-tui-inbox-approvals-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let approvals = root.join("approvals");
+        fs::create_dir_all(&approvals).unwrap();
+        let artifact = |id: &str, deadline: &str, decision: &str| {
+            format!(
+                r#"{{"schema":"orchestra/approval@1","id":"{id}","subject":"task:T-250|batch:","task":"T-250","batch":"","reason":"human-review","fingerprint":"aa","policy_hash":"bb","created_at":"2026-07-16T00:00:00Z","deadline":"{deadline}","decision":"{decision}"}}"#
+            )
+        };
+        fs::write(
+            approvals.join("apr-pending.json"),
+            artifact("apr-pending", "2026-07-17T00:00:00Z", ""),
+        )
+        .unwrap();
+        fs::write(
+            approvals.join("apr-expired.json"),
+            artifact("apr-expired", "2026-07-15T00:00:00Z", ""),
+        )
+        .unwrap();
+        fs::write(
+            approvals.join("apr-consumed.json"),
+            artifact("apr-consumed", "2026-07-17T00:00:00Z", "approve"),
+        )
+        .unwrap();
+        fs::write(approvals.join("broken.json"), "not-json").unwrap();
+
+        let loaded = load_approvals(&root, "2026-07-16T12:00:00Z");
+        assert_eq!(loaded.pending.len(), 1);
+        assert_eq!(loaded.pending[0].id, "apr-pending");
+        assert_eq!(loaded.pending[0].task.as_deref(), Some("T-250"));
+        assert_eq!(loaded.expired.len(), 1);
+        assert_eq!(loaded.expired[0].id, "apr-expired");
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].contains("broken.json"));
+        assert!(!loaded
+            .pending
+            .iter()
+            .chain(loaded.expired.iter())
+            .any(|a| a.id == "apr-consumed"));
+
+        let _ = fs::remove_dir_all(root);
+    }
     #[test]
     fn pause_marker_is_surfaced_verbatim() {
         let inbox = build(

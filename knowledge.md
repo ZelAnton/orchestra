@@ -60,6 +60,20 @@ workspace, коммитит результаты листовых агентов
   `YYYY-MM-DDTHH:MM:SSZ`; его используют engine run и TUI вместо локальных копий алгоритма
   Howard Hinnant `civil_from_days`, а проверки известных дат, leap day и лексической
   монотонности живут рядом с реализацией.
+- **Decision Inbox TUI — исполняемый human gate (T-250).** `tui/src/inbox.rs` сохраняет прежнюю
+  проекцию эскалаций/карантина/блокировок и read-only загружает
+  `.work/approvals/*.json`: неистёкшие undecided-заявки образуют выбираемые карточки, истёкшие и
+  ошибки JSON видны, а уже consumed (`decision != ""`) исчезают из pending. `tui/src/app.rs`
+  хранит выбор и трёхшаговый reject (ввод непустой причины → confirm → команда), `tui/src/main.rs`
+  маршрутизирует `a`/`d` **только** на экране Decision Inbox, а `tui/src/ui.rs` показывает детали,
+  deadline/привязку и исход. Единственная граница мутации — `tui/src/commands.rs`: approve/reject
+  резолвят `tools/policy.ps1` в раскладках checkout/`cc-sync`, собирают отдельные argv для
+  `approval-approve`/`approval-reject` с аргументами `--work ... --id ... --by orchestra-tui`,
+  опциональным `--note <причина>` и `--json`, затем запускают их тем же supervisor-каналом, что
+  `state-tx status`; Rust никогда не пишет
+  approval JSON напрямую. Оба решения требуют второго `y`/Enter, rejection дополнительно требует
+  причины; exit 11 после успешно записанного reject распознаётся по JSON как применённый отказ,
+  тогда как consumed/expired/ошибка показываются оператору и inbox немедленно перечитывается.
 
 ### Координация и интеграция
 

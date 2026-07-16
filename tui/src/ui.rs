@@ -37,8 +37,12 @@ pub fn render(f: &mut Frame, app: &AppState) {
     if let Some(lease) = &app.lease {
         render_lease_overlay(f, lease);
     }
-    if app.modal == Modal::ConfirmForceLock {
-        render_force_lock_modal(f);
+    match app.modal {
+        Modal::ConfirmForceLock => render_force_lock_modal(f),
+        Modal::ConfirmApprove | Modal::EnterRejectReason | Modal::ConfirmReject => {
+            render_approval_modal(f, app)
+        }
+        Modal::None => {}
     }
 }
 
@@ -329,17 +333,14 @@ fn notice_spans(app: &AppState) -> Vec<Span<'static>> {
 
 // ---- §6.2 Decision Inbox screen -------------------------------------------------------------
 //
-// Only rendering: answers to the §6.2 card questions ("what's needed / why can't the agent
-// decide / what would this unblock / how urgent") are drawn strictly to the extent they are
-// derivable from `AppState::inbox` (built from `engine::state::Snapshot` + `.work/PAUSE`, see
-// `main.rs` / `crate::inbox`) — no command is ever sent from here (approve/pause/resume remain a
-// later task's mandate).
+// Rendering only: cards come from `AppState::inbox` (Snapshot + PAUSE + read-only approval JSON
+// projection). Input handling and every command invocation remain in `main.rs` / `commands.rs`.
 
 fn render_decision_inbox(f: &mut Frame, app: &AppState) {
     let root = Layout::vertical([
         Constraint::Length(if app.inbox.paused { 5 } else { 3 }), // header
         Constraint::Min(3),                                       // body
-        Constraint::Length(1),                                    // footer
+        Constraint::Length(2),                                    // actions + result
     ])
     .split(f.area());
 
@@ -355,6 +356,11 @@ fn render_inbox_header(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
             Style::default().add_modifier(Modifier::BOLD).fg(CYAN),
         ),
         Span::raw("   "),
+        Span::styled(
+            format!("решения {}", inbox.approvals.len()),
+            Style::default().fg(if inbox.approvals.is_empty() { DIM } else { RED }),
+        ),
+        Span::raw("  ·  "),
         Span::styled(
             format!("эскалировано {}", inbox.escalated.len()),
             Style::default().fg(if inbox.escalated.is_empty() { DIM } else { RED }),
@@ -405,7 +411,7 @@ fn render_inbox_header(f: &mut Frame, area: Rect, inbox: &DecisionInbox) {
 
 /// The Decision Inbox body: either the empty-state message (R-1: distinguishes "nothing at all"
 /// from "no cards, but paused" — the pause banner in the header still demands attention even
-/// with an empty card list) or the three scrollable panels (R-3: each independently focusable
+/// with an empty card list) or the four panels (approvals + the existing three), each focusable
 /// with `←`/`→` and scrollable with `↑`/`↓`, so cards beyond the visible height are reachable
 /// rather than silently clipped).
 fn render_inbox_body(f: &mut Frame, area: Rect, app: &AppState) {
@@ -423,30 +429,32 @@ fn render_inbox_body(f: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    let thirds = Layout::vertical([
+    let panels = Layout::vertical([
         Constraint::Percentage(34),
-        Constraint::Percentage(33),
-        Constraint::Percentage(33),
+        Constraint::Percentage(22),
+        Constraint::Percentage(22),
+        Constraint::Percentage(22),
     ])
     .split(area);
 
+    render_approval_panel(f, panels[0], app);
     render_escalated_panel(
         f,
-        thirds[0],
+        panels[1],
         &inbox.escalated,
         app.inbox_focus == InboxPanel::Escalated,
         app.inbox_scroll[InboxPanel::Escalated as usize],
     );
     render_quarantine_panel(
         f,
-        thirds[1],
+        panels[2],
         &inbox.quarantined,
         app.inbox_focus == InboxPanel::Quarantined,
         app.inbox_scroll[InboxPanel::Quarantined as usize],
     );
     render_blocked_panel(
         f,
-        thirds[2],
+        panels[3],
         &inbox.blocked,
         app.inbox_focus == InboxPanel::Blocked,
         app.inbox_scroll[InboxPanel::Blocked as usize],
@@ -463,6 +471,91 @@ fn focus_marker(focused: bool) -> &'static str {
     }
 }
 
+fn render_approval_panel(f: &mut Frame, area: Rect, app: &AppState) {
+    let inbox = &app.inbox;
+    let focused = app.inbox_focus == InboxPanel::Approvals;
+    let mut lines: Vec<Line> = Vec::new();
+    if inbox.approvals.is_empty() {
+        lines.push(dim_line("pending approvals нет"));
+    } else {
+        for (index, card) in inbox.approvals.iter().enumerate() {
+            let selected = index == app.approval_selected;
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if selected { "▶ " } else { "  " },
+                    Style::default().fg(if selected { CYAN } else { DIM }),
+                ),
+                Span::styled(
+                    card.id.clone(),
+                    Style::default().fg(RED).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(card.subject.clone(), Style::default().fg(Color::White)),
+            ]));
+            lines.push(field_line("    причина: ", &card.reason));
+            lines.push(field_line(
+                "    deadline: ",
+                card.deadline.as_deref().unwrap_or("не указан"),
+            ));
+            let binding = format!(
+                "fingerprint={} · policy={}",
+                short_hash(card.fingerprint.as_deref()),
+                short_hash(card.policy_hash.as_deref())
+            );
+            lines.push(field_line("    привязка: ", &binding));
+            if selected {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "    a ",
+                        Style::default().fg(GREEN).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("approve  "),
+                    Span::styled(" d ", Style::default().fg(RED).add_modifier(Modifier::BOLD)),
+                    Span::raw("reject (с причиной)"),
+                ]));
+            } else {
+                // Keep every pending card at five lines so selection -> scroll is deterministic.
+                lines.push(dim_line("    ↑/↓ выбрать карточку"));
+            }
+        }
+    }
+    for card in &inbox.expired_approvals {
+        lines.push(Line::from(vec![
+            Span::styled("  ПРОСРОЧЕНО ", Style::default().fg(YELLOW)),
+            Span::styled(card.id.clone(), Style::default().fg(DIM)),
+            Span::raw("  "),
+            Span::styled(card.subject.clone(), Style::default().fg(DIM)),
+        ]));
+        if let Some(deadline) = &card.deadline {
+            lines.push(field_line("    deadline: ", deadline));
+        }
+    }
+    for error in &inbox.approval_errors {
+        lines.push(Line::from(vec![
+            Span::styled("  ОШИБКА approval: ", Style::default().fg(RED)),
+            Span::styled(error.clone(), Style::default().fg(YELLOW)),
+        ]));
+    }
+
+    let title = format!(
+        "{}Approval requests (pending {}, expired {})",
+        focus_marker(focused),
+        inbox.approvals.len(),
+        inbox.expired_approvals.len()
+    );
+    let border = if inbox.approvals.is_empty() { DIM } else { RED };
+    let para = Paragraph::new(lines)
+        .block(block(&title).border_style(Style::default().fg(border)))
+        .wrap(Wrap { trim: true })
+        .scroll((app.inbox_scroll[InboxPanel::Approvals as usize], 0));
+    f.render_widget(para, area);
+}
+
+fn short_hash(value: Option<&str>) -> String {
+    value
+        .map(|text| text.chars().take(12).collect())
+        .unwrap_or_else(|| "?".to_string())
+}
 fn render_escalated_panel(
     f: &mut Frame,
     area: Rect,
@@ -589,28 +682,38 @@ fn render_blocked_panel(
 }
 
 fn render_inbox_footer(f: &mut Frame, area: Rect, app: &AppState) {
-    let mut spans = vec![
+    let action_style = if app.pending_approval().is_some() {
+        GREEN
+    } else {
+        DIM
+    };
+    let first = Line::from(vec![
         Span::styled(" q/Esc ", Style::default().fg(CYAN)),
         Span::raw("выход  "),
         Span::styled(" Tab ", Style::default().fg(CYAN)),
         Span::raw("обзор  "),
         Span::styled(" ←/→ ↑/↓ ", Style::default().fg(CYAN)),
-        Span::raw("панели  "),
-    ];
-    spans.extend(command_hint_spans());
-    // Only pause/resume/lease/force-lock are wired; approve/decision actions have no backend yet.
-    spans.push(Span::styled(
-        "   (approve/решения — не входят)",
-        Style::default().fg(DIM),
-    ));
-    spans.extend(notice_spans(app));
+        Span::raw("панель/карточка  "),
+        Span::styled(" a ", Style::default().fg(action_style)),
+        Span::raw("approve  "),
+        Span::styled(
+            " d ",
+            Style::default().fg(if app.pending_approval().is_some() {
+                RED
+            } else {
+                DIM
+            }),
+        ),
+        Span::raw("reject"),
+    ]);
+    let mut second = command_hint_spans();
+    second.extend(notice_spans(app));
     f.render_widget(
-        Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
+        Paragraph::new(vec![first, Line::from(second)]).alignment(Alignment::Left),
         area,
     );
 }
-
-// ---- command overlays: lease-status popup + force-lock confirmation modal -------------------
+// ---- command overlays: lease-status plus destructive-operation confirmation modals ----------
 
 /// A centered rectangle `percent_x` × `percent_y` of `area`, for a modal/popup overlay.
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -693,6 +796,91 @@ fn render_lease_overlay(f: &mut Frame, lease: &LeaseStatus) {
 /// The force-lock confirmation modal (§6.2 "опасные операции — с явным confirm"): the destructive
 /// removal of `.work/orchestrator.lock`, mirroring `cc-processor.sh --force-lock`, only fires on an
 /// explicit `y`/Enter here (see `main.rs::handle_modal_key`), never a single stray keystroke.
+fn render_approval_modal(f: &mut Frame, app: &AppState) {
+    let area = centered_rect(76, 52, f.area());
+    f.render_widget(Clear, area);
+    let card = app.pending_approval();
+    let (title, prompt, color) = match app.modal {
+        Modal::ConfirmApprove => (
+            " подтверждение approve ",
+            "Одобрить и навсегда потребить этот one-time approval?",
+            GREEN,
+        ),
+        Modal::EnterRejectReason => (
+            " причина reject ",
+            "Введите причину отказа; Enter перейдёт к отдельному подтверждению.",
+            YELLOW,
+        ),
+        Modal::ConfirmReject => (
+            " подтверждение reject ",
+            "Отклонить и навсегда потребить этот one-time approval?",
+            RED,
+        ),
+        _ => return,
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        prompt,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ))];
+    if let Some(card) = card {
+        lines.push(Line::from(""));
+        lines.push(field_line("  id: ", &card.id));
+        lines.push(field_line("  subject: ", &card.subject));
+        lines.push(field_line("  причина запроса: ", &card.reason));
+        if let Some(deadline) = &card.deadline {
+            lines.push(field_line("  deadline: ", deadline));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  выбранная заявка больше не pending; отмените и обновите inbox",
+            Style::default().fg(RED),
+        )));
+    }
+    match app.modal {
+        Modal::EnterRejectReason => {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  > ", Style::default().fg(CYAN)),
+                Span::raw(app.rejection_reason.clone()),
+                Span::styled("█", Style::default().fg(CYAN)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(" Enter ", Style::default().fg(CYAN)),
+                Span::raw("далее   "),
+                Span::styled(" Esc ", Style::default().fg(CYAN)),
+                Span::raw("отмена"),
+            ]));
+        }
+        Modal::ConfirmApprove | Modal::ConfirmReject => {
+            if app.modal == Modal::ConfirmReject {
+                lines.push(field_line("  причина отказа: ", &app.rejection_reason));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    " y / Enter ",
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("подтвердить   "),
+                Span::styled(" n / Esc ", Style::default().fg(CYAN)),
+                Span::raw("отмена"),
+            ]));
+        }
+        _ => {}
+    }
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    title,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ))
+                .border_style(Style::default().fg(color)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, area);
+}
 fn render_force_lock_modal(f: &mut Frame) {
     let area = centered_rect(72, 45, f.area());
     f.render_widget(Clear, area);
@@ -850,6 +1038,19 @@ mod tests {
         app.inbox = DecisionInbox {
             paused: true,
             pause_note: Some("оператор остановил конвейер на ночь".to_string()),
+            approvals: vec![crate::inbox::ApprovalCard {
+                id: "apr-t250".to_string(),
+                subject: "task:T-250|batch:".to_string(),
+                task: Some("T-250".to_string()),
+                batch: None,
+                reason: "human-review".to_string(),
+                created_at: Some("2026-07-16T00:00:00Z".to_string()),
+                deadline: Some("2026-07-17T00:00:00Z".to_string()),
+                fingerprint: Some("abcdef0123456789".to_string()),
+                policy_hash: Some("9876543210abcdef".to_string()),
+            }],
+            expired_approvals: vec![],
+            approval_errors: vec![],
             escalated: vec![crate::inbox::EscalatedCard {
                 id: "T-050".to_string(),
                 title: "Старая задача".to_string(),
@@ -893,10 +1094,13 @@ mod tests {
         );
         assert!(screen.contains("T-060"), "blocked card not shown");
         assert!(screen.contains("Заблокировано"), "missing blocked panel");
-        // the footer now advertises the wired command subset AND that approve/decisions are not.
         assert!(
-            screen.contains("force-lock") && screen.contains("approve/решения"),
-            "missing command-channel / out-of-scope footer hints"
+            screen.contains("apr-t250"),
+            "pending approval card not shown"
+        );
+        assert!(
+            screen.contains("approve") && screen.contains("reject"),
+            "missing approval action hints"
         );
     }
 
@@ -910,6 +1114,37 @@ mod tests {
         assert_eq!(app.screen, Screen::Overview);
     }
 
+    #[test]
+    fn renders_approval_confirmation_with_selected_card() {
+        let mut app = AppState::new();
+        app.screen = Screen::DecisionInbox;
+        app.inbox.approvals = vec![crate::inbox::ApprovalCard {
+            id: "apr-confirm".to_string(),
+            subject: "task:T-250|batch:".to_string(),
+            task: Some("T-250".to_string()),
+            batch: None,
+            reason: "human-review".to_string(),
+            created_at: None,
+            deadline: Some("2026-07-17T00:00:00Z".to_string()),
+            fingerprint: Some("aa".to_string()),
+            policy_hash: Some("bb".to_string()),
+        }];
+        assert!(app.arm_approve());
+
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("подтверждение approve"));
+        assert!(screen.contains("apr-confirm"));
+        assert!(screen.contains("y / Enter"));
+    }
     /// The force-lock confirmation modal overlays the active screen with an explicit destructive
     /// warning and the y/cancel affordances (§6.2 confirm gate) — rendered headlessly.
     #[test]

@@ -3,7 +3,7 @@ name = "orchestra-tui"
 version = "0.0.1"
 edition = "2021"
 rust-version = "1.74"
-description = "Operator TUI for a running orchestrator (plan §6.1 overview + §6.2 Decision Inbox): read-only by default, rendered over `.work/events.jsonl` (tailed via the engine crate's cursor reader) and `.work/status.md`. Also sends a small, explicit-keystroke command subset (pause/resume/lease-status/force-lock) that touches ONLY `.work/PAUSE` and `.work/orchestrator.lock`, mirroring the existing launchers/state-tx; never touches the queue, task descriptors, or code."
+description = "Operator TUI for a running orchestrator: overview plus actionable Decision Inbox, with supervised pause/resume/lease/force-lock and approval decisions."
 license = "MIT"
 publish = false
 

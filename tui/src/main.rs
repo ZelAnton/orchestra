@@ -17,9 +17,11 @@
 //! mirroring `cc-unpause.sh`), `s` lease-status (read `.work/orchestrator.lock` via the engine
 //! crate's owner-checked `tools/state-tx.ps1 status` path), and `x` force-lock — the one
 //! destructive command, gated behind an explicit confirmation modal (`y` to confirm) and mirroring
-//! `cc-processor.sh --force-lock` (remove `.work/orchestrator.lock`). It touches ONLY those two
-//! files, never the queue / task descriptors / code, and never calls `processor` or a launcher.
-//! Decision-Inbox approve/decisions are intentionally NOT here — that backend does not yet exist.
+//! `cc-processor.sh --force-lock` (remove `.work/orchestrator.lock`). On the Decision Inbox,
+//! `a`/`d` arm approve/reject for the selected pending request; Rust never writes approval JSON —
+//! it delegates that transaction to `tools/policy.ps1`. The TUI never touches the queue / task
+//! descriptors / code and never calls `processor` or a launcher. Both approval actions
+//! require a second explicit confirmation and run under the engine supervisor.
 //!
 //! The terminal is always restored — normal quit, error return, or panic (see [`terminal`]).
 
@@ -40,7 +42,7 @@ use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, K
 use orchestra_engine::events::TailReader;
 use orchestra_engine::state::Snapshot;
 
-use app::{AppState, Screen};
+use app::{AppState, InboxPanel, Modal, Screen};
 use cli::{Cli, Config};
 
 fn main() {
@@ -73,7 +75,7 @@ fn run(cfg: Config) -> io::Result<()> {
     // long-running orchestra) before drawing the first frame.
     app.apply_all(&reader.poll()?);
     app.status = status::load(&status_path);
-    app.inbox = load_inbox(&cfg.work_dir);
+    app.replace_inbox(load_inbox(&cfg.work_dir));
 
     terminal::install_panic_hook();
     let mut term = terminal::init()?;
@@ -94,7 +96,7 @@ fn run(cfg: Config) -> io::Result<()> {
         // reads, cheap, read-only — no lock, never writes).
         if last_status_reload.elapsed() >= status_reload_every {
             app.status = status::load(&status_path);
-            app.inbox = load_inbox(&cfg.work_dir);
+            app.replace_inbox(load_inbox(&cfg.work_dir));
             last_status_reload = Instant::now();
         }
 
@@ -143,7 +145,7 @@ fn handle_key(
         KeyCode::Tab => app.toggle_screen(),
         KeyCode::Char('r') => {
             app.status = status::load(status_path);
-            app.inbox = load_inbox(&cfg.work_dir);
+            app.replace_inbox(load_inbox(&cfg.work_dir));
             *last_status_reload = Instant::now();
         }
         // ---- §5/§6.2 safe command subset --------------------------------------------------
@@ -154,6 +156,18 @@ fn handle_key(
         KeyCode::Char('s') => app.set_lease(commands::query_lease_status(&cfg.work_dir)),
         // `x` only ARMS force-lock (opens the confirm modal); it never removes the lock by itself.
         KeyCode::Char('x') => app.arm_force_lock(),
+        // Approval keys are intentionally scoped to Decision Inbox, so they cannot collide with
+        // commands on the overview screen. Each only arms a modal; no decision fires here.
+        KeyCode::Char('a') if app.screen == Screen::DecisionInbox => {
+            if !app.arm_approve() {
+                app.notice = Some("нет выбранного pending approval для approve".to_string());
+            }
+        }
+        KeyCode::Char('d') if app.screen == Screen::DecisionInbox => {
+            if !app.arm_reject() {
+                app.notice = Some("нет выбранного pending approval для reject".to_string());
+            }
+        }
         // ---- Decision Inbox panel navigation (R-3): independent per-panel scrolling so cards
         // beyond the visible height stay reachable instead of silently clipped. ---------------
         KeyCode::Left | KeyCode::Char('h') if app.screen == Screen::DecisionInbox => {
@@ -163,13 +177,33 @@ fn handle_key(
             app.focus_next_inbox_panel()
         }
         KeyCode::Up | KeyCode::Char('k') if app.screen == Screen::DecisionInbox => {
-            app.scroll_inbox(-1)
+            if app.inbox_focus == InboxPanel::Approvals {
+                app.select_approval(-1);
+            } else {
+                app.scroll_inbox(-1);
+            }
         }
         KeyCode::Down | KeyCode::Char('j') if app.screen == Screen::DecisionInbox => {
-            app.scroll_inbox(1)
+            if app.inbox_focus == InboxPanel::Approvals {
+                app.select_approval(1);
+            } else {
+                app.scroll_inbox(1);
+            }
         }
-        KeyCode::PageUp if app.screen == Screen::DecisionInbox => app.scroll_inbox(-10),
-        KeyCode::PageDown if app.screen == Screen::DecisionInbox => app.scroll_inbox(10),
+        KeyCode::PageUp if app.screen == Screen::DecisionInbox => {
+            if app.inbox_focus == InboxPanel::Approvals {
+                app.select_approval(-10);
+            } else {
+                app.scroll_inbox(-10);
+            }
+        }
+        KeyCode::PageDown if app.screen == Screen::DecisionInbox => {
+            if app.inbox_focus == InboxPanel::Approvals {
+                app.select_approval(10);
+            } else {
+                app.scroll_inbox(10);
+            }
+        }
         _ => {}
     }
     false
@@ -180,24 +214,57 @@ fn handle_key(
 /// removal fires strictly through the [`AppState::take_force_lock_confirmation`] gate, so it is
 /// impossible for a single stray keystroke to have triggered it.
 fn handle_modal_key(app: &mut AppState, work_dir: &Path, k: KeyEvent) {
-    match k.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-            if app.take_force_lock_confirmation() {
-                app.notice = Some(match commands::force_lock(work_dir) {
-                    Ok(true) => {
-                        "force-lock: .work/orchestrator.lock удалён (замок снят)".to_string()
-                    }
-                    Ok(false) => "force-lock: замка не было — .work/orchestrator.lock отсутствует"
-                        .to_string(),
-                    Err(e) => format!("force-lock не удался: {e}"),
-                });
+    match app.modal {
+        Modal::EnterRejectReason => match k.code {
+            KeyCode::Esc => app.dismiss_modal(),
+            KeyCode::Backspace => app.pop_rejection_char(),
+            KeyCode::Enter => {
+                if !app.confirm_rejection_reason() {
+                    app.notice = Some("для reject укажите непустую причину".to_string());
+                }
             }
-        }
-        // n / Esc / any other key cancels without touching the lock.
-        _ => app.dismiss_modal(),
+            KeyCode::Char(ch) if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.push_rejection_char(ch)
+            }
+            _ => {}
+        },
+        Modal::ConfirmApprove | Modal::ConfirmReject => match k.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                if let Some(action) = app.take_approval_confirmation() {
+                    let result = commands::decide_approval(
+                        work_dir,
+                        &action.id,
+                        action.decision,
+                        action.rejection_reason.as_deref(),
+                    );
+                    app.notice = Some(result.summary());
+                    // policy.ps1 may have consumed the card or found it expired/consumed by
+                    // another operator. Reload immediately so no stale actionable card remains.
+                    app.replace_inbox(load_inbox(work_dir));
+                }
+            }
+            _ => app.dismiss_modal(),
+        },
+        Modal::ConfirmForceLock => match k.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                if app.take_force_lock_confirmation() {
+                    app.notice = Some(match commands::force_lock(work_dir) {
+                        Ok(true) => {
+                            "force-lock: .work/orchestrator.lock удалён (замок снят)".to_string()
+                        }
+                        Ok(false) => {
+                            "force-lock: замка не было — .work/orchestrator.lock отсутствует"
+                                .to_string()
+                        }
+                        Err(e) => format!("force-lock не удался: {e}"),
+                    });
+                }
+            }
+            _ => app.dismiss_modal(),
+        },
+        Modal::None => {}
     }
 }
-
 /// **pause** command: create `.work/PAUSE` (mirroring `cc-pause.sh`) and refresh the inbox so the
 /// pause banner reflects it immediately. Any IO error is surfaced as a footer notice, not a crash.
 fn run_pause(app: &mut AppState, work_dir: &Path, last_status_reload: &mut Instant) {
@@ -209,7 +276,7 @@ fn run_pause(app: &mut AppState, work_dir: &Path, last_status_reload: &mut Insta
         }
         Err(e) => format!("не удалось поднять паузу: {e}"),
     });
-    app.inbox = load_inbox(work_dir);
+    app.replace_inbox(load_inbox(work_dir));
     *last_status_reload = Instant::now();
 }
 
@@ -221,7 +288,7 @@ fn run_resume(app: &mut AppState, work_dir: &Path, last_status_reload: &mut Inst
         Ok(false) => "паузы не было — .work/PAUSE отсутствует (нечего снимать)".to_string(),
         Err(e) => format!("не удалось снять паузу: {e}"),
     });
-    app.inbox = load_inbox(work_dir);
+    app.replace_inbox(load_inbox(work_dir));
     *last_status_reload = Instant::now();
 }
 
@@ -244,7 +311,12 @@ fn load_inbox(work_dir: &Path) -> inbox::DecisionInbox {
         None
     };
     let done_ids = done_task_ids(work_dir);
-    inbox::build(&snapshot, paused, pause_note, &done_ids)
+    let mut decision_inbox = inbox::build(&snapshot, paused, pause_note, &done_ids);
+    let approvals = inbox::load_approvals(work_dir, &commands::now_iso8601());
+    decision_inbox.approvals = approvals.pending;
+    decision_inbox.expired_approvals = approvals.expired;
+    decision_inbox.approval_errors = approvals.errors;
+    decision_inbox
 }
 
 /// Task ids already archived to `.work/Tasks_Done.md`, decoded from that file's `### [T-NNN]
@@ -264,4 +336,55 @@ fn done_task_ids(work_dir: &Path) -> BTreeSet<String> {
         })
         .filter(|id| id.starts_with("T-"))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending_card() -> inbox::ApprovalCard {
+        inbox::ApprovalCard {
+            id: "apr-key".to_string(),
+            subject: "task:T-250|batch:".to_string(),
+            task: Some("T-250".to_string()),
+            batch: None,
+            reason: "human-review".to_string(),
+            created_at: None,
+            deadline: Some("2099-01-01T00:00:00Z".to_string()),
+            fingerprint: Some("aa".to_string()),
+            policy_hash: Some("bb".to_string()),
+        }
+    }
+
+    #[test]
+    fn approval_keys_are_scoped_to_decision_inbox_and_only_arm() {
+        let mut app = AppState::new();
+        app.inbox.approvals.push(pending_card());
+        let cfg = Config {
+            work_dir: PathBuf::from("unused"),
+            tick_ms: 250,
+        };
+        let mut reloaded = Instant::now();
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+
+        assert!(!handle_key(
+            &mut app,
+            &cfg,
+            Path::new("unused/status.md"),
+            &mut reloaded,
+            key,
+        ));
+        assert_eq!(app.modal, Modal::None, "overview must ignore approve");
+
+        app.screen = Screen::DecisionInbox;
+        assert!(!handle_key(
+            &mut app,
+            &cfg,
+            Path::new("unused/status.md"),
+            &mut reloaded,
+            key,
+        ));
+        assert_eq!(app.modal, Modal::ConfirmApprove);
+        assert!(app.take_approval_confirmation().is_some());
+    }
 }

@@ -47,12 +47,11 @@ pub fn usage() -> String {
     ));
     s.push_str("    -h, --help           Print this help and exit\n");
     s.push_str("    -V, --version        Print version and exit\n\n");
+
     s.push_str(
         "The TUI observes read-only by default — it tails <WORK_DIR>/events.jsonl and reads \
 <WORK_DIR>/status.md —\nbut can also send a small, named command subset downward, each mirroring \
-an existing launcher/tool\nand touching ONLY <WORK_DIR>/PAUSE or <WORK_DIR>/orchestrator.lock. It \
-never touches the queue,\ntask descriptors, or code, and never runs the processor itself. \
-Decision-Inbox approve/decisions\nare NOT included (that backend does not yet exist).\n\n",
+an existing launcher/tool. Pause/force-lock touch only their established control files; approval\ndecisions run tools/policy.ps1 under supervision and never write approvals JSON from Rust. The TUI\nnever touches the queue, task descriptors, or code, and never runs the processor itself.\n\n",
     );
     s.push_str("KEYS:\n");
     s.push_str(
@@ -69,6 +68,10 @@ Decision-Inbox approve/decisions\nare NOT included (that backend does not yet ex
     s.push_str(
         "    x        force-lock — remove <WORK_DIR>/orchestrator.lock; DESTRUCTIVE, asks to confirm (y)\n",
     );
+    s.push_str(
+        "    a        approve selected pending approval (Decision Inbox only; asks to confirm)\n",
+    );
+    s.push_str("    d        reject selected pending approval with reason (Decision Inbox only; asks to confirm)\n");
     s
 }
 
