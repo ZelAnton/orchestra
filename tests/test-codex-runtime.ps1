@@ -466,6 +466,9 @@ if (-not $git) {
 # 13. jj no-commit guard (T-120): the fingerprint must be STABLE across a plain
 # file edit (auto-snapshot changes commit_id but NOT change_id -> committed=false),
 # yet still catch a real drift (`jj new` / a bookmark set onto `@` -> jj-drift).
+# Case (c) (T-255) additionally covers DIVERGENCE - `@`'s change_id mapping to >1
+# visible commit - which the fingerprint comparison alone cannot see (a rewrite
+# preserves the change_id) and which the standalone `divergent` probe must catch.
 # Self-skips when jj is not on PATH (optional binary; jj is not installed on CI).
 # =============================================================================
 $jj = Get-Command jj -ErrorAction SilentlyContinue
@@ -503,6 +506,7 @@ if (-not $jj) {
         Assert-Equal $false $r.Json.committed 'guard-commit(jj): a plain file edit is NOT a commit (committed=false)'
         Assert-Equal 'none' $r.Json.action 'guard-commit(jj): no jj-drift action on a plain edit (false positive closed)'
         Assert-Equal $pre $r.Json.post 'guard-commit(jj): post fingerprint == pre across the edit (change_id stable)'
+        Assert-Equal $false $r.Json.divergent 'guard-commit(jj): a plain edit leaves `@` non-divergent (divergent=false)'
     }.Invoke()
 
     # (b) TRUE-POSITIVE PRESERVED - new revision: `jj new` moves the change_id of `@`,
@@ -514,6 +518,7 @@ if (-not $jj) {
         $r = Invoke-Runtime -RuntimeArgs @('guard-commit', '--worktree', $repo, '--vcs', 'jj', '--pre', $pre, '--reset')
         Assert-Equal $true $r.Json.committed 'guard-commit(jj): `jj new` (new change_id) IS detected as drift'
         Assert-Equal 'jj-drift' $r.Json.action 'guard-commit(jj): real drift -> action=jj-drift (reported, never rewritten)'
+        Assert-Equal $false $r.Json.divergent 'guard-commit(jj): a moved change_id is drift but not divergence (divergent=false)'
     }.Invoke()
 
     # (b') TRUE-POSITIVE PRESERVED - bookmark moved onto `@`: another way codex could
@@ -526,6 +531,41 @@ if (-not $jj) {
         $r = Invoke-Runtime -RuntimeArgs @('guard-commit', '--worktree', $repo, '--vcs', 'jj', '--pre', $pre, '--reset')
         Assert-Equal $true $r.Json.committed 'guard-commit(jj): a bookmark set onto `@` IS detected as drift'
         Assert-Equal 'jj-drift' $r.Json.action 'guard-commit(jj): bookmark drift -> action=jj-drift'
+        Assert-Equal $false $r.Json.divergent 'guard-commit(jj): a moved bookmark is drift but not divergence (divergent=false)'
+    }.Invoke()
+
+    # (c) DIVERGENCE DETECTED (T-255): the exact failure the task guards against - `@`'s
+    # change_id maps to >1 visible commit ("multiple visible revisions with one change_id").
+    # Divergence PRESERVES the change_id (a rewrite keeps the change_id; only the commit_id
+    # forks), so the PRE/POST fingerprint is IDENTICAL (committed=false) and the old detector
+    # is blind to it. The standalone `divergent` probe must still catch it and escalate as
+    # jj-drift - reported, never rewritten and never auto-reconciled (both would rewrite one
+    # divergent side = the unattached risk the guard forbids). Reproduced deterministically
+    # with two concurrent rewrites of the same change via `jj --at-op <past-op>` (the single-
+    # repo way to fork the operation log so both rewrites stay visible after the auto-merge).
+    {
+        $repo = New-TempJjRepo
+        & jj -R $repo describe -m base 2>&1 | Out-Null
+        & jj -R $repo new -m target 2>&1 | Out-Null
+        # PRE now: `@` is `target`, change_id X, NOT divergent (captured via the same
+        # guard-head code path POST uses, so a match proves divergence was caught by the
+        # probe, not smuggled in through the fingerprint).
+        $pre = (Invoke-Runtime -RuntimeArgs @('guard-head', '--worktree', $repo, '--vcs', 'jj')).Out.Trim()
+        $op0 = (@(& jj -R $repo --no-pager op log --no-graph -T 'id.short()' -n1 2>$null))[0]
+        $op0 = ([string]$op0).Trim()
+        # Fork the op log: rewrite X from HEAD (v1) and again from op0 (v2). After jj's
+        # auto-merge of the concurrent ops, both rewrites of X stay visible -> X divergent.
+        & jj -R $repo describe -m v1 2>&1 | Out-Null
+        & jj -R $repo --at-op $op0 describe -m v2 2>&1 | Out-Null
+
+        # Precondition: `@` really is divergent now (guard the reproducer itself).
+        $divCheck = (@(& jj -R $repo --no-pager log -r '@' --no-graph -T 'if(divergent,"1","0")' 2>$null))[0]
+        Assert-Equal '1' ([string]$divCheck).Trim() 'guard-commit(jj): precondition - `@` is a divergent change'
+
+        $r = Invoke-Runtime -RuntimeArgs @('guard-commit', '--worktree', $repo, '--vcs', 'jj', '--pre', $pre, '--reset')
+        Assert-Equal $true $r.Json.divergent 'guard-commit(jj): a DIVERGENT `@` is detected (divergent=true)'
+        Assert-Equal 'jj-drift' $r.Json.action 'guard-commit(jj): divergence -> action=jj-drift (reported, never rewritten/reconciled)'
+        Assert-Equal $false $r.Json.committed 'guard-commit(jj): fingerprint is blind to divergence (change_id preserved, pre==post) - the standalone probe is what caught it'
     }.Invoke()
 }
 
