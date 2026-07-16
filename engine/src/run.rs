@@ -58,6 +58,7 @@ use crate::resolvers::{
 };
 use crate::state::{Snapshot, TaskState};
 use crate::supervise::{self, Reason, SpawnSpec};
+use crate::time::epoch_to_iso;
 
 /// Engine-side exit codes for `engine run` (a small, documented vocabulary).
 pub mod exit {
@@ -424,29 +425,6 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Format epoch seconds as an ISO-8601 UTC timestamp `YYYY-MM-DDTHH:MM:SSZ` (second precision) —
-/// the inverse of `main::parse_iso_utc`, via Howard Hinnant's `civil_from_days` (no external
-/// dependency). Second precision matches the `SUMMARY-R-<ts>` id format so the two sort lexically
-/// with each other, which is exactly what the phase-2.6 freshness gate compares.
-fn epoch_to_iso(secs: u64) -> String {
-    let secs = secs as i64;
-    let days = secs.div_euclid(86400);
-    let tod = secs.rem_euclid(86400);
-    let (hour, min, sec) = (tod / 3600, (tod % 3600) / 60, tod % 60);
-    // civil_from_days: (days since 1970-01-01) -> (year, month, day), proleptic Gregorian.
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = if month <= 2 { y + 1 } else { y };
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
 }
 
 /// The current wall clock as an ISO-8601 UTC `date -u` mark — the freshness cutoff the review
@@ -1662,24 +1640,6 @@ mod tests {
             route_reviewer_name(Augment(BaseReviewer::Reviewer)),
             "reviewer"
         );
-    }
-
-    #[test]
-    fn epoch_to_iso_formats_known_utc_instants() {
-        // Well-known epochs (UTC): 1970-01-01 and 2021-01-01, plus a within-day offset.
-        assert_eq!(epoch_to_iso(0), "1970-01-01T00:00:00Z");
-        assert_eq!(epoch_to_iso(1_609_459_200), "2021-01-01T00:00:00Z");
-        assert_eq!(epoch_to_iso(1_609_462_861), "2021-01-01T01:01:01Z");
-    }
-
-    #[test]
-    fn epoch_to_iso_is_lexically_monotonic_across_boundaries() {
-        // The freshness gate compares timestamps lexically, so `+1s` must sort strictly greater —
-        // including across a minute rollover (…T00:00:59Z < …T00:01:00Z).
-        let boundary = 1_609_459_200 + 59; // 2021-01-01T00:00:59Z
-        assert_eq!(epoch_to_iso(boundary), "2021-01-01T00:00:59Z");
-        assert_eq!(epoch_to_iso(boundary + 1), "2021-01-01T00:01:00Z");
-        assert!(epoch_to_iso(boundary + 1) > epoch_to_iso(boundary));
     }
 
     #[test]

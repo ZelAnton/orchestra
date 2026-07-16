@@ -15,6 +15,7 @@
 //! * [`codex`] — fail-closed `codex exec` argv mirroring `tools/codex-runtime.ps1`.
 //! * [`contract`] — deterministic parse of leaf-agent structured markers (§8.2).
 //! * [`jsonline`] — minimal top-level JSON field scanner for stream-json lines.
+//! * [`time`] — dependency-free Unix epoch to ISO-8601 UTC formatting shared with the TUI.
 //!
 //! Beyond the original spike, the crate now also carries [`events`] — typed, read-only access
 //! to the `.work/events.jsonl` durable event outbox (contract `docs/queue_contract.md` §19).
@@ -62,3 +63,4 @@ pub mod resolvers;
 pub mod run;
 pub mod state;
 pub mod supervise;
+pub mod time;

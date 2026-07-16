@@ -70,8 +70,10 @@
       guard-commit      No-commit guard: compare the worktree head (see guard-head)
                         against a pre-run value; optionally soft-reset (git) so the
                         processor still commits the leftover working-tree changes. For jj
-                        a moved change_id / bookmark is reported as `jj-drift` (never a
-                        rewrite). Never --hard, never touches a path outside the worktree.
+                        a moved change_id / bookmark, OR a now-divergent `@` (its change_id
+                        maps to >1 visible commit - T-255), is reported as `jj-drift` (never
+                        a rewrite, never an auto-reconcile); the result carries a `divergent`
+                        flag. Never --hard, never touches a path outside the worktree.
       cleanup           Discard the call's own working-copy changes after a failure so a
                         Claude fallback starts clean. In a main-tree call (Phase 5.4)
                         never runs `git clean -fd` (that would delete the untracked
@@ -555,6 +557,31 @@ function Get-Head {
     } catch { return '' }
 }
 
+# Absolute divergence probe for a jj workspace's working copy `@` (T-255). Returns $true
+# iff `@`'s change_id currently maps to MORE THAN ONE visible commit - jj's `divergent`
+# state, i.e. the exact "multiple visible revisions with one change_id" corruption the
+# task describes, which later makes change-id / `-r main`-style references ambiguous and
+# blocks jj ops. This is complementary to Get-Head, not a duplicate: the change_id/bookmark
+# fingerprint only moves when a NEW change_id is created or a bookmark lands on `@`, but a
+# change that BECOMES divergent keeps the SAME change_id and the SAME `@` bookmarks - so the
+# PRE-vs-POST fingerprint comparison alone cannot see it (pre == post). This is instead an
+# ABSOLUTE check of the current `@` state, catching divergence even when nothing about the
+# fingerprint moved, and catching pre-existing divergence that was already present at PRE.
+# `-R $Worktree` targets THIS workspace's `@` regardless of process cwd (mirrors Get-Head /
+# K-025). Returns $false when definitely not divergent, $null when it cannot be determined
+# (non-jj, or a jj/template error on an older jj without the `divergent` keyword) - a $null
+# degrades to today's behaviour (no divergence signal), never a false escalation.
+function Get-JjDivergent {
+    param([string]$Worktree)
+    try {
+        $r = & jj -R $Worktree --no-pager log -r '@' --no-graph -T 'if(divergent, "1", "0")' 2>$null
+        $s = ([string]$r).Trim()
+        if ($s -eq '1') { return $true }
+        if ($s -eq '0') { return $false }
+        return $null
+    } catch { return $null }
+}
+
 # ==========================================================================
 # Commands
 # ==========================================================================
@@ -644,20 +671,33 @@ function Cmd-GuardCommit {
     $pre = [string](Opt 'pre' '')
     $post = Get-Head -Worktree $wt -Vcs $vcs
     $committed = ($pre -ne '') -and ($post -ne '') -and ($pre -ne $post)
+    $doReset = [bool](Opt 'reset' $false)
+    $divergent = $false
     $action = 'none'
-    if ($committed -and [bool](Opt 'reset' $false)) {
-        if ($vcs -eq 'jj') {
-            # committed=true here means the `change_id` of `@` (or a bookmark on it) moved
-            # - a genuine history drift, NOT a mere file edit (Get-Head fingerprints the
-            # stable change_id, not the per-edit commit_id). A jj revision must not be
-            # rewritten from here (unattached risk) - just report the drift to escalate.
+    if ($vcs -eq 'jj') {
+        # committed=true here means the `change_id` of `@` (or a bookmark on it) moved - a
+        # genuine history drift, NOT a mere file edit (Get-Head fingerprints the stable
+        # change_id, not the per-edit commit_id). Separately (T-255) probe whether `@` is
+        # now DIVERGENT: its change_id maps to >1 visible commit. That is invisible to the
+        # fingerprint comparison (a divergent `@` keeps its change_id and bookmarks, so
+        # pre == post) yet is exactly the "multiple visible revisions with one change_id"
+        # state that blocks later ops - so it is reported as drift in its own right, even
+        # when committed=false.
+        $d = Get-JjDivergent -Worktree $wt
+        if ($d -eq $true) { $divergent = $true }
+        if (($committed -or $divergent) -and $doReset) {
+            # A jj revision must not be rewritten from here (unattached risk), and a
+            # divergence must NOT be auto-reconciled here either: reconciling means
+            # `jj abandon`/rewriting one of the two divergent sides - the same unattached
+            # risk, plus it needs human/processor context on WHICH side to keep. So we only
+            # report the drift/divergence (never mutate) and let the caller escalate.
             $action = 'jj-drift'
-        } else {
-            & git -C $wt reset --soft $pre 2>$null | Out-Null
-            $action = 'soft-reset'
         }
+    } elseif ($committed -and $doReset) {
+        & git -C $wt reset --soft $pre 2>$null | Out-Null
+        $action = 'soft-reset'
     }
-    Emit-Json ([pscustomobject]@{ pre = $pre; post = $post; committed = $committed; action = $action })
+    Emit-Json ([pscustomobject]@{ pre = $pre; post = $post; committed = $committed; divergent = $divergent; action = $action })
 }
 
 function Cmd-Cleanup {

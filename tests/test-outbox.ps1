@@ -24,8 +24,8 @@
         with rc=0.
       * Torn / corrupted tail: a truncated final fragment is repaired (dropped) on the next
         append without mutating any valid committed line and without creating a second
-        semantic event; a valid unterminated last line is preserved; a newline-terminated
-        corrupt committed line is refused (rc=6) rather than appended over.
+        semantic event; a valid unterminated last line is preserved; newline-terminated
+        blank lines are ignored, while meaningful corruption is refused (rc=6).
       * Single-writer invariant: a held lock rejects a parallel writer (rc=7); with --owner
         an append not matching the orchestrator.lock lease owner is rejected (rc=13).
       * Validation at write and lenient read: unknown top-level key / bad schema_version /
@@ -233,15 +233,30 @@ function Ref-UuidV5 {
 }.Invoke()
 
 # =============================================================================
-# 5. Corrupted committed line (newline-terminated) is refused, not appended over.
+# 5. Blank committed lines are ignored; meaningful corruption is still refused.
 # =============================================================================
 {
     $dir = New-TempDir; $ev = New-EventsFile $dir
     Invoke-Outbox @('append', '--events', $ev, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') | Out-Null
+
+    # Accidental empty and whitespace-only newline-terminated separators are not corruption.
+    Append-Raw $ev "`n `t `n"
+    $blankRead = Invoke-Outbox @('read', '--events', $ev, '--json')
+    Assert-Exit $blankRead 0 'read continues past blank committed lines'
+    $blankReadObj = $blankRead.Out | ConvertFrom-Json
+    Assert-Equal 1 $blankReadObj.new_count 'read still delivers the valid event around blank lines'
+    Assert-Equal 2 $blankReadObj.skipped_invalid 'read retains skipped_invalid accounting for blank lines'
+    $blankVerify = Invoke-Outbox @('verify', '--events', $ev, '--json')
+    Assert-Exit $blankVerify 0 'verify does not treat blank committed lines as blocking corruption'
+
+    $afterBlank = Invoke-Outbox @('append', '--events', $ev, '--type', 'cohort.closed', '--batch-id', 'B-1', '--payload', '{}')
+    Assert-Exit $afterBlank 0 'append continues after empty and whitespace-only committed lines'
+    Assert-Contains $afterBlank.Out 'appended' 'append writes the event after blank committed lines'
+
     Append-Raw $ev "garbage that is not json`n"
     $v = Invoke-Outbox @('verify', '--events', $ev)
     Assert-Exit $v 6 'verify flags a corrupt committed line (rc=6)'
-    $a = Invoke-Outbox @('append', '--events', $ev, '--type', 'cohort.closed', '--batch-id', 'B-1', '--payload', '{}')
+    $a = Invoke-Outbox @('append', '--events', $ev, '--type', 'cohort.join_started', '--batch-id', 'B-1', '--payload', '{}')
     Assert-Exit $a 6 'append refuses to write over corruption (rc=6)'
 }.Invoke()
 

@@ -65,7 +65,7 @@
       3   input read failure (unreadable events file / cursor)
       4   integrity conflict (same event_id already present with a different type)
       5   validation failure (envelope / payload invalid)
-      6   unrepairable corruption (a newline-terminated committed line is invalid)
+      6   unrepairable corruption (a newline-terminated committed line is meaningfully invalid)
       7   could not acquire the outbox lock (timeout; a parallel writer holds it)
       13  not the run owner (--owner does not match the orchestrator.lock lease)
 
@@ -336,7 +336,12 @@ function Decode-Span {
 # Parse+validate a decoded line. Returns @{ Obj; Valid; Error }. $Mode is 'read' or 'write'.
 function Test-EventText {
     param([string]$Text, [string]$Mode)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return [pscustomobject]@{ Obj = $null; Valid = $false; Error = 'empty line' } }
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        # A committed blank separator is ignorable to the writer's corruption gate.
+        # Readers retain their historical skipped_invalid accounting for such lines.
+        if ($Mode -eq 'write') { return [pscustomobject]@{ Obj = $null; Valid = $true; Error = $null } }
+        return [pscustomobject]@{ Obj = $null; Valid = $false; Error = 'empty line' }
+    }
     $obj = $null
     try { $obj = $Text | ConvertFrom-Json } catch { return [pscustomobject]@{ Obj = $null; Valid = $false; Error = 'unparseable JSON' } }
     if ($null -eq $obj -or $obj -is [array] -or $obj.GetType().FullName -ne 'System.Management.Automation.PSCustomObject') {
@@ -535,17 +540,24 @@ function Cmd-Append {
 
     # write-mode validation of the exact bytes we intend to append.
     $chk = Test-EventText $line 'write'
-    if (-not $chk.Valid) { Fail 5 "refusing to append an invalid event: $($chk.Error)" }
+    if (-not $chk.Valid -or $null -eq $chk.Obj) {
+        $reason = if ($chk.Error) { $chk.Error } else { 'empty line' }
+        Fail 5 "refusing to append an invalid event: $reason"
+    }
     $eid = [string]$chk.Obj.event_id
 
     $timeout = [int](Opt 'lock-timeout-ms' 30000)
     Acquire-Lock $paths.Lock $timeout
     try {
         $ob = Read-Outbox $paths.Events 'read'
-        # A newline-terminated committed line that is itself invalid is unrepairable
-        # corruption (append repairs only the trailing unterminated fragment).
+        # A meaningfully invalid newline-terminated committed line is unrepairable
+        # corruption (append repairs only the trailing unterminated fragment). Blank
+        # separator lines are valid in write mode and therefore do not block appends.
         foreach ($r in $ob.Records) {
-            if (-not $r.Valid -and -not $r.Unterminated) { Fail 6 "a committed line is invalid ($($r.Error)); refuse to append over corruption (run 'verify')" }
+            if (-not $r.Valid -and -not $r.Unterminated) {
+                $writeCheck = Test-EventText $r.Text 'write'
+                if (-not $writeCheck.Valid) { Fail 6 "a committed line is invalid ($($r.Error)); refuse to append over corruption (run 'verify')" }
+            }
         }
         # idempotent dedup / integrity conflict against already-present ids.
         $isDuplicate = $false
@@ -629,8 +641,9 @@ function Cmd-Verify {
         foreach ($m in $invalid) { Write-Output "  invalid: $m" }
         foreach ($m in $dups) { Write-Output "  $m" }
     }
-    # a newline-terminated invalid line is hard corruption; a torn tail alone is fine.
-    $hardBad = @($ob.Records | Where-Object { -not $_.Valid -and -not $_.Unterminated })
+    # A meaningfully invalid newline-terminated line is hard corruption; blank separator
+    # lines remain skipped-invalid diagnostics and do not make verification blocking.
+    $hardBad = @($ob.Records | Where-Object { -not $_.Valid -and -not $_.Unterminated -and -not [string]::IsNullOrWhiteSpace($_.Text) })
     if ($hardBad.Count -gt 0) { exit 6 }
     if ($dups.Count -gt 0) { exit 4 }
 }
