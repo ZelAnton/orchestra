@@ -33,7 +33,9 @@
                                 elevation. N/A on POSIX (the concept does not exist there).
     6. Task queue & config    - Tasks_Queue.md header format + T-NNN uniqueness, and
                                 .work/config.md unknown/mistyped keys ($known) + SMOKE_CMD.
-    7. Lock & worktrees       - stuck orchestrator.lock heuristic + orphaned worktrees.
+    7. Lock & worktrees       - structured orchestrator lease liveness (via the
+                                checkout/mirror state-tx.ps1), legacy lock heuristic,
+                                and orphaned worktrees.
     8. Main branch & mirror   - main-branch determinability (jj-then-git) and, from an
                                 actual checkout, ~/.claude/agents mirror freshness.
 
@@ -101,6 +103,19 @@ $script:EmDash     = [char]0x2014
 
 $script:WorkDir    = Join-Path $ProjectRoot '.work'
 $script:ConfigFile = Join-Path $script:WorkDir 'config.md'
+
+# state-tx.ps1 is shipped in both runtime layouts: tools/ in an Orchestra checkout,
+# or ~/.claude/scripts beside this doctor after cc-sync. Resolve those canonical
+# locations explicitly; do not assume the target project itself contains Orchestra.
+function Resolve-StateTxPath {
+    $checkout = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/state-tx.ps1'
+    if (Test-Path -LiteralPath $checkout -PathType Leaf) { return $checkout }
+
+    $mirror = Join-Path (Join-Path $HomeDir '.claude/scripts') 'state-tx.ps1'
+    if (Test-Path -LiteralPath $mirror -PathType Leaf) { return $mirror }
+
+    return $null
+}
 
 # =============================================================================
 # Config parsing helpers (semantics identical to the old cc-doctor GetCfg/EffCodex)
@@ -426,30 +441,68 @@ Write-Host ''
 Write-Host '== Preflight readiness audit: orchestrator lock & worktrees =='
 $lockDir = Join-Path $script:WorkDir 'orchestrator.lock'
 if (Test-Path -LiteralPath $lockDir) {
-    $infoFile = Join-Path $lockDir 'info'
-    $started = $null; $hostVal = $null
-    if (Test-Path -LiteralPath $infoFile) {
-        foreach ($l in Get-Content -LiteralPath $infoFile -Encoding UTF8) {
-            if ($l -match '^started=(.+)$') { $started = $Matches[1] }
-            if ($l -match '^host=(.+)$') { $hostVal = $Matches[1] }
+    $leaseFile = Join-Path $lockDir 'lease.json'
+    $stateTx = Resolve-StateTxPath
+    $leaseReported = $false
+    $stateRc = $null
+
+    if ($stateTx) {
+        # state-tx uses process exit codes (14 = no lease, 19 = legacy lock), so run it
+        # in a child PowerShell process. Invoking the script in this runspace would let
+        # its `exit` terminate cc-doctor itself.
+        $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+        $stateArgs = @('-NoProfile')
+        if ($script:OnWindows) { $stateArgs += @('-ExecutionPolicy', 'Bypass') }
+        $stateArgs += @('-File', $stateTx, 'status', '--work', $script:WorkDir, '--json')
+        $stateJson = & $psExe @stateArgs 2>$null
+        $stateRc = $LASTEXITCODE
+
+        if ($stateRc -eq 0 -and $stateJson) {
+            $leaseStatus = $null
+            try { $leaseStatus = (($stateJson -join "`n") | ConvertFrom-Json) } catch { $leaseStatus = $null }
+            if ($leaseStatus -and $leaseStatus.present -and $leaseStatus.valid) {
+                $liveLabel = if ([bool]$leaseStatus.live) { 'live' } else { 'stale' }
+                $verdict = if ([bool]$leaseStatus.live) { 'OK  ' } else { 'WARN' }
+                Write-Host ('{0} orchestrator.lock: owner={1} role={2} heartbeat {3}s ({4})' -f $verdict, $leaseStatus.owner_id, $leaseStatus.role, $leaseStatus.heartbeat_age_secs, $liveLabel)
+                $leaseReported = $true
+            }
         }
     }
-    if ($started) {
-        $ts = [DateTime]::MinValue
-        $ok = [DateTime]::TryParse($started, [System.Globalization.CultureInfo]::InvariantCulture, ([System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal), [ref]$ts)
-        if ($ok) {
-            $ageHours = [math]::Round(((Get-Date).ToUniversalTime() - $ts).TotalHours, 1)
-            $ageHoursStr = $ageHours.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)
-            if ($ageHours -gt 6) {
-                Write-Host ('WARN orchestrator.lock: age {0}h (started {1}, host {2}) - possibly stale (heuristic only); verify no processor is actually running before removing .work/orchestrator.lock manually' -f $ageHoursStr, $started, $hostVal)
+
+    if (-not $leaseReported -and (Test-Path -LiteralPath $leaseFile -PathType Leaf)) {
+        $why = if (-not $stateTx) { 'state-tx.ps1 was not found in checkout or mirror layout' } elseif ($null -eq $stateRc) { 'state-tx.ps1 did not run' } else { "state-tx.ps1 status exited $stateRc" }
+        Write-Host ('WARN orchestrator.lock lease.json present but could not be evaluated ({0}); verify manually' -f $why)
+        $leaseReported = $true
+    }
+
+    if (-not $leaseReported) {
+        # Backward-compatible degraded mkdir-lock fallback. Keep this output unchanged
+        # for legacy locks that have info but no structured lease.json.
+        $infoFile = Join-Path $lockDir 'info'
+        $started = $null; $hostVal = $null
+        if (Test-Path -LiteralPath $infoFile) {
+            foreach ($l in Get-Content -LiteralPath $infoFile -Encoding UTF8) {
+                if ($l -match '^started=(.+)$') { $started = $Matches[1] }
+                if ($l -match '^host=(.+)$') { $hostVal = $Matches[1] }
+            }
+        }
+        if ($started) {
+            $ts = [DateTime]::MinValue
+            $ok = [DateTime]::TryParse($started, [System.Globalization.CultureInfo]::InvariantCulture, ([System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal), [ref]$ts)
+            if ($ok) {
+                $ageHours = [math]::Round(((Get-Date).ToUniversalTime() - $ts).TotalHours, 1)
+                $ageHoursStr = $ageHours.ToString('0.0', [System.Globalization.CultureInfo]::InvariantCulture)
+                if ($ageHours -gt 6) {
+                    Write-Host ('WARN orchestrator.lock: age {0}h (started {1}, host {2}) - possibly stale (heuristic only); verify no processor is actually running before removing .work/orchestrator.lock manually' -f $ageHoursStr, $started, $hostVal)
+                } else {
+                    Write-Host ('OK   orchestrator.lock present, age {0}h (started {1}, host {2}) - looks like an active run' -f $ageHoursStr, $started, $hostVal)
+                }
             } else {
-                Write-Host ('OK   orchestrator.lock present, age {0}h (started {1}, host {2}) - looks like an active run' -f $ageHoursStr, $started, $hostVal)
+                Write-Host ('WARN orchestrator.lock/info present but the started timestamp is unparsable ({0}) - cannot judge age' -f $started)
             }
         } else {
-            Write-Host ('WARN orchestrator.lock/info present but the started timestamp is unparsable ({0}) - cannot judge age' -f $started)
+            Write-Host 'WARN orchestrator.lock present without info/started timestamp - cannot judge age; verify manually'
         }
-    } else {
-        Write-Host 'WARN orchestrator.lock present without info/started timestamp - cannot judge age; verify manually'
     }
 } else {
     Write-Host 'OK   no orchestrator.lock (no active/stuck processor run)'

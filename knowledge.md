@@ -667,6 +667,12 @@ codex-правилами выше (см. «Резолвинг раннеров `
   `lease.json`, degraded-режим при отсутствии PowerShell) `state-tx acquire` видит как **занятый**
   (код 19), а не как «аренды нет» — иначе получили бы два управляющих цикла в общем `.work`
   (§14, «Аренда ↔ legacy-лок»).
+- **`cc-doctor` диагностирует современную аренду через `state-tx status --json`.**
+  `tools/doctor-runtime.ps1` резолвит `state-tx.ps1` в обеих поддерживаемых раскладках
+  (`tools/state-tx.ps1` в чекауте и `~/.claude/scripts/state-tx.ps1` в зеркале `cc-sync`) и
+  показывает owner/role/возраст heartbeat/liveness структурного `lease.json`. Только
+  degraded mkdir-lock без `lease.json` проходит через прежнюю эвристику `info` с
+  `started=`/`host=`; её совместимый вывод не менять.
 - **Переходы состояния processor гардит в рабочем потоке фаз, а не по памяти.** Каждую смену
   статуса задачи/когорты/интеграции он сверяет `state-tx check-transition` (код 8 — стоп) и
   фиксирует CAS поколения `state-tx bump-generation --expected-generation` (код 3 — гонка, стоп)

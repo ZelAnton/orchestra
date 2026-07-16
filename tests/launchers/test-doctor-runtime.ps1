@@ -15,7 +15,8 @@
   classification (routing off / routing on with no grant / settings allow-rule / session
   grant / deny-only / CI-fix-only / custom CODEX_CMD), effective CODEX_* + env fallback,
   fail-closed Codex key value validation, KB status (default, env fallback, config
-  precedence over env), the queue/config audit, and the
+  precedence over env), the queue/config audit, structured/legacy lock diagnostics in
+  both checkout and mirror layouts, and the
   Windows sandbox profile block (OS-conditionally: the real classification on Windows, the
   N/A line on POSIX). The codex "binary present/version" line is not asserted (it depends
   on an external binary and carries no classification logic); the "NOT FOUND" branch is
@@ -73,7 +74,8 @@ $script:EmDash = [char]0x2014
 function Invoke-Doctor {
     param(
         [pscustomobject]$Case,
-        [hashtable]$Env = @{}
+        [hashtable]$Env = @{},
+        [string]$Runtime = $script:Runtime
     )
     # Env vars the runtime consults from the process environment (CODEX_CODER/
     # CODEX_REVIEWER env fallback, CC_CODEX_EXEC_GRANT session grant). Set them on the
@@ -88,7 +90,7 @@ function Invoke-Doctor {
         Set-Item -Path "env:$k" -Value $defaults[$k]
     }
     try {
-        $rtArgs = @('-NoProfile', '-File', $script:Runtime,
+        $rtArgs = @('-NoProfile', '-File', $Runtime,
             '-ProjectRoot', $Case.Proj, '-HomeDir', $Case.Home, '-RepoRoot', $Case.Home)
         $outFile = [System.IO.Path]::GetTempFileName()
         $errFile = [System.IO.Path]::GetTempFileName()
@@ -316,7 +318,7 @@ Assert-Contains $r.Out 'OK   SMOKE_CMD is configured' 'config: SMOKE_CMD detecte
 Remove-Case $c
 
 # =============================================================================
-# 14) main-branch + lock/worktree audit on a non-repo project
+# 14) lock/worktree audit: no lock remains OK
 # =============================================================================
 $c = New-Case
 $r = Invoke-Doctor -Case $c
@@ -325,7 +327,46 @@ Assert-Contains $r.Out 'OK   agent-mirror freshness check skipped' 'mirror: skip
 Remove-Case $c
 
 # =============================================================================
-# 15) Windows sandbox profile block: OS-conditional
+# 15) structured active lease: checkout and mirror state-tx resolvers
+# =============================================================================
+$c = New-Case
+$now = [DateTime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+$lease = [ordered]@{
+    schema = 'orchestra/lease@1'; owner_id = 'OWNER-A'; session_id = 'SESSION-A'
+    role = 'processor'; root = $c.Proj; host = 'doctor-fixture-remote-host'; pid = $null
+    pid_started = $null; acquired = $now; heartbeat = $now; ttl_seconds = 900; generation = 1
+} | ConvertTo-Json -Compress
+Write-File (Join-Path $c.Proj '.work/orchestrator.lock/lease.json') $lease
+
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   orchestrator.lock: owner=OWNER-A role=processor heartbeat ' 'lock lease checkout: owner/role/heartbeat reported'
+Assert-Contains $r.Out 's (live)' 'lock lease checkout: live status reported'
+Assert-NotContains $r.Out 'WARN orchestrator.lock' 'lock lease checkout: healthy lease does not WARN'
+
+$mirrorDir = Join-Path $c.Home '.claude/scripts'
+New-Item -ItemType Directory -Force -Path $mirrorDir | Out-Null
+Copy-Item -LiteralPath $script:Runtime -Destination (Join-Path $mirrorDir 'doctor-runtime.ps1')
+Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'state-tx.ps1') -Destination (Join-Path $mirrorDir 'state-tx.ps1')
+$r = Invoke-Doctor -Case $c -Runtime (Join-Path $mirrorDir 'doctor-runtime.ps1')
+Assert-Contains $r.Out 'OK   orchestrator.lock: owner=OWNER-A role=processor heartbeat ' 'lock lease mirror: owner/role/heartbeat reported'
+Assert-Contains $r.Out 's (live)' 'lock lease mirror: live status reported'
+Assert-NotContains $r.Out 'WARN orchestrator.lock' 'lock lease mirror: healthy lease does not WARN'
+Remove-Case $c
+
+# =============================================================================
+# 16) legacy mkdir-lock: info-file heuristic remains the fallback
+# =============================================================================
+$c = New-Case
+$started = [DateTime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+Write-File (Join-Path $c.Proj '.work/orchestrator.lock/info') "host=legacy-host`nstarted=$started`n"
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   orchestrator.lock present, age ' 'legacy lock: info-file age heuristic used'
+Assert-Contains $r.Out 'host legacy-host) - looks like an active run' 'legacy lock: existing healthy output preserved'
+Assert-NotContains $r.Out 'owner=' 'legacy lock: not misreported as a structured lease'
+Remove-Case $c
+
+# =============================================================================
+# 17) Windows sandbox profile block: OS-conditional
 # =============================================================================
 if (-not $script:OnWindows) {
     # POSIX: the Windows-only concept is reported N/A, never silently dropped.
@@ -375,5 +416,5 @@ if ($script:Failures.Count -gt 0) {
     foreach ($f in $script:Failures) { Write-Host "  $f" }
     exit 1
 }
-Write-Host 'OK - tools/doctor-runtime.ps1 behaves per contract (exec-permission classification, effective CODEX_*, key validation, KB, queue/config audit, Windows sandbox block).'
+Write-Host 'OK - tools/doctor-runtime.ps1 behaves per contract (exec-permission classification, effective CODEX_*, key validation, KB, queue/config audit, checkout/mirror lease diagnostics, Windows sandbox block).'
 exit 0
