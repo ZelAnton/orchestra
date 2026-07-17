@@ -26,7 +26,16 @@
     ready to capture only once every predecessor is archived into
     `.work/Tasks_Done.md`), reporting the concrete blocking predecessor.
 
-    See docs/queue_contract.md (§9-§12) for the normative protocol this tool
+    The same unified backlog also carries a SEPARATE proposal lane: raw ideas as
+    `### [P-NNN] ... — kind: proposal — status: <proposed|converted|rejected|
+    duplicate|needs_human|deferred>` records. Proposals are NEVER executable —
+    they form their own P-NNN id sequence, are excluded from candidate/readiness/
+    validate/T-dedup, can never be a predecessor, and are only ever turned into
+    tasks by the `proposal_curator` role (`classify-proposal`). The core T-task
+    machine round-trips them verbatim so their original text (provenance) is never
+    altered by an unrelated task mutation. See docs/queue_contract.md §20.
+
+    See docs/queue_contract.md (§9-§12, §20) for the normative protocol this tool
     implements and that the queue writers are required to use.
 
 .NOTES
@@ -53,6 +62,9 @@
     pwsh -File tools/queue-tx.ps1 capture --work /abs/.work --id T-045 --batch B-20260101T000000Z
     pwsh -File tools/queue-tx.ps1 ready --work /abs/.work
     pwsh -File tools/queue-tx.ps1 validate-deps --work /abs/.work
+    pwsh -File tools/queue-tx.ps1 propose --work /abs/.work --kind proposal --title "Idea Y" --body-file idea.txt --source user
+    pwsh -File tools/queue-tx.ps1 list-proposals --work /abs/.work --status proposed
+    pwsh -File tools/queue-tx.ps1 classify-proposal --work /abs/.work --id P-001 --outcome converted --tasks "T-201,T-202"
 #>
 
 Set-StrictMode -Version Latest
@@ -93,6 +105,7 @@ function Require-Opt {
     return [string]$opts[$Name]
 }
 function Format-Id { param([int]$N) return ('T-{0:D3}' -f $N) }
+function Format-PId { param([int]$N) return ('P-{0:D3}' -f $N) }
 
 # --------------------------------------------------------------------------
 # Paths (resolved once --work is known)
@@ -198,6 +211,20 @@ function Set-Generation {
 $HeaderRegex = '^###\s+\[T-0*(\d+)\]\s*(.*?)\s*—\s*статус:\s*(.*?)\s*$'
 $PredRegex   = '^(?:Предпосылки|Predecessors)\s*:\s*(.+)$'
 
+# Proposal-lane records (kind: proposal, id P-NNN) live in the SAME unified backlog
+# file but form a separate lane: they are NEVER executable tasks. Their header carries
+# the explicit `kind: proposal` marker (so no reader can mistake a proposal for a task
+# by position) and an English `status:` label drawn from the closed set below. The `[P-`
+# id prefix and the distinct `kind: proposal — status:` shape keep proposals structurally
+# invisible to every T-task operation (readiness, validate-deps, capture, T-dedup, id
+# allocation) while `Split-Queue`/`Build-QueueText` round-trip them verbatim so their
+# original text (provenance) survives any unrelated T-task mutation. See
+# docs/queue_contract.md §20.
+$ProposalHeaderRegex = '^###\s+\[P-0*(\d+)\]\s*(.*?)\s*—\s*kind:\s*proposal\s*—\s*status:\s*(.*?)\s*$'
+$AnyHeaderRegex      = '^###\s+\[[TP]-0*\d+\]'
+$ProposalStatuses    = @('proposed', 'converted', 'rejected', 'duplicate', 'needs_human', 'deferred')
+$ProposalOutcomes    = @('converted', 'rejected', 'duplicate', 'needs_human', 'deferred')
+
 function Parse-Task {
     param([string[]]$BlockLines)
     $header = $BlockLines[0]
@@ -220,6 +247,7 @@ function Parse-Task {
         }
     }
     return [pscustomobject]@{
+        Kind         = 'task'
         Id           = $id
         IdStr        = (Format-Id $id)
         Title        = $title
@@ -231,20 +259,52 @@ function Parse-Task {
     }
 }
 
+function Parse-Proposal {
+    param([string[]]$BlockLines)
+    $header = $BlockLines[0]
+    $m = [regex]::Match($header, $ProposalHeaderRegex)
+    $id = -1; $title = ''; $status = ''
+    if ($m.Success) {
+        $id = [int]$m.Groups[1].Value
+        $title = $m.Groups[2].Value
+        $status = $m.Groups[3].Value
+    }
+    $body = @()
+    if ($BlockLines.Count -gt 1) { $body = @($BlockLines[1..($BlockLines.Count - 1)]) }
+    return [pscustomobject]@{
+        Kind      = 'proposal'
+        Id        = $id
+        IdStr     = (Format-PId $id)
+        Title     = $title
+        Status    = $status
+        Header    = $header
+        Body      = @($body)
+        Malformed = (-not $m.Success)
+    }
+}
+
+# Dispatches a header block to the task or proposal parser by its id prefix, so a
+# unified backlog can carry both lanes and each record knows its own Kind.
+function Parse-Record {
+    param([string[]]$BlockLines)
+    if ($BlockLines[0] -match '^###\s+\[P-0*\d+\]') { return (Parse-Proposal $BlockLines) }
+    return (Parse-Task $BlockLines)
+}
+
 function Split-Queue {
     param([string]$Text)
     $normalized = ($Text -replace "`r`n", "`n") -replace "`r", "`n"
     $lines = $normalized -split "`n"
     $headerIdx = New-Object System.Collections.Generic.List[int]
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '^###\s+\[T-0*\d+\]') { [void]$headerIdx.Add($i) }
+        if ($lines[$i] -match $AnyHeaderRegex) { [void]$headerIdx.Add($i) }
     }
     if ($headerIdx.Count -eq 0) {
-        return [pscustomobject]@{ Preamble = ($normalized.TrimEnd("`n")); Tasks = @() }
+        return [pscustomobject]@{ Preamble = ($normalized.TrimEnd("`n")); Records = @(); Tasks = @(); Proposals = @() }
     }
     $preamble = ''
     if ($headerIdx[0] -gt 0) { $preamble = (@($lines[0..($headerIdx[0] - 1)]) -join "`n").TrimEnd("`n") }
-    $tasks = New-Object System.Collections.ArrayList
+    $records = New-Object System.Collections.ArrayList
     for ($h = 0; $h -lt $headerIdx.Count; $h++) {
         $start = $headerIdx[$h]
         $end = if ($h -lt $headerIdx.Count - 1) { $headerIdx[$h + 1] - 1 } else { $lines.Count - 1 }
@@ -252,16 +312,26 @@ function Split-Queue {
         while ($blockLines.Count -gt 1 -and [string]::IsNullOrWhiteSpace($blockLines[$blockLines.Count - 1])) {
             $blockLines = @($blockLines[0..($blockLines.Count - 2)])
         }
-        [void]$tasks.Add((Parse-Task $blockLines))
+        [void]$records.Add((Parse-Record $blockLines))
     }
-    return [pscustomobject]@{ Preamble = $preamble; Tasks = @($tasks.ToArray()) }
+    $all = @($records.ToArray())
+    # `Tasks` (the executable lane) and `Proposals` (the curation lane) are Kind-filtered
+    # views of the same ordered `Records` union; every T-task operation consumes only
+    # `Tasks`, so proposals never become candidates/predecessors, while `Records` preserves
+    # exact file order for a byte-faithful round-trip through Build-QueueText.
+    return [pscustomobject]@{
+        Preamble  = $preamble
+        Records   = $all
+        Tasks     = @($all | Where-Object { $_.Kind -eq 'task' })
+        Proposals = @($all | Where-Object { $_.Kind -eq 'proposal' })
+    }
 }
 
 function Build-QueueText {
-    param([string]$Preamble, $Tasks)
+    param([string]$Preamble, $Records)
     $segments = New-Object System.Collections.Generic.List[string]
     if (-not [string]::IsNullOrWhiteSpace($Preamble)) { [void]$segments.Add($Preamble.TrimEnd("`n")) }
-    foreach ($t in $Tasks) {
+    foreach ($t in $Records) {
         $block = $t.Header
         if ($t.Body.Count -gt 0) { $block += "`n" + (@($t.Body) -join "`n") }
         [void]$segments.Add($block.TrimEnd("`n"))
@@ -276,16 +346,28 @@ function Set-TaskStatus {
     $Task.Header = "### [$($Task.IdStr)] $($Task.Title) — статус: $NewStatus"
 }
 
+function Set-ProposalStatus {
+    param($Proposal, [string]$NewStatus)
+    $Proposal.Status = $NewStatus
+    $Proposal.Header = "### [$($Proposal.IdStr)] $($Proposal.Title) — kind: proposal — status: $NewStatus"
+}
+
 function Read-QueueState {
     param($Paths)
     $q = Split-Queue (Read-TextOrEmpty $Paths.Queue)
     $pre = $q.Preamble
     if ([string]::IsNullOrWhiteSpace($pre)) { $pre = '# Очередь задач' }
-    return [pscustomobject]@{ Preamble = $pre; Tasks = @($q.Tasks) }
+    # Canonical, order-preserving union of both lanes. The T-task commands read/mutate the
+    # tasks sub-view (Get-StateTasks) while proposals ride along untouched in Records so the
+    # commit round-trips them unchanged.
+    return [pscustomobject]@{ Preamble = $pre; Records = @($q.Records) }
 }
+function Get-StateTasks     { param($State) return @($State.Records | Where-Object { $_.Kind -eq 'task' }) }
+function Get-StateProposals { param($State) return @($State.Records | Where-Object { $_.Kind -eq 'proposal' }) }
+
 function Commit-QueueState {
     param($Paths, $State, [int]$GenDelta = 1)
-    Write-TextAtomic $Paths.Queue (Build-QueueText $State.Preamble $State.Tasks)
+    Write-TextAtomic $Paths.Queue (Build-QueueText $State.Preamble $State.Records)
     $g = (Get-Generation $Paths.State) + $GenDelta
     Set-Generation $Paths.State $g
     return $g
@@ -334,6 +416,23 @@ function Get-MaxKnownId {
         }
     }
     return $max
+}
+# Highest known P-NNN across the unified backlog + archive. Proposals form their OWN id
+# sequence, independent of T-NNN: a P-id is never derived from or collides with a T-id.
+function Get-MaxKnownPId {
+    param($Paths, $QueueProposals)
+    $max = 0
+    foreach ($p in $QueueProposals) { if ($p.Id -gt $max) { $max = $p.Id } }
+    foreach ($m in [regex]::Matches((Read-TextOrEmpty $Paths.Done), 'P-0*(\d+)')) {
+        $v = [int]$m.Groups[1].Value; if ($v -gt $max) { $max = $v }
+    }
+    return $max
+}
+function Get-KnownProposalTitles {
+    param($QueueProposals)
+    $set = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($p in $QueueProposals) { [void]$set.Add((Normalize-Title $p.Title)) }
+    return ,$set
 }
 function Normalize-Title {
     param([string]$Title)
@@ -500,7 +599,47 @@ function New-TaskBlock {
     return (Parse-Task (@("### [$(Format-Id $Id)] $Title — статус: не начата") + @($bodyLines.ToArray())))
 }
 
-# Mutates $State.Tasks in place (adds one task). Throws typed errors:
+# Builds a fresh proposal record (kind: proposal, status: proposed). The optional
+# provenance fields Suggested target / Source are appended after the body in the same
+# order the observability plan (§3.1) shows, so a submitter's authorship survives verbatim.
+function New-ProposalBlock {
+    param([int]$Id, [string]$Title, [string]$Body, [string]$Source, [string]$SuggestedTarget)
+    $bodyLines = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrEmpty($Body)) {
+        foreach ($bl in (($Body -replace "`r`n", "`n") -split "`n")) { [void]$bodyLines.Add($bl) }
+    }
+    if ((-not [string]::IsNullOrEmpty($Source)) -or (-not [string]::IsNullOrEmpty($SuggestedTarget))) {
+        while ($bodyLines.Count -gt 0 -and [string]::IsNullOrWhiteSpace($bodyLines[$bodyLines.Count - 1])) {
+            $bodyLines.RemoveAt($bodyLines.Count - 1)
+        }
+    }
+    if (-not [string]::IsNullOrEmpty($SuggestedTarget)) { [void]$bodyLines.Add("Suggested target: $SuggestedTarget") }
+    if (-not [string]::IsNullOrEmpty($Source)) { [void]$bodyLines.Add("Source: $Source") }
+    return (Parse-Proposal (@("### [$(Format-PId $Id)] $Title — kind: proposal — status: proposed") + @($bodyLines.ToArray())))
+}
+
+# Sets/replaces a single `Key: Value` evaluation field in a proposal body without touching
+# the original prose (provenance). Re-classification replaces the existing field in place
+# instead of duplicating it, so the operation is idempotent.
+function Set-ProposalField {
+    param($Proposal, [string]$Key, [string]$Value)
+    $out = New-Object System.Collections.Generic.List[string]
+    $replaced = $false
+    foreach ($bl in $Proposal.Body) {
+        if ($bl -match ('^' + [regex]::Escape($Key) + '\s*:')) {
+            if (-not $replaced) { [void]$out.Add("${Key}: $Value"); $replaced = $true }
+        } else {
+            [void]$out.Add($bl)
+        }
+    }
+    if (-not $replaced) {
+        while ($out.Count -gt 0 -and [string]::IsNullOrWhiteSpace($out[$out.Count - 1])) { $out.RemoveAt($out.Count - 1) }
+        [void]$out.Add("${Key}: $Value")
+    }
+    $Proposal.Body = @($out.ToArray())
+}
+
+# Mutates $State.Records in place (appends one task). Throws typed errors:
 #   'DUP:<title>' -> duplicate ; 'DEP:<detail>' -> invalid dependency.
 function Add-Proposal {
     param(
@@ -510,8 +649,9 @@ function Add-Proposal {
     $normTitle = Normalize-Title $Title
     if (-not $Force -and $KnownTitles.Contains($normTitle)) { throw "DUP:$Title" }
 
+    $stateTasks = Get-StateTasks $State
     if ($ExplicitId -gt 0) {
-        foreach ($t in $State.Tasks) { if ($t.Id -eq $ExplicitId) { throw "DEP:explicit id $(Format-Id $ExplicitId) already in queue" } }
+        foreach ($t in $stateTasks) { if ($t.Id -eq $ExplicitId) { throw "DEP:explicit id $(Format-Id $ExplicitId) already in queue" } }
         $id = $ExplicitId
     } else {
         $MaxIdRef.Value = $MaxIdRef.Value + 1
@@ -519,21 +659,21 @@ function Add-Proposal {
     }
 
     $queueIds = New-Object 'System.Collections.Generic.HashSet[int]'
-    foreach ($t in $State.Tasks) { [void]$queueIds.Add($t.Id) }
+    foreach ($t in $stateTasks) { [void]$queueIds.Add($t.Id) }
     $doneIds = Get-DoneIds $Paths
     $activeIds = Get-ActiveIds $Paths.TasksDir
     foreach ($p in $Predecessors) {
         if ($p -eq $id) { throw "DEP:self-reference $(Format-Id $p)" }
         $known = $queueIds.Contains($p) -or $doneIds.Contains($p) -or $activeIds.Contains($p)
         if (-not $known) { throw "DEP:missing predecessor $(Format-Id $p)" }
-        $predTask = $State.Tasks | Where-Object { $_.Id -eq $p } | Select-Object -First 1
+        $predTask = $stateTasks | Where-Object { $_.Id -eq $p } | Select-Object -First 1
         if ($predTask -and (Is-Escalated $predTask.Status)) { throw "DEP:infeasible predecessor $(Format-Id $p) (escalated)" }
     }
 
     $newTask = New-TaskBlock -Id $id -Title $Title -Body $Body -Predecessors $Predecessors
-    $State.Tasks = @($State.Tasks) + @($newTask)
+    $State.Records = @($State.Records) + @($newTask)
 
-    $cycleFindings = Validate-Graph $Paths $State.Tasks | Where-Object { $_ -like 'cycle*' }
+    $cycleFindings = Validate-Graph $Paths (Get-StateTasks $State) | Where-Object { $_ -like 'cycle*' }
     if ($cycleFindings) { throw "DEP:$($cycleFindings[0])" }
 
     [void]$KnownTitles.Add($normTitle)
@@ -559,15 +699,46 @@ function Get-PredecessorsArg {
 }
 function Parse-IdArg {
     $raw = Require-Opt 'id'
+    # Explicit guard: the T-task lifecycle commands (capture/return/escalate/archive/ready)
+    # never operate on a proposal. A P-NNN id is refused with a pointed message instead of a
+    # generic parse error, so a proposal can never be captured/executed via a T-command.
+    if ($raw -match 'P-0*\d+') {
+        Fail 2 "invalid --id: $raw is a proposal (kind: proposal); proposals are not executable tasks (use classify-proposal / list-proposals)"
+    }
     $m = [regex]::Match($raw, 'T-0*(\d+)')
     if (-not $m.Success) { Fail 2 "invalid --id: $raw" }
     return [int]$m.Groups[1].Value
 }
+function Parse-ProposalIdArg {
+    $raw = Require-Opt 'id'
+    $m = [regex]::Match($raw, 'P-0*(\d+)')
+    if (-not $m.Success) { Fail 2 "invalid --id: $raw (expected a proposal id P-NNN)" }
+    return [int]$m.Groups[1].Value
+}
+function Get-KindArg {
+    $k = ([string](Opt 'kind' 'task')).Trim().ToLowerInvariant()
+    if ($k -ne 'task' -and $k -ne 'proposal') { Fail 2 "invalid --kind '$k' (expected 'task' or 'proposal')" }
+    return $k
+}
+function Assert-ExpectedGeneration {
+    param($Paths)
+    if ($opts.ContainsKey('expected-generation')) {
+        $exp = [int]$opts['expected-generation']
+        $cur = Get-Generation $Paths.State
+        if ($exp -ne $cur) { Fail 3 "generation mismatch: expected $exp, current $cur (queue changed since you read it; re-read and retry)" }
+    }
+}
 function Get-TaskOrFail {
     param($State, [int]$Id)
-    $t = $State.Tasks | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    $t = (Get-StateTasks $State) | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
     if (-not $t) { Fail 9 "task $(Format-Id $Id) not found in queue" }
     return $t
+}
+function Get-ProposalOrFail {
+    param($State, [int]$Id)
+    $p = (Get-StateProposals $State) | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if (-not $p) { Fail 9 "proposal $(Format-PId $Id) not found in queue" }
+    return $p
 }
 
 # --------------------------------------------------------------------------
@@ -575,7 +746,12 @@ function Get-TaskOrFail {
 # --------------------------------------------------------------------------
 function Cmd-AllocateId {
     $paths = Resolve-Paths
+    $kind = Get-KindArg
     $q = Split-Queue (Read-TextOrEmpty $paths.Queue)
+    if ($kind -eq 'proposal') {
+        Write-Output (Format-PId ((Get-MaxKnownPId $paths $q.Proposals) + 1))
+        return
+    }
     Write-Output (Format-Id ((Get-MaxKnownId $paths $q.Tasks) + 1))
 }
 
@@ -596,6 +772,9 @@ function Cmd-BumpGeneration {
 
 function Cmd-Propose {
     $paths = Resolve-Paths
+    $kind = Get-KindArg
+    if ($kind -eq 'proposal') { Invoke-ProposeProposal $paths; return }
+
     $title = Require-Opt 'title'
     $body = Get-BodyArg
     $preds = Get-PredecessorsArg
@@ -605,14 +784,11 @@ function Cmd-Propose {
 
     Acquire-Lock $paths.Lock
     try {
-        if ($opts.ContainsKey('expected-generation')) {
-            $exp = [int]$opts['expected-generation']
-            $cur = Get-Generation $paths.State
-            if ($exp -ne $cur) { Fail 3 "generation mismatch: expected $exp, current $cur (queue changed since you read it; re-read and retry)" }
-        }
+        Assert-ExpectedGeneration $paths
         $state = Read-QueueState $paths
-        $known = Get-KnownTitles $paths $state.Tasks
-        $maxId = [ref](Get-MaxKnownId $paths $state.Tasks)
+        $stateTasks = Get-StateTasks $state
+        $known = Get-KnownTitles $paths $stateTasks
+        $maxId = [ref](Get-MaxKnownId $paths $stateTasks)
         try {
             $newTask = Add-Proposal $paths $state $title $body $preds $explicitId $force $known $maxId
         } catch {
@@ -624,6 +800,106 @@ function Cmd-Propose {
         $g = Commit-QueueState $paths $state
         Write-Output "id=$($newTask.IdStr) generation=$g"
     } finally { Release-Lock $paths.Lock }
+}
+
+# Adds a new proposal-lane record (kind: proposal, status: proposed) to the unified
+# backlog. Proposals form their own id/dedup namespace and never validate/carry
+# predecessors — they are not executable. See docs/queue_contract.md §20.
+function Invoke-ProposeProposal {
+    param($paths)
+    $title = Require-Opt 'title'
+    $body = Get-BodyArg
+    $source = [string](Opt 'source' '')
+    $target = [string](Opt 'suggested-target' '')
+    $force = [bool](Opt 'force' $false)
+    $explicitId = 0
+    if ($opts.ContainsKey('id')) {
+        $m = [regex]::Match([string]$opts['id'], 'P-0*(\d+)')
+        if (-not $m.Success) { Fail 2 "invalid --id for --kind proposal: expected P-NNN, got $([string]$opts['id'])" }
+        $explicitId = [int]$m.Groups[1].Value
+    }
+
+    Acquire-Lock $paths.Lock
+    try {
+        Assert-ExpectedGeneration $paths
+        $state = Read-QueueState $paths
+        $proposals = Get-StateProposals $state
+        $known = Get-KnownProposalTitles $proposals
+        $normTitle = Normalize-Title $title
+        if (-not $force -and $known.Contains($normTitle)) {
+            Fail 4 "duplicate: a proposal titled '$title' already exists in the backlog"
+        }
+        if ($explicitId -gt 0) {
+            foreach ($p in $proposals) { if ($p.Id -eq $explicitId) { Fail 5 "invalid: explicit proposal id $(Format-PId $explicitId) already in the backlog" } }
+            $id = $explicitId
+        } else {
+            $id = (Get-MaxKnownPId $paths $proposals) + 1
+        }
+        $newP = New-ProposalBlock -Id $id -Title $title -Body $body -Source $source -SuggestedTarget $target
+        $state.Records = @($state.Records) + @($newP)
+        $g = Commit-QueueState $paths $state
+        Write-Output "id=$($newP.IdStr) generation=$g"
+    } finally { Release-Lock $paths.Lock }
+}
+
+# Curator outcome for a single proposal: flips its status to one of the closed outcome set
+# and appends provenance/evaluation fields WITHOUT rewriting the original proposal prose.
+# `converted` requires --tasks naming the created T-ids, each of which must already exist
+# (queue/active/archive) so the provenance link is never dangling. The proposal record is
+# never deleted — it stays in the backlog as the immutable source (provenance).
+function Cmd-ClassifyProposal {
+    $paths = Resolve-Paths
+    $id = Parse-ProposalIdArg
+    $outcome = ([string](Require-Opt 'outcome')).Trim().ToLowerInvariant()
+    if ($ProposalOutcomes -notcontains $outcome) {
+        Fail 2 "invalid --outcome '$outcome' (expected one of: $($ProposalOutcomes -join ', '))"
+    }
+    $reason = [string](Opt 'reason' '')
+    $tasksRaw = [string](Opt 'tasks' '')
+
+    Acquire-Lock $paths.Lock
+    try {
+        Assert-ExpectedGeneration $paths
+        $state = Read-QueueState $paths
+        $p = Get-ProposalOrFail $state $id
+        if ($outcome -eq 'converted') {
+            $taskIds = New-Object System.Collections.Generic.List[int]
+            foreach ($tm in [regex]::Matches($tasksRaw, 'T-0*(\d+)')) { [void]$taskIds.Add([int]$tm.Groups[1].Value) }
+            if ($taskIds.Count -eq 0) { Fail 2 "outcome 'converted' requires --tasks `"T-a,T-b`" naming the created task id(s)" }
+            $queueTaskIds = New-Object 'System.Collections.Generic.HashSet[int]'
+            foreach ($t in (Get-StateTasks $state)) { [void]$queueTaskIds.Add($t.Id) }
+            $doneIds = Get-DoneIds $paths
+            $activeIds = Get-ActiveIds $paths.TasksDir
+            foreach ($tid in $taskIds) {
+                $known = $queueTaskIds.Contains($tid) -or $doneIds.Contains($tid) -or $activeIds.Contains($tid)
+                if (-not $known) { Fail 5 "converted --tasks references $(Format-Id $tid), which does not exist (create the task first, then classify)" }
+            }
+            Set-ProposalStatus $p 'converted'
+            Set-ProposalField $p 'Converted' (($taskIds | ForEach-Object { Format-Id $_ }) -join ', ')
+            if ($reason) { Set-ProposalField $p 'Rationale' $reason }
+        } else {
+            Set-ProposalStatus $p $outcome
+            if ($reason) { Set-ProposalField $p 'Причина' $reason }
+        }
+        $g = Commit-QueueState $paths $state
+        Write-Output "classified $($p.IdStr) status=$outcome generation=$g"
+    } finally { Release-Lock $paths.Lock }
+}
+
+# Lists proposal-lane records (id, status, title), optionally filtered by --status. Read-only
+# helper the curator (and the demonstration) use to find proposals awaiting curation.
+function Cmd-ListProposals {
+    $paths = Resolve-Paths
+    $q = Split-Queue (Read-TextOrEmpty $paths.Queue)
+    $filter = $null
+    if ($opts.ContainsKey('status')) { $filter = ([string]$opts['status']).Trim().ToLowerInvariant() }
+    $rows = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $q.Proposals) {
+        if ($filter -and ($p.Status.Trim().ToLowerInvariant() -ne $filter)) { continue }
+        [void]$rows.Add("$($p.IdStr) $($p.Status) $($p.Title)")
+    }
+    if ($rows.Count -eq 0) { Write-Output 'proposals: (none)'; return }
+    foreach ($r in $rows) { Write-Output $r }
 }
 
 function Cmd-Capture {
@@ -690,9 +966,11 @@ function Cmd-Archive {
     Acquire-Lock $paths.Lock
     try {
         $state = Read-QueueState $paths
-        $t = $state.Tasks | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+        $t = (Get-StateTasks $state) | Where-Object { $_.Id -eq $id } | Select-Object -First 1
         if (-not $t) { Write-Output "not-present $(Format-Id $id)"; return }  # idempotent
-        $state.Tasks = @($state.Tasks | Where-Object { $_.Id -ne $id })
+        # Remove only the matching TASK record; proposal-lane records (even a coincident
+        # P-NNN with the same number) ride along untouched.
+        $state.Records = @($state.Records | Where-Object { -not ($_.Kind -eq 'task' -and $_.Id -eq $id) })
         $g = Commit-QueueState $paths $state
         Write-Output "archived $(Format-Id $id) generation=$g"
     } finally { Release-Lock $paths.Lock }
@@ -728,17 +1006,32 @@ function Cmd-Ready {
 
 function Cmd-InboxAdd {
     $paths = Resolve-Paths
+    $kind = Get-KindArg
     $title = Require-Opt 'title'
     $body = Get-BodyArg
-    $preds = Get-PredecessorsArg
     if (-not (Test-Path -LiteralPath $paths.Inbox)) { $null = New-Item -ItemType Directory -Force -Path $paths.Inbox }
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')
     $name = "$stamp-$PID-$([guid]::NewGuid().ToString('N').Substring(0,8)).json"
-    $record = @{
-        title        = $title
-        predecessors = @($preds | ForEach-Object { Format-Id $_ })
-        body         = $body
-        created      = ([DateTime]::UtcNow.ToString('o'))
+    if ($kind -eq 'proposal') {
+        # A proposal-lane inbox record: no predecessors (proposals never carry them); carries
+        # the optional provenance fields instead. Drained into a `[P-NNN] ... kind: proposal`.
+        $record = @{
+            kind             = 'proposal'
+            title            = $title
+            body             = $body
+            source           = [string](Opt 'source' '')
+            suggested_target = [string](Opt 'suggested-target' '')
+            created          = ([DateTime]::UtcNow.ToString('o'))
+        }
+    } else {
+        $preds = Get-PredecessorsArg
+        $record = @{
+            kind         = 'task'
+            title        = $title
+            predecessors = @($preds | ForEach-Object { Format-Id $_ })
+            body         = $body
+            created      = ([DateTime]::UtcNow.ToString('o'))
+        }
     }
     Write-TextAtomic (Join-Path $paths.Inbox $name) ($record | ConvertTo-Json -Depth 5)
     Write-Output "inbox=$name"
@@ -803,8 +1096,11 @@ function Cmd-InboxDrain {
         if ($entries.Count -eq 0) { Write-Output 'inbox empty'; return }
         try {
             $state = Read-QueueState $paths
-            $known = Get-KnownTitles $paths $state.Tasks
-            $maxId = [ref](Get-MaxKnownId $paths $state.Tasks)
+            $stateTasks0 = Get-StateTasks $state
+            $known = Get-KnownTitles $paths $stateTasks0
+            $maxId = [ref](Get-MaxKnownId $paths $stateTasks0)
+            $knownP = Get-KnownProposalTitles (Get-StateProposals $state)
+            $maxPId = [ref](Get-MaxKnownPId $paths (Get-StateProposals $state))
         } catch {
             Fail 5 "cannot read queue state for inbox drain: $($_.Exception.Message)"
         }
@@ -828,22 +1124,41 @@ function Cmd-InboxDrain {
                 }
                 continue
             }
-            $taskCountBefore = @($state.Tasks).Count
+            $recKind = 'task'
+            if (($rec.PSObject.Properties.Name -contains 'kind') -and $rec.kind) { $recKind = ([string]$rec.kind).Trim().ToLowerInvariant() }
+            $recBody = ''
+            if ($rec.PSObject.Properties.Name -contains 'body') { $recBody = [string]$rec.body }
+
+            if ($recKind -eq 'proposal') {
+                # Proposal-lane record: title-dedup only, no dependency graph, cannot fail with
+                # DEP/cycle, so no rollback path is needed beyond the pre-append dup check.
+                $normTitle = Normalize-Title ([string]$rec.title)
+                if ($knownP.Contains($normTitle)) { [void]$skipped.Add("$($e.Name): duplicate proposal"); [void]$consume.Add($e.FullName); continue }
+                $recSource = ''; $recTarget = ''
+                if ($rec.PSObject.Properties.Name -contains 'source') { $recSource = [string]$rec.source }
+                if ($rec.PSObject.Properties.Name -contains 'suggested_target') { $recTarget = [string]$rec.suggested_target }
+                $maxPId.Value = $maxPId.Value + 1
+                $np = New-ProposalBlock -Id $maxPId.Value -Title ([string]$rec.title) -Body $recBody -Source $recSource -SuggestedTarget $recTarget
+                $state.Records = @($state.Records) + @($np)
+                [void]$knownP.Add($normTitle)
+                [void]$added.Add($np.IdStr); [void]$consume.Add($e.FullName)
+                continue
+            }
+
+            $recordCountBefore = @($state.Records).Count
             $maxIdBefore = [int]$maxId.Value
             try {
                 $recPreds = @()
                 if (($rec.PSObject.Properties.Name -contains 'predecessors') -and $rec.predecessors) {
                     $recPreds = @($rec.predecessors | ForEach-Object { [int]([regex]::Match([string]$_, '\d+').Value) })
                 }
-                $recBody = ''
-                if ($rec.PSObject.Properties.Name -contains 'body') { $recBody = [string]$rec.body }
                 $nt = Add-Proposal $paths $state ([string]$rec.title) $recBody $recPreds 0 $false $known $maxId
                 [void]$added.Add($nt.IdStr); [void]$consume.Add($e.FullName)
             } catch {
                 $msg = [string]$_.Exception.Message
                 $maxId.Value = $maxIdBefore
-                if ($taskCountBefore -eq 0) { $state.Tasks = @() }
-                else { $state.Tasks = @($state.Tasks | Select-Object -First $taskCountBefore) }
+                if ($recordCountBefore -eq 0) { $state.Records = @() }
+                else { $state.Records = @($state.Records | Select-Object -First $recordCountBefore) }
                 if ($msg -like 'DUP:*') { [void]$skipped.Add("$($e.Name): duplicate"); [void]$consume.Add($e.FullName) }
                 elseif ($msg -like 'DEP:*') {
                     try {
@@ -888,10 +1203,12 @@ try {
         'ready'           { Cmd-Ready }
         'generation'      { Cmd-Generation }
         'bump-generation' { Cmd-BumpGeneration }
-        'inbox-add'       { Cmd-InboxAdd }
-        'inbox-drain'     { Cmd-InboxDrain }
+        'inbox-add'          { Cmd-InboxAdd }
+        'inbox-drain'        { Cmd-InboxDrain }
+        'classify-proposal'  { Cmd-ClassifyProposal }
+        'list-proposals'     { Cmd-ListProposals }
         default {
-            Fail 2 "unknown command '$Command'. Valid: allocate-id, propose, capture, return, escalate, archive, validate-deps, ready, generation, bump-generation, inbox-add, inbox-drain"
+            Fail 2 "unknown command '$Command'. Valid: allocate-id, propose, capture, return, escalate, archive, validate-deps, ready, generation, bump-generation, inbox-add, inbox-drain, classify-proposal, list-proposals"
         }
     }
 } catch {

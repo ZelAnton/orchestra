@@ -56,6 +56,11 @@ a human only needs to seed the queue and periodically check status or escalation
   `.work/knowledge/` in a target project, harvesting agents' `learnings.md` notes.
 - **thinker** — interactively explores an idea with the user and, once agreed,
   creates queue entries for it.
+- **proposal_curator** — batch-curates the raw `P-NNN` proposal lane (`kind: proposal`)
+  in the unified backlog: for each proposal it decides one outcome (`converted` — creating
+  executable `T-NNN` tasks with a provenance link, `rejected`, `duplicate`, `needs_human`,
+  or `deferred`), keeping the original proposal text immutable. The engine never executes a
+  proposal until it is `converted`.
 
 ### Pipeline, top level
 
@@ -136,7 +141,8 @@ Other launchers: `cc-resume` continues an interrupted processor session,
 read-only Codex/configuration/orchestration preflight (a thin wrapper, like
 `cc-sync`, over one cross-platform `pwsh` engine, `tools/doctor-runtime.ps1`, so
 Windows and macOS/Linux report identically), `cc-audit` and `cc-enhance` run
-`code_auditor` and `enhancement_scout`, and `cc-github` runs `github_sync`.
+`code_auditor` and `enhancement_scout`, `cc-github` runs `github_sync`, and
+`cc-proposal` runs `proposal_curator` to curate the `P-NNN` proposal lane.
 
 ## Further reading
 
