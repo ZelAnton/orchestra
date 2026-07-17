@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Read-only operational metrics from .work/events.jsonl + journal.md fallback.
 set -u
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 if [ -f "$SCRIPT_DIR/../tools/metrics.ps1" ]; then
   METRICS="$SCRIPT_DIR/../tools/metrics.ps1"
 elif [ -f "$SCRIPT_DIR/metrics.ps1" ]; then
