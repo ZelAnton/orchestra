@@ -226,8 +226,7 @@ function ConvertFrom-ConfigText {
 # ============================================================================
 # constraints.md parsing. Returns the ACTIVE bullet lines of a section (the list under
 # "**Активные ..." up to the "**Пример" marker), excluding placeholder bullets like
-# "(пусто ...)" / "Метка: (по умолчанию ...)". A label-only bullet is also inactive:
-# it can be the first line of a wrapped placeholder value. The example block is never returned.
+# "(пусто ...)" / "Метка: (по умолчанию ...)". The example block is never returned.
 # ============================================================================
 function Get-PolicyActiveBullets {
     param([string[]]$Lines, [string]$HeadingText)
@@ -246,13 +245,9 @@ function Get-PolicyActiveBullets {
         if ($raw -match '^\s*\*\*Пример') { $inActive = $false; continue }
         if ($inActive -and $raw -match '^\s*-\s+(.*\S)\s*$') {
             $item = $Matches[1]
-            # A placeholder may be a bare value, the value after a human-readable label,
-            # or a wrapped value on the line after a label-only bullet. Continuation lines
-            # are not bullets, so dropping the empty label keeps that last form inactive.
-            if (
-                $item -match '^[^:]+:\s*$' -or
-                $item -match '^(?:[^:]+:\s*)?\(\s*(?:пусто|не\s+задано|по\s+умолчанию)(?=\s|\)|$)'
-            ) { continue }
+            # A placeholder may be a bare value or the value after a human-readable label.
+            # Keep this one rule section-agnostic so every policy consumer ignores both forms.
+            if ($item -match '^(?:[^:]+:\s*)?\(\s*(?:пусто|не\s+задано|по\s+умолчанию)(?=\s|\)|$)') { continue }
             $bullets.Add($item)
         }
     }
