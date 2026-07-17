@@ -348,6 +348,7 @@ $mirrorDir = Join-Path $c.Home '.claude/scripts'
 New-Item -ItemType Directory -Force -Path $mirrorDir | Out-Null
 Copy-Item -LiteralPath $script:Runtime -Destination (Join-Path $mirrorDir 'doctor-runtime.ps1')
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'state-tx.ps1') -Destination (Join-Path $mirrorDir 'state-tx.ps1')
+Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'common.ps1') -Destination (Join-Path $mirrorDir 'common.ps1')
 $r = Invoke-Doctor -Case $c -Runtime (Join-Path $mirrorDir 'doctor-runtime.ps1')
 Assert-Contains $r.Out 'OK   orchestrator.lock: owner=OWNER-A role=processor heartbeat ' 'lock lease mirror: owner/role/heartbeat reported'
 Assert-Contains $r.Out '/900s (live)' 'lock lease mirror: TTL threshold reported'
