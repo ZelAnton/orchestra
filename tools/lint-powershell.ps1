@@ -8,7 +8,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $settingsPath = Join-Path $repoRoot 'PSScriptAnalyzerSettings.psd1'
 
 if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
-    Write-Error "PSScriptAnalyzer settings file is missing: $settingsPath"
+    Write-Error "PSScriptAnalyzer settings file is missing: $settingsPath" -ErrorAction Continue
     exit 2
 }
 
@@ -16,7 +16,7 @@ $analyzerModule = Get-Module -ListAvailable -Name PSScriptAnalyzer |
     Sort-Object Version -Descending |
     Select-Object -First 1
 if ($null -eq $analyzerModule) {
-    Write-Error 'PSScriptAnalyzer is required. Install it with: Install-Module PSScriptAnalyzer -Scope CurrentUser'
+    Write-Error 'PSScriptAnalyzer is required. Install it with: Install-Module PSScriptAnalyzer -Scope CurrentUser' -ErrorAction Continue
     exit 2
 }
 
@@ -29,7 +29,7 @@ $sourceFiles = @(
 ) | Sort-Object FullName -Unique
 
 if ($sourceFiles.Count -eq 0) {
-    Write-Error 'No PowerShell source files were found in tools/, tests/, or the root generators.'
+    Write-Error 'No PowerShell source files were found in tools/, tests/, or the root generators.' -ErrorAction Continue
     exit 2
 }
 
