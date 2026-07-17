@@ -112,17 +112,23 @@ workspace, коммитит результаты листовых агентов
   оверрайды сети T-063, **классификация отказов** (`ENV_LIMIT`-таблица T-062/T-067,
   расширяемая), **порог негабаритного diff** (T-074, дефолт 4000), **проверка «чистого
   прогона»** reviewer-вывода (RECHECK/NEW), **валидация брокер-команд** по allowlist (T-063),
-  **гарантия отсутствия коммитов** (`guard-commit`, git soft-reset, никогда `--hard`) и
+  **проверка состояния активной рабочей копии** (`working-copy-status`: обязательный
+  `--vcs`, для jj — только `jj -R <worktree> diff`, без ложного fallback на Git в
+  colocated jj+git), **гарантия отсутствия коммитов** (`guard-commit`, git soft-reset,
+  никогда `--hard`) и
   **безопасная очистка только своей рабочей копии** (`cleanup`; в основном дереве Фазы 5.4 —
   `--main-tree`, никогда `git clean -fd`, `.work/` не трогается), плюс маппинг сентинелов
   `ЭСКАЛАЦИЯ codex: …`. Оба адаптера зовут его коротким стабильным контрактом (команды
-  `run`/`build-argv`/`classify`/`check-diff`/`validate-reviewer`/`broker-validate`/
+  `run`/`build-argv`/`classify`/`check-diff`/`working-copy-status`/
+  `validate-reviewer`/`broker-validate`/
   `guard-commit`/`cleanup`/`map-sentinel`) — **один** источник сборки команды, без двух
   расходящихся вариантов. Публичное поведение (сентинелы, «нет коммитов от codex»,
   нормализованный `codex exec`, форматы `codex_out.md`/`codex_review_out.md`) сохранено.
   Детерминированные тесты с fake `codex` — `tests/test-codex-runtime.ps1` (в CI
   `.github/workflows/ci.yml`, шаг «Check Codex runtime behaviour»); написаны переносимо и
-  готовы к POSIX-прогону. **Зеркалирование в другие проекты (T-114 → обобщено T-115).**
+  готовы к POSIX-прогону; при наличии jj отдельно воспроизводят colocated-состояние, где
+  `git status`/`git diff` чисты, но `jj diff` содержит изменения, и требуют
+  `clean=false`. **Зеркалирование в другие проекты (T-114 → обобщено T-115).**
   `tools/sync-runtime.ps1` изначально (T-114) мирроил в `<dest>/scripts` только
   `codex-runtime.ps1` тем же способом, что и `doctor-runtime.ps1`; **с T-115 он зеркалирует
   ВСЮ папку `tools/*.ps1`** (кроме своего `sync-runtime.ps1` — единственное исключение),

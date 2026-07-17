@@ -2,13 +2,17 @@
 //! binary as the headless engine over a throwaway **sandbox** `.work` and the REAL transaction
 //! tools (`queue-tx.ps1` / `state-tx.ps1` / `outbox.ps1`), and assert the engine drives ONE
 //! cohort/phase end to end — take its owner lease, admit a cohort by readiness, capture each task,
-//! run ONE supervised leaf round (the deterministic `__fake-agent` stand-in, never a live model
-//! call), validate every descriptor/cohort transition through `state-tx`, emit the §19 events, and
-//! release the lease — with nothing ever touching this repository's own `.work`.
+//! run ONE supervised leaf round (the deterministic `__fake-agent` stand-in), validate every
+//! descriptor/cohort transition through `state-tx`, emit the §19 events, and release the lease —
+//! with nothing ever touching this repository's own `.work`.
+//!
+//! The opt-in `--live` path (task T-244) is exercised too, but WITHOUT any model/network: the
+//! live-mode test only runs where a real `claude` binary is absent, so the supervised leaf fails to
+//! spawn and the task fail-closes — proving the live spawn target was taken with no billable call.
 //!
 //! Like `lease_fixture`, the PowerShell-driven scenarios need a `pwsh`/`powershell` host to run the
 //! `.ps1` tools; when neither is available they self-skip with a note (never fail). Every sandbox
-//! lives in a per-test temp directory removed on drop; the run is offline and token-free.
+//! lives in a per-test temp directory removed on drop; the default round is offline and token-free.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -415,7 +419,7 @@ fn injected_escalation_takes_one_task_to_escalated() {
 }
 
 #[test]
-fn run_requires_a_work_dir_and_refuses_live() {
+fn run_requires_a_work_dir_and_accepts_live() {
     // `--work` is required and has NO default, so `run` can never silently touch the live `.work`.
     let missing_work = Command::new(BIN)
         .args(["run", "--once"])
@@ -443,15 +447,99 @@ fn run_requires_a_work_dir_and_refuses_live() {
         "missing --once is a usage error"
     );
 
-    // A real model call is out of scope: `--live` is refused, so the run stays hermetic.
+    // `--live` (task T-244) is now ACCEPTED, not refused: passing it without `--work` falls through
+    // to the SAME `--work`-required usage error, and never prints an out-of-scope "refusing --live"
+    // message. This proves the flag is parsed as a valid opt-in, not rejected up front. (No leaf is
+    // spawned here — the run bails on the missing `--work` before any model call, so this stays
+    // hermetic regardless of whether a real `claude` binary is installed.)
     let live = Command::new(BIN)
-        .args(["run", "--once", "--live", "--work", "/tmp/whatever"])
+        .args(["run", "--once", "--live"])
         .output()
         .expect("spawn engine run --live");
-    assert_eq!(live.status.code(), Some(2), "--live is refused");
+    assert_eq!(
+        live.status.code(),
+        Some(2),
+        "--live without --work is a --work usage error, not a --live refusal"
+    );
+    let live_err = stderr_of(&live);
     assert!(
-        stderr_of(&live).contains("--live"),
-        "explains --live is refused: {}",
-        stderr_of(&live)
+        live_err.contains("--work"),
+        "the failure is the missing --work, proving --live was accepted: {live_err}"
+    );
+    assert!(
+        !live_err.contains("refusing"),
+        "--live is no longer refused: {live_err}"
+    );
+}
+
+/// Whether a real `claude` binary is launchable on this host. Used to keep the live-mode e2e test
+/// TOKEN-FREE: it only runs where `claude` is ABSENT (e.g. CI), so the supervised leaf can never
+/// reach a real model — it fails to spawn and the task fail-closes. On a dev box with `claude`
+/// installed the test self-skips rather than risk a real (billable) call.
+fn claude_present() -> bool {
+    Command::new("claude")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn live_mode_spawns_a_real_leaf_and_fails_closed_without_claude() {
+    let host = host_or_skip!();
+    if claude_present() {
+        eprintln!(
+            "SKIP: a real `claude` binary is installed — refusing to risk a billable model call"
+        );
+        return;
+    }
+    let sb = Sandbox::new();
+
+    let out = queue_propose(&host, &sb.work, "T-501", "live wiring", None);
+    assert!(out.status.success(), "propose T-501: {}", stderr_of(&out));
+    write_planned_descriptor(&sb.work, "T-501", "не начата", Some("engine/src/**"));
+
+    // Under `--live` the coder leaf spawns the REAL `claude` child instead of the offline stand-in.
+    // With no `claude` on PATH the supervised spawn fails (a crash), so the task fail-closes to
+    // `escalated` — the OFFLINE stand-in would instead have driven a clean `готово`. That divergence
+    // is the proof the live spawn target was actually taken, with no model/network involved.
+    let run = engine_run(
+        &sb.work,
+        &[
+            "--batch",
+            "B-live",
+            "--cohort-size",
+            "1",
+            "--live",
+            "--json",
+        ],
+    );
+    let out = stdout_of(&run);
+    assert!(
+        run.status.success(),
+        "live run still exits 0 (escalation is a clean outcome): {out} / {}",
+        stderr_of(&run)
+    );
+    assert!(
+        out.contains("\"to\":\"escalated\""),
+        "the live leaf could not spawn a real claude, so the task fail-closed: {out}"
+    );
+    assert!(
+        !out.contains("\"verdict\":\"готово\""),
+        "no offline stand-in ran — the round did not fabricate a clean verdict: {out}"
+    );
+    assert_eq!(
+        sb.descriptor_status("T-501"),
+        "эскалирована",
+        "the descriptor records the fail-closed escalation"
+    );
+    // The lease is still cleanly released even though the live leaf failed to spawn.
+    assert!(
+        out.contains("\"lease_released\":true"),
+        "lease released after a live-spawn failure: {out}"
+    );
+    assert!(
+        !sb.work.join("orchestrator.lock").exists(),
+        "no dangling lease after a live run"
     );
 }
