@@ -502,6 +502,128 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'develop', '--remote', 'origin')
     Assert-Exit $r 8 'check-publish: explicit bare branch restriction remains active'
 }.Invoke()
+
+# =============================================================================
+# 9b. T-259 incident investigation: placeholder detector vs publish extraction
+# =============================================================================
+{
+    . $script:SchemaLib
+
+    # Investigation result: no live placeholder-detector gap was found. T-116 skips the
+    # reported single-line label-prefixed form; the wrapped form cannot produce a target.
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+    $constraints = Join-Path $work 'constraints.md'
+
+    # Scenario A: a wrapped placeholder leaves only label-only bullets visible to the shared
+    # parser because continuation lines are not bullets. This still cannot restrict publishing:
+    # Get-PublishTargets requires one or more characters after the colon, so both target lists
+    # are empty and check-publish must ALLOW. No broader label-only parser rule is needed.
+    $wrapped = @'
+## Разрешённые ветки и remotes
+
+**Активные ограничения**:
+
+- Ветки публикации:
+  (по умолчанию — trunk)
+- Remotes:
+  (не задано)
+'@
+    Write-Utf8 $constraints $wrapped
+    $active = Get-PolicyActiveBullets ($wrapped -split "`r?`n") 'Разрешённые ветки и remotes'
+    Assert-Equal 2 $active.Count 'T-259 scenario A: parser retains the two label-only bullets'
+    Assert-Equal 'Ветки публикации:' $active[0] 'T-259 scenario A: branch label has no value'
+    Assert-Equal 'Remotes:' $active[1] 'T-259 scenario A: remote label has no value'
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'T-259 scenario A: wrapped label-only placeholders cannot restrict main/origin'
+
+    # Scenario B: this is the reported single-line incident shape. T-116's optional label
+    # prefix skips it. The template spelling with a backtick token is included because, without
+    # T-116, Get-PublishTargets would mistake MAIN_BRANCH for an allowed branch and DENY main.
+    $singleLineCases = [ordered]@{
+        'reported trunk spelling' = '- Ветки публикации: (по умолчанию — trunk)'
+        'seeded backtick spelling' = '- Ветки публикации: (по умолчанию — trunk из `MAIN_BRANCH`/автоопределения)'
+        'inner whitespace'         = '- Ветки публикации: ( по умолчанию — trunk)'
+        'alternate label'          = '- Publish branches: (по умолчанию – trunk)'
+        'remote empty'             = '- Remotes: (пусто)'
+        'remote unset'             = '- Remotes: (не задано)'
+        'bare placeholder'         = '- (по умолчанию — trunk)'
+    }
+    foreach ($case in $singleLineCases.GetEnumerator()) {
+        $lines = @(
+            '## Разрешённые ветки и remotes',
+            '',
+            '**Активные ограничения**:',
+            '',
+            $case.Value
+        )
+        Assert-Equal 0 (Get-PolicyActiveBullets $lines 'Разрешённые ветки и remotes').Count "T-259 scenario B/C: $($case.Key) is inactive"
+    }
+
+    Write-Utf8 $constraints @'
+## Разрешённые ветки и remotes
+
+**Активные ограничения**:
+
+- Ветки публикации: (по умолчанию — trunk)
+- Remotes: (не задано)
+'@
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'T-259 scenario B: reported single-line placeholders permit main/origin'
+
+    # Scenario D: branch/remote placeholders do not interact with the push placeholder or the
+    # explicit ff-merge invariant. A real remote restriction remains active and still DENYs.
+    Write-Utf8 $constraints @'
+## Разрешённые ветки и remotes
+
+**Активные ограничения**:
+
+- Ветки публикации: (по умолчанию — trunk из `MAIN_BRANCH`/автоопределения)
+- Remotes: (не задано)
+
+## Push/merge policy
+
+**Активные ограничения**:
+
+- Публикация (push): (по умолчанию — по `PUSH` из `config.md`)
+- Слияние в trunk: только ff-merge после интеграционного ревью
+'@
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'T-259 scenario D: target and push placeholders do not combine into a false DENY'
+
+    Write-Utf8 $constraints @'
+## Разрешённые ветки и remotes
+
+**Активные ограничения**:
+
+- Ветки публикации: (по умолчанию — trunk)
+- Remotes: `upstream`
+'@
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 8 'T-259 scenario D: explicit remote restriction remains enforced beside a placeholder'
+
+    # Scenario E: reconstructed from the surviving .work/constraints.md whose timestamp predates
+    # batch B-20260717T110755Z. Its active sections explicitly allowed main/origin; the default
+    # push bullet was inactive and the ff-merge text did not request manual confirmation.
+    Write-Utf8 $constraints @'
+## Разрешённые ветки и remotes
+
+**Активные ограничения** (по умолчанию — как определяет processor):
+
+- Ветки публикации: `main`
+- Remotes: `origin`
+
+## Push/merge policy
+
+**Активные ограничения** (по умолчанию — по `PUSH` из `config.md`):
+
+- Публикация (push): (по умолчанию — по `PUSH` из `config.md`)
+- Слияние в trunk: только ff-merge после интеграционного ревью (текущее поведение
+  processor; не ослабляйте без причины)
+'@
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'T-259 scenario E: reconstructed batch-era policy permits main/origin'
+}.Invoke()
 # =============================================================================
 # 10. check-gate (T-095): the fail-closed, SHA-bound, whole-set publish CI gate
 # =============================================================================

@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 pub const SCHEMA_VERSION: i64 = 1;
 
 /// The closed set of event `type`s (§19.3). Namespaced `cohort.*` / `task.*` plus the
-/// historical `codex.attempt` archetype. Unknown types are rejected on read.
+/// `codex.attempt` and `usage.recorded` telemetry events. Unknown types are rejected on read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventType {
     CohortOpened,
@@ -30,6 +30,7 @@ pub enum EventType {
     TaskCaptured,
     TaskStatusChanged,
     CodexAttempt,
+    UsageRecorded,
 }
 
 impl EventType {
@@ -46,6 +47,7 @@ impl EventType {
             EventType::TaskCaptured => "task.captured",
             EventType::TaskStatusChanged => "task.status_changed",
             EventType::CodexAttempt => "codex.attempt",
+            EventType::UsageRecorded => "usage.recorded",
         }
     }
 
@@ -62,6 +64,7 @@ impl EventType {
             "task.captured" => EventType::TaskCaptured,
             "task.status_changed" => EventType::TaskStatusChanged,
             "codex.attempt" => EventType::CodexAttempt,
+            "usage.recorded" => EventType::UsageRecorded,
             _ => return None,
         })
     }
