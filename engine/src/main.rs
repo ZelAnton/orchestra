@@ -42,15 +42,18 @@
 //!                             so it can only remove its own lease. See `src/lease.rs`.
 //!   run      --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]
 //!            [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>]
-//!            [--json]
-//!                             Drive ONE cohort/phase end-to-end over a hermetic SANDBOX `.work`
-//!                             (task T-109): take the engine lease, admit a cohort (T-106), capture
-//!                             each task through `queue-tx`, run ONE supervised leaf round (the
-//!                             deterministic `__fake-agent` stand-in — a real `--live` model call is
-//!                             out of scope and refused), validate every descriptor/cohort transition
-//!                             through `state-tx check-transition`, emit the events through `outbox`,
-//!                             and release the lease. `--work` is REQUIRED and has no default, so this
-//!                             can never touch the repository's live `.work`. `--once` is required.
+//!            [--live] [--codex-coder <off|fast|fast+std>] [--codex-network] [--json]
+//!                             Drive ONE cohort/phase end-to-end over a SANDBOX `.work` (task
+//!                             T-109): take the engine lease, admit a cohort (T-106), capture each
+//!                             task through `queue-tx`, run ONE supervised leaf round, validate every
+//!                             descriptor/cohort transition through `state-tx check-transition`, emit
+//!                             the events through `outbox`, and release the lease. By default the leaf
+//!                             round drives the deterministic offline `__fake-agent` stand-in;
+//!                             `--live` (task T-244) opts into REAL `claude -p`/`codex exec` leaf
+//!                             calls routed through the executor resolvers, each stating its
+//!                             permission posture on its own argv. `--work` is REQUIRED and has no
+//!                             default, so this can never touch the repository's live `.work`.
+//!                             `--once` is required.
 //!   __fake-agent ...          Hidden: a deterministic stand-in child used by the
 //!                             hermetic tests, by `selfcheck`, and by `run`'s round (emits
 //!                             stream-json; `--mode leaf` carries a parseable leaf report, and
@@ -75,8 +78,8 @@ use orchestra_engine::events::TailReader;
 use orchestra_engine::lease::{self, exit as lease_exit, AcquireVerdict, LeaseOp};
 use orchestra_engine::resolvers::{
     admission_gate, base_reviewer, is_ready, plan_admission, unmet_prerequisites, ActiveClass,
-    ActiveTask, AdmissionGate, AdmissionOutcome, Candidate, CohortCounters, CohortThresholds,
-    Domain, Level,
+    ActiveTask, AdmissionGate, AdmissionOutcome, Candidate, CodexCoder, CohortCounters,
+    CohortThresholds, Domain, Level,
 };
 use orchestra_engine::run::{self, RunConfig};
 use orchestra_engine::state::{Snapshot, TaskState};
@@ -1011,16 +1014,11 @@ fn lease_status(script: &str, work: &str, json: bool) -> i32 {
 
 /// `run --once --work <sandbox>` — drive ONE cohort/phase end-to-end over a SANDBOX `.work`
 /// (task T-109). `--work` is REQUIRED and has NO default, so `run` can never silently resolve the
-/// repository's live `.work`; `--once` is the only mode. Offline by construction: `--live` is
-/// refused, and the round drives the deterministic `__fake-agent` stand-in, not a real model call.
+/// repository's live `.work`; `--once` is the only mode. Offline by DEFAULT: the round drives the
+/// deterministic `__fake-agent` stand-in. Opt into real leaf model calls with `--live` (task
+/// T-244): each leaf then spawns a real `claude -p`/`codex exec` child with its permission posture
+/// stated explicitly on its own argv; the transactional invariants (K-006) are unchanged.
 fn cmd_run(args: &[String]) {
-    if args.iter().any(|a| a == "--live") {
-        eprintln!(
-            "run: refusing --live — this hermetic run drives ONLY the deterministic __fake-agent\n\
-             stand-in over a sandbox .work; a real model call is out of scope for T-109."
-        );
-        exit(run::exit::USAGE);
-    }
     if !args.iter().any(|a| a == "--once") {
         eprintln!(
             "usage: run --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]\n\
@@ -1028,8 +1026,10 @@ fn cmd_run(args: &[String]) {
              \x20          [--review] [--inject-findings <T-ID>] [--review-loop-max <n>]\n\
              \x20          [--converge-after <n>] [--join] [--integration-loop-max <n>]\n\
              \x20          [--inject-merge-conflict <T-ID>] [--inject-f-findings]\n\
-             \x20          [--integration-converge-after <n>] [--json]\n\
-             (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work)"
+             \x20          [--integration-converge-after <n>] [--live]\n\
+             \x20          [--codex-coder <off|fast|fast+std>] [--codex-network] [--json]\n\
+             (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work.\n\
+             \x20 --live opts into real claude/codex leaf calls — off by default the round stays hermetic)"
         );
         exit(run::exit::USAGE);
     }
@@ -1082,6 +1082,16 @@ fn cmd_run(args: &[String]) {
     let inject_f_findings = args.iter().any(|a| a == "--inject-f-findings");
     let integration_converge_after =
         opt(args, "--integration-converge-after").and_then(|s| s.parse::<u32>().ok());
+    // Opt-in live mode (task T-244): real `claude`/`codex` leaf calls instead of the offline
+    // `__fake-agent` stand-in. Off by default, so the run stays hermetic and token-free.
+    let live = args.iter().any(|a| a == "--live");
+    // The Codex maker-routing flag fed to the coder resolver (default `off` = Claude-only). Only
+    // meaningful under `--live`; an unrecognized value falls back to `off`.
+    let codex_coder = opt(args, "--codex-coder")
+        .as_deref()
+        .and_then(CodexCoder::parse)
+        .unwrap_or(CodexCoder::Off);
+    let codex_network = args.iter().any(|a| a == "--codex-network");
     let json = args.iter().any(|a| a == "--json");
 
     let cfg = RunConfig {
@@ -1104,6 +1114,9 @@ fn cmd_run(args: &[String]) {
         inject_merge_conflict,
         inject_f_findings,
         integration_converge_after,
+        live,
+        codex_coder,
+        codex_network,
         leaf_deadline: Duration::from_secs(60),
     };
 

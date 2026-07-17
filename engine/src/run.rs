@@ -14,8 +14,9 @@
 //!    validated by `tools/state-tx.ps1 check-transition --kind cohort` — never by hand-editing the
 //!    queue / control-plane state.
 //! 3. **One execution round.** For each captured task, run ONE supervised leaf call — the
-//!    deterministic, offline `__fake-agent` stand-in (a real `--live` model call is deliberately
-//!    out of scope) — parse its structured report with [`crate::contract`], apply the T-105
+//!    deterministic, offline `__fake-agent` stand-in by default, OR (opt-in `--live`, task T-244)
+//!    the REAL `claude -p`/`codex exec` child routed through the executor resolvers — parse its
+//!    structured report with [`crate::contract`], apply the T-105
 //!    per-task decision (reviewer tier via [`base_reviewer`]), validate the descriptor status
 //!    transition through `state-tx check-transition --kind task`, write the descriptor, and emit
 //!    the round/task events through `tools/outbox.ps1` in the §19 outbox format.
@@ -66,15 +67,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 
 use crate::claude::{ClaudeCall, PermissionPosture};
+use crate::codex::{CodexCall, Sandbox};
 use crate::contract::{
     parse_changed_files, parse_merge_report, parse_outcome, parse_review, MergeOutcome,
 };
 use crate::lease::{self, AcquireVerdict};
 use crate::resolvers::{
     base_reviewer, integration_gate, is_ready, plan_admission, reelect_reviewer,
-    review_cycle_decision, review_gate, ActiveClass, ActiveTask, AdmissionOutcome, BaseReviewer,
-    Candidate, CloseReason, CodexReviewer, CycleDecision, Domain, ImplBy, Level, ReviewGate,
-    ReviewerRoute,
+    review_cycle_decision, review_gate, route_coder, ActiveClass, ActiveTask, AdmissionOutcome,
+    BaseReviewer, Candidate, CloseReason, CoderRoute, CoderRouteInput, CodexCoder, CodexReviewer,
+    CycleDecision, Domain, ImplBy, Level, ReviewGate, ReviewerRoute,
 };
 use crate::state::{Snapshot, TaskState};
 use crate::supervise::{self, Reason, SpawnSpec};
@@ -172,6 +174,23 @@ pub struct RunConfig {
     /// while `cycle < integration_converge_after` and a clean pass from that cycle onward. `None`
     /// with `inject_f_findings` = never converges → drives the `INTEGRATION_LOOP_MAX` stop branch.
     pub integration_converge_after: Option<u32>,
+    /// **Live mode** (opt-in, `--live`, task T-244). When set, every supervised leaf round spawns
+    /// the REAL model child — `claude -p --output-format stream-json` (via [`crate::claude`]) or
+    /// `codex exec` (via [`crate::codex`]) — with its permission posture stated explicitly on its
+    /// OWN argv (the T-057 lesson: consent lives in the context of the call, never inherited).
+    /// Off by default: the round drives the deterministic offline `__fake-agent` stand-in exactly
+    /// as before, so the hermetic tests / CI stay token-free and the fake baseline is unchanged.
+    /// Only the SPAWN TARGET changes — supervision (deadline/drain/tree-kill via [`supervise`]) and
+    /// every transactional mutation (queue-tx/state-tx/outbox, K-006) are identical to fake mode.
+    pub live: bool,
+    /// `CODEX_CODER` maker-routing flag (default `off`). Fed to the [`route_coder`] resolver so a
+    /// LIVE coder/fix leaf is routed to the `codex exec` maker when the operator opts in
+    /// (`--codex-coder`); `off` keeps the leaf on Claude (the sandbox's Claude-only default). Inert
+    /// in fake mode — the offline stand-in is spawned regardless of the routed executor.
+    pub codex_coder: CodexCoder,
+    /// `CODEX_NETWORK` availability, fed to [`route_coder`]'s network gate (default off). Only
+    /// consulted when `codex_coder` routes a live leaf toward Codex.
+    pub codex_network: bool,
     /// Wall-clock bound on one supervised leaf call.
     pub leaf_deadline: Duration,
 }
@@ -186,6 +205,138 @@ impl RunConfig {
     fn outbox(&self) -> PathBuf {
         self.tools.join("outbox.ps1")
     }
+}
+
+// --- leaf spawn: the ONE place the live vs offline switch lives (task T-244) ---------------
+
+/// Which real model backs a LIVE leaf call. Selects how the child's output is read back: a
+/// `claude -p` child speaks stream-json (the `result` event carries the report); a `codex exec`
+/// child streams plain text whose final agent message is the report (both end with the T-111
+/// `ИТОГ:` line — the contract covers the Codex variants too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Executor {
+    Claude,
+    Codex,
+}
+
+/// One supervised leaf invocation, describing BOTH the real child (`program`/`argv`/`stdin`, run
+/// only under `--live`) and the deterministic `__fake-agent` stand-in (`fake_args`, the offline
+/// default). Every leaf call in the run loop routes through this one shape so the two paths can
+/// never diverge in supervision: [`leaf_spec`] picks the spawn target, but the deadline / output
+/// drain / tree-kill always come from the SAME [`supervise::run`], live or offline.
+struct LeafPlan {
+    /// The real child program for a live run (`"claude"` or `"codex"`); ignored offline.
+    program: &'static str,
+    /// The real child argv (the headless `claude`/`codex` command); used only live.
+    argv: Vec<String>,
+    /// The real child's stdin (the codex prompt; empty for claude, whose prompt is on argv).
+    stdin: String,
+    /// How to read the live child's output back.
+    executor: Executor,
+    /// The `__fake-agent` argv (after the engine's own path) for the offline default run.
+    fake_args: Vec<String>,
+}
+
+/// Build the [`SpawnSpec`] for one leaf: the REAL child under `--live`, the deterministic
+/// `__fake-agent` stand-in otherwise. The deadline is identical either way — only the spawn
+/// target differs. Pure and total so the live/offline switch is unit-testable without spawning.
+fn leaf_spec(live: bool, self_exe: &str, deadline: Duration, plan: &LeafPlan) -> SpawnSpec {
+    let spec = if live {
+        SpawnSpec::new(plan.program, plan.argv.clone()).stdin(plan.stdin.clone())
+    } else {
+        SpawnSpec::new(self_exe, plan.fake_args.clone())
+    };
+    spec.deadline(Some(deadline))
+}
+
+/// The Claude model for a coder/fix leaf of the given executor level — the SINGLE source of the
+/// level→model mapping (the live path never re-hardcodes it): `coder_deep` gets Opus, the
+/// shallower levels Sonnet. Keyed off the resolver's typed [`Level`], never re-derived inline.
+fn claude_model_for_level(level: Level) -> &'static str {
+    match level {
+        Level::CoderDeep => "opus",
+        Level::Coder | Level::CoderFast => "sonnet",
+    }
+}
+
+/// The Claude model for a reviewer leaf named by the tiering/re-election resolvers: the cheaper
+/// Sonnet for `reviewer_std`, Opus for the base `reviewer` (the sandbox is Claude-only, so the
+/// name is never `reviewer_codex` at runtime — the mapping stays keyed off the resolver output).
+fn claude_reviewer_model(reviewer_name: &str) -> &'static str {
+    if reviewer_name == "reviewer_std" {
+        "sonnet"
+    } else {
+        "opus"
+    }
+}
+
+/// The explicit tool allowlist for a live Claude leaf working in a hermetic worktree. Enumerated
+/// (`--permission-mode acceptEdits` + `--allowedTools`, not blanket `bypassPermissions`) so the
+/// posture is auditable ON THE CALL'S OWN ARGV — the engine states what the child may do on the
+/// very command it runs, never inheriting consent from a parent context (the T-057 lesson).
+fn leaf_allowed_tools() -> Vec<String> {
+    ["Read", "Edit", "Write", "Bash", "Grep", "Glob"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// The Codex reasoning effort / model for a live Codex maker leaf (mirrors the `coder_codex`
+/// default). Kept as a role constant, not a level mapping — Codex is the opt-in maker accelerator.
+const CODEX_CODER_MODEL: &str = "gpt-5-codex";
+
+/// Route a live coder/fix leaf to its real executor THROUGH the [`route_coder`] resolver
+/// (coder.rs) — never a duplicated inline choice. `off` (the default) keeps it on the Claude
+/// coder of its level with an explicit permission posture on argv; an opted-in `CODEX_CODER`
+/// routes it to the fail-closed `codex exec` maker (prompt on stdin). Pure over its inputs, so the
+/// routing→executor mapping is unit-testable without spawning either child.
+fn plan_coder_executor(
+    codex_coder: CodexCoder,
+    codex_network: bool,
+    level: Level,
+    prompt: &str,
+    worktree: &Path,
+) -> (&'static str, Vec<String>, String, Executor) {
+    let route = route_coder(&CoderRouteInput {
+        codex_coder,
+        level,
+        codex_network,
+        // The sandbox does not parse the descriptor's `Сеть:`/`Экосистема:` or KB pitfalls into the
+        // gate here (mirroring the run loop's existing simplifications); the level×flag stage is
+        // what selects the maker. Absent inputs read as "no extra gate", the pre-T-064 behavior.
+        network: None,
+        kb_pitfall: None,
+    });
+    match route {
+        CoderRoute::Codex => {
+            let mut c = CodexCall::new(
+                worktree.to_string_lossy().into_owned(),
+                Sandbox::WorkspaceWrite,
+            );
+            c.model = Some(CODEX_CODER_MODEL.to_string());
+            // The engine's worktree is a real git worktree in live mode; in a repo-less sandbox the
+            // check would abort, so skip it — the fail-closed `--sandbox`/`approval_policy=never`
+            // contract still holds either way (T-069).
+            c.skip_git_repo_check = true;
+            ("codex", c.to_argv(), prompt.to_string(), Executor::Codex)
+        }
+        CoderRoute::Claude(_) => {
+            let mut c = ClaudeCall::new(prompt.to_string());
+            c.model = Some(claude_model_for_level(level).to_string());
+            c.max_turns = Some(40);
+            c.allowed_tools = leaf_allowed_tools();
+            c.posture = PermissionPosture::Allowlisted;
+            ("claude", c.to_argv(), String::new(), Executor::Claude)
+        }
+    }
+}
+
+/// The distilled body + supervision verdict of one leaf's output.
+struct LeafReport {
+    /// The report text scanned for `ИТОГ:` / `Изменённые файлы:` (contract.rs).
+    text: String,
+    /// Whether the child was supervised cleanly (exit 0, and for a stream-json child no `is_error`).
+    supervised_ok: bool,
 }
 
 /// The outcome of driving one task through the round.
@@ -1034,9 +1185,81 @@ impl<'a> Runner<'a> {
         })
     }
 
-    /// Run ONE task's round: a supervised leaf call (deterministic `__fake-agent` stand-in),
-    /// contract parse, T-105 reviewer-tier decision, a validated descriptor transition, and the
-    /// `task.status_changed` event.
+    // --- leaf spawning (live vs offline) -----------------------------------------------
+
+    /// Supervise ONE leaf, live or offline, through the SAME [`supervise::run`]: [`leaf_spec`]
+    /// picks the spawn target (`--live` → the real `claude`/`codex` child, else the deterministic
+    /// `__fake-agent` stand-in), and the deadline / output drain / tree-kill come from the shared
+    /// supervisor either way — the live and offline paths never diverge in supervision (T-244).
+    fn run_leaf(&self, plan: &LeafPlan) -> supervise::Verdict {
+        let spec = leaf_spec(
+            self.cfg.live,
+            &self.cfg.self_exe,
+            self.cfg.leaf_deadline,
+            plan,
+        );
+        supervise::run(&spec)
+    }
+
+    /// Read one leaf's output back into a [`LeafReport`]. A live Codex child streams plain text
+    /// (its final agent message is the report body, `supervised_ok` == a clean exit); a Claude
+    /// child or the offline stand-in speaks stream-json (the `result` event carries the report and
+    /// an explicit `is_error`). The downstream `parse_outcome`/`parse_changed_files` scanners
+    /// (contract.rs) read the same `ИТОГ:`/`Изменённые файлы:` markers from either body.
+    fn leaf_report(&self, plan: &LeafPlan, v: &supervise::Verdict) -> LeafReport {
+        if self.cfg.live && plan.executor == Executor::Codex {
+            LeafReport {
+                text: v.stdout.clone(),
+                supervised_ok: v.reason == Reason::Ok,
+            }
+        } else {
+            let parsed = crate::claude::parse_transcript(&v.stdout);
+            LeafReport {
+                text: parsed.result_text.unwrap_or_default(),
+                supervised_ok: v.reason == Reason::Ok && parsed.is_error != Some(true),
+            }
+        }
+    }
+
+    /// Build the leaf plan for a coder / R-fix call. The live executor is routed through
+    /// [`route_coder`] (coder.rs) via [`plan_coder_executor`] — Claude by default, the `codex exec`
+    /// maker when `--codex-coder` opts in — while the offline stand-in is always
+    /// `__fake-agent --mode leaf` with the given terminal `verdict`, so the fake baseline is
+    /// unchanged regardless of the routed live executor.
+    fn coder_leaf_plan(&self, id: &str, verdict: &str) -> LeafPlan {
+        let worktree = self.cfg.work.join("worktrees").join(id);
+        let prompt = format!(
+            "Use the coder subagent to implement task {id}. Worktree={} WORK={}",
+            worktree.display(),
+            self.cfg.work.display()
+        );
+        let (program, argv, stdin, executor) = plan_coder_executor(
+            self.cfg.codex_coder,
+            self.cfg.codex_network,
+            Level::Coder,
+            &prompt,
+            &worktree,
+        );
+        LeafPlan {
+            program,
+            argv,
+            stdin,
+            executor,
+            fake_args: vec![
+                "__fake-agent".into(),
+                "--mode".into(),
+                "leaf".into(),
+                "--task".into(),
+                id.to_string(),
+                "--verdict".into(),
+                verdict.to_string(),
+            ],
+        }
+    }
+
+    /// Run ONE task's round: a supervised leaf call (live `claude`/`codex` or the deterministic
+    /// `__fake-agent` stand-in), contract parse, T-105 reviewer-tier decision, a validated
+    /// descriptor transition, and the `task.status_changed` event.
     fn run_one_task(
         &mut self,
         id: &str,
@@ -1048,43 +1271,21 @@ impl<'a> Runner<'a> {
         let level = Level::Coder;
         let reviewer = base_reviewer(self.cfg.reviewer_tiering, level);
 
-        // Build the headless claude argv the engine WOULD spawn for a real leaf call (proving the
-        // claude.rs adapter is on the real path), then spawn the deterministic, offline stand-in
-        // instead — a real `--live` model call is out of scope for this hermetic run.
-        let prompt = format!(
-            "Use the coder subagent to implement task {id}. Worktree={} WORK={}",
-            self.cfg.work.join("worktrees").join(id).display(),
-            self.cfg.work.display()
-        );
-        let mut call = ClaudeCall::new(prompt);
-        call.model = Some("sonnet".into());
-        call.max_turns = Some(40);
-        call.posture = PermissionPosture::BypassInSandbox;
-        let _would_argv = call.to_argv();
-
+        // Build the leaf plan: under `--live` this carries the REAL `claude`/`codex` argv (routed
+        // through the coder.rs resolver), offline the deterministic `__fake-agent --mode leaf`
+        // stand-in. Either way it is supervised by the SAME `supervise::run` (deadline/tree-kill).
         let verdict_arg = if self.cfg.inject_escalate.as_deref() == Some(id) {
             "эскалация"
         } else {
             "готово"
         };
-        let spec = SpawnSpec::new(
-            &self.cfg.self_exe,
-            vec![
-                "__fake-agent".into(),
-                "--mode".into(),
-                "leaf".into(),
-                "--task".into(),
-                id.to_string(),
-                "--verdict".into(),
-                verdict_arg.to_string(),
-            ],
-        )
-        .deadline(Some(self.cfg.leaf_deadline));
-        let v = supervise::run(&spec);
+        let plan = self.coder_leaf_plan(id, verdict_arg);
+        let v = self.run_leaf(&plan);
 
-        // Parse the stream-json transcript, then the leaf's structured report (contract.rs).
-        let parsed = crate::claude::parse_transcript(&v.stdout);
-        let report = parsed.result_text.unwrap_or_default();
+        // Read the leaf's report body (stream-json `result` for claude/stand-in, raw stdout for a
+        // live codex child), then parse its structured markers (contract.rs).
+        let leaf = self.leaf_report(&plan, &v);
+        let report = leaf.text;
         let outcome = parse_outcome(&report);
         let verdict = outcome
             .as_ref()
@@ -1092,8 +1293,7 @@ impl<'a> Runner<'a> {
             .unwrap_or_default();
         let changed_files = parse_changed_files(&report).unwrap_or_default();
 
-        let supervised_ok = v.reason == Reason::Ok && parsed.is_error != Some(true);
-        let to = decide_to_state(supervised_ok, &verdict);
+        let to = decide_to_state(leaf.supervised_ok, &verdict);
 
         // Validate working -> {in-review|escalated} through the state machine, then write it.
         self.check_transition("task", TaskState::Working.as_str(), to.as_str())?;
@@ -1357,11 +1557,13 @@ impl<'a> Runner<'a> {
     }
 
     /// Run ONE supervised reviewer pass over an `in-review` task: take the phase-2.6 freshness mark,
-    /// spawn the deterministic offline reviewer stand-in (`__fake-agent --mode review`, which writes
-    /// the task's `review.md`), and name the [`review_gate`] branch off the parsed `review.md` — the
-    /// terminal `ИТОГ:` line is NOT what decides clean/with-findings. The `inject_findings` task
-    /// yields findings until it converges (`converge_after_cycles`), the deterministic
-    /// "the fix worked at cycle N" (or never) knob.
+    /// spawn the reviewer leaf (live `claude` reviewer of the tier the resolvers named, or the
+    /// deterministic offline `__fake-agent --mode review` stand-in), and name the [`review_gate`]
+    /// branch off the parsed `review.md` — the terminal `ИТОГ:` line is NOT what decides
+    /// clean/with-findings. The `inject_findings` task yields findings until it converges
+    /// (`converge_after_cycles`), the deterministic "the fix worked at cycle N" (or never) knob.
+    /// Robust to a live child that does not speak stream-json: the gate reads `review.md` from
+    /// disk (the real reviewer writes it), and `supervised_ok` only needs a clean exit.
     fn run_review_pass(&self, id: &str, reviewer_name: &str, cycle: u32) -> ReviewPass {
         // The phase-2.6 freshness cutoff: the UTC mark taken JUST BEFORE the reviewer call. A clean
         // `SUMMARY-R` must be newer than this; the clean stand-in stamps its summary one second
@@ -1376,23 +1578,26 @@ impl<'a> Runner<'a> {
                 None => true,
             };
 
-        // Build the headless reviewer `claude` argv the engine WOULD spawn (proving the adapter is
-        // on the real path), then spawn the deterministic, offline reviewer stand-in instead.
+        // The reviewer leaf is Claude (the sandbox is Claude-only); its model comes from the tier
+        // the tiering/re-election resolvers named — never a hard-coded model choice.
         let prompt = format!(
             "Use the {reviewer_name} subagent to review task {id}. Worktree={} WORK={}",
             self.cfg.work.join("worktrees").join(id).display(),
             self.cfg.work.display()
         );
         let mut call = ClaudeCall::new(prompt);
-        call.model = Some("opus".into());
+        call.model = Some(claude_reviewer_model(reviewer_name).to_string());
         call.max_turns = Some(40);
-        call.posture = PermissionPosture::BypassInSandbox;
-        let _would_argv = call.to_argv();
+        call.allowed_tools = leaf_allowed_tools();
+        call.posture = PermissionPosture::Allowlisted;
 
         let outcome_arg = if want_findings { "findings" } else { "clean" };
-        let spec = SpawnSpec::new(
-            &self.cfg.self_exe,
-            vec![
+        let plan = LeafPlan {
+            program: "claude",
+            argv: call.to_argv(),
+            stdin: String::new(),
+            executor: Executor::Claude,
+            fake_args: vec![
                 "__fake-agent".into(),
                 "--mode".into(),
                 "review".into(),
@@ -1405,11 +1610,9 @@ impl<'a> Runner<'a> {
                 "--summary-ts".into(),
                 summary_ts,
             ],
-        )
-        .deadline(Some(self.cfg.leaf_deadline));
-        let v = supervise::run(&spec);
-        let parsed = crate::claude::parse_transcript(&v.stdout);
-        let supervised_ok = v.reason == Reason::Ok && parsed.is_error != Some(true);
+        };
+        let v = self.run_leaf(&plan);
+        let supervised_ok = self.leaf_report(&plan, &v).supervised_ok;
 
         let review_md = fs::read_to_string(self.cfg.work.join("tasks").join(id).join("review.md"))
             .unwrap_or_default();
@@ -1422,43 +1625,19 @@ impl<'a> Runner<'a> {
         }
     }
 
-    /// Run ONE coder-side fix round within the fix cycle: build the headless coder `claude` argv the
-    /// engine WOULD spawn, then supervise the deterministic offline coder stand-in
-    /// (`__fake-agent --mode leaf`, verdict `готово`). Returns whether the fix converged cleanly (a
-    /// supervised, cleanly-`готово` leaf); anything else fail-closes the task, exactly like the
-    /// execution round's [`decide_to_state`].
+    /// Run ONE coder-side fix round within the fix cycle: supervise the coder/fix leaf (live
+    /// `claude`/`codex` routed through [`route_coder`], or the deterministic offline
+    /// `__fake-agent --mode leaf` stand-in, verdict `готово`). Returns whether the fix converged
+    /// cleanly (a supervised, cleanly-`готово` leaf); anything else fail-closes the task, exactly
+    /// like the execution round's [`decide_to_state`].
     fn run_fix_round(&self, id: &str) -> bool {
-        let prompt = format!(
-            "Use the coder subagent to implement task {id}. Worktree={} WORK={}",
-            self.cfg.work.join("worktrees").join(id).display(),
-            self.cfg.work.display()
-        );
-        let mut call = ClaudeCall::new(prompt);
-        call.model = Some("sonnet".into());
-        call.max_turns = Some(40);
-        call.posture = PermissionPosture::BypassInSandbox;
-        let _would_argv = call.to_argv();
-
-        let spec = SpawnSpec::new(
-            &self.cfg.self_exe,
-            vec![
-                "__fake-agent".into(),
-                "--mode".into(),
-                "leaf".into(),
-                "--task".into(),
-                id.to_string(),
-                "--verdict".into(),
-                "готово".into(),
-            ],
-        )
-        .deadline(Some(self.cfg.leaf_deadline));
-        let v = supervise::run(&spec);
-        let parsed = crate::claude::parse_transcript(&v.stdout);
-        let report = parsed.result_text.unwrap_or_default();
-        let verdict = parse_outcome(&report)
+        let plan = self.coder_leaf_plan(id, "готово");
+        let v = self.run_leaf(&plan);
+        let leaf = self.leaf_report(&plan, &v);
+        let verdict = parse_outcome(&leaf.text)
             .map(|o| o.verdict)
             .unwrap_or_default();
-        v.reason == Reason::Ok && parsed.is_error != Some(true) && verdict == "готово"
+        leaf.supervised_ok && verdict == "готово"
     }
 
     /// Validate + write ONE review-cycle descriptor transition (`in-review -> {ready|in-review}`),
@@ -1800,11 +1979,11 @@ impl<'a> Runner<'a> {
         }))
     }
 
-    /// Run ONE supervised merger pass: build the headless `merger` `claude` argv the engine WOULD
-    /// spawn (proving the adapter is on the real path), then spawn the deterministic offline merger
-    /// stand-in (`__fake-agent --mode merge`, which writes `merge_report.md`), and return that
-    /// report's parsed per-task lines. The `inject_merge_conflict` task (if any of the ready set)
-    /// is quarantined by the stand-in — the deterministic "this branch conflicted" knob.
+    /// Run ONE supervised merger pass: supervise the merger leaf (live `claude` merger, or the
+    /// deterministic offline `__fake-agent --mode merge` stand-in, which writes `merge_report.md`),
+    /// and return that report's parsed per-task lines. The `inject_merge_conflict` task (if any of
+    /// the ready set) is quarantined by the stand-in — the deterministic "this branch conflicted"
+    /// knob. The merger is a Claude role; its `merge_report.md` is read from disk either way.
     fn run_merge_round(
         &self,
         ready: &[String],
@@ -1816,12 +1995,12 @@ impl<'a> Runner<'a> {
             self.cfg.work.display()
         );
         let mut call = ClaudeCall::new(prompt);
-        call.model = Some("sonnet".into());
+        call.model = Some("sonnet".to_string());
         call.max_turns = Some(100);
-        call.posture = PermissionPosture::BypassInSandbox;
-        let _would_argv = call.to_argv();
+        call.allowed_tools = leaf_allowed_tools();
+        call.posture = PermissionPosture::Allowlisted;
 
-        let mut args: Vec<String> = vec![
+        let mut fake_args: Vec<String> = vec![
             "__fake-agent".into(),
             "--mode".into(),
             "merge".into(),
@@ -1834,12 +2013,18 @@ impl<'a> Runner<'a> {
         ];
         if let Some(q) = self.cfg.inject_merge_conflict.as_deref() {
             if ready.iter().any(|id| id == q) {
-                args.push("--quarantine".into());
-                args.push(q.to_string());
+                fake_args.push("--quarantine".into());
+                fake_args.push(q.to_string());
             }
         }
-        let spec = SpawnSpec::new(&self.cfg.self_exe, args).deadline(Some(self.cfg.leaf_deadline));
-        let v = supervise::run(&spec);
+        let plan = LeafPlan {
+            program: "claude",
+            argv: call.to_argv(),
+            stdin: String::new(),
+            executor: Executor::Claude,
+            fake_args,
+        };
+        let v = self.run_leaf(&plan);
         let parsed = crate::claude::parse_transcript(&v.stdout);
         if v.reason != Reason::Ok || parsed.is_error == Some(true) {
             return Err(RunError::new(
@@ -1908,10 +2093,12 @@ impl<'a> Runner<'a> {
     }
 
     /// Run ONE supervised `full_reviewer` pass over the integration branch: take the phase-5.2
-    /// freshness mark, spawn the deterministic offline reviewer stand-in
-    /// (`__fake-agent --mode integration-review`, which writes `review_integration.md`), and name
-    /// the [`integration_gate`] branch off the parsed `F-`/`SUMMARY-F`. The `inject_f_findings` knob
-    /// yields findings until it converges (`integration_converge_after`), or never.
+    /// freshness mark, spawn the full_reviewer leaf (live `claude` full_reviewer, or the
+    /// deterministic offline `__fake-agent --mode integration-review` stand-in, which writes
+    /// `review_integration.md`), and name the [`integration_gate`] branch off the parsed
+    /// `F-`/`SUMMARY-F`. The `inject_f_findings` knob yields findings until it converges
+    /// (`integration_converge_after`), or never. The `full_reviewer` is a Claude role; its
+    /// `review_integration.md` is read from disk either way.
     fn run_integration_review_pass(&self, cycle: u32) -> IntegrationPass {
         let since = now_utc_iso();
         let summary_ts = epoch_to_iso(now_epoch_secs() + 1);
@@ -1928,15 +2115,18 @@ impl<'a> Runner<'a> {
             self.cfg.work.display()
         );
         let mut call = ClaudeCall::new(prompt);
-        call.model = Some("opus".into());
+        call.model = Some("opus".to_string());
         call.max_turns = Some(40);
-        call.posture = PermissionPosture::BypassInSandbox;
-        let _would_argv = call.to_argv();
+        call.allowed_tools = leaf_allowed_tools();
+        call.posture = PermissionPosture::Allowlisted;
 
         let outcome_arg = if want_findings { "findings" } else { "clean" };
-        let spec = SpawnSpec::new(
-            &self.cfg.self_exe,
-            vec![
+        let plan = LeafPlan {
+            program: "claude",
+            argv: call.to_argv(),
+            stdin: String::new(),
+            executor: Executor::Claude,
+            fake_args: vec![
                 "__fake-agent".into(),
                 "--mode".into(),
                 "integration-review".into(),
@@ -1947,11 +2137,9 @@ impl<'a> Runner<'a> {
                 "--summary-ts".into(),
                 summary_ts,
             ],
-        )
-        .deadline(Some(self.cfg.leaf_deadline));
-        let v = supervise::run(&spec);
-        let parsed = crate::claude::parse_transcript(&v.stdout);
-        let supervised_ok = v.reason == Reason::Ok && parsed.is_error != Some(true);
+        };
+        let v = self.run_leaf(&plan);
+        let supervised_ok = self.leaf_report(&plan, &v).supervised_ok;
 
         let review_md =
             fs::read_to_string(self.cfg.work.join("review_integration.md")).unwrap_or_default();
@@ -2205,6 +2393,114 @@ mod tests {
             route_reviewer_name(Augment(BaseReviewer::Reviewer)),
             "reviewer"
         );
+    }
+
+    // --- live mode (task T-244) --------------------------------------------------------
+
+    #[test]
+    fn leaf_spec_selects_live_vs_offline_target() {
+        // A leaf plan carrying BOTH the real child argv and the offline stand-in argv.
+        let plan = LeafPlan {
+            program: "claude",
+            argv: vec!["-p".into(), "do the task".into(), "--verbose".into()],
+            stdin: String::new(),
+            executor: Executor::Claude,
+            fake_args: vec!["__fake-agent".into(), "--mode".into(), "leaf".into()],
+        };
+        // Offline default: spawn THIS engine binary as the deterministic `__fake-agent` stand-in.
+        let offline = leaf_spec(false, "/path/to/engine", Duration::from_secs(1), &plan);
+        assert_eq!(offline.program, "/path/to/engine");
+        assert_eq!(
+            offline.args.first().map(String::as_str),
+            Some("__fake-agent")
+        );
+        // Live: spawn the REAL child with the built argv (never the engine's own path).
+        let live = leaf_spec(true, "/path/to/engine", Duration::from_secs(1), &plan);
+        assert_eq!(live.program, "claude");
+        assert_eq!(live.args, plan.argv);
+    }
+
+    #[test]
+    fn leaf_spec_carries_codex_prompt_on_stdin_when_live() {
+        let plan = LeafPlan {
+            program: "codex",
+            argv: vec!["exec".into(), "-".into()],
+            stdin: "implement T-1".into(),
+            executor: Executor::Codex,
+            fake_args: vec!["__fake-agent".into(), "--mode".into(), "leaf".into()],
+        };
+        // Live codex: the prompt rides stdin (never a shell fragment).
+        let live = leaf_spec(true, "/engine", Duration::from_secs(1), &plan);
+        assert_eq!(live.program, "codex");
+        assert_eq!(live.stdin, "implement T-1");
+        // Offline: the codex prompt is irrelevant — the stand-in gets no stdin.
+        let offline = leaf_spec(false, "/engine", Duration::from_secs(1), &plan);
+        assert!(offline.stdin.is_empty());
+        assert_eq!(offline.program, "/engine");
+    }
+
+    #[test]
+    fn coder_executor_routes_through_route_coder_with_explicit_posture() {
+        let wt = Path::new("/abs/worktree/T-1");
+        // Default `off` → the Claude coder of the level, with the permission posture stated
+        // EXPLICITLY on argv (`--permission-mode` + an enumerated `--allowedTools`), never inherited.
+        let (prog, argv, stdin, ex) =
+            plan_coder_executor(CodexCoder::Off, false, Level::Coder, "implement T-1", wt);
+        assert_eq!(prog, "claude");
+        assert_eq!(ex, Executor::Claude);
+        assert!(stdin.is_empty(), "claude's prompt is on argv, not stdin");
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "acceptEdits"),
+            "explicit permission mode on the call's own argv (T-057): {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|s| s == "--allowedTools"),
+            "explicit tool allowlist on argv: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|s| s == "implement T-1"),
+            "the prompt is passed as an argv element: {argv:?}"
+        );
+
+        // Opted-in `fast+std` at `coder` level → the fail-closed `codex exec` maker, prompt on stdin.
+        let (prog, argv, stdin, ex) = plan_coder_executor(
+            CodexCoder::FastStd,
+            false,
+            Level::Coder,
+            "implement T-1",
+            wt,
+        );
+        assert_eq!(prog, "codex");
+        assert_eq!(ex, Executor::Codex);
+        assert_eq!(stdin, "implement T-1", "codex reads the prompt from stdin");
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-c" && w[1] == "approval_policy=never"),
+            "the fail-closed approval policy is pinned on argv (T-069): {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--sandbox" && w[1] == "workspace-write"),
+            "an explicit sandbox is on argv: {argv:?}"
+        );
+
+        // `coder_deep` is always Claude even under an opted-in flag (the resolver's stage-1 rule).
+        let (prog, _argv, _stdin, ex) =
+            plan_coder_executor(CodexCoder::FastStd, false, Level::CoderDeep, "x", wt);
+        assert_eq!(prog, "claude");
+        assert_eq!(ex, Executor::Claude);
+    }
+
+    #[test]
+    fn claude_models_key_off_the_resolved_tier() {
+        // Level → model (single source; coder_deep is Opus, the shallower levels Sonnet).
+        assert_eq!(claude_model_for_level(Level::CoderDeep), "opus");
+        assert_eq!(claude_model_for_level(Level::Coder), "sonnet");
+        assert_eq!(claude_model_for_level(Level::CoderFast), "sonnet");
+        // Reviewer tier → model (keyed off the tiering resolver's name).
+        assert_eq!(claude_reviewer_model("reviewer_std"), "sonnet");
+        assert_eq!(claude_reviewer_model("reviewer"), "opus");
     }
 
     #[test]
