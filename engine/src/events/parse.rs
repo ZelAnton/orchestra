@@ -295,6 +295,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_usage_recorded() {
+        let line = r#"{"schema_version":1,"event_id":"739b5bde-c58b-51d8-b46f-d5c10f15e214","occurred_at":"2026-07-17T10:00:00Z","type":"usage.recorded","batch_id":"B-20260717T095500Z","task_id":"T-258","actor":{"kind":"tool","name":"codex"},"payload":{"task_id":"T-258","role":"coder","mode":"full","attempt_number":1,"source":"codex","model":"gpt-5-codex","input_tokens":1200,"output_tokens":450,"cache_read_input_tokens":300,"cache_creation_input_tokens":0,"total_tokens":1950,"estimated":false}}"#;
+        let ev = parse_line(line).expect("valid");
+        assert_eq!(ev.event_type, EventType::UsageRecorded);
+    }
+
+    #[test]
     fn all_known_types_parse() {
         for t in [
             "cohort.opened",
@@ -307,6 +314,7 @@ mod tests {
             "task.captured",
             "task.status_changed",
             "codex.attempt",
+            "usage.recorded",
         ] {
             let line = format!(
                 r#"{{"schema_version":1,"event_id":"e-1","occurred_at":"2026-07-08T12:24:10Z","type":"{t}","actor":{{"kind":"agent","name":"processor"}},"payload":{{}}}}"#
