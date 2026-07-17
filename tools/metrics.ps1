@@ -71,6 +71,7 @@ function New-Batch {
         Id=$Id; Start=$null; End=$null; LastSeen=$null; Tasks=@{}; R=@{}; F=$null; CI=$null
         Escalated=@{}; Quarantined=@{}; Interrupted=$false; Recovered=$false
         Tokens=0.0; TokenObserved=$false; CostUsd=0.0; CostObserved=$false
+        EstimatedTokens=0.0; EstimatedTokenObserved=$false
         JournalTaskCount=$null; JournalEscalated=$null; JournalQuarantined=$null
         SourceEvents=$false; SourceJournal=$false
     }
@@ -162,7 +163,14 @@ function Add-Usage {
             if ($found) { $total = $sum }
         }
     }
-    if ($null -ne $total) { $Batch.Tokens += $total; $Batch.TokenObserved = $true }
+    # T-248: a usage.recorded (or any) event may mark its counts `estimated`. An estimate is a
+    # heuristic, never a provider-exact figure, so it is routed to a SEPARATE bucket and never
+    # summed into the actual-token total (plans/OBSERVABILITY_PLATFORM_PLAN.md §8).
+    $isEstimated = ((Get-Prop $payload 'estimated') -eq $true)
+    if ($null -ne $total) {
+        if ($isEstimated) { $Batch.EstimatedTokens += $total; $Batch.EstimatedTokenObserved = $true }
+        else { $Batch.Tokens += $total; $Batch.TokenObserved = $true }
+    }
     $cost = Get-EventNumber $Event @('cost_usd','usd_cost','total_cost_usd')
     if ($null -ne $cost) { $Batch.CostUsd += $cost; $Batch.CostObserved = $true }
 }
@@ -336,6 +344,7 @@ function Cmd-Aggregate {
     $rValues=@(); $fValues=@(); $ciValues=@(); $leadValues=@()
     $taskTotal=0; $escalatedTotal=0; $quarantinedTotal=0
     $interrupted=0; $recovered=0; $tokens=0.0; $tokenObserved=$false; $costUsd=0.0; $costObserved=$false
+    $estTokens=0.0; $estTokenObserved=$false
     foreach ($batch in $selected) {
         foreach ($taskId in $batch.Tasks.Keys) {
             $task=$batch.Tasks[$taskId]
@@ -348,12 +357,14 @@ function Cmd-Aggregate {
         $batchQuarantined=$batch.Quarantined.Count; if ($null -ne $batch.JournalQuarantined) { $batchQuarantined=[Math]::Max($batchQuarantined,$batch.JournalQuarantined) }; $quarantinedTotal += $batchQuarantined
         if ($batch.Interrupted) { $interrupted++; if ($batch.Recovered) { $recovered++ } }
         if ($batch.TokenObserved) { $tokens += $batch.Tokens; $tokenObserved=$true }
+        if ($batch.EstimatedTokenObserved) { $estTokens += $batch.EstimatedTokens; $estTokenObserved=$true }
         if ($batch.CostObserved) { $costUsd += $batch.CostUsd; $costObserved=$true }
     }
     $completedTasks=@($selected | ForEach-Object { $_.Tasks.Values } | Where-Object { $null -ne $_.Verified }).Count
     if ($completedTasks -eq 0) { $completedTasks=$taskTotal-$escalatedTotal-$quarantinedTotal; if ($completedTasks -lt 0) { $completedTasks=0 } }
     $rStat=Get-Stat $rValues; $fStat=Get-Stat $fValues; $ciStat=Get-Stat $ciValues; $leadStat=Get-Stat $leadValues
     $tokensPerTask=if ($tokenObserved -and $completedTasks -gt 0) { [Math]::Round($tokens/$completedTasks,2) } else { $null }
+    $estTokensPerTask=if ($estTokenObserved -and $completedTasks -gt 0) { [Math]::Round($estTokens/$completedTasks,2) } else { $null }
     $costPerTask=if ($costObserved -and $completedTasks -gt 0) { [Math]::Round($costUsd/$completedTasks,4) } else { $null }
 
     $result=[ordered]@{
@@ -362,7 +373,7 @@ function Cmd-Aggregate {
         escalation=[ordered]@{ tasks=$escalatedTotal; total_tasks=$taskTotal; share=if ($taskTotal -gt 0) { [Math]::Round($escalatedTotal/[double]$taskTotal,4) } else { $null } }
         quarantine=[ordered]@{ tasks=$quarantinedTotal; total_tasks=$taskTotal; share=if ($taskTotal -gt 0) { [Math]::Round($quarantinedTotal/[double]$taskTotal,4) } else { $null } }
         recovery=if ($interrupted -gt 0) { [ordered]@{ interruptions=$interrupted; recovered=$recovered; success_share=[Math]::Round($recovered/[double]$interrupted,4) } } else { $null }
-        cost_per_completed_task=[ordered]@{ completed_tasks=$completedTasks; tokens=$tokensPerTask; usd=$costPerTask; available=($null -ne $tokensPerTask -or $null -ne $costPerTask) }
+        cost_per_completed_task=[ordered]@{ completed_tasks=$completedTasks; tokens=$tokensPerTask; estimated_tokens=$estTokensPerTask; usd=$costPerTask; available=($null -ne $tokensPerTask -or $null -ne $costPerTask) }
         sources=[ordered]@{ events_status=$eventsStatus; event_count=$stream.Events.Count; journal_present=[bool]$journalPresent; skipped_jsonl_lines=$stream.Invalid }
     }
     if ([bool](Opt 'json' $false)) { Write-Output ($result | ConvertTo-Json -Depth 10 -Compress); return }
@@ -376,7 +387,7 @@ function Cmd-Aggregate {
     Write-Output "| Эскалации | $escalatedTotal / $taskTotal | — | $(Format-Percent $escalatedTotal $taskTotal) |"
     Write-Output "| Карантины | $quarantinedTotal / $taskTotal | — | $(Format-Percent $quarantinedTotal $taskTotal) |"
     Write-Output "| Recovery после прерывания | $(if ($interrupted -gt 0) {"$recovered / $interrupted"} else {'недоступно'}) | — | $(if ($interrupted -gt 0) {Format-Percent $recovered $interrupted} else {'недоступно'}) |"
-    $costText=if ($null -ne $tokensPerTask) { "$(Format-Number $tokensPerTask) tokens/task" } elseif ($null -ne $costPerTask) { '$'+(Format-Number $costPerTask)+'/task' } else { 'недоступно' }
+    $costText=if ($null -ne $tokensPerTask) { "$(Format-Number $tokensPerTask) tokens/task" } elseif ($null -ne $costPerTask) { '$'+(Format-Number $costPerTask)+'/task' } elseif ($null -ne $estTokensPerTask) { "~$(Format-Number $estTokensPerTask) tokens/task (оценка)" } else { 'недоступно' }
     Write-Output "| Стоимость на завершённую задачу | $completedTasks | $costText | — |"
     if ($eventsStatus -eq 'missing') { Write-Output 'Диагностика: events.jsonl отсутствует; доступны только fallback-поля journal.md.' }
     elseif ($eventsStatus -eq 'empty') { Write-Output 'Диагностика: events.jsonl пуст; доступны только fallback-поля journal.md.' }

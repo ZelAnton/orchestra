@@ -108,13 +108,31 @@ $script:KnownActorKinds = @('agent', 'human', 'tool')
 $script:KnownTypes = @(
     'cohort.opened', 'cohort.round_started', 'cohort.round_closed', 'cohort.admission_closed',
     'cohort.join_started', 'cohort.published', 'cohort.closed',
-    'task.captured', 'task.status_changed', 'codex.attempt'
+    'task.captured', 'task.status_changed', 'codex.attempt', 'usage.recorded'
 )
 # codex.attempt payload is a strict scalar allowlist (privacy: no prompt/diff/paths/secrets).
 $script:CodexAttemptKeys = @(
     'task_id', 'role', 'mode', 'attempt_number', 'started_at', 'ended_at', 'duration_ms',
     'effective_model', 'effective_reasoning', 'effective_sandbox', 'effective_network',
     'exit_code', 'outcome', 'outcome_reason'
+)
+# usage.recorded payload is a strict SCALAR allowlist (T-248): per-model-call token usage,
+# uniformly for both a headless `claude -p --output-format stream-json` result event and a
+# `codex exec` token count. Same privacy posture as codex.attempt - no prompt/diff/paths/
+# secrets, only non-sensitive integer counts, a source/role/mode label and the estimated flag.
+# `estimated` marks a heuristic (never-exact) figure so a consumer never mixes it with actual
+# usage (plans/OBSERVABILITY_PLATFORM_PLAN.md §8). The reader tolerates future unknown payload
+# keys (it only allowlists on WRITE), so a later field never breaks an already-written line.
+$script:UsageRecordedKeys = @(
+    'task_id', 'role', 'mode', 'attempt_number', 'source', 'model',
+    'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens',
+    'total_tokens', 'estimated'
+)
+# usage.recorded token/count fields that, WHEN PRESENT and non-null, must be non-negative
+# integers (a scalar-shape write guard; null = "unknown for this call", which stays allowed).
+$script:UsageIntKeys = @(
+    'attempt_number', 'input_tokens', 'output_tokens', 'cache_read_input_tokens',
+    'cache_creation_input_tokens', 'total_tokens'
 )
 $script:UuidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 # The pre-T-089 no-generator fallback id shape (kept read-compatible so old lines validate).
@@ -201,6 +219,21 @@ function Get-CanonicalName {
             $an = [string](Require-Opt 'attempt-number')
             if ($an -notmatch '^\d+$') { Fail 2 "--attempt-number must be a non-negative integer" }
             return "orchestra/$Type/$t/$role/$mode/$an"
+        }
+        '^usage\.recorded$' {
+            # Per-model-call usage keyed by the CALL identity (T-248). `source` (claude|codex)
+            # is a key coordinate so a codex attempt and its Claude fallback for the SAME
+            # (task,role,mode,attempt) stay two distinct usage facts (the fallback is a separate
+            # model call), rather than colliding on one event_id. All coordinates are durably
+            # reconstructable (same reservation as codex.attempt for codex; the processor supplies
+            # role/attempt for a Claude call), so a crash/replay rebuilds the same id and dedups.
+            $src = Require-Opt 'source'
+            $t = Require-Opt 'task-id'
+            $role = Require-Opt 'role'
+            $mode = Require-Opt 'mode'
+            $an = [string](Require-Opt 'attempt-number')
+            if ($an -notmatch '^\d+$') { Fail 2 "--attempt-number must be a non-negative integer" }
+            return "orchestra/$Type/$src/$t/$role/$mode/$an"
         }
         default { Fail 2 "unknown --type '$Type' (valid: $($script:KnownTypes -join ', '))" }
     }
@@ -342,6 +375,25 @@ function Test-Envelope {
         if ([string]$Obj.type -eq 'codex.attempt') {
             foreach ($k in $payload.PSObject.Properties.Name) {
                 if ($script:CodexAttemptKeys -notcontains $k) { return "codex.attempt payload key '$k' is not in the privacy allowlist" }
+            }
+        }
+        if ([string]$Obj.type -eq 'usage.recorded') {
+            foreach ($k in $payload.PSObject.Properties.Name) {
+                if ($script:UsageRecordedKeys -notcontains $k) { return "usage.recorded payload key '$k' is not in the privacy allowlist" }
+            }
+            # Scalar-shape guard: token/count fields, when present and non-null, are non-negative
+            # integers; `estimated`, when present, is a boolean. This keeps the allowlist strictly
+            # scalar (no nested object smuggled through a token field) without rejecting a null
+            # ("unknown for this call") value.
+            foreach ($k in $script:UsageIntKeys) {
+                if (Has-Prop $payload $k) {
+                    $val = $payload.$k
+                    if ($null -ne $val -and ([string]$val -notmatch '^\d+$')) { return "usage.recorded payload key '$k' must be a non-negative integer or null" }
+                }
+            }
+            if (Has-Prop $payload 'estimated') {
+                $est = $payload.estimated
+                if ($null -ne $est -and $est -isnot [bool]) { return "usage.recorded payload key 'estimated' must be a boolean" }
             }
         }
     }
@@ -645,9 +697,14 @@ function Cmd-Read {
 }
 
 # ==========================================================================
-# metrics : phase / critical-path duration projection over the deduped stream.
-# All figures are timestamps / integer durations only - no sensitive payload data.
+# metrics : phase / critical-path duration projection over the deduped stream, plus a
+# usage.recorded token projection (T-248). All figures are timestamps / integer durations /
+# integer token counts only - no sensitive payload data. ACTUAL and ESTIMATED usage are
+# reported in separate buckets and never summed together (OBSERVABILITY_PLATFORM_PLAN §8).
 # ==========================================================================
+# Read a usage.recorded payload count field as a non-negative int (absent / non-integer -> 0).
+function Get-UsageInt { param($Pl, [string]$Name) if ((Has-Prop $Pl $Name) -and ([string]$Pl.$Name -match '^\d+$')) { return [int]$Pl.$Name } else { return 0 } }
+
 function Cmd-Metrics {
     $paths = Resolve-Paths
     $ob = Read-Outbox $paths.Events 'read'
@@ -660,6 +717,12 @@ function Cmd-Metrics {
     $roundDur = New-Object System.Collections.Generic.List[object]
     $taskCaptured = @{} # task_id -> earliest occurred_at
     $taskDone = @{}     # task_id -> occurred_at of status_changed to выполнена
+    # usage.recorded aggregation (T-248). ACTUAL and ESTIMATED are summed into SEPARATE buckets
+    # and never merged into one figure (plans/OBSERVABILITY_PLATFORM_PLAN.md §8): a heuristic
+    # estimate must never be presented as, or added to, a provider-exact count.
+    $usageActual = [ordered]@{ n = 0; input_tokens = 0; output_tokens = 0; cache_read_input_tokens = 0; cache_creation_input_tokens = 0; total_tokens = 0 }
+    $usageEstimated = [ordered]@{ n = 0; total_tokens = 0 }
+    $usageBySource = @{}   # source -> @{ actual_total_tokens; estimated_total_tokens; n }
 
     foreach ($e in $events) {
         $type = [string]$e.type
@@ -690,6 +753,31 @@ function Cmd-Metrics {
                 $to = if (Has-Prop $pl 'to') { [string]$pl.to } else { '' }
                 if ($t -and $to -eq 'выполнена') { $taskDone[$t] = $e.occurred_at }
             }
+            'usage.recorded' {
+                $isEst = ((Has-Prop $pl 'estimated') -and ($pl.estimated -eq $true))
+                $inTok = Get-UsageInt $pl 'input_tokens'
+                $outTok = Get-UsageInt $pl 'output_tokens'
+                $cRead = Get-UsageInt $pl 'cache_read_input_tokens'
+                $cCreate = Get-UsageInt $pl 'cache_creation_input_tokens'
+                # total: an explicit total_tokens wins; otherwise the sum of known components.
+                $tot = if ((Has-Prop $pl 'total_tokens') -and ([string]$pl.total_tokens -match '^\d+$')) { [int]$pl.total_tokens } else { $inTok + $outTok + $cRead + $cCreate }
+                $src = if (Has-Prop $pl 'source') { [string]$pl.source } else { 'unknown' }
+                if (-not $usageBySource.ContainsKey($src)) { $usageBySource[$src] = [ordered]@{ actual_total_tokens = 0; estimated_total_tokens = 0; n = 0 } }
+                $usageBySource[$src].n = $usageBySource[$src].n + 1
+                if ($isEst) {
+                    $usageEstimated.n = $usageEstimated.n + 1
+                    $usageEstimated.total_tokens = $usageEstimated.total_tokens + $tot
+                    $usageBySource[$src].estimated_total_tokens = $usageBySource[$src].estimated_total_tokens + $tot
+                } else {
+                    $usageActual.n = $usageActual.n + 1
+                    $usageActual.input_tokens = $usageActual.input_tokens + $inTok
+                    $usageActual.output_tokens = $usageActual.output_tokens + $outTok
+                    $usageActual.cache_read_input_tokens = $usageActual.cache_read_input_tokens + $cRead
+                    $usageActual.cache_creation_input_tokens = $usageActual.cache_creation_input_tokens + $cCreate
+                    $usageActual.total_tokens = $usageActual.total_tokens + $tot
+                    $usageBySource[$src].actual_total_tokens = $usageBySource[$src].actual_total_tokens + $tot
+                }
+            }
         }
     }
 
@@ -708,17 +796,24 @@ function Cmd-Metrics {
         return [ordered]@{ n = $List.Count; total_ms = $sum; min_ms = $min; max_ms = $max; avg_ms = [int]($sum / $List.Count) }
     }
 
+    $usage = [ordered]@{
+        actual    = $usageActual
+        estimated = $usageEstimated
+        by_source = $usageBySource
+    }
+
     $out = [ordered]@{
         total_events   = $events.Count
         type_counts    = $typeCounts
         codex_attempt  = (Stat $codexDur)
         round_durations = $roundDur
         critical_paths = $critical
+        usage          = $usage
     }
     if ([bool](Opt 'json' $false)) {
         Write-Output ($out | ConvertTo-Json -Depth 8 -Compress)
     } else {
-        Write-Output "metrics: events=$($events.Count) codex.attempt(n=$($out.codex_attempt.n) avg_ms=$($out.codex_attempt.avg_ms)) rounds=$($roundDur.Count) critical_paths=$($critical.Count)"
+        Write-Output "metrics: events=$($events.Count) codex.attempt(n=$($out.codex_attempt.n) avg_ms=$($out.codex_attempt.avg_ms)) rounds=$($roundDur.Count) critical_paths=$($critical.Count) usage(actual_tokens=$($usageActual.total_tokens) n=$($usageActual.n); estimated_tokens=$($usageEstimated.total_tokens) n=$($usageEstimated.n))"
     }
 }
 

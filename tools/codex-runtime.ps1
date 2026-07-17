@@ -38,7 +38,11 @@
                         `thread_id` as `threadId` in the result - the ONLY supported way to
                         capture a session id for a later `resume-image` call (never guess
                         or reuse a stale one). Omitted (default), the call is byte-for-byte
-                        identical to before T-222.
+                        identical to before T-222. The result also carries a best-effort
+                        `usage` block (T-248): per-call token counts parsed ACTUAL from the
+                        `--json` stream's `turn.completed` usage, or a chars/4 estimate marked
+                        `estimated:true` when no structured usage is present. Best-effort - a
+                        parse miss just omits the block, never changing the exit code.
       resume-image      T-222: continue a session captured via `run --emit-json` and
                         attach an image to the follow-up prompt, so a vision-capable codex
                         model can actually inspect a file the FIRST call could only create
@@ -674,6 +678,79 @@ function Get-WorkingCopyStatus {
     }
 }
 
+# --------------------------------------------------------------------------
+# Per-call token usage capture (T-248). Best-effort, never affects control flow: a
+# parse miss just yields $null (no usage block), exactly like the rest of the telemetry.
+#
+# EXACT path: `codex exec --json` (opt-in via --emit-json) emits a JSONL event stream on
+# stdout; the token usage rides a `turn.completed` event's `usage` object. `codex exec` is
+# non-interactive (a single turn), but summing across every usage-bearing event stays correct
+# if a future codex run emits more than one. When such structured usage is found it is ACTUAL
+# (estimated=$false).
+#
+# ESTIMATE path: when the run carried no `--json` stream (or none of it carried usage), no
+# provider-exact count exists. Rather than drop usage entirely, a coarse chars/4 heuristic over
+# the prompt (input) and codex's final -o message (output) is returned, EXPLICITLY marked
+# estimated=$true so a consumer never mixes it with an actual count
+# (plans/OBSERVABILITY_PLATFORM_PLAN.md §8). No structured breakdown is fabricated for an
+# estimate beyond the chars/4 input/output split.
+# --------------------------------------------------------------------------
+function Read-UsageField {
+    param($UsageObj, [string[]]$Names)
+    foreach ($n in $Names) {
+        if ($UsageObj.PSObject.Properties.Name -contains $n) {
+            $v = $UsageObj.$n
+            if ($null -ne $v -and ([string]$v -match '^\d+$')) { return [int]$v }
+        }
+    }
+    return 0
+}
+function Get-CodexUsage {
+    param([string]$StdoutText, [string]$PromptText, [string]$OutFileText)
+    if ($null -eq $StdoutText) { $StdoutText = '' }
+    if ($null -eq $PromptText) { $PromptText = '' }
+    if ($null -eq $OutFileText) { $OutFileText = '' }
+
+    $inTok = 0; $outTok = 0; $cacheTok = 0; $found = $false
+    foreach ($line in ($StdoutText -split "`n")) {
+        $t = $line.Trim()
+        if (-not $t.StartsWith('{')) { continue }
+        $ev = $null
+        try { $ev = $t | ConvertFrom-Json } catch { continue }
+        if ($null -eq $ev) { continue }
+        $u = $null
+        if ($ev.PSObject.Properties.Name -contains 'usage') { $u = $ev.usage }
+        elseif ($ev.PSObject.Properties.Name -contains 'token_usage') { $u = $ev.token_usage }
+        if ($null -eq $u -or $u -isnot [System.Management.Automation.PSCustomObject]) { continue }
+        $found = $true
+        $inTok += (Read-UsageField $u @('input_tokens', 'prompt_tokens', 'input'))
+        $outTok += (Read-UsageField $u @('output_tokens', 'completion_tokens', 'output'))
+        $cacheTok += (Read-UsageField $u @('cached_input_tokens', 'cache_read_input_tokens', 'cache_read'))
+    }
+    if ($found) {
+        return [pscustomobject]@{
+            source                      = 'codex'
+            estimated                   = $false
+            input_tokens                = $inTok
+            output_tokens               = $outTok
+            cache_read_input_tokens     = $cacheTok
+            total_tokens                = ($inTok + $outTok + $cacheTok)
+        }
+    }
+    # No structured usage: coarse chars/4 estimate, explicitly marked.
+    $estIn = [int][math]::Ceiling($PromptText.Length / 4.0)
+    $estOut = [int][math]::Ceiling($OutFileText.Length / 4.0)
+    if ($estIn -eq 0 -and $estOut -eq 0) { return $null }
+    return [pscustomobject]@{
+        source                      = 'codex'
+        estimated                   = $true
+        input_tokens                = $estIn
+        output_tokens               = $estOut
+        cache_read_input_tokens     = 0
+        total_tokens                = ($estIn + $estOut)
+    }
+}
+
 # ==========================================================================
 # Commands
 # ==========================================================================
@@ -899,6 +976,12 @@ function Cmd-Run {
         $sentinel = Get-Sentinel -Kind 'failed' -Class $fc.class -Detail 'environment limit'
     }
 
+    # T-248: best-effort per-call token usage (ACTUAL from a --json stream, else a marked
+    # estimate). Surfaced as a scalar `usage` block the processor lifts into a usage.recorded
+    # event; a $null (nothing to parse/estimate) simply omits the block. Never affects control
+    # flow or the exit code.
+    $usage = Get-CodexUsage $res.StdOut $prompt (Read-TextOrEmpty ([string](Opt 'out-file' '')))
+
     $result = [pscustomobject]@{
         ok           = ($res.ExitCode -eq 0 -and -not $res.TimedOut)
         stage        = 'run'
@@ -913,6 +996,7 @@ function Cmd-Run {
         broker       = $fc.broker
         sentinel     = $sentinel
         threadId     = $threadId
+        usage        = $usage
     }
     $resultFile = [string](Opt 'result-file' '')
     if ($resultFile) { Write-TextNoBom $resultFile ($result | ConvertTo-Json -Depth 12) }
@@ -998,6 +1082,9 @@ function Cmd-ResumeImage {
         $sentinel = Get-Sentinel -Kind 'failed' -Class $fc.class -Detail 'environment limit'
     }
 
+    # T-248: same best-effort usage capture as `run` (a resume turn is a model call too).
+    $usage = Get-CodexUsage $res.StdOut $prompt (Read-TextOrEmpty $outFile)
+
     $result = [pscustomobject]@{
         ok           = ($res.ExitCode -eq 0 -and -not $res.TimedOut)
         stage        = 'resume-image'
@@ -1013,6 +1100,7 @@ function Cmd-ResumeImage {
         envLimit     = $fc.envLimit
         broker       = $fc.broker
         sentinel     = $sentinel
+        usage        = $usage
     }
     $resultFile = [string](Opt 'result-file' '')
     if ($resultFile) { Write-TextNoBom $resultFile ($result | ConvertTo-Json -Depth 12) }

@@ -414,6 +414,68 @@ function Ref-UuidV5 {
 }.Invoke()
 
 # =============================================================================
+# 12. usage.recorded (T-248): dedup key (source is a coordinate), strict scalar
+#     allowlist + shape guard on write, forward-lenient read, metrics split of
+#     ACTUAL vs ESTIMATED tokens by source.
+# =============================================================================
+{
+    # dedup key: source distinguishes a codex attempt from its Claude fallback for the
+    # SAME (task,role,mode,attempt); the id is a standard UUIDv5 over the canonical name.
+    $u1 = Outbox-Id @('--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    $u2 = Outbox-Id @('--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    Assert-True ($u1 -ne $u2) 'usage.recorded source is a dedup-key coordinate (codex vs claude are distinct facts)'
+    Assert-Equal (Ref-UuidV5 'orchestra/usage.recorded/codex/T-1/coder/full/1') $u1 'usage.recorded event-id is standard UUIDv5 over its canonical name'
+
+    $dir = New-TempDir; $ev = New-EventsFile $dir
+    $payload = '{"task_id":"T-1","role":"coder","mode":"full","attempt_number":1,"source":"codex","model":"default","input_tokens":1200,"output_tokens":450,"cache_read_input_tokens":300,"cache_creation_input_tokens":0,"total_tokens":1950,"estimated":false}'
+    $a1 = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', $payload)
+    Assert-Exit $a1 0 'usage.recorded actual usage appends'
+    $a2 = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', $payload)
+    Assert-Contains $a2.Out 'skipped-duplicate' 'usage.recorded replay dedups by event_id'
+    Assert-Equal 1 (Line-Count $ev) 'usage.recorded replay leaves exactly one line'
+
+    # non-allowlisted payload key rejected on write (privacy, like codex.attempt).
+    $bad = Invoke-Outbox @('append', '--events', $ev, '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"prompt":"secret","total_tokens":5}')
+    Assert-Exit $bad 5 'usage.recorded non-allowlisted key rejected'
+    Assert-Contains $bad.Err 'allowlist' 'usage.recorded rejection cites the privacy allowlist'
+
+    # scalar-shape guard: non-integer token / non-boolean estimated rejected; null is allowed.
+    $nonInt = Invoke-Outbox @('append', '--events', $ev, '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"total_tokens":"lots"}')
+    Assert-Exit $nonInt 5 'usage.recorded non-integer token rejected'
+    $badEst = Invoke-Outbox @('append', '--events', $ev, '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"total_tokens":5,"estimated":"yes"}')
+    Assert-Exit $badEst 5 'usage.recorded non-boolean estimated rejected'
+    $nullTok = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-2', '--role', 'reviewer', '--mode', 'full', '--attempt-number', '1', '--payload', '{"source":"claude","input_tokens":null,"total_tokens":800,"estimated":true}')
+    Assert-Exit $nullTok 0 'usage.recorded null token field ("unknown for this call") is allowed'
+
+    # forward-lenient read: a usage.recorded line with a FUTURE unknown payload key reads valid
+    # without rewrite (strict write still refuses it); an OLD codex.attempt line still reads too.
+    $dir2 = New-TempDir; $ev2 = New-EventsFile $dir2
+    $fid = Outbox-Id @('--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-3', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    $futureLine = '{"schema_version":1,"event_id":"' + $fid + '","occurred_at":"2026-07-17T10:00:00Z","type":"usage.recorded","batch_id":"B-1","task_id":"T-3","actor":{"kind":"tool","name":"codex"},"payload":{"source":"codex","total_tokens":10,"estimated":false,"future_field":"x"}}'
+    Write-File $ev2 ($futureLine + "`n")
+    Append-Raw $ev2 ('{"schema_version":1,"event_id":"208af7d9-b848-4bd9-a215-3791e2b5c94d","occurred_at":"2026-07-17T10:00:01Z","type":"codex.attempt","task_id":"T-3","actor":{"kind":"tool","name":"codex"},"payload":{"role":"coder","attempt_number":1}}' + "`n")
+    $vr = Invoke-Outbox @('verify', '--events', $ev2, '--json')
+    Assert-Exit $vr 0 'forward-lenient: future usage payload key + old codex.attempt read valid without migration'
+    Assert-Equal 2 (($vr.Out | ConvertFrom-Json).valid) 'both existing lines are valid on read'
+    $wfut = Invoke-Outbox @('append', '--events', $ev2, '--json-line', $futureLine)
+    Assert-Exit $wfut 5 'strict writer refuses a future usage payload key that lenient read tolerates'
+
+    # metrics: ACTUAL and ESTIMATED usage are aggregated in SEPARATE buckets, split by source.
+    $dir3 = New-TempDir; $ev3 = New-EventsFile $dir3
+    Invoke-Outbox @('append', '--events', $ev3, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"source":"codex","input_tokens":1000,"output_tokens":500,"total_tokens":1500,"estimated":false}') | Out-Null
+    Invoke-Outbox @('append', '--events', $ev3, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-1', '--role', 'reviewer', '--mode', 'full', '--attempt-number', '1', '--payload', '{"source":"claude","total_tokens":800,"estimated":true}') | Out-Null
+    $m = Invoke-Outbox @('metrics', '--events', $ev3, '--json')
+    Assert-Exit $m 0 'metrics runs over usage.recorded'
+    $mo = $m.Out | ConvertFrom-Json
+    Assert-Equal 1500 $mo.usage.actual.total_tokens 'metrics sums ACTUAL usage'
+    Assert-Equal 1000 $mo.usage.actual.input_tokens 'metrics sums ACTUAL input tokens component'
+    Assert-Equal 800 $mo.usage.estimated.total_tokens 'metrics keeps ESTIMATED usage in a separate bucket (never merged with actual)'
+    Assert-Equal 1500 $mo.usage.by_source.codex.actual_total_tokens 'metrics splits ACTUAL usage by source'
+    Assert-Equal 800 $mo.usage.by_source.claude.estimated_total_tokens 'metrics splits ESTIMATED usage by source'
+    Assert-NotContains $m.Out 'secret' 'metrics carries no sensitive text'
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in $script:TempDirs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }

@@ -74,7 +74,7 @@
 .EXAMPLE
     pwsh -File tools/supervisor.ps1 run --file worker.ps1 --args-json '["--id","T-1"]' --deadline-sec 60 --result-file r.json
     pwsh -File tools/supervisor.ps1 supervise --exe git --args-json '["status"]' --max-attempts 2 --budget-file b.json --budget-sec 600 --checkpoint-file cp.json --work /abs/.work --owner OWN --task-id T-1
-    pwsh -File tools/supervisor.ps1 observe --result-file r.json --work /abs/.work --json
+    pwsh -File tools/supervisor.ps1 observe --result-file r.json --stdout-file out.txt --task-id T-1 --role coder --source claude --work /abs/.work --json
     pwsh -File tools/supervisor.ps1 budget --budget-file b.json --json
 #>
 
@@ -537,7 +537,10 @@ function Cmd-Supervise {
 # ==========================================================================
 # observe : turn a verdict into non-sensitive observability outputs (a journal line
 # + codex.attempt event args) with any free-text run through redaction. NEVER emits
-# raw stdout/stderr.
+# raw stdout/stderr. With --stdout-file it ALSO parses per-call token usage out of a
+# headless `claude -p --output-format stream-json` transcript and surfaces a
+# usage.recorded event-args set (T-248) - only the non-sensitive integer counts, never
+# the transcript text; absent/garbled input just omits it.
 # ==========================================================================
 function Invoke-Redact {
     param([string]$Text)
@@ -567,6 +570,52 @@ function Invoke-Redact {
     }
 }
 
+# --------------------------------------------------------------------------
+# Per-call token usage from a headless `claude -p --output-format stream-json` transcript
+# (T-248). The authoritative figures ride the FINAL `{"type":"result", ...}` event's `usage`
+# object (last result wins); earlier assistant/tool events are ignored. These are provider-
+# ACTUAL counts (estimated=$false). Best-effort: an absent/garbled transcript yields $null and
+# no usage is surfaced - exactly like the rest of the telemetry, it never changes control flow.
+# The transcript is read ONLY to extract non-sensitive integer counts; no raw text is emitted.
+# --------------------------------------------------------------------------
+function Read-UsageInt {
+    param($UsageObj, [string]$Name)
+    if ((Has-Prop $UsageObj $Name)) {
+        $v = $UsageObj.$Name
+        if ($null -ne $v -and ([string]$v -match '^\d+$')) { return [int]$v }
+    }
+    return 0
+}
+function Get-StreamJsonUsage {
+    param([string]$Transcript)
+    if ([string]::IsNullOrEmpty($Transcript)) { return $null }
+    $usage = $null
+    foreach ($line in ($Transcript -split "`n")) {
+        $t = $line.Trim()
+        if (-not $t.StartsWith('{')) { continue }
+        $ev = $null
+        try { $ev = $t | ConvertFrom-Json } catch { continue }
+        if ($null -eq $ev) { continue }
+        if (([string](Get-Prop $ev 'type')) -ne 'result') { continue }
+        $u = Get-Prop $ev 'usage'
+        if ($null -ne $u -and $u -is [System.Management.Automation.PSCustomObject]) { $usage = $u }   # last result wins
+    }
+    if ($null -eq $usage) { return $null }
+    $in = Read-UsageInt $usage 'input_tokens'
+    $out = Read-UsageInt $usage 'output_tokens'
+    $cRead = Read-UsageInt $usage 'cache_read_input_tokens'
+    $cCreate = Read-UsageInt $usage 'cache_creation_input_tokens'
+    return [pscustomobject]@{
+        source                      = 'claude'
+        estimated                   = $false
+        input_tokens                = $in
+        output_tokens               = $out
+        cache_read_input_tokens     = $cRead
+        cache_creation_input_tokens = $cCreate
+        total_tokens                = ($in + $out + $cRead + $cCreate)
+    }
+}
+
 function Cmd-Observe {
     $resultFile = Require-Opt 'result-file'
     if (-not (Test-Path -LiteralPath $resultFile)) { Fail 2 "--result-file not found: $resultFile" }
@@ -583,12 +632,22 @@ function Cmd-Observe {
     $taskId = [string](Opt 'task-id' '')
     $role = [string](Opt 'role' 'coder')
     $mode = [string](Opt 'mode' 'full')
+    $source = [string](Opt 'source' 'claude')
     $budgetMs = if (Has-Prop $v 'budget_remaining_ms') { [int]$v.budget_remaining_ms } else { -1 }
+
+    # T-248: best-effort claude usage from the captured stream-json transcript (--stdout-file,
+    # optional). Never fatal, never emits raw text - only the non-sensitive integer counts.
+    $usage = $null
+    $stdoutFile = [string](Opt 'stdout-file' '')
+    if ($stdoutFile -and (Test-Path -LiteralPath $stdoutFile)) {
+        $usage = Get-StreamJsonUsage (Read-TextOrEmpty $stdoutFile)
+    }
 
     # A one-line, non-sensitive journal/status summary.
     $journal = "supervisor: reason=$reason attempts=$attempts elapsed_ms=$dur output_bytes=$bytes exit=$exit"
     if ($budgetMs -ge 0) { $journal += " budget_remaining_ms=$budgetMs" }
     if ($safeReason) { $journal += " ($safeReason)" }
+    if ($null -ne $usage) { $journal += " usage_tokens=$($usage.total_tokens)$(if ($usage.estimated) { '~est' } else { '' })" }
 
     # codex.attempt event args for tools/outbox.ps1 - scalar allowlist only.
     $eventArgs = @(
@@ -606,6 +665,30 @@ function Cmd-Observe {
             } | ConvertTo-Json -Compress)
     )
 
+    # usage.recorded event args (T-248) - only when usage was actually captured. Scalar
+    # allowlist only; the processor supplies the identity coordinates for the dedup key.
+    $usageEventArgs = @()
+    if ($null -ne $usage) {
+        $usagePayload = [ordered]@{
+            task_id                     = $taskId
+            role                        = $role
+            mode                        = $mode
+            attempt_number              = $attempts
+            source                      = $source
+            input_tokens                = $usage.input_tokens
+            output_tokens               = $usage.output_tokens
+            cache_read_input_tokens     = $usage.cache_read_input_tokens
+            cache_creation_input_tokens = $usage.cache_creation_input_tokens
+            total_tokens                = $usage.total_tokens
+            estimated                   = $usage.estimated
+        }
+        $usageEventArgs = @(
+            '--type', 'usage.recorded', '--task-id', $taskId, '--role', $role, '--mode', $mode,
+            '--attempt-number', "$attempts", '--source', $source,
+            '--payload', ($usagePayload | ConvertTo-Json -Compress)
+        )
+    }
+
     if ([bool](Opt 'json' $false)) {
         $out = [ordered]@{
             reason              = $reason
@@ -617,6 +700,8 @@ function Cmd-Observe {
             journal_line        = $journal
             outcome_reason      = $safeReason
             event_args          = $eventArgs
+            usage               = $usage
+            usage_event_args    = $usageEventArgs
         }
         Write-Output ($out | ConvertTo-Json -Depth 8 -Compress)
     } else {

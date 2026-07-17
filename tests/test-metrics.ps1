@@ -141,6 +141,27 @@ $costRun=Invoke-Metrics @('aggregate','--work',$costWork,'--last','1','--json')
 Assert-Equal 0 $costRun.ExitCode 'token-usage fixture exits zero'
 if ($costRun.ExitCode -eq 0) { $costData=$costRun.Out|ConvertFrom-Json; Assert-True $costData.cost_per_completed_task.available 'explicit token usage makes cost available'; Assert-Equal 1200 $costData.cost_per_completed_task.tokens 'tokens per completed task' }
 
+# T-248: an `estimated` usage figure is NEVER summed into the actual token total; it is tracked
+# separately (plans/OBSERVABILITY_PLATFORM_PLAN.md §8). One actual (1200) + one estimated (9999)
+# usage.recorded on one completed task => tokens=1200 (actual only), estimated_tokens=9999.
+$estWork=New-Fixture
+$estLines=@(
+    (Event-Line s01 '2026-07-04T00:00:00Z' 'cohort.opened' B-4),
+    (Event-Line s02 '2026-07-04T00:00:00Z' 'task.captured' B-4 T-9),
+    (Event-Line s03 '2026-07-04T01:00:00Z' 'task.status_changed' B-4 T-9 @{from='на ревью';to='verified'}),
+    (Event-Line s04 '2026-07-04T01:01:00Z' 'usage.recorded' B-4 T-9 @{source='codex';total_tokens=1200;estimated=$false}),
+    (Event-Line s05 '2026-07-04T01:02:00Z' 'usage.recorded' B-4 T-9 @{source='codex';total_tokens=9999;estimated=$true}),
+    (Event-Line s06 '2026-07-04T02:00:00Z' 'cohort.closed' B-4)
+)
+Write-Utf8 (Join-Path $estWork 'events.jsonl') (($estLines -join "`n")+"`n")
+$estRun=Invoke-Metrics @('aggregate','--work',$estWork,'--last','1','--json')
+Assert-Equal 0 $estRun.ExitCode 'estimated-usage fixture exits zero'
+if ($estRun.ExitCode -eq 0) {
+    $estData=$estRun.Out|ConvertFrom-Json
+    Assert-Equal 1200 $estData.cost_per_completed_task.tokens 'actual tokens exclude the estimated figure (never mixed)'
+    Assert-Equal 9999 $estData.cost_per_completed_task.estimated_tokens 'estimated tokens are reported in their own field'
+}
+
 $empty=New-Fixture; $emptyRun=Invoke-Metrics @('aggregate','--work',$empty,'--last','5')
 Assert-Equal 0 $emptyRun.ExitCode 'empty input is success'; Assert-Contains $emptyRun.Out 'Нет данных' 'empty input has explicit no-data output'
 Assert-Contains $emptyRun.Out 'events.jsonl отсутствует' 'missing event stream has an explicit diagnostic'

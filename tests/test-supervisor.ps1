@@ -331,6 +331,50 @@ exit $code
 }.Invoke()
 
 # =============================================================================
+# 6b. T-248: observe parses per-call token usage from a headless `claude -p
+#     --output-format stream-json` transcript (--stdout-file) into usage.recorded
+#     event args, carrying only the non-sensitive integer counts (never raw text).
+# =============================================================================
+{
+    $d = New-TempDir
+    $resFile = Join-Path $d 'result.json'
+    # A minimal, valid verdict (the shape supervisor writes).
+    Write-File $resFile '{"reason":"ok","exit_code":0,"timed_out":false,"cancelled":false,"duration_ms":1234,"attempts":1,"output_bytes":42,"output_truncated":false,"output_sha256":"ab","outcome_reason":"exit code 0","occurred_at":"2026-07-17T10:00:00Z"}'
+    # A stream-json transcript whose FINAL result event carries usage AND a secret in its text.
+    $secret = 'AKIAIOSFODNN7EXAMPLE'
+    $stdoutFile = Join-Path $d 'out.txt'
+    Write-File $stdoutFile (
+        '{"type":"system","subtype":"init","model":"sonnet"}' + "`n" +
+        '{"type":"assistant","message":{"role":"assistant"}}' + "`n" +
+        ('{"type":"result","subtype":"success","is_error":false,"result":"done ' + $secret + '","usage":{"input_tokens":3000,"output_tokens":800,"cache_read_input_tokens":1500,"cache_creation_input_tokens":200}}')
+    )
+    $obs = Invoke-Spv @('observe', '--result-file', $resFile, '--stdout-file', $stdoutFile, '--task-id', 'T-9', '--role', 'coder', '--mode', 'full', '--source', 'claude', '--json')
+    Assert-Exit $obs 0 'observe(usage) rc=0'
+    Assert-NotContains $obs.Out $secret 'observe(usage) never emits the raw transcript text'
+    $obsObj = $obs.Out | ConvertFrom-Json
+    Assert-True ($null -ne $obsObj.usage) 'observe(usage) surfaces a usage block'
+    if ($null -ne $obsObj.usage) {
+        Assert-Equal $false $obsObj.usage.estimated 'observe(usage): claude result usage is ACTUAL, not estimated'
+        Assert-Equal 3000 $obsObj.usage.input_tokens 'observe(usage): input_tokens from the result event'
+        Assert-Equal 5500 $obsObj.usage.total_tokens 'observe(usage): total sums input+output+cache'
+    }
+    Assert-True ($obsObj.usage_event_args.Count -gt 0) 'observe(usage) emits usage.recorded event args'
+    # the usage.recorded args observe emits must be accepted by the REAL outbox tool.
+    $ev = Join-Path $d 'events.jsonl'
+    $usageArgs = @('append', '--events', $ev, '--batch-id', 'B-1') + @($obsObj.usage_event_args | ForEach-Object { [string]$_ })
+    $ap = Invoke-Outbox $usageArgs
+    Assert-Exit $ap 0 'outbox accepts the usage.recorded event args observe emits'
+    Assert-NotContains (Read-File $ev) $secret 'the appended usage.recorded line holds no raw transcript text'
+
+    # No --stdout-file -> no usage surfaced (best-effort, absent input is a clean no-op).
+    $obs2 = Invoke-Spv @('observe', '--result-file', $resFile, '--task-id', 'T-9', '--role', 'coder', '--json')
+    Assert-Exit $obs2 0 'observe(no usage) rc=0'
+    $obs2Obj = $obs2.Out | ConvertFrom-Json
+    Assert-True ($null -eq $obs2Obj.usage) 'observe(no usage): usage is null without a transcript'
+    Assert-Equal 0 $obs2Obj.usage_event_args.Count 'observe(no usage): no usage.recorded args without a transcript'
+}.Invoke()
+
+# =============================================================================
 # 7. supervise retry: transient retried up to max-attempts; substantive error NOT retried.
 # =============================================================================
 {

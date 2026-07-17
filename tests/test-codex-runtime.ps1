@@ -915,6 +915,51 @@ function Stop-GcIfAlive {
 }.Invoke()
 
 # =============================================================================
+# 16. T-248: per-call token usage capture in `run`.
+#   (a) ACTUAL usage parsed from a `codex exec --json` turn.completed usage event.
+#   (b) ESTIMATE (chars/4, marked estimated) when the run carried no structured usage.
+# =============================================================================
+{
+    # (a) ACTUAL: the fake emits a JSONL stream whose turn.completed carries a usage object.
+    $fake = New-FakeCodex
+    $wt = New-TempDir
+    $promptFile = New-TempFile
+    [System.IO.File]::WriteAllText($promptFile, 'implement the thing', $script:Utf8)
+    $jsonl = '{"type":"thread.started","thread_id":"019f573e-04f2-71e2-8f32-b70d71adc6d8"}' + "`n" +
+             '{"type":"turn.completed","usage":{"input_tokens":1200,"cached_input_tokens":300,"output_tokens":450}}'
+    $r = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake, '--worktree', $wt, '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', $promptFile, '--emit-json'
+    ) -EnvVars @{ FAKE_CODEX_STDOUT = $jsonl; FAKE_CODEX_EXIT = '0' }
+    Assert-True ($null -ne $r.Json -and $null -ne $r.Json.usage) 'usage(actual): result carries a usage block'
+    if ($r.Json -and $r.Json.usage) {
+        Assert-Equal $false $r.Json.usage.estimated 'usage(actual): structured usage is not estimated'
+        Assert-Equal 'codex' $r.Json.usage.source 'usage(actual): source is codex'
+        Assert-Equal 1200 $r.Json.usage.input_tokens 'usage(actual): input tokens parsed from turn.completed'
+        Assert-Equal 450 $r.Json.usage.output_tokens 'usage(actual): output tokens parsed'
+        Assert-Equal 300 $r.Json.usage.cache_read_input_tokens 'usage(actual): cached_input_tokens mapped to cache_read'
+        Assert-Equal 1950 $r.Json.usage.total_tokens 'usage(actual): total is the sum of components'
+    }
+
+    # (b) ESTIMATE: no --emit-json / no structured usage -> chars/4 estimate, marked estimated.
+    $fake2 = New-FakeCodex
+    $promptFile2 = New-TempFile
+    [System.IO.File]::WriteAllText($promptFile2, 'implement the thing', $script:Utf8)   # 19 chars -> ceil(19/4)=5
+    $outFile2 = New-TempFile
+    $r2 = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake2, '--worktree', (New-TempDir), '--sandbox', 'read-only',
+        '--reasoning', 'low', '--out-file', $outFile2, '--prompt-file', $promptFile2
+    ) -EnvVars @{ FAKE_CODEX_STDOUT = 'plain free-form progress, not json'; FAKE_CODEX_OUT_CONTENT = 'sixteen char msg'; FAKE_CODEX_EXIT = '0' }
+    Assert-True ($null -ne $r2.Json -and $null -ne $r2.Json.usage) 'usage(estimate): result carries a usage block'
+    if ($r2.Json -and $r2.Json.usage) {
+        Assert-Equal $true $r2.Json.usage.estimated 'usage(estimate): no structured usage is explicitly marked estimated'
+        Assert-Equal 5 $r2.Json.usage.input_tokens 'usage(estimate): input estimated chars/4 from the prompt'
+        Assert-Equal 4 $r2.Json.usage.output_tokens 'usage(estimate): output estimated chars/4 from the -o message'
+        Assert-Equal 9 $r2.Json.usage.total_tokens 'usage(estimate): total is the sum of the estimated components'
+    }
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($item in $script:TempItems) {
