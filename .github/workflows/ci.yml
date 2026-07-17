@@ -259,6 +259,26 @@ jobs:
           set -euo pipefail
           shellcheck -x launchers/*.sh
 
+      - name: Check event outbox
+        # tests/test-outbox.ps1 (T-089/T-248): drives tools/outbox.ps1 - the transactional,
+        # validated, idempotent, torn-tail-safe single-writer for the durable event outbox
+        # .work/events.jsonl. Covers the stable UUIDv5 dedupe key, crash-replay idempotency,
+        # torn-tail repair, the single-writer lease, the strict-write/lenient-read validation
+        # split, and (T-248) the usage.recorded scalar-allowlist + shape-guard and the
+        # actual/estimated metrics split - the ONLY CI cover for that privacy allowlist.
+        # K-007: tests/test-*.ps1 files are not discovered automatically, so this wiring is
+        # explicit; test-outbox was previously missing from this list (found in review T-248).
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-outbox.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check operational metrics aggregation
         # tests/test-metrics.ps1 (T-249): drives the read-only metrics tool as a child
         # pwsh process and checks averages/p95, journal fallback, lenient JSONL parsing,
