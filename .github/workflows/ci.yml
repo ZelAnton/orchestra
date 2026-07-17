@@ -217,6 +217,27 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Test POSIX launchers (bash)
+        # K-007: this bash harness is wired explicitly rather than auto-discovered. It runs
+        # the real Claude-backed launchers with mocked claude/codex/pwsh and verifies their
+        # argv plus the clear failure path when claude is absent; bash launchers run only on
+        # ubuntu-latest because Windows has separate PowerShell launcher tests.
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tests/launchers/test-posix-launchers.sh
+
+      - name: Check POSIX launcher bash syntax (shellcheck)
+        # K-007: explicitly lint all launchers/*.sh for bash syntax, portability and
+        # variable quoting. This runs on ubuntu-latest because these are POSIX/bash
+        # launchers; Windows launchers have no shellcheck-equivalent surface.
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck -x launchers/*.sh
+
       - name: Check operational metrics aggregation
         # tests/test-metrics.ps1 (T-249): drives the read-only metrics tool as a child
         # pwsh process and checks averages/p95, journal fallback, lenient JSONL parsing,
