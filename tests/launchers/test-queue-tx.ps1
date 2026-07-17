@@ -422,4 +422,120 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         $r = Run-Tool @('validate-deps', '--work', $W)
         Assert-Equal 0 $r.ExitCode '[concurrent] resulting queue graph valid'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 13: proposal lane is invisible to every T-task operation ---
+    # A P-NNN proposal shares the unified backlog but is never a candidate /
+    # predecessor / readiness or validate-deps subject, and its own id sequence
+    # is independent of T-NNN (task T-245).
+    $W = New-Work
+    try {
+        Propose $W 'Real task A' 'do A' | Out-Null                       # T-001
+        $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Idea one', '--body', 'raw idea body', '--source', 'user', '--suggested-target', 'next_major')
+        Assert-Equal 0 $r.ExitCode '[proposal] propose --kind proposal succeeds'
+        Assert-Match $r.Output 'id=P-001' '[proposal] proposals get their own P-NNN id sequence'
+        Propose $W 'Real task B' 'do B' | Out-Null                       # T-002
+
+        $q = Read-Queue $W
+        Assert-Match $q '### \[P-001\] Idea one — kind: proposal — status: proposed' '[proposal] header form with explicit kind + english status'
+        Assert-Match $q 'Suggested target: next_major' '[proposal] provenance field preserved'
+        Assert-Match $q 'Source: user' '[proposal] source provenance field preserved'
+
+        # id allocation lanes are independent: next task is T-003, next proposal is P-002
+        Assert-Match (Run-Tool @('allocate-id', '--work', $W)).Output 'T-003' '[proposal] task id lane unaffected by proposals'
+        Assert-Match (Run-Tool @('allocate-id', '--work', $W, '--kind', 'proposal')).Output 'P-002' '[proposal] proposal id lane independent'
+
+        # readiness / validate-deps never surface a proposal
+        $r = Run-Tool @('ready', '--work', $W)
+        Assert-Match $r.Output 'ready: T-001 T-002' '[proposal] only real tasks are ready'
+        Assert-True (-not ($r.Output -match 'P-0')) '[proposal] no proposal appears in readiness output'
+        Assert-Equal 0 (Run-Tool @('validate-deps', '--work', $W)).ExitCode '[proposal] proposals do not break the dependency graph'
+
+        # list-proposals surfaces only the proposal lane
+        $r = Run-Tool @('list-proposals', '--work', $W, '--status', 'proposed')
+        Assert-Match $r.Output 'P-001 proposed Idea one' '[proposal] list-proposals shows the proposed record'
+        Assert-True (-not ($r.Output -match 'Real task')) '[proposal] list-proposals never lists tasks'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 14: end-to-end conversion preserves provenance ------------
+    # proposal_curator flow: create the real task from the need, then convert the
+    # proposal, whose ORIGINAL text stays byte-for-byte while only status flips and
+    # evaluation fields are appended - even after an unrelated T-task mutation.
+    $W = New-Work
+    try {
+        Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Batch schema updates', '--body', "We repeatedly hand-edit schema.`nAuthor suggests a batch API.", '--source', 'user') | Out-Null   # P-001
+        Propose $W 'Existing task' 'x' | Out-Null                        # T-001
+
+        # guard: a proposal id can never be captured as an executable task
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'P-001', '--batch', 'B-1')
+        Assert-Equal 2 $r.ExitCode '[convert] capturing a P-NNN is refused (exit 2)'
+        Assert-Match $r.Output 'proposal.*not executable' '[convert] refusal names the proposal invariant'
+
+        # guard: converted requires --tasks, and each must exist
+        Assert-Equal 2 (Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'converted')).ExitCode '[convert] converted without --tasks rejected'
+        Assert-Equal 5 (Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'converted', '--tasks', 'T-999')).ExitCode '[convert] converted with a non-existent task rejected'
+
+        # curator creates the scoped task from the NEED, then converts
+        Propose $W 'Add batch schema-update API' 'Introduce a batch endpoint. Происхождение: P-001' | Out-Null  # T-002
+        $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'converted', '--tasks', 'T-002', '--reason', 'Real need; scoped task created.')
+        Assert-Equal 0 $r.ExitCode '[convert] classify converted succeeds'
+        Assert-Match $r.Output 'classified P-001 status=converted' '[convert] outcome reported'
+
+        # an unrelated task mutation must not disturb the proposal record
+        Run-Tool @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-20260101T000000Z') | Out-Null
+        $q = Read-Queue $W
+        Assert-Match $q '### \[P-001\] Batch schema updates — kind: proposal — status: converted' '[convert] status flipped to converted'
+        Assert-Match $q 'We repeatedly hand-edit schema\.' '[convert] original proposal prose preserved verbatim (provenance)'
+        Assert-Match $q 'Author suggests a batch API\.' '[convert] full original body preserved'
+        Assert-Match $q 'Converted: T-002' '[convert] forward provenance link to the created task'
+        Assert-Match $q 'Rationale: Real need; scoped task created\.' '[convert] rationale recorded without touching original text'
+        Assert-Match $q '### \[T-002\] Add batch schema-update API' '[convert] the created executable task exists'
+        Assert-Match $q 'Происхождение: P-001' '[convert] backward provenance link on the created task'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 15: proposal dedup, inbox lane, idempotent re-classify ----
+    $W = New-Work
+    try {
+        # proposal dedup rejects a normalized-title duplicate
+        Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Cache the results', '--body', 'a') | Out-Null
+        $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'cache   the   results', '--body', 'b')
+        Assert-Equal 4 $r.ExitCode '[proposal-dup] duplicate proposal title rejected (exit 4)'
+
+        # inbox lane: a proposal submitted under an active lock drains into a P-record
+        Run-Tool @('inbox-add', '--work', $W, '--kind', 'proposal', '--title', 'Inbox idea', '--body', 'idea body', '--source', 'thinker') | Out-Null
+        Run-Tool @('inbox-add', '--work', $W, '--title', 'Inbox task', '--body', 'task body') | Out-Null
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[proposal-inbox] mixed proposal+task drain succeeds'
+        $q = Read-Queue $W
+        Assert-Match $q '### \[P-002\] Inbox idea — kind: proposal — status: proposed' '[proposal-inbox] proposal drained into a P-record'
+        Assert-Match $q 'Source: thinker' '[proposal-inbox] provenance carried through the inbox'
+        Assert-Match $q '### \[T-001\] Inbox task — статус: не начата' '[proposal-inbox] task drained into a T-record'
+
+        # idempotent re-classification replaces the evaluation field, not duplicates it
+        Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-002', '--outcome', 'deferred', '--reason', 'later') | Out-Null
+        Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-002', '--outcome', 'rejected', '--reason', 'not needed') | Out-Null
+        $q = Read-Queue $W
+        Assert-Match $q '### \[P-002\] Inbox idea — kind: proposal — status: rejected' '[proposal-reclassify] final status is rejected'
+        $reasonCount = ([regex]::Matches($q, 'Причина:')).Count
+        Assert-Equal 1 $reasonCount '[proposal-reclassify] re-classify replaces the reason field (no duplication)'
+        Assert-Match $q 'Причина: not needed' '[proposal-reclassify] latest reason kept'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 16: a proposal is never a blocking/unblocking predecessor --
+    # A P-id in a task's `Предпосылки:` line forms no graph edge, so the task is
+    # ready and the graph is valid (proposals never gate tasks - task T-245).
+    $W = New-Work
+    try {
+        $q = @(
+            '# Очередь задач', '',
+            '### [P-001] A raw idea — kind: proposal — status: proposed', 'idea body', '',
+            '### [T-001] Task referencing a proposal — статус: не начата', 'x', 'Предпосылки: P-001'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('validate-deps', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[proposal-pred] a P-id in Предпосылки is not a missing/edge dependency'
+        $r = Run-Tool @('ready', '--work', $W)
+        Assert-Match $r.Output 'ready: T-001' '[proposal-pred] the task is ready - a proposal never blocks it'
+        Assert-True (-not ($r.Output -match 'not-ready')) '[proposal-pred] no blocking predecessor from the proposal'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }
