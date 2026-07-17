@@ -1,0 +1,6 @@
+# Keep ShellCheck's warning-level portability and quoting diagnostics enabled.
+severity=warning
+
+# SC2086 remains enabled: all launcher argument expansions are intentionally quoted.
+# Test fixtures create mock commands dynamically, so ShellCheck cannot resolve them.
+disable=SC1091
