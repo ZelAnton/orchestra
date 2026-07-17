@@ -478,6 +478,35 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Equal 1 $active.Count 'policy placeholders: explicit Unicode-safe terminators are skipped'
     Assert-Equal 'Explicit value: upstream' $active[0] 'policy placeholders: ASCII explicit value remains active'
 
+    # T-259: exercise the incident-shaped variants beyond T-116's seeded-template case.
+    # Every spelling below is an inactive placeholder; in the wrapped form the empty label
+    # must not survive as an active bullet when its placeholder value is on the next line.
+    $placeholderVariants = [ordered]@{
+        'bare default'          = @('- (по умолчанию — trunk)')
+        'labelled default'      = @('- Ветки публикации: (по умолчанию — trunk)')
+        'inner spaces'          = @('- Ветки публикации: ( по умолчанию )')
+        'backtick suffix'       = @('- Ветки публикации: (по умолчанию — trunk из `MAIN_BRANCH`/автоопределения)')
+        'en dash suffix'        = @('- Ветки публикации: (по умолчанию – trunk)')
+        'bare empty'            = @('- Remotes: (пусто)')
+        'bare unset'            = @('- Remotes: (не задано)')
+        'wrapped label + value' = @(
+            '- Ветки публикации:',
+            '  (по умолчанию — trunk)',
+            '- Remotes:',
+            '  (не задано)'
+        )
+    }
+    foreach ($variant in $placeholderVariants.GetEnumerator()) {
+        $variantLines = @(
+            '## Разрешённые ветки и remotes',
+            '',
+            '**Активные ограничения**:',
+            ''
+        ) + $variant.Value
+        $active = Get-PolicyActiveBullets $variantLines 'Разрешённые ветки и remotes'
+        Assert-Equal 0 $active.Count "policy placeholders T-259: $($variant.Key) is inactive"
+    }
+
     # cc-config seeds this exact template. Its default branch/remote, push and size text
     # must remain inactive, while a real explicit branch/remote policy still applies.
     $templateLines = [System.IO.File]::ReadAllLines($script:ConstraintsExample, $script:Utf8)
@@ -501,6 +530,10 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 0 'check-publish: explicit bare branch+remote pass'
     $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'develop', '--remote', 'origin')
     Assert-Exit $r 8 'check-publish: explicit bare branch restriction remains active'
+
+    Write-Utf8 $constraints "## Разрешённые ветки и remotes`n`n**Активные ограничения**:`n`n- Ветки публикации:`n  (по умолчанию — trunk)`n- Remotes:`n  (не задано)`n"
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'check-publish: wrapped placeholder labels do not restrict main/origin'
 }.Invoke()
 # =============================================================================
 # 10. check-gate (T-095): the fail-closed, SHA-bound, whole-set publish CI gate

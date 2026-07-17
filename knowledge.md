@@ -221,6 +221,10 @@ workspace, коммитит результаты листовых агентов
   отчёт). `Get-PathComparer` применяется только к файловым путям; git refs, remotes и SHA
   сравниваются ordinal case-sensitive на всех ОС. processor встраивает эти вызовы в Фазы
   1.5/5.3, merger — в свой merge-self-check.
+  `Get-PolicyActiveBullets` считает неактивными bare/label-prefixed плейсхолдеры
+  `(пусто|не задано|по умолчанию ...)`, включая пробелы/Unicode dash/backtick-суффиксы и
+  перенос значения после label-only bullet; матрица T-116/T-259 закреплена в секции 9a
+  `tests/test-policy.ps1`, поэтому нетронутый template не может дать false DENY публикации.
   Список ключей и Codex-enum'ы схемы **машинно-сверяются** с `config.example.md`
   (`tools/check-consistency.ps1`, класс 5), а та — с `cc-doctor` (класс 4): движок
   `cc-doctor` (`tools/doctor-runtime.ps1`) держит копию хардкодом (mirror-совместимость),
