@@ -82,7 +82,7 @@ use orchestra_engine::resolvers::{
     CohortThresholds, Domain, Level,
 };
 use orchestra_engine::run::{self, RunConfig};
-use orchestra_engine::state::{Snapshot, TaskState};
+use orchestra_engine::state::{DeliveryTarget, Snapshot, TaskState};
 use orchestra_engine::supervise::{self, SpawnSpec};
 
 fn main() {
@@ -570,13 +570,15 @@ fn render_plan(
         .collect();
     // Fresh-candidate conflict-domains are NOT in the read-only snapshot (the planner derives them
     // from task text); an empty domain conflicts with nothing, so packing here reflects readiness +
-    // capacity + known active-task domains only. This is stated in the NOTE below.
+    // delivery lane (§11.1 — `next_major` is parked) + capacity + known active-task domains only.
+    // This is stated in the NOTE below.
     let candidates: Vec<Candidate> = not_started
         .iter()
         .map(|e| Candidate {
             id: e.id.clone(),
             ready: is_ready(&e.prerequisites, completed),
             domain: Domain::parse(""),
+            delivery: e.delivery_target,
         })
         .collect();
 
@@ -605,6 +607,12 @@ fn render_plan(
 
     let _ = writeln!(s, "Not-started candidates ({}):", not_started.len());
     for e in &not_started {
+        // A next_major entry is parked out of the ordinary current-lane admission (§11.1), so it
+        // is never "ready" for capture regardless of its prerequisites — label it as such.
+        if e.delivery_target == DeliveryTarget::NextMajor {
+            let _ = writeln!(s, "  {} · next_major (parked, not admitted)", e.id);
+            continue;
+        }
         let unmet = unmet_prerequisites(&e.prerequisites, completed);
         if unmet.is_empty() {
             let _ = writeln!(s, "  {} · ready", e.id);

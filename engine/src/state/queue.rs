@@ -9,6 +9,39 @@
 use super::canonical::{suffix_field, TaskState};
 use super::util::{is_task_id, line_field, parse_task_id_list};
 
+/// Delivery lane of a task (`docs/queue_contract.md` §11.1), decoded from the body's
+/// `Delivery target:` field. `current` is the normal delivery line the ordinary
+/// processor/engine admits; `next_major` parks intentional breaking work out of the ordinary
+/// execution capacity. A **missing field, or any value other than an explicit `next_major`,
+/// resolves to `current`** — backward-compatible with every existing fieldless queue/archive
+/// record, and fail-safe (only an explicit `next_major` parks a task).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeliveryTarget {
+    #[default]
+    Current,
+    NextMajor,
+}
+
+impl DeliveryTarget {
+    /// The canonical field literal (`current` / `next_major`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeliveryTarget::Current => "current",
+            DeliveryTarget::NextMajor => "next_major",
+        }
+    }
+
+    /// Map a `Delivery target:` field value to a lane. Only an explicit `next_major` (any case)
+    /// parks the task; every other value — including an empty/garbage one — is `current`.
+    pub fn from_field(value: &str) -> DeliveryTarget {
+        if value.trim().eq_ignore_ascii_case("next_major") {
+            DeliveryTarget::NextMajor
+        } else {
+            DeliveryTarget::Current
+        }
+    }
+}
+
 /// One decoded queue block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueEntry {
@@ -26,6 +59,8 @@ pub struct QueueEntry {
     pub escalation_reason: Option<String>,
     /// T-ids from the block's `Предпосылки:` line.
     pub prerequisites: Vec<String>,
+    /// Delivery lane from the block's `Delivery target:` line (§11.1); `current` when absent.
+    pub delivery_target: DeliveryTarget,
 }
 
 /// Parse the full queue text into entries, in file order.
@@ -50,6 +85,9 @@ pub fn parse_queue(text: &str) -> Vec<QueueEntry> {
         let prerequisites = line_field(&body, "Предпосылки:")
             .map(parse_task_id_list)
             .unwrap_or_default();
+        let delivery_target = line_field(&body, "Delivery target:")
+            .map(DeliveryTarget::from_field)
+            .unwrap_or_default();
         out.push(QueueEntry {
             id,
             title,
@@ -59,6 +97,7 @@ pub fn parse_queue(text: &str) -> Vec<QueueEntry> {
             escalation_reason: suffix_field(&status_literal, "причина="),
             status_literal,
             prerequisites,
+            delivery_target,
         });
     }
     out
@@ -164,5 +203,62 @@ mod tests {
         // The leading prose / `------` lines must not become entries.
         assert_eq!(parse_queue(QUEUE).len(), 4);
         assert!(parse_queue("just some text\nno headers here").is_empty());
+    }
+
+    #[test]
+    fn fieldless_entries_default_to_current_lane() {
+        // Every entry in the legacy fixture (none carries a `Delivery target:` line) is `current`.
+        for e in parse_queue(QUEUE) {
+            assert_eq!(
+                e.delivery_target,
+                DeliveryTarget::Current,
+                "{} must default to current",
+                e.id
+            );
+        }
+    }
+
+    #[test]
+    fn parses_delivery_target_field_and_defaults() {
+        let q = "\
+### [T-201] Explicit current — статус: не начата\n\
+Тело.\n\
+Delivery target: current\n\n\
+### [T-202] Parked breaking work — статус: не начата\n\
+Тело.\n\
+Delivery target: next_major\n\n\
+### [T-203] No field at all — статус: не начата\n\
+Тело без поля.\n\n\
+### [T-204] Garbage value — статус: не начата\n\
+Delivery target: whatever\n";
+        let entries = parse_queue(q);
+        assert_eq!(entries[0].delivery_target, DeliveryTarget::Current);
+        assert_eq!(entries[1].delivery_target, DeliveryTarget::NextMajor);
+        // Missing field and an unrecognized value both fall back to the current lane.
+        assert_eq!(entries[2].delivery_target, DeliveryTarget::Current);
+        assert_eq!(entries[3].delivery_target, DeliveryTarget::Current);
+    }
+
+    #[test]
+    fn delivery_target_from_field_is_case_insensitive_on_next_major_only() {
+        assert_eq!(
+            DeliveryTarget::from_field("next_major"),
+            DeliveryTarget::NextMajor
+        );
+        assert_eq!(
+            DeliveryTarget::from_field("  NEXT_MAJOR  "),
+            DeliveryTarget::NextMajor
+        );
+        assert_eq!(
+            DeliveryTarget::from_field("current"),
+            DeliveryTarget::Current
+        );
+        assert_eq!(DeliveryTarget::from_field(""), DeliveryTarget::Current);
+        assert_eq!(
+            DeliveryTarget::from_field("nonsense"),
+            DeliveryTarget::Current
+        );
+        assert_eq!(DeliveryTarget::Current.as_str(), "current");
+        assert_eq!(DeliveryTarget::NextMajor.as_str(), "next_major");
     }
 }

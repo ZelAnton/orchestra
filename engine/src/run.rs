@@ -1023,9 +1023,11 @@ impl<'a> Runner<'a> {
         let snap = Snapshot::load(&self.cfg.work);
         let completed = completed_ids(&self.cfg.work, &snap);
 
-        // Candidates: every not-started queue entry, ready iff its prerequisites are complete.
-        // Their planner-created descriptors carry the conflict-domain. A missing or malformed
-        // descriptor field is deliberately an unknown domain, which blocks packing fail-closed.
+        // Candidates: every not-started queue entry, ready iff its prerequisites are complete and
+        // carrying its delivery lane (§11.1 — a `next_major` entry is parked out of ordinary
+        // admission). Their planner-created descriptors carry the conflict-domain. A missing or
+        // malformed descriptor field is deliberately an unknown domain, which blocks packing
+        // fail-closed.
         let candidates: Vec<Candidate> = snap
             .queue
             .iter()
@@ -1034,6 +1036,7 @@ impl<'a> Runner<'a> {
                 id: e.id.clone(),
                 ready: is_ready(&e.prerequisites, &completed),
                 domain: descriptor_domain(&snap, &e.id),
+                delivery: e.delivery_target,
             })
             .collect();
 

@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::state::TaskState;
+use crate::state::{DeliveryTarget, TaskState};
 
 /// The declared prerequisites of `prerequisites` that are NOT yet in `completed` — the concrete
 /// blockers, in declared order, deduplicated. Empty ⇒ ready. Mirrors `queue-tx ready` naming the
@@ -189,6 +189,10 @@ pub struct Candidate {
     pub ready: bool,
     /// Its conflict-domain (an empty [`Domain`] = unknown/none — conflicts with nothing).
     pub domain: Domain,
+    /// Its delivery lane (`docs/queue_contract.md` §11.1). Only `current` competes for the
+    /// ordinary execution capacity; `next_major` is parked out of ordinary admission the same
+    /// way an unready candidate is skipped. A fieldless queue entry decodes to `current`.
+    pub delivery: DeliveryTarget,
 }
 
 impl Candidate {
@@ -198,12 +202,20 @@ impl Candidate {
         prerequisites: &[String],
         completed: &BTreeSet<String>,
         domain: Domain,
+        delivery: DeliveryTarget,
     ) -> Candidate {
         Candidate {
             id: id.into(),
             ready: is_ready(prerequisites, completed),
             domain,
+            delivery,
         }
+    }
+
+    /// Whether this candidate competes for the ordinary current-lane execution capacity: ready
+    /// **and** on the `current` delivery lane. A `next_major` candidate never is (§11.1).
+    fn admissible_to_current_lane(&self) -> bool {
+        self.ready && self.delivery == DeliveryTarget::Current
     }
 }
 
@@ -283,9 +295,10 @@ pub enum AdmissionOutcome {
 }
 
 /// Plan one admission round (`agents/planner.md` "Выбор батча"): walking `candidates` from the
-/// head, admit up to `capacity` **ready** candidates whose conflict-domains overlap NEITHER each
-/// other NOR any active task's domain (either class blocks equally). Pure: a deterministic
-/// function of already-parsed inputs.
+/// head, admit up to `capacity` **ready, current-lane** candidates whose conflict-domains overlap
+/// NEITHER each other NOR any active task's domain (either class blocks equally). `next_major`
+/// candidates are parked out of the ordinary capacity (§11.1). Pure: a deterministic function of
+/// already-parsed inputs.
 ///
 /// On an empty result it names one of the three planner reasons, with the documented priority
 /// (`только-конфликты-с-активными` outranks `только-конфликты-с-готовыми`; п.4). `capacity` is
@@ -304,6 +317,12 @@ pub fn plan_admission(
             break;
         }
         if !c.ready {
+            continue;
+        }
+        // Skip a `next_major` candidate: the ordinary admission path selects only the `current`
+        // delivery lane (§11.1) — parked breaking work never competes for execution capacity,
+        // filtered the same way an unready candidate is above.
+        if c.delivery == DeliveryTarget::NextMajor {
             continue;
         }
         // Skip a candidate overlapping an already-admitted candidate's domain (candidates in one
@@ -342,10 +361,13 @@ fn empty_reason(candidates: &[Candidate], active: &[ActiveTask]) -> EmptyReason 
         }
     }
 
-    // Inspect the ready candidates that could not be admitted (all of them, since none was).
+    // Inspect the current-lane candidates that could not be admitted (all of them, since none
+    // was). A `next_major` candidate is not admissible to the current lane at all (§11.1), so it
+    // never counts as a domain-blocked candidate — a cohort left with only parked next_major work
+    // reads as queue-empty for the current lane below.
     let mut blocked_exclusively_by_active = false;
     let mut blocked_by_terminal = false;
-    for c in candidates.iter().filter(|c| c.ready) {
+    for c in candidates.iter().filter(|c| c.admissible_to_current_lane()) {
         let hits_active = active_domains.iter().any(|d| d.intersects(&c.domain));
         let hits_terminal = terminal_domains.iter().any(|d| d.intersects(&c.domain));
         if hits_active && !hits_terminal {
@@ -387,6 +409,15 @@ mod tests {
             id: id.to_string(),
             ready,
             domain: Domain::parse(domain),
+            delivery: DeliveryTarget::Current,
+        }
+    }
+
+    /// A `next_major`-lane candidate (otherwise like [`cand`]).
+    fn cand_next_major(id: &str, ready: bool, domain: &str) -> Candidate {
+        Candidate {
+            delivery: DeliveryTarget::NextMajor,
+            ..cand(id, ready, domain)
         }
     }
 
@@ -422,9 +453,16 @@ mod tests {
             &prereqs(&["T-105"]),
             &done,
             Domain::parse("engine/**"),
+            DeliveryTarget::Current,
         );
         assert!(ready.ready);
-        let blocked = Candidate::new("T-109", &prereqs(&["T-106"]), &done, Domain::parse("x/**"));
+        let blocked = Candidate::new(
+            "T-109",
+            &prereqs(&["T-106"]),
+            &done,
+            Domain::parse("x/**"),
+            DeliveryTarget::Current,
+        );
         assert!(!blocked.ready);
     }
 
@@ -493,6 +531,51 @@ mod tests {
         assert_eq!(
             plan_admission(&cands, &[], 5),
             AdmissionOutcome::Admitted(vec!["T-2".into()])
+        );
+    }
+
+    // --- delivery lane (§11.1) ------------------------------------------------------------------
+
+    #[test]
+    fn skips_next_major_candidate_but_admits_current_one() {
+        // A ready `next_major` candidate at the head is parked; the `current` one behind it is
+        // admitted — the ordinary admission path selects only the current lane.
+        let cands = vec![
+            cand_next_major("T-1", true, "a/**"),
+            cand("T-2", true, "b/**"),
+        ];
+        assert_eq!(
+            plan_admission(&cands, &[], 5),
+            AdmissionOutcome::Admitted(vec!["T-2".into()])
+        );
+    }
+
+    #[test]
+    fn admits_nothing_when_only_next_major_candidates_remain() {
+        // A cohort left with only parked breaking work admits nothing and reads as queue-empty for
+        // the current lane (which latches admission closed), NOT a domain-conflict reason.
+        let cands = vec![
+            cand_next_major("T-1", true, "a/**"),
+            cand_next_major("T-2", true, "b/**"),
+        ];
+        assert_eq!(
+            plan_admission(&cands, &[], 5),
+            AdmissionOutcome::Empty(EmptyReason::QueueEmpty)
+        );
+    }
+
+    #[test]
+    fn next_major_candidate_does_not_mask_a_real_active_conflict_reason() {
+        // Only the `current` candidate is domain-blocked by a really-active task; the parked
+        // `next_major` candidate must not be counted as its own blocked candidate.
+        let active = vec![active("engine/src/state/**", ActiveClass::Active)];
+        let cands = vec![
+            cand("T-1", true, "engine/src/state/**"),
+            cand_next_major("T-2", true, "engine/src/state/**"),
+        ];
+        assert_eq!(
+            plan_admission(&cands, &active, 5),
+            AdmissionOutcome::Empty(EmptyReason::OnlyConflictsWithActive)
         );
     }
 

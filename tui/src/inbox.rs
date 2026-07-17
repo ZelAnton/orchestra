@@ -383,7 +383,9 @@ fn dependents_of(id: &str, snapshot: &Snapshot) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestra_engine::state::{Descriptor, IntegrationSnapshot, IntegrationState, QueueEntry};
+    use orchestra_engine::state::{
+        DeliveryTarget, Descriptor, IntegrationSnapshot, IntegrationState, QueueEntry,
+    };
     use std::path::PathBuf;
 
     fn queue_entry(
@@ -404,6 +406,7 @@ mod tests {
             quarantine: quarantine.map(str::to_string),
             escalation_reason: escalation_reason.map(str::to_string),
             prerequisites: prerequisites.iter().map(|s| s.to_string()).collect(),
+            delivery_target: DeliveryTarget::Current,
         }
     }
 

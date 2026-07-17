@@ -22,9 +22,20 @@
     `Предпосылки: T-045, T-046` (the `### [T-NNN] ... — статус: ...` header
     format is never touched, so writers/readers that only parse the header stay
     compatible). The tool validates that graph (missing / self-reference /
-    cycle / infeasible-because-escalated) and resolves readiness (a task is
-    ready to capture only once every predecessor is archived into
-    `.work/Tasks_Done.md`), reporting the concrete blocking predecessor.
+    cycle / infeasible-because-escalated / current-depends-on-next_major) and
+    resolves readiness (a task is ready to capture only once every predecessor
+    is archived into `.work/Tasks_Done.md`), reporting the concrete blocking
+    predecessor.
+
+    A task may also declare a DELIVERY LANE with the body field
+    `Delivery target: current | next_major` (docs/queue_contract.md §11.1). A
+    missing field, or any value but an explicit `next_major`, is the
+    backward-compatible `current` lane. `next_major` (intentional breaking work)
+    is visible/deduplicated/refined but parked out of the ordinary execution
+    capacity: `ready` (the default current-lane view planner captures from) never
+    lists it, `ready --next-major` shows the parked backlog separately, and a
+    current-lane task may not declare a next_major-lane predecessor
+    (validate-deps / propose reject that edge).
 
     The same unified backlog also carries a SEPARATE proposal lane: raw ideas as
     `### [P-NNN] ... — kind: proposal — status: <proposed|converted|rejected|
@@ -74,7 +85,7 @@ $ErrorActionPreference = 'Stop'
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
 $Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('force', 'json')
+$BoolFlags = @('force', 'json', 'next-major')
 $opts = @{}
 for ($i = 1; $i -lt $args.Count; $i++) {
     $a = [string]$args[$i]
@@ -210,6 +221,9 @@ function Set-Generation {
 # --------------------------------------------------------------------------
 $HeaderRegex = '^###\s+\[T-0*(\d+)\]\s*(.*?)\s*—\s*статус:\s*(.*?)\s*$'
 $PredRegex   = '^(?:Предпосылки|Predecessors)\s*:\s*(.+)$'
+# Delivery lane body field (docs/queue_contract.md §11.1). Only an explicit `next_major` (any
+# case) parks a task; a missing field or any other value is the backward-compatible `current`.
+$DeliveryRegex = '^Delivery target\s*:\s*(.+)$'
 
 # Proposal-lane records (kind: proposal, id P-NNN) live in the SAME unified backlog
 # file but form a separate lane: they are NEVER executable tasks. Their header carries
@@ -224,6 +238,21 @@ $ProposalHeaderRegex = '^###\s+\[P-0*(\d+)\]\s*(.*?)\s*—\s*kind:\s*proposal\s*
 $AnyHeaderRegex      = '^###\s+\[[TP]-0*\d+\]'
 $ProposalStatuses    = @('proposed', 'converted', 'rejected', 'duplicate', 'needs_human', 'deferred')
 $ProposalOutcomes    = @('converted', 'rejected', 'duplicate', 'needs_human', 'deferred')
+
+# The delivery lane declared by a body's `Delivery target:` line (docs/queue_contract.md §11.1).
+# First matching line wins; only an explicit `next_major` parks the task, everything else
+# (missing field, `current`, or any other value) is the backward-compatible `current` lane.
+function Get-DeliveryTarget {
+    param([string[]]$Lines)
+    foreach ($bl in $Lines) {
+        $dm = [regex]::Match($bl, $DeliveryRegex)
+        if ($dm.Success) {
+            if ($dm.Groups[1].Value.Trim().ToLowerInvariant() -eq 'next_major') { return 'next_major' }
+            return 'current'
+        }
+    }
+    return 'current'
+}
 
 function Parse-Task {
     param([string[]]$BlockLines)
@@ -247,15 +276,16 @@ function Parse-Task {
         }
     }
     return [pscustomobject]@{
-        Kind         = 'task'
-        Id           = $id
-        IdStr        = (Format-Id $id)
-        Title        = $title
-        Status       = $status
-        Header       = $header
-        Body         = @($body)
-        Predecessors = @($preds.ToArray())
-        Malformed    = (-not $m.Success)
+        Kind           = 'task'
+        Id             = $id
+        IdStr          = (Format-Id $id)
+        Title          = $title
+        Status         = $status
+        Header         = $header
+        Body           = @($body)
+        Predecessors   = @($preds.ToArray())
+        DeliveryTarget = (Get-DeliveryTarget $body)
+        Malformed      = (-not $m.Success)
     }
 }
 
@@ -532,6 +562,9 @@ function Validate-Graph {
     $activeIds = Get-ActiveIds $Paths.TasksDir
     $escalated = @{}
     foreach ($t in $QueueTasks) { if (Is-Escalated $t.Status) { $escalated[$t.Id] = $true } }
+    # Delivery lane per in-queue task (§11.1), for the current -> next_major edge check below.
+    $delivery = @{}
+    foreach ($t in $QueueTasks) { $delivery[$t.Id] = $t.DeliveryTarget }
 
     $adj = @{}
     foreach ($t in $QueueTasks) { $adj[$t.Id] = New-Object System.Collections.Generic.List[int] }
@@ -542,6 +575,12 @@ function Validate-Graph {
             $known = $queueIds.Contains($p) -or $doneIds.Contains($p) -or $activeIds.Contains($p)
             if (-not $known) { [void]$findings.Add("$($t.IdStr): missing predecessor $(Format-Id $p) (not in queue, archive, or active)"); continue }
             if ($escalated.ContainsKey($p)) { [void]$findings.Add("$($t.IdStr): infeasible predecessor $(Format-Id $p) (escalated, will never complete)") }
+            # A current-lane task must not depend on a next_major-lane predecessor: the next_major
+            # task is never admitted to the ordinary cohort, so the edge would block the current
+            # task forever (§11.1). The reverse edge (next_major -> current) is allowed.
+            if ($t.DeliveryTarget -ne 'next_major' -and $queueIds.Contains($p) -and $delivery[$p] -eq 'next_major') {
+                [void]$findings.Add("$($t.IdStr): current task depends on next_major predecessor $(Format-Id $p) (a current-lane task cannot depend on a next_major-lane task)")
+            }
             if ($queueIds.Contains($p)) { [void]$adj[$t.Id].Add($p) }
         }
     }
@@ -575,7 +614,7 @@ function Resolve-Readiness {
                 [void]$reasons.Add("missing predecessor $(Format-Id $p)")
             }
         }
-        [void]$result.Add([pscustomobject]@{ Task = $t; Ready = ($reasons.Count -eq 0); Reasons = @($reasons.ToArray()) })
+        [void]$result.Add([pscustomobject]@{ Task = $t; Ready = ($reasons.Count -eq 0); Reasons = @($reasons.ToArray()); Delivery = $t.DeliveryTarget })
     }
     return @($result.ToArray())
 }
@@ -662,12 +701,18 @@ function Add-Proposal {
     foreach ($t in $stateTasks) { [void]$queueIds.Add($t.Id) }
     $doneIds = Get-DoneIds $Paths
     $activeIds = Get-ActiveIds $Paths.TasksDir
+    # The new task's own delivery lane rides in its body text (§11.1); a current-lane task may not
+    # declare a next_major-lane predecessor (rejected here the same way as missing/infeasible).
+    $newDelivery = Get-DeliveryTarget (($Body -replace "`r`n", "`n") -split "`n")
     foreach ($p in $Predecessors) {
         if ($p -eq $id) { throw "DEP:self-reference $(Format-Id $p)" }
         $known = $queueIds.Contains($p) -or $doneIds.Contains($p) -or $activeIds.Contains($p)
         if (-not $known) { throw "DEP:missing predecessor $(Format-Id $p)" }
         $predTask = $stateTasks | Where-Object { $_.Id -eq $p } | Select-Object -First 1
         if ($predTask -and (Is-Escalated $predTask.Status)) { throw "DEP:infeasible predecessor $(Format-Id $p) (escalated)" }
+        if ($newDelivery -ne 'next_major' -and $predTask -and $predTask.DeliveryTarget -eq 'next_major') {
+            throw "DEP:current task cannot depend on next_major predecessor $(Format-Id $p) (a current-lane task cannot depend on a next_major-lane task)"
+        }
     }
 
     $newTask = New-TaskBlock -Id $id -Title $Title -Body $Body -Predecessors $Predecessors
@@ -989,17 +1034,29 @@ function Cmd-Ready {
     $paths = Resolve-Paths
     $q = Split-Queue (Read-TextOrEmpty $paths.Queue)
     $res = @(Resolve-Readiness $paths $q.Tasks)
+    # Delivery-lane selection (§11.1): the DEFAULT output is the ordinary `current` lane that
+    # planner/processor capture from; `--next-major` shows the parked next_major backlog SEPARATELY,
+    # never mixed into the default `ready` set.
+    $nextMajor = [bool](Opt 'next-major' $false)
     if ($opts.ContainsKey('id')) {
         $id = Parse-IdArg
         $one = $res | Where-Object { $_.Task.Id -eq $id } | Select-Object -First 1
         if (-not $one) { Fail 9 "task $(Format-Id $id) is not a 'не начата' queue task" }
+        # A next_major task is parked out of the ordinary current-lane capture gate: never ready
+        # here, so the processor/engine capture gate refuses it (exit 6), same as an unmet prereq.
+        if ($one.Delivery -eq 'next_major') {
+            Write-Output "not-ready $($one.Task.IdStr): next_major delivery lane (parked; not admitted to the current cohort — see queue_contract §11.1)"
+            exit 6
+        }
         if ($one.Ready) { Write-Output "ready $($one.Task.IdStr)"; return }
         Write-Output "not-ready $($one.Task.IdStr): $(@($one.Reasons) -join '; ')"
         exit 6
     }
-    $readyIds = @($res | Where-Object { $_.Ready } | ForEach-Object { $_.Task.IdStr })
+    $lane = if ($nextMajor) { 'next_major' } else { 'current' }
+    $laneRes = @($res | Where-Object { $_.Delivery -eq $lane })
+    $readyIds = @($laneRes | Where-Object { $_.Ready } | ForEach-Object { $_.Task.IdStr })
     if ($readyIds.Count -gt 0) { Write-Output ("ready: " + ($readyIds -join ' ')) } else { Write-Output 'ready: (none)' }
-    foreach ($r in ($res | Where-Object { -not $_.Ready })) {
+    foreach ($r in ($laneRes | Where-Object { -not $_.Ready })) {
         Write-Output "not-ready: $($r.Task.IdStr) - $(@($r.Reasons) -join '; ')"
     }
 }

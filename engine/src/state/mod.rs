@@ -8,7 +8,8 @@
 //!
 //! * [`canonical`] — the canonical ASCII state names (§13.1–§13.3) and the Cyrillic-literal →
 //!   canonical mapping, byte-for-byte with the contract tables and `tools/state-tx.ps1`.
-//! * [`queue`] — `.work/Tasks_Queue.md` entries (id, title, task state, `Предпосылки:`).
+//! * [`queue`] — `.work/Tasks_Queue.md` entries (id, title, task state, `Предпосылки:`,
+//!   `Delivery target:` delivery lane §11.1).
 //! * [`descriptor`] — `.work/tasks/<T-ID>/task.md` `Статус:` (§13.1).
 //! * [`cohort`] — `.work/cohort_state.md` `Приём:` (§13.2); absent = no active cohort.
 //! * [`integration`] — `.work/integration_state.md` (§13.3); absent = `none`.
@@ -36,5 +37,5 @@ pub use canonical::{CohortAdmission, IntegrationState, TaskState};
 pub use cohort::{load_cohort, parse_cohort, CohortState};
 pub use descriptor::{load_descriptors, parse_descriptor, parse_review_cycles, Descriptor};
 pub use integration::{load_integration, parse_integration, IntegrationSnapshot};
-pub use queue::{parse_queue, QueueEntry};
+pub use queue::{parse_queue, DeliveryTarget, QueueEntry};
 pub use snapshot::Snapshot;

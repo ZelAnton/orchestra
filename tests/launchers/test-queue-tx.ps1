@@ -14,6 +14,9 @@
 #   - crash/retry mid-transaction (fault injection leaves queue+gen intact)
 #   - inbox add/drain, including immutable quarantine of rejected records
 #   - several concurrent writers with no lost update / no duplicate id
+#   - delivery lane (§11.1): next_major parked out of the default `ready`, shown
+#     under `--next-major`, `ready --id` capture gate refusal, and the forbidden
+#     current -> next_major dependency edge (validate-deps + propose) (task T-246)
 #
 # The tool is invoked with pwsh (PowerShell 7) when available, else the current
 # powershell.exe; the tool file itself is UTF-8 with BOM so its Cyrillic status
@@ -537,5 +540,86 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         $r = Run-Tool @('ready', '--work', $W)
         Assert-Match $r.Output 'ready: T-001' '[proposal-pred] the task is ready - a proposal never blocks it'
         Assert-True (-not ($r.Output -match 'not-ready')) '[proposal-pred] no blocking predecessor from the proposal'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 17: delivery lane excludes next_major from the ordinary ready --
+    # A `Delivery target: next_major` task (docs/queue_contract.md §11.1) is parked out
+    # of the default current-lane `ready` output planner captures from; it surfaces only
+    # under `--next-major`, and the capture gate `ready --id` refuses it (task T-246).
+    $W = New-Work
+    try {
+        $q = @(
+            '# Очередь задач', '',
+            '### [T-001] Ordinary current work — статус: не начата', 'body', 'Delivery target: current', '',
+            '### [T-002] Parked breaking work — статус: не начата', 'body', 'Delivery target: next_major', '',
+            '### [T-003] Fieldless legacy task — статус: не начата', 'body'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+
+        # default `ready`: current lane only (T-001 and the fieldless T-003), never the next_major T-002
+        $r = Run-Tool @('ready', '--work', $W)
+        Assert-Match $r.Output 'ready: T-001 T-003' '[delivery] default ready lists current + fieldless(=current) tasks'
+        Assert-True (-not ($r.Output -match 'T-002')) '[delivery] next_major task is absent from the default ready output'
+
+        # `--next-major`: only the parked backlog, never the current-lane tasks
+        $r = Run-Tool @('ready', '--work', $W, '--next-major')
+        Assert-Match $r.Output 'ready: T-002' '[delivery] --next-major lists only the parked next_major backlog'
+        Assert-True (-not ($r.Output -match 'T-001')) '[delivery] --next-major excludes current-lane tasks'
+
+        # capture gate: `ready --id` on a next_major task refuses (exit 6) with a lane reason
+        $r = Run-Tool @('ready', '--work', $W, '--id', 'T-002')
+        Assert-Equal 6 $r.ExitCode '[delivery] ready --id on a next_major task is not-ready (capture gate refuses)'
+        Assert-Match $r.Output 'next_major delivery lane' '[delivery] refusal names the next_major lane'
+
+        # capture gate on a current task is unaffected
+        $r = Run-Tool @('ready', '--work', $W, '--id', 'T-001')
+        Assert-Equal 0 $r.ExitCode '[delivery] ready --id on a current task is ready'
+        Assert-Match $r.Output 'ready T-001' '[delivery] current task ready via the capture gate'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 18: validate-deps rejects a current -> next_major edge --------
+    $W = New-Work
+    try {
+        # T-002 (current, default) depends on T-001 (next_major) -> forbidden edge.
+        $q = @(
+            '# Очередь задач', '',
+            '### [T-001] Breaking migration — статус: не начата', 'x', 'Delivery target: next_major', '',
+            '### [T-002] Ordinary task — статус: не начата', 'x', 'Предпосылки: T-001'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+        $r = Run-Tool @('validate-deps', '--work', $W)
+        Assert-Equal 5 $r.ExitCode '[delivery-dep] current -> next_major edge is an invalid graph (exit 5)'
+        Assert-Match $r.Output 'T-002: current task depends on next_major predecessor T-001' '[delivery-dep] finding names the forbidden edge'
+
+        # The reverse edge (next_major -> current) is allowed: a valid graph.
+        $q = @(
+            '# Очередь задач', '',
+            '### [T-001] Foundation current work — статус: не начата', 'x', '',
+            '### [T-002] Breaking follow-up — статус: не начата', 'x', 'Delivery target: next_major', 'Предпосылки: T-001'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+        $r = Run-Tool @('validate-deps', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[delivery-dep] next_major -> current edge is a valid graph (exit 0)'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 19: propose rejects a current task depending on next_major ----
+    $W = New-Work
+    try {
+        # A next_major task authored with the field in its body.
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Parked breaking work', '--body', "desc`nDelivery target: next_major")
+        Assert-Equal 0 $r.ExitCode '[delivery-propose] a next_major task can be proposed'
+        Assert-Match $r.Output 'id=T-001' '[delivery-propose] next_major task got T-001'
+        Assert-Match (Read-Queue $W) 'Delivery target: next_major' '[delivery-propose] delivery field preserved in the body'
+
+        # a current-lane task (default, no field) may NOT declare the next_major task as predecessor
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Current dependent', '--body', 'desc', '--predecessors', 'T-001')
+        Assert-Equal 5 $r.ExitCode '[delivery-propose] current -> next_major predecessor rejected at propose time (exit 5)'
+        Assert-Match $r.Output 'current task cannot depend on next_major predecessor T-001' '[delivery-propose] rejection names the rule'
+        Assert-Equal 1 (Get-QueueIds $W).Count '[delivery-propose] rejected task never entered the queue'
+
+        # but a next_major task MAY depend on the next_major task (next_major -> next_major is fine)
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Breaking follow-up', '--body', "desc`nDelivery target: next_major", '--predecessors', 'T-001')
+        Assert-Equal 0 $r.ExitCode '[delivery-propose] next_major -> next_major predecessor is allowed'
+        Assert-Match $r.Output 'id=T-002' '[delivery-propose] the follow-up next_major task lands'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }
