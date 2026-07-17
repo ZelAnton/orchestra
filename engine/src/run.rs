@@ -237,6 +237,31 @@ struct LeafPlan {
     fake_args: Vec<String>,
 }
 
+/// The default wall-clock budget for one **offline** `__fake-agent` leaf. The stand-in finishes in
+/// well under a second, so the fake baseline keeps its historical 60s cap unchanged.
+pub const LEAF_DEADLINE_FAKE_SECS: u64 = 60;
+
+/// The default wall-clock budget for one **live** (`--live`) leaf. A real `claude -p`/`codex exec`
+/// child that implements or reviews a whole task in a worktree runs minutes, not seconds, so the
+/// live default is a much larger budget — the 60s fake cap would otherwise time-out→tree-kill every
+/// real leaf into a `supervised_ok=false` escalation (T-244 R-01), while also burning partial model
+/// spend on each doomed call.
+pub const LEAF_DEADLINE_LIVE_SECS: u64 = 1800;
+
+/// Resolve the wall-clock budget for one supervised leaf. Fake and live get **separate** defaults
+/// ([`LEAF_DEADLINE_FAKE_SECS`] vs [`LEAF_DEADLINE_LIVE_SECS`]) so the offline baseline is untouched
+/// while a real leaf gets a budget adequate for a headless call; an explicit `--leaf-deadline <sec>`
+/// override (clamped to ≥1s) wins for either mode, so an operator can retune without a rebuild. Pure
+/// and total, so the fake-vs-live default and the clamp are unit-testable (T-244 R-01).
+pub fn resolve_leaf_deadline(override_secs: Option<u64>, live: bool) -> Duration {
+    let secs = override_secs.map(|s| s.max(1)).unwrap_or(if live {
+        LEAF_DEADLINE_LIVE_SECS
+    } else {
+        LEAF_DEADLINE_FAKE_SECS
+    });
+    Duration::from_secs(secs)
+}
+
 /// Build the [`SpawnSpec`] for one leaf: the REAL child under `--live`, the deterministic
 /// `__fake-agent` stand-in otherwise. The deadline is identical either way — only the spawn
 /// target differs. Pure and total so the live/offline switch is unit-testable without spawning.
@@ -2418,6 +2443,34 @@ mod tests {
         let live = leaf_spec(true, "/path/to/engine", Duration::from_secs(1), &plan);
         assert_eq!(live.program, "claude");
         assert_eq!(live.args, plan.argv);
+    }
+
+    #[test]
+    fn leaf_deadline_defaults_split_fake_and_live() {
+        // No override: fake keeps the historical 60s cap, live gets the much larger budget so a real
+        // headless leaf can actually finish instead of timing out→tree-kill→escalation (R-01).
+        assert_eq!(
+            resolve_leaf_deadline(None, false),
+            Duration::from_secs(LEAF_DEADLINE_FAKE_SECS)
+        );
+        assert_eq!(
+            resolve_leaf_deadline(None, true),
+            Duration::from_secs(LEAF_DEADLINE_LIVE_SECS)
+        );
+        // A live leaf must get a strictly larger default budget than the fake stand-in — otherwise
+        // the shared 60s cap would time-out every real leaf (R-01).
+        const _: () = assert!(LEAF_DEADLINE_LIVE_SECS > LEAF_DEADLINE_FAKE_SECS);
+        // An explicit `--leaf-deadline` override wins for either mode…
+        assert_eq!(
+            resolve_leaf_deadline(Some(300), false),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            resolve_leaf_deadline(Some(7200), true),
+            Duration::from_secs(7200)
+        );
+        // …and is clamped to a floor of 1s so `--leaf-deadline 0` can never mean "kill immediately".
+        assert_eq!(resolve_leaf_deadline(Some(0), true), Duration::from_secs(1));
     }
 
     #[test]

@@ -1026,10 +1026,11 @@ fn cmd_run(args: &[String]) {
              \x20          [--review] [--inject-findings <T-ID>] [--review-loop-max <n>]\n\
              \x20          [--converge-after <n>] [--join] [--integration-loop-max <n>]\n\
              \x20          [--inject-merge-conflict <T-ID>] [--inject-f-findings]\n\
-             \x20          [--integration-converge-after <n>] [--live]\n\
+             \x20          [--integration-converge-after <n>] [--live] [--leaf-deadline <sec>]\n\
              \x20          [--codex-coder <off|fast|fast+std>] [--codex-network] [--json]\n\
              (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work.\n\
-             \x20 --live opts into real claude/codex leaf calls — off by default the round stays hermetic)"
+             \x20 --live opts into real claude/codex leaf calls — off by default the round stays hermetic.\n\
+             \x20 --leaf-deadline overrides the per-leaf wall-clock budget; the default is 60s offline, minutes under --live)"
         );
         exit(run::exit::USAGE);
     }
@@ -1092,6 +1093,11 @@ fn cmd_run(args: &[String]) {
         .and_then(CodexCoder::parse)
         .unwrap_or(CodexCoder::Off);
     let codex_network = args.iter().any(|a| a == "--codex-network");
+    // Wall-clock budget for one supervised leaf. Separate fake/live defaults (60s vs minutes) so
+    // the offline baseline is untouched while a real `--live` leaf gets a budget adequate for a
+    // headless call; `--leaf-deadline <sec>` overrides either (clamped to ≥1s) for retuning without
+    // a rebuild — a shared 60s cap would time-out→tree-kill every live leaf into escalation (R-01).
+    let leaf_deadline_override = opt(args, "--leaf-deadline").and_then(|s| s.parse::<u64>().ok());
     let json = args.iter().any(|a| a == "--json");
 
     let cfg = RunConfig {
@@ -1117,7 +1123,7 @@ fn cmd_run(args: &[String]) {
         live,
         codex_coder,
         codex_network,
-        leaf_deadline: Duration::from_secs(60),
+        leaf_deadline: run::resolve_leaf_deadline(leaf_deadline_override, live),
     };
 
     match run::run_once(&cfg) {
