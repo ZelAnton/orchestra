@@ -31,6 +31,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Lint PowerShell sources
+        # K-007/K-034: explicitly run the blanket tools/tests/generators gate on both
+        # matrix OSes. Use the runner-image module when available and install the reviewed
+        # analyzer version only as a fallback.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installedAnalyzer = Get-Module -ListAvailable -Name PSScriptAnalyzer |
+            Sort-Object Version -Descending |
+            Select-Object -First 1
+          if ($null -eq $installedAnalyzer) {
+            Install-Module -Name PSScriptAnalyzer -RequiredVersion "1.24.0" -Repository PSGallery -Scope CurrentUser -Force
+          }
+          $p = "./tools/lint-powershell.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY validator $p is missing on ${{ matrix.os }} - a missing mandatory validator is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Regenerate agent variants and check for drift
         # Regenerates agents/coder.md / coder_fast.md / coder_deep.md from
         # agents/coder.template.md and agents/reviewer.md / reviewer_std.md from

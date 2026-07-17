@@ -238,6 +238,13 @@ workspace, коммитит результаты листовых агентов
   `orchestrator.lock`; обёртки — `cc-metrics.cmd`/`.sh` (чекаут `tools/metrics.ps1` либо
   зеркальная sibling-копия от `cc-sync`). Детерминированный тест — `tests/test-metrics.ps1`,
   явно подключённый к job `validate` в `.github/workflows/ci.yml` (K-007).
+- **Статический gate PowerShell-слоя (T-253).** `tools/lint-powershell.ps1` запускает
+  PSScriptAnalyzer с корневым `PSScriptAnalyzerSettings.psd1` для всех `tools/*.ps1`,
+  рекурсивно `tests/**/*.ps1` и корневых генераторов `generate-*.ps1`. Профиль явно
+  обосновывает только шумные исключения; Warning остаются видимыми, но неблокирующими,
+  Error (включая ошибки парсинга) дают ненулевой код. Gate явно подключён одним общим шагом
+  к Windows + Linux matrix job `validate` в `.github/workflows/ci.yml` (K-007) и всегда
+  проверяет весь набор файлов, а не только изменённые (K-034).
 - **Граница внешних данных и redaction секретов (T-087).** Единый нормативный контракт
   доверия/происхождения (`trusted`/`internal`/`external`) и редактирования чувствительного
   текста — `docs/queue_contract.md`, §18; исполняемая половина — `tools/redaction.ps1`
