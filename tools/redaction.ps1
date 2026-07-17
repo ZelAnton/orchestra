@@ -59,25 +59,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+# Shared infrastructure primitives (arg-parse, Fail/Opt + catch dispatcher; T-240).
+# Dot-sourced like tools/policy-schema.ps1.
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'RDCERR'  # coded-error tag decoded by the catch dispatcher
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('json', 'defang', 'no-defang', 'stdin')
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $a = [string]$args[$i]
-    if ($a -like '--*') {
-        $key = $a.Substring(2)
-        if ($BoolFlags -contains $key) { $opts[$key] = $true; continue }
-        $i++
-        $val = if ($i -lt $args.Count) { [string]$args[$i] } else { '' }
-        $opts[$key] = $val
-    }
-}
-
-function Fail { param([int]$Code, [string]$Message) throw ('RDCERR|' + $Code + '|' + $Message) }
-function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default } }
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'defang', 'no-defang', 'stdin')
+$Command = $parsed.Command
+$opts = $parsed.Opts
 
 $script:DefaultMaxBytes = 65536
 
@@ -466,13 +458,5 @@ try {
         }
     }
 } catch {
-    $m = [string]$_.Exception.Message
-    if ($m -like 'RDCERR|*') {
-        $parts = $m -split '\|', 3
-        [Console]::Error.WriteLine("redaction: $($parts[2])")
-        exit ([int]$parts[1])
-    }
-    [Console]::Error.WriteLine("redaction: $m")
-    if ($env:REDACTION_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }
-    exit 1
+    exit (Resolve-CatchExit $_ 'RDCERR' 'redaction' 'REDACTION_DEBUG')
 }

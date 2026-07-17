@@ -81,40 +81,23 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher,
+# crash-safe Read-TextOrEmpty/Write-TextAtomic, Maybe-Fault, Acquire-Lock/Release-Lock;
+# T-240). Dot-sourced like tools/policy-schema.ps1. Fail throws a coded terminating error
+# instead of calling `exit`, so any `finally { Release-Lock }` still runs before the process
+# leaves; the top-level dispatcher (Resolve-CatchExit) decodes the code and exits.
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'QTXERR'          # coded-error tag decoded by the catch dispatcher
+$script:FaultEnv  = 'QUEUE_TX_FAULT'  # crash-injection hook read by Maybe-Fault
+$script:LockName  = 'queue'           # label in the Acquire-Lock failure message
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('force', 'json', 'next-major')
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $a = [string]$args[$i]
-    if ($a -like '--*') {
-        $key = $a.Substring(2)
-        if ($BoolFlags -contains $key) { $opts[$key] = $true; continue }
-        $i++
-        if ($i -lt $args.Count) { $opts[$key] = [string]$args[$i] } else { $opts[$key] = '' }
-    }
-}
+$parsed = Parse-CliArgs $args -BoolFlags @('force', 'json', 'next-major')
+$Command = $parsed.Command
+$opts = $parsed.Opts
 
-# Fail throws a coded terminating error instead of calling `exit`, so that any
-# `finally { Release-Lock }` still runs before the process leaves. The top-level
-# dispatcher decodes the code and exits.
-function Fail {
-    param([int]$Code, [string]$Message)
-    throw ('QTXERR|' + $Code + '|' + $Message)
-}
-function Opt {
-    param([string]$Name, $Default = $null)
-    if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default }
-}
-function Require-Opt {
-    param([string]$Name)
-    if (-not $opts.ContainsKey($Name) -or [string]::IsNullOrEmpty([string]$opts[$Name])) {
-        Fail 2 "missing required option --$Name"
-    }
-    return [string]$opts[$Name]
-}
 function Format-Id { param([int]$N) return ('T-{0:D3}' -f $N) }
 function Format-PId { param([int]$N) return ('P-{0:D3}' -f $N) }
 
@@ -134,69 +117,6 @@ function Resolve-Paths {
         Inbox    = Join-Path $work 'queue_inbox'
         Rejected = Join-Path (Join-Path $work 'queue_inbox') 'rejected'
     }
-}
-
-# --------------------------------------------------------------------------
-# Crash-safe IO
-# --------------------------------------------------------------------------
-function Read-TextOrEmpty {
-    param([string]$Path)
-    if (Test-Path -LiteralPath $Path) { return [System.IO.File]::ReadAllText($Path) }
-    return ''
-}
-function Maybe-Fault {
-    param([string]$Stage)
-    if ($env:QUEUE_TX_FAULT -and $env:QUEUE_TX_FAULT -eq $Stage) {
-        throw "injected fault at stage '$Stage'"
-    }
-}
-function Write-TextAtomic {
-    param([string]$Path, [string]$Content)
-    $enc = New-Object System.Text.UTF8Encoding($false)  # no BOM for .work/*.md/.json
-    $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Force -Path $dir }
-    # Fixed temp name (not PID-suffixed): queue/state writes are serialized by the
-    # queue lock and inbox targets are already unique, so a crashed transaction's
-    # leftover temp is simply overwritten by the retry instead of accumulating.
-    $tmp = "$Path.tmp"
-    [System.IO.File]::WriteAllText($tmp, $Content, $enc)
-    Maybe-Fault 'before-rename'
-    Move-Item -LiteralPath $tmp -Destination $Path -Force
-    Maybe-Fault 'after-rename'
-}
-
-# --------------------------------------------------------------------------
-# Lock: an exclusive lock FILE created with FileMode.CreateNew, which is the
-# atomic "create, failing if it already exists" primitive. (PowerShell's
-# `New-Item -ItemType Directory` is NOT atomic — it is a check-then-create over
-# Directory.CreateDirectory, which is idempotent, so concurrent callers can all
-# "succeed" and enter the critical section together. CreateNew fails the losers
-# with an IOException, giving true mutual exclusion.) A crashed holder leaves the
-# file behind; a lock older than $StaleMs is treated as abandoned and broken.
-# --------------------------------------------------------------------------
-function Acquire-Lock {
-    param([string]$LockPath, [int]$TimeoutMs = 30000, [int]$StaleMs = 60000)
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
-    while ($true) {
-        try {
-            $fs = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try { $b = [System.Text.Encoding]::ASCII.GetBytes("$PID"); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
-            return
-        } catch {
-            if (Test-Path -LiteralPath $LockPath) {
-                try {
-                    $age = ([DateTime]::UtcNow - (Get-Item -LiteralPath $LockPath).CreationTimeUtc).TotalMilliseconds
-                    if ($age -gt $StaleMs) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue; continue }
-                } catch { }
-            }
-            if ([DateTime]::UtcNow -gt $deadline) { Fail 7 "could not acquire queue lock at $LockPath (held by another writer)" }
-            Start-Sleep -Milliseconds 50
-        }
-    }
-}
-function Release-Lock {
-    param([string]$LockPath)
-    Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
 }
 
 # --------------------------------------------------------------------------
@@ -1269,13 +1189,5 @@ try {
         }
     }
 } catch {
-    $m = [string]$_.Exception.Message
-    if ($m -like 'QTXERR|*') {
-        $parts = $m -split '\|', 3
-        [Console]::Error.WriteLine("queue-tx: $($parts[2])")
-        exit ([int]$parts[1])
-    }
-    [Console]::Error.WriteLine("queue-tx: $m")
-    if ($env:QUEUE_TX_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }
-    exit 1
+    exit (Resolve-CatchExit $_ 'QTXERR' 'queue-tx' 'QUEUE_TX_DEBUG')
 }

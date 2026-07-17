@@ -123,6 +123,14 @@ $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 # Invoke-Captured). proc-tree.ps1 is a pure library with no top-level side effects.
 . (Join-Path $PSScriptRoot 'proc-tree.ps1')
 
+# Shared Win32 quoting primitive (ConvertTo-Win32Arg / ConvertTo-Win32CommandLine) comes from
+# tools/common.ps1 (T-240), shared with tools/supervisor.ps1 instead of a per-file copy. Loaded
+# as a pure library (like proc-tree.ps1 above). This runtime keeps its OWN direct-exit
+# Fail/Opt/Require-Opt/Read-TextOrEmpty (defined below, so they override common's throw-model
+# copies): it reports failures by writing stderr and calling `exit`, not via a coded-error
+# catch dispatcher, so it deliberately does NOT adopt common's Fail.
+. (Join-Path $PSScriptRoot 'common.ps1')
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # (same shape as tools/queue-tx.ps1)
@@ -286,39 +294,9 @@ function Build-CodexArgv {
     return , $argv.ToArray()
 }
 
-# --------------------------------------------------------------------------
 # CommandLineToArgvW-correct quoting for the Windows PowerShell 5.1 fallback
-# (ProcessStartInfo.ArgumentList is not available there). Follows the standard
-# MSVC / CommandLineToArgvW backslash-and-quote rules so each element round-trips
-# to exactly one argument.
-# --------------------------------------------------------------------------
-function ConvertTo-Win32Arg {
-    param([string]$Arg)
-    if ($Arg.Length -gt 0 -and $Arg -notmatch '[ \t\n\v"]') { return $Arg }
-    $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append('"')
-    for ($i = 0; $i -lt $Arg.Length; $i++) {
-        $backslashes = 0
-        while ($i -lt $Arg.Length -and $Arg[$i] -eq '\') { $backslashes++; $i++ }
-        if ($i -eq $Arg.Length) {
-            # Trailing backslashes: double them so they do not escape the closing quote.
-            [void]$sb.Append('\' * ($backslashes * 2))
-            break
-        } elseif ($Arg[$i] -eq '"') {
-            [void]$sb.Append('\' * ($backslashes * 2 + 1))
-            [void]$sb.Append('"')
-        } else {
-            [void]$sb.Append('\' * $backslashes)
-            [void]$sb.Append($Arg[$i])
-        }
-    }
-    [void]$sb.Append('"')
-    return $sb.ToString()
-}
-function ConvertTo-Win32CommandLine {
-    param([string[]]$Argv)
-    return (($Argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ')
-}
+# (ConvertTo-Win32Arg / ConvertTo-Win32CommandLine) comes from tools/common.ps1 (T-240),
+# shared with tools/supervisor.ps1 instead of a per-file copy that could drift.
 
 # --------------------------------------------------------------------------
 # Resolve the codex command target into a directly-spawnable executable plus any

@@ -81,29 +81,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+# Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher,
+# crash-safe IO, CreateNew lock, UTC helpers; T-240). Dot-sourced like tools/policy-schema.ps1.
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'OBXERR'        # coded-error tag decoded by the catch dispatcher
+$script:FaultEnv  = 'OUTBOX_FAULT'  # crash-injection hook read by Maybe-Fault
+$script:LockName  = 'outbox'        # label in the Acquire-Lock failure message
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('json', 'stdin')
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $a = [string]$args[$i]
-    if ($a -like '--*') {
-        $key = $a.Substring(2)
-        if ($BoolFlags -contains $key) { $opts[$key] = $true; continue }
-        $i++
-        if ($i -lt $args.Count) { $opts[$key] = [string]$args[$i] } else { $opts[$key] = '' }
-    }
-}
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'stdin')
+$Command = $parsed.Command
+$opts = $parsed.Opts
 
-function Fail { param([int]$Code, [string]$Message) throw ('OBXERR|' + $Code + '|' + $Message) }
-function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default } }
-function Require-Opt {
-    param([string]$Name)
-    if (-not $opts.ContainsKey($Name) -or [string]::IsNullOrEmpty([string]$opts[$Name])) { Fail 2 "missing required option --$Name" }
-    return [string]$opts[$Name]
-}
 function Has-Prop { param($Obj, [string]$Name) return ($null -ne $Obj -and $Obj.PSObject.Properties.Name -contains $Name) }
 function Get-Prop { param($Obj, [string]$Name) if (Has-Prop $Obj $Name) { return $Obj.$Name } else { return $null } }
 
@@ -235,7 +226,12 @@ function Resolve-Paths {
 }
 
 # --------------------------------------------------------------------------
-# Crash-safe IO helpers (mirror queue-tx / state-tx).
+# Crash-safe IO. Read-TextOrEmpty / Write-TextAtomic / Maybe-Fault, the short
+# serialization lock (Acquire-Lock / Release-Lock) and the time helpers (Format-UtcNow /
+# Parse-Utc) come from tools/common.ps1 (T-240); Read-BytesOrEmpty is outbox-specific (the
+# durable outbox is byte-addressed for torn-tail repair). Maybe-Fault reads $script:FaultEnv
+# (OUTBOX_FAULT set above); the shared Write-TextAtomic only faults on the before/after-rename
+# stages, which outbox never injects (its OUTBOX_FAULT stages are before-open/-write/-flush).
 # --------------------------------------------------------------------------
 function Read-BytesOrEmpty {
     param([string]$Path)
@@ -246,58 +242,7 @@ function Read-BytesOrEmpty {
     }
     return ,(New-Object 'byte[]' 0)
 }
-function Read-TextOrEmpty {
-    param([string]$Path)
-    if (Test-Path -LiteralPath $Path) { return [System.IO.File]::ReadAllText($Path) }
-    return ''
-}
-function Write-TextAtomic {
-    param([string]$Path, [string]$Content)
-    $enc = New-Object System.Text.UTF8Encoding($false)
-    $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Force -Path $dir }
-    $tmp = "$Path.tmp"
-    [System.IO.File]::WriteAllText($tmp, $Content, $enc)
-    Move-Item -LiteralPath $tmp -Destination $Path -Force
-}
-function Maybe-Fault {
-    param([string]$Stage)
-    if ($env:OUTBOX_FAULT -and $env:OUTBOX_FAULT -eq $Stage) { throw "injected fault at stage '$Stage'" }
-}
 
-# --------------------------------------------------------------------------
-# Short serialization lock (identical primitive to queue-tx / state-tx).
-# --------------------------------------------------------------------------
-function Acquire-Lock {
-    param([string]$LockPath, [int]$TimeoutMs = 30000, [int]$StaleMs = 60000)
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
-    while ($true) {
-        try {
-            $fs = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try { $b = [System.Text.Encoding]::ASCII.GetBytes("$PID"); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
-            return
-        } catch {
-            if (Test-Path -LiteralPath $LockPath) {
-                try {
-                    $age = ([DateTime]::UtcNow - (Get-Item -LiteralPath $LockPath).CreationTimeUtc).TotalMilliseconds
-                    if ($age -gt $StaleMs) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue; continue }
-                } catch { }
-            }
-            if ([DateTime]::UtcNow -gt $deadline) { Fail 7 "could not acquire outbox lock at $LockPath (held by another writer)" }
-            Start-Sleep -Milliseconds 50
-        }
-    }
-}
-function Release-Lock { param([string]$LockPath) Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue }
-
-# --------------------------------------------------------------------------
-# Time helpers.
-# --------------------------------------------------------------------------
-function Format-UtcNow { return [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
-function Parse-Utc {
-    param([string]$S)
-    return [System.DateTimeOffset]::Parse($S, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime
-}
 # ConvertFrom-Json coerces ISO-8601 strings to [datetime]; accept either shape and
 # never round-trip through a culture-localized ToString() (which would misparse).
 function To-Utc {
@@ -795,13 +740,5 @@ try {
         }
     }
 } catch {
-    $m = [string]$_.Exception.Message
-    if ($m -like 'OBXERR|*') {
-        $parts = $m -split '\|', 3
-        [Console]::Error.WriteLine("outbox: $($parts[2])")
-        exit ([int]$parts[1])
-    }
-    [Console]::Error.WriteLine("outbox: $m")
-    if ($env:OUTBOX_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }
-    exit 1
+    exit (Resolve-CatchExit $_ 'OBXERR' 'outbox' 'OUTBOX_DEBUG')
 }

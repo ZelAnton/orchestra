@@ -82,29 +82,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+# Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher,
+# Read-TextOrEmpty, Format-UtcNow, ConvertTo-Win32Arg/ConvertTo-Win32CommandLine; T-240).
+# Dot-sourced like tools/proc-tree.ps1 (loaded below).
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'SPVERR'  # coded-error tag decoded by the catch dispatcher
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...  (shape of queue-tx.ps1)
 # --------------------------------------------------------------------------
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('json', 'reset', 'no-checkpoint')
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $a = [string]$args[$i]
-    if ($a -like '--*') {
-        $key = $a.Substring(2)
-        if ($BoolFlags -contains $key) { $opts[$key] = $true; continue }
-        $i++
-        if ($i -lt $args.Count) { $opts[$key] = [string]$args[$i] } else { $opts[$key] = '' }
-    }
-}
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'reset', 'no-checkpoint')
+$Command = $parsed.Command
+$opts = $parsed.Opts
 
-function Fail { param([int]$Code, [string]$Message) throw ('SPVERR|' + $Code + '|' + $Message) }
-function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default } }
-function Require-Opt {
-    param([string]$Name)
-    if (-not $opts.ContainsKey($Name) -or [string]::IsNullOrEmpty([string]$opts[$Name])) { Fail 2 "missing required option --$Name" }
-    return [string]$opts[$Name]
-}
 function Has-Prop { param($Obj, [string]$Name) return ($null -ne $Obj -and $null -ne $Obj.PSObject.Properties[$Name]) }
 function Get-Prop { param($Obj, [string]$Name) if (Has-Prop $Obj $Name) { return $Obj.$Name } else { return $null } }
 
@@ -120,7 +110,8 @@ $script:TransientReasons = @('timeout', 'crash')
 # Small IO helpers.
 # --------------------------------------------------------------------------
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
-function Read-TextOrEmpty { param([string]$Path) if ($Path -and (Test-Path -LiteralPath $Path)) { return [System.IO.File]::ReadAllText($Path, $script:Utf8) } else { return '' } }
+# Read-TextOrEmpty comes from tools/common.ps1 (T-240). Write-TextNoBom / Write-JsonAtomic
+# stay local: they write with the explicit no-BOM $script:Utf8 encoding this tool pins.
 function Write-TextNoBom {
     param([string]$Path, [string]$Content)
     $dir = Split-Path -Parent $Path
@@ -140,7 +131,7 @@ function Sha256Hex { param([byte[]]$Bytes)
     try { $h = $sha.ComputeHash($Bytes) } finally { $sha.Dispose() }
     return -join ($h | ForEach-Object { $_.ToString('x2') })
 }
-function Format-UtcNow { return [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+# Format-UtcNow comes from tools/common.ps1 (T-240).
 function Parse-IntOpt {
     param([string]$Name, [int]$Default, [int]$Min = 0)
     $raw = [string](Opt $Name "$Default")
@@ -157,26 +148,9 @@ function Parse-IntList {
     return , $out.ToArray()
 }
 
-# --------------------------------------------------------------------------
-# CommandLineToArgvW-correct quoting for the Windows PowerShell 5.1 fallback (no
-# ProcessStartInfo.ArgumentList there). Same rules as tools/codex-runtime.ps1.
-# --------------------------------------------------------------------------
-function ConvertTo-Win32Arg {
-    param([string]$Arg)
-    if ($Arg.Length -gt 0 -and $Arg -notmatch '[ \t\n\v"]') { return $Arg }
-    $sb = New-Object System.Text.StringBuilder
-    [void]$sb.Append('"')
-    for ($i = 0; $i -lt $Arg.Length; $i++) {
-        $bs = 0
-        while ($i -lt $Arg.Length -and $Arg[$i] -eq '\') { $bs++; $i++ }
-        if ($i -eq $Arg.Length) { [void]$sb.Append('\' * ($bs * 2)); break }
-        elseif ($Arg[$i] -eq '"') { [void]$sb.Append('\' * ($bs * 2 + 1)); [void]$sb.Append('"') }
-        else { [void]$sb.Append('\' * $bs); [void]$sb.Append($Arg[$i]) }
-    }
-    [void]$sb.Append('"')
-    return $sb.ToString()
-}
-function ConvertTo-Win32CommandLine { param([string[]]$Argv) return (($Argv | ForEach-Object { ConvertTo-Win32Arg $_ }) -join ' ') }
+# CommandLineToArgvW-correct quoting for the Windows PowerShell 5.1 fallback
+# (ConvertTo-Win32Arg / ConvertTo-Win32CommandLine) comes from tools/common.ps1 (T-240),
+# shared with tools/codex-runtime.ps1 instead of a per-file copy.
 
 # --------------------------------------------------------------------------
 # Resolve the call target: --file <script.ps1> runs through this pwsh host; --exe
@@ -701,13 +675,5 @@ try {
         }
     }
 } catch {
-    $m = [string]$_.Exception.Message
-    if ($m -like 'SPVERR|*') {
-        $parts = $m -split '\|', 3
-        [Console]::Error.WriteLine("supervisor: $($parts[2])")
-        exit ([int]$parts[1])
-    }
-    [Console]::Error.WriteLine("supervisor: $m")
-    if ($env:SUPERVISOR_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }
-    exit 1
+    exit (Resolve-CatchExit $_ 'SPVERR' 'supervisor' 'SUPERVISOR_DEBUG')
 }

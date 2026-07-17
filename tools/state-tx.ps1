@@ -81,37 +81,19 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher,
+# crash-safe IO, CreateNew lock, UTC helpers; T-240). Dot-sourced like tools/policy-schema.ps1.
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'STXERR'          # coded-error tag decoded by the catch dispatcher
+$script:FaultEnv  = 'STATE_TX_FAULT'  # crash-injection hook read by Maybe-Fault
+$script:LockName  = 'state-tx'        # label in the Acquire-Lock failure message
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('force', 'json')
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $a = [string]$args[$i]
-    if ($a -like '--*') {
-        $key = $a.Substring(2)
-        if ($BoolFlags -contains $key) { $opts[$key] = $true; continue }
-        $i++
-        if ($i -lt $args.Count) { $opts[$key] = [string]$args[$i] } else { $opts[$key] = '' }
-    }
-}
-
-function Fail {
-    param([int]$Code, [string]$Message)
-    throw ('STXERR|' + $Code + '|' + $Message)
-}
-function Opt {
-    param([string]$Name, $Default = $null)
-    if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default }
-}
-function Require-Opt {
-    param([string]$Name)
-    if (-not $opts.ContainsKey($Name) -or [string]::IsNullOrEmpty([string]$opts[$Name])) {
-        Fail 2 "missing required option --$Name"
-    }
-    return [string]$opts[$Name]
-}
+$parsed = Parse-CliArgs $args -BoolFlags @('force', 'json')
+$Command = $parsed.Command
+$opts = $parsed.Opts
 
 # --------------------------------------------------------------------------
 # Paths (resolved once --work is known)
@@ -128,72 +110,9 @@ function Resolve-Paths {
     }
 }
 
-# --------------------------------------------------------------------------
-# Crash-safe IO (mirrors queue-tx.ps1)
-# --------------------------------------------------------------------------
-function Read-TextOrEmpty {
-    param([string]$Path)
-    if (Test-Path -LiteralPath $Path) { return [System.IO.File]::ReadAllText($Path) }
-    return ''
-}
-function Maybe-Fault {
-    param([string]$Stage)
-    if ($env:STATE_TX_FAULT -and $env:STATE_TX_FAULT -eq $Stage) {
-        throw "injected fault at stage '$Stage'"
-    }
-}
-function Write-TextAtomic {
-    param([string]$Path, [string]$Content)
-    $enc = New-Object System.Text.UTF8Encoding($false)  # no BOM for .work/*.json
-    $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Force -Path $dir }
-    $tmp = "$Path.tmp"
-    [System.IO.File]::WriteAllText($tmp, $Content, $enc)
-    Maybe-Fault 'before-rename'
-    Move-Item -LiteralPath $tmp -Destination $Path -Force
-    Maybe-Fault 'after-rename'
-}
-
-# --------------------------------------------------------------------------
-# Short serialization lock (identical primitive to queue-tx.ps1's queue lock)
-# --------------------------------------------------------------------------
-function Acquire-Lock {
-    param([string]$LockPath, [int]$TimeoutMs = 30000, [int]$StaleMs = 60000)
-    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
-    while ($true) {
-        try {
-            $fs = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            try { $b = [System.Text.Encoding]::ASCII.GetBytes("$PID"); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
-            return
-        } catch {
-            if (Test-Path -LiteralPath $LockPath) {
-                try {
-                    $age = ([DateTime]::UtcNow - (Get-Item -LiteralPath $LockPath).CreationTimeUtc).TotalMilliseconds
-                    if ($age -gt $StaleMs) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue; continue }
-                } catch { }
-            }
-            if ([DateTime]::UtcNow -gt $deadline) { Fail 7 "could not acquire state-tx lock at $LockPath (held by another writer)" }
-            Start-Sleep -Milliseconds 50
-        }
-    }
-}
-function Release-Lock {
-    param([string]$LockPath)
-    Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
-}
-
-# --------------------------------------------------------------------------
-# Time helpers (UTC, round-trippable ISO 8601)
-# --------------------------------------------------------------------------
-function Format-Utc { param([datetime]$D) return $D.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
-function Parse-Utc {
-    # DateTimeOffset unambiguously honours a trailing 'Z' / explicit offset and, with
-    # AssumeUniversal, treats an offset-less string as UTC too (never as local). Using
-    # DateTime.Parse+ToUniversalTime here would misread a 'Z' string as local on hosts
-    # whose offset != 0, throwing the heartbeat age off by the local UTC offset.
-    param([string]$S)
-    return [System.DateTimeOffset]::Parse($S, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime
-}
+# Crash-safe IO (Read-TextOrEmpty / Maybe-Fault / Write-TextAtomic), the short serialization
+# lock (Acquire-Lock / Release-Lock) and the UTC helpers (Format-Utc / Parse-Utc) come from
+# tools/common.ps1 (T-240): Maybe-Fault reads $script:FaultEnv (STATE_TX_FAULT set above).
 function Get-HostName { return [System.Net.Dns]::GetHostName() }
 
 # --------------------------------------------------------------------------
@@ -622,13 +541,5 @@ try {
         }
     }
 } catch {
-    $m = [string]$_.Exception.Message
-    if ($m -like 'STXERR|*') {
-        $parts = $m -split '\|', 3
-        [Console]::Error.WriteLine("state-tx: $($parts[2])")
-        exit ([int]$parts[1])
-    }
-    [Console]::Error.WriteLine("state-tx: $m")
-    if ($env:STATE_TX_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }
-    exit 1
+    exit (Resolve-CatchExit $_ 'STXERR' 'state-tx' 'STATE_TX_DEBUG')
 }

@@ -113,37 +113,21 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 
 . (Join-Path $PSScriptRoot 'policy-schema.ps1')
 
+# Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher;
+# T-240). Dot-sourced like tools/policy-schema.ps1 just above.
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'PLCERR'  # coded-error tag decoded by the catch dispatcher
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...  (repeatable keys collect)
 # --------------------------------------------------------------------------
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('json', 'quiet')
-$RepeatKeys = @('path')
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $a = [string]$args[$i]
-    if ($a -like '--*') {
-        $key = $a.Substring(2)
-        if ($BoolFlags -contains $key) { $opts[$key] = $true; continue }
-        $i++
-        $val = if ($i -lt $args.Count) { [string]$args[$i] } else { '' }
-        if ($RepeatKeys -contains $key) {
-            if (-not $opts.ContainsKey($key)) { $opts[$key] = [System.Collections.Generic.List[string]]::new() }
-            $opts[$key].Add($val)
-        } else { $opts[$key] = $val }
-    }
-}
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'quiet') -RepeatKeys @('path')
+$Command = $parsed.Command
+$opts = $parsed.Opts
 
-function Fail { param([int]$Code, [string]$Message) throw ('PLCERR|' + $Code + '|' + $Message) }
-function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default } }
 # Human-readable status line - suppressed under --json so a machine consumer gets ONLY the
 # JSON object on stdout (the JSON emitters below print the machine form when --json is set).
 function Say { param([string]$Message) if (-not [bool](Opt 'json' $false)) { Write-Output $Message } }
-function Require-Opt {
-    param([string]$Name)
-    if (-not $opts.ContainsKey($Name) -or [string]::IsNullOrEmpty([string]$opts[$Name])) { Fail 2 "missing required option --$Name" }
-    return [string]$opts[$Name]
-}
 function Read-Lines {
     param([string]$Path)
     # $null => file absent; @() => file present but empty (distinct: an empty config.md is
@@ -789,6 +773,8 @@ function Get-ApprovalNow {
     }
     return [DateTime]::UtcNow
 }
+# Local by design (T-240): approval timestamps use WHOLE-SECOND granularity, distinct from
+# tools/common.ps1's millisecond Format-Utc. Defined after the common dot-source so this wins.
 function Format-Utc { param([datetime]$T) return $T.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
 
 function Cmd-ApprovalRequest {
@@ -998,13 +984,5 @@ try {
         }
     }
 } catch {
-    $m = [string]$_.Exception.Message
-    if ($m -like 'PLCERR|*') {
-        $parts = $m -split '\|', 3
-        [Console]::Error.WriteLine("policy: $($parts[2])")
-        exit ([int]$parts[1])
-    }
-    [Console]::Error.WriteLine("policy: $m")
-    if ($env:POLICY_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }
-    exit 1
+    exit (Resolve-CatchExit $_ 'PLCERR' 'policy' 'POLICY_DEBUG')
 }

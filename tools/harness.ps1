@@ -67,28 +67,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+# Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher;
+# T-240). Dot-sourced like tools/policy-schema.ps1.
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'HRNERR'  # coded-error tag decoded by the catch dispatcher
+
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$BoolFlags = @('json', 'keep')
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $a = [string]$args[$i]
-    if ($a -like '--*') {
-        $key = $a.Substring(2)
-        if ($BoolFlags -contains $key) { $opts[$key] = $true; continue }
-        $i++
-        if ($i -lt $args.Count) { $opts[$key] = [string]$args[$i] } else { $opts[$key] = '' }
-    }
-}
-function Fail { param([int]$Code, [string]$Message) throw ('HRNERR|' + $Code + '|' + $Message) }
-function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default } }
-function Require-Opt {
-    param([string]$Name)
-    if (-not $opts.ContainsKey($Name) -or [string]::IsNullOrEmpty([string]$opts[$Name])) { Fail 2 "missing required option --$Name" }
-    return [string]$opts[$Name]
-}
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'keep')
+$Command = $parsed.Command
+$opts = $parsed.Opts
 
 # --------------------------------------------------------------------------
 # Tool locations + a PowerShell host to spawn them with.
@@ -1382,13 +1371,5 @@ try {
         }
     }
 } catch {
-    $m = [string]$_.Exception.Message
-    if ($m -like 'HRNERR|*') {
-        $parts = $m -split '\|', 3
-        [Console]::Error.WriteLine("harness: $($parts[2])")
-        exit ([int]$parts[1])
-    }
-    [Console]::Error.WriteLine("harness: $m")
-    if ($env:HARNESS_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }
-    exit 1
+    exit (Resolve-CatchExit $_ 'HRNERR' 'harness' 'HARNESS_DEBUG')
 }
