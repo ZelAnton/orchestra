@@ -57,6 +57,11 @@
                         recoverable flags included.
       check-diff        Oversized-diff guard: count unified-diff lines and report whether
                         they exceed the threshold (default 4000, T-074's DIFF_TOO_LARGE).
+      working-copy-status
+                        Inspect the actual active VCS working copy and return `clean`,
+                        `changedFiles`, and `stat`. Requires an explicit --vcs so a
+                        colocated jj+git workspace can never silently fall back to git;
+                        every jj query is scoped with `-R <worktree>` (K-025).
       validate-reviewer Validate a reviewer_codex pass output (RECHECK + NEW sections)
                         against the requested R-IDs - the "clean pass" contract (T-074).
       broker-validate   Validate a NEED_NET / dependency-broker command against the
@@ -632,6 +637,65 @@ function Get-JjDivergent {
     } catch { return $null }
 }
 
+# The adapter's single source of truth for whether the active workspace has changes.
+# In a colocated jj+git repository Git can report a clean index/worktree after jj has
+# snapshotted the working-copy revision even though `jj diff -r @` is substantive.
+# Therefore the selected VCS is REQUIRED (no git default), and the jj branch never
+# consults Git. All jj calls carry `-R $Worktree` so the result cannot come from the
+# runtime process's cwd instead of the requested workspace (K-025).
+function Get-WorkingCopyStatus {
+    param([string]$Worktree, [string]$Vcs)
+
+    if ($Vcs -notin @('git', 'jj')) {
+        Fail 2 "invalid --vcs '$Vcs' (allowed: git | jj)"
+    }
+
+    $nameLines = @()
+    $statLines = @()
+    if ($Vcs -eq 'jj') {
+        # jj renders paths relative to the process cwd even with -R. Enter the
+        # requested worktree only to normalize output paths, while retaining -R as
+        # the authoritative repository selector (the K-025 safety invariant).
+        Push-Location -LiteralPath $Worktree
+        try {
+            $nameLines = @(& jj -R $Worktree --no-pager diff --name-only 2>$null)
+            if ($LASTEXITCODE -ne 0) { Fail 3 "jj diff --name-only failed for --worktree '$Worktree'" }
+            $statLines = @(& jj -R $Worktree --no-pager diff --stat 2>$null)
+            if ($LASTEXITCODE -ne 0) { Fail 3 "jj diff --stat failed for --worktree '$Worktree'" }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        # Cover unstaged, staged, and untracked paths. Keeping every Git command in
+        # this branch makes it mechanically impossible for --vcs jj to observe Git.
+        $unstaged = @(& git -C $Worktree diff --name-only -- 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail 3 "git diff failed for --worktree '$Worktree'" }
+        $staged = @(& git -C $Worktree diff --cached --name-only -- 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail 3 "git diff --cached failed for --worktree '$Worktree'" }
+        $untracked = @(& git -C $Worktree ls-files --others --exclude-standard 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail 3 "git ls-files failed for --worktree '$Worktree'" }
+        $nameLines = @($unstaged) + @($staged) + @($untracked)
+
+        $unstagedStat = @(& git -C $Worktree diff --stat -- 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail 3 "git diff --stat failed for --worktree '$Worktree'" }
+        $stagedStat = @(& git -C $Worktree diff --cached --stat -- 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail 3 "git diff --cached --stat failed for --worktree '$Worktree'" }
+        $statLines = @($unstagedStat) + @($stagedStat)
+    }
+
+    $changed = @($nameLines |
+        ForEach-Object { [string]$_ } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Sort-Object -Unique)
+    return [pscustomobject]@{
+        worktree     = $Worktree
+        vcs          = $Vcs
+        clean        = ($changed.Count -eq 0)
+        changedFiles = $changed
+        stat         = (@($statLines | ForEach-Object { [string]$_ }) -join "`n")
+    }
+}
+
 # ==========================================================================
 # Commands
 # ==========================================================================
@@ -673,6 +737,12 @@ function Cmd-CheckDiff {
     $over = $lines -gt $max
     Emit-Json ([pscustomobject]@{ lines = $lines; threshold = $max; overLimit = $over })
     if ($over -and [bool](Opt 'fail-on-over' $false)) { exit 3 }
+}
+
+function Cmd-WorkingCopyStatus {
+    $wt = Require-Opt 'worktree'
+    $vcs = Require-Opt 'vcs'
+    Emit-Json (Get-WorkingCopyStatus -Worktree $wt -Vcs $vcs)
 }
 
 function Cmd-ValidateReviewer {
@@ -987,6 +1057,7 @@ switch ($Command) {
     'resume-image'      { Cmd-ResumeImage }
     'classify'          { Cmd-Classify }
     'check-diff'        { Cmd-CheckDiff }
+    'working-copy-status' { Cmd-WorkingCopyStatus }
     'validate-reviewer' { Cmd-ValidateReviewer }
     'broker-validate'   { Cmd-BrokerValidate }
     'guard-head'        { Cmd-Head }
@@ -994,6 +1065,6 @@ switch ($Command) {
     'cleanup'           { Cmd-Cleanup }
     'map-sentinel'      { Cmd-MapSentinel }
     default {
-        Fail 2 "unknown command '$Command'. Valid: build-argv, run, resume-image, classify, check-diff, validate-reviewer, broker-validate, guard-head, guard-commit, cleanup, map-sentinel"
+        Fail 2 "unknown command '$Command'. Valid: build-argv, run, resume-image, classify, check-diff, working-copy-status, validate-reviewer, broker-validate, guard-head, guard-commit, cleanup, map-sentinel"
     }
 }

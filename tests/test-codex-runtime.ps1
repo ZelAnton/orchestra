@@ -21,6 +21,8 @@
       * dependency-broker allowlist (accept canonical, reject metacharacters /
         non-allowlisted / non-canonical);
       * invalid codex output (reviewer RECHECK/NEW validation, oversized diff);
+      * active-VCS working-copy status in a colocated jj+git repo where Git is
+        clean but jj has a substantive uncommitted working-copy revision;
       * cleanup correctness after a failure (own worktree only; a main-tree call
         never deletes the untracked .work/);
       * failure-class -> escalation-sentinel mapping.
@@ -456,9 +458,15 @@ if (-not $git) {
         $repo = New-TempGitRepo
         [System.IO.File]::WriteAllText((Join-Path $repo 'a.txt'), 'dirty', $script:Utf8)
         [System.IO.File]::WriteAllText((Join-Path $repo 'junk.txt'), 'temp', $script:Utf8)
+        $before = Invoke-Runtime -RuntimeArgs @('working-copy-status', '--worktree', $repo, '--vcs', 'git')
+        Assert-Equal $false $before.Json.clean 'working-copy-status(git): tracked and untracked changes are not clean'
+        Assert-True (@($before.Json.changedFiles) -contains 'a.txt') 'working-copy-status(git): tracked change listed'
+        Assert-True (@($before.Json.changedFiles) -contains 'junk.txt') 'working-copy-status(git): untracked change listed'
         $r = Invoke-Runtime -RuntimeArgs @('cleanup', '--worktree', $repo, '--vcs', 'git')
         Assert-Equal 'one' ([System.IO.File]::ReadAllText((Join-Path $repo 'a.txt'))) 'cleanup: tracked change reverted'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $repo 'junk.txt'))) 'cleanup: untracked file removed'
+        $after = Invoke-Runtime -RuntimeArgs @('working-copy-status', '--worktree', $repo, '--vcs', 'git')
+        Assert-Equal $true $after.Json.clean 'working-copy-status(git): cleanup leaves the active Git worktree clean'
     }.Invoke()
 
     # cleanup (main-tree mode): NEVER deletes the untracked .work/
@@ -496,11 +504,60 @@ if (-not $jj) {
         # scratchpad tree so the internal `.jj/repo/index/segments/<hash>` paths
         # stay under the Windows MAX_PATH limit.
         $dir = New-TempDir
-        & jj git init $dir 2>&1 | Out-Null
+        & jj git init --colocate $dir 2>&1 | Out-Null
         & jj -R $dir config set --repo user.name 'Test' 2>&1 | Out-Null
         & jj -R $dir config set --repo user.email 'test@example.com' 2>&1 | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $dir 'a.txt'), 'one', $script:Utf8)
         return $dir
+    }
+
+    # COLOCATED FALSE-CLEAN REGRESSION: after jj snapshots its working-copy revision,
+    # Git's status/diff view can report clean while `jj diff` still contains the real
+    # uncommitted change relative to @'s parent. The runtime
+    # must query the explicitly selected active VCS, not infer Git from the .git dir.
+    if (-not $git) {
+        Write-Host 'SKIP - git not on PATH; colocated jj false-clean regression skipped.'
+    } else {
+        {
+            # Start from a real Git commit, then create jj's mutable @ revision on
+            # top. Mark the Git index entry assume-unchanged to model the observed
+            # colocated boundary: the edit is tracked by jj's change_id but is not
+            # represented as Git index/worktree dirt for Git's status machinery.
+            $repo = New-TempGitRepo
+            & jj git init --colocate $repo 2>&1 | Out-Null
+            & jj -R $repo config set --repo user.name 'Test' 2>&1 | Out-Null
+            & jj -R $repo config set --repo user.email 'test@example.com' 2>&1 | Out-Null
+            & jj -R $repo new 2>&1 | Out-Null
+            & git -C $repo update-index --assume-unchanged a.txt 2>&1 | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $repo 'a.txt'), 'jj-only working-copy edit', $script:Utf8)
+
+            Assert-True (Test-Path -LiteralPath (Join-Path $repo '.git')) 'working-copy-status(jj colocated): precondition - .git exists'
+            Assert-True (Test-Path -LiteralPath (Join-Path $repo '.jj')) 'working-copy-status(jj colocated): precondition - .jj exists'
+
+            # Snapshot the file into jj's stable change_id-tracked @ revision. This is
+            # intentionally uncommitted in the Orchestra sense: no `jj commit`/`jj new`.
+            & jj -R $repo status 2>&1 | Out-Null
+            $changeId = ([string](& jj -R $repo --no-pager log -r '@' --no-graph -T 'change_id' 2>$null)).Trim()
+            Assert-True ($changeId -ne '') 'working-copy-status(jj colocated): @ has a stable change_id'
+
+            $gitStatus = @(& git -C $repo status --porcelain 2>$null)
+            $gitDiff = @(& git -C $repo diff --name-only 2>$null)
+            Assert-Equal 0 $gitStatus.Count 'working-copy-status(jj colocated): precondition - git status falsely appears clean'
+            Assert-Equal 0 $gitDiff.Count 'working-copy-status(jj colocated): precondition - git diff falsely appears empty'
+
+            $jjDiff = @(& jj -R $repo --no-pager diff --name-only 2>$null)
+            $jjHasFile = @($jjDiff | Where-Object { (Split-Path -Leaf ([string]$_)) -eq 'a.txt' }).Count -gt 0
+            Assert-True $jjHasFile 'working-copy-status(jj colocated): precondition - jj diff sees the uncommitted file'
+
+            $r = Invoke-Runtime -RuntimeArgs @('working-copy-status', '--worktree', $repo, '--vcs', 'jj')
+            Assert-Equal 0 $r.ExitCode 'working-copy-status(jj colocated): runtime exits successfully'
+            Assert-True ($null -ne $r.Json) 'working-copy-status(jj colocated): JSON result present'
+            if ($r.Json) {
+                Assert-Equal 'jj' $r.Json.vcs 'working-copy-status(jj colocated): selected VCS is preserved'
+                Assert-Equal $false $r.Json.clean 'working-copy-status(jj colocated): jj-only change is NOT clean'
+                Assert-True (@($r.Json.changedFiles) -contains 'a.txt') 'working-copy-status(jj colocated): changedFiles comes from jj diff'
+            }
+        }.Invoke()
     }
 
     # (a) FALSE-POSITIVE CLOSED: a plain file edit (no VCS-mutating command) must NOT
