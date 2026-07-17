@@ -367,8 +367,27 @@ function Invoke-Captured {
         [string]$StdinText = '',
         [int]$TimeoutSec = 0
     )
+    # Non-Windows: launch the captured child through `setsid` (when present) so it leads its
+    # OWN fresh process group (pgid == its pid). A helper the child later leaks inherits that
+    # group id and KEEPS it even after the child exits and the kernel reparents the helper to a
+    # subreaper / PID 1 - so Stop-ProcessTree can reap the whole group by pgid, reaching a
+    # reparented descendant that Kill($true)'s ppid tree-walk (run from the already-exited child)
+    # would otherwise miss (the T-256 leak, which surfaces only on Linux/macOS). setsid is probed
+    # once and is OPTIONAL: if absent we spawn plainly and the group reap simply does not run
+    # (Windows-parity, no hard failure). Plain `setsid` execs the target in place here (a
+    # .NET-spawned child is not a process-group leader, so setsid does not fork), so the process
+    # we Start() keeps its pid AND reports the target's own exit code - transparent to the capture
+    # below. Windows is untouched (Resolve-SetsidLauncher returns $null there).
+    $setsidLauncher = Resolve-SetsidLauncher
+    $launchFile = $FilePath
+    $launchArgs = @($Arguments)
+    if ($setsidLauncher) {
+        $launchFile = $setsidLauncher
+        $launchArgs = @($FilePath) + @($Arguments)
+    }
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $FilePath
+    $psi.FileName = $launchFile
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
@@ -387,14 +406,19 @@ function Invoke-Captured {
 
     $hasArgList = [bool]($psi | Get-Member -Name 'ArgumentList' -MemberType Property -ErrorAction SilentlyContinue)
     if ($hasArgList) {
-        foreach ($a in $Arguments) { $psi.ArgumentList.Add($a) }
+        foreach ($a in $launchArgs) { $psi.ArgumentList.Add($a) }
     } else {
-        $psi.Arguments = ConvertTo-Win32CommandLine $Arguments
+        $psi.Arguments = ConvertTo-Win32CommandLine $launchArgs
     }
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
     [void]$proc.Start()
+
+    # When launched via setsid the child leads a new group whose pgid == its own pid; that is
+    # the group Stop-ProcessTree reaps below. 0 = plain spawn (Windows, or setsid absent) = no
+    # group reap, unchanged behaviour.
+    $posixPgid = if ($setsidLauncher) { [int]$proc.Id } else { 0 }
 
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
@@ -432,7 +456,7 @@ function Invoke-Captured {
     # via proc-tree.ps1) reaps that subtree even when codex itself already exited; a clean
     # run has no surviving subtree so this is a no-op. Never a bare $proc.Kill(), which
     # left the tree behind on the timeout branch (T-234).
-    Stop-ProcessTree $proc
+    Stop-ProcessTree $proc -PosixProcessGroupId $posixPgid
 
     $stdout = ''
     $stderr = ''
