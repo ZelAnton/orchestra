@@ -258,6 +258,10 @@ impl AppState {
             EventType::TaskCaptured => self.on_task_captured(ev),
             EventType::TaskStatusChanged => self.on_task_status_changed(ev),
             EventType::CodexAttempt => self.on_codex_attempt(ev),
+            // Deliberately inert here: `usage.recorded` events are recognized by the engine's
+            // durable event-log reader but interpretation/display is out of scope for now (see
+            // engine/src/events/model.rs).
+            EventType::UsageRecorded => {}
         }
     }
 
