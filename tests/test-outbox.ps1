@@ -476,6 +476,54 @@ function Ref-UuidV5 {
 }.Invoke()
 
 # =============================================================================
+# 13. Coordinate payload-fallback (T-261): a CLI flag that is ALSO always present
+#     in the type's documented --payload (--wave for cohort.round_started/closed,
+#     --from/--to for task.status_changed) may be omitted from the CLI and read
+#     from --payload instead - fixing the "outbox: missing required option --wave"
+#     trap without weakening the explicit-flag-wins priority or the "absent from
+#     both -> Fail 2" regression case.
+# =============================================================================
+{
+    # cohort.round_started / round_closed: --wave omitted, only present in --payload
+    # -> succeeds, and the computed event_id equals the explicit --wave branch
+    # (detereminism across the two coordinate sources is not broken).
+    foreach ($type in @('cohort.round_started', 'cohort.round_closed')) {
+        $explicit = Outbox-Id @('--type', $type, '--batch-id', 'B-1', '--wave', '3')
+        $viaPayload = Outbox-Id @('--type', $type, '--batch-id', 'B-1', '--payload', '{"wave":3,"active":0,"free_slots":5}')
+        Assert-Equal $explicit $viaPayload "[$type] event_id from --payload-only wave matches the explicit --wave branch"
+        Assert-Equal (Ref-UuidV5 "orchestra/$type/B-1/w3") $viaPayload "[$type] --payload-only wave is still the standard UUIDv5 over the documented canonical name"
+
+        # end-to-end: `append` without --wave (only in --payload) actually succeeds (not Fail 2).
+        $dir = New-TempDir; $ev = New-EventsFile $dir
+        $r = Invoke-Outbox @('append', '--events', $ev, '--type', $type, '--batch-id', 'B-1', '--payload', '{"wave":3,"active":0,"free_slots":5}')
+        Assert-Exit $r 0 "[$type] append succeeds without a separate --wave flag (payload fallback)"
+        Assert-Contains $r.Out "event_id=$viaPayload" "[$type] append computes the same event_id as the --payload fallback"
+    }
+
+    # Conflict: an explicit --wave that disagrees with --payload's wave is NOT silently
+    # overridden by the payload - the explicit flag keeps priority (documented decision,
+    # docs/queue_contract.md §19.2 / tools/outbox.ps1 Get-CoordFallback comment).
+    $conflictId = Outbox-Id @('--type', 'cohort.round_started', '--batch-id', 'B-1', '--wave', '5', '--payload', '{"wave":3}')
+    Assert-Equal (Ref-UuidV5 'orchestra/cohort.round_started/B-1/w5') $conflictId 'explicit --wave wins over a conflicting --payload wave (priority not silently overridden)'
+    Assert-True ($conflictId -ne (Ref-UuidV5 'orchestra/cohort.round_started/B-1/w3')) 'a conflicting --payload wave is NOT what the id is computed from'
+
+    # Absent from BOTH the CLI flag and --payload: still Fail 2 (no regression), and the
+    # message still names the missing option like the pre-T-261 Require-Opt diagnostic.
+    $missingBoth = Invoke-Outbox @('event-id', '--type', 'cohort.round_started', '--batch-id', 'B-1')
+    Assert-Exit $missingBoth 2 'wave absent from both CLI flag and payload is still a usage error (rc=2)'
+    Assert-Contains $missingBoth.Err 'missing required option --wave' 'the rc=2 diagnostic still names --wave'
+    $missingBothPayload = Invoke-Outbox @('event-id', '--type', 'cohort.round_started', '--batch-id', 'B-1', '--payload', '{"active":0}')
+    Assert-Exit $missingBothPayload 2 'wave absent from an unrelated --payload is still a usage error (rc=2)'
+
+    # task.status_changed: --from/--to also fall back to --payload (same trap class).
+    $tExplicit = Outbox-Id @('--type', 'task.status_changed', '--task-id', 'T-014', '--from', 'в работе', '--to', 'на ревью', '--attempt', '1', '--round', '1')
+    $tViaPayload = Outbox-Id @('--type', 'task.status_changed', '--task-id', 'T-014', '--attempt', '1', '--round', '1', '--payload', '{"from":"в работе","to":"на ревью"}')
+    Assert-Equal $tExplicit $tViaPayload 'task.status_changed: event_id from --payload-only from/to matches the explicit --from/--to branch'
+    $tMissing = Invoke-Outbox @('event-id', '--type', 'task.status_changed', '--task-id', 'T-014', '--attempt', '1', '--round', '1')
+    Assert-Exit $tMissing 2 'task.status_changed: from/to absent from both CLI and payload is still a usage error (rc=2)'
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in $script:TempDirs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }

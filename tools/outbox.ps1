@@ -95,8 +95,32 @@ $parsed = Parse-CliArgs $args -BoolFlags @('json', 'stdin')
 $Command = $parsed.Command
 $opts = $parsed.Opts
 
-function Has-Prop { param($Obj, [string]$Name) return ($null -ne $Obj -and $Obj.PSObject.Properties.Name -contains $Name) }
+# NB: indexed lookup ($Obj.PSObject.Properties[$Name]), NOT `.Properties.Name -contains`
+# - under Set-StrictMode -Version Latest, `.Properties.Name` throws "The property 'Name'
+# cannot be found on this object" when $Obj has ZERO properties (e.g. an empty --payload
+# '{}'); the indexer form has no such quirk and returns $null cleanly either way (T-261).
+function Has-Prop { param($Obj, [string]$Name) return ($null -ne $Obj -and $null -ne $Obj.PSObject.Properties[$Name]) }
 function Get-Prop { param($Obj, [string]$Name) if (Has-Prop $Obj $Name) { return $Obj.$Name } else { return $null } }
+
+# --------------------------------------------------------------------------
+# Parsed --payload, shared by Get-CanonicalName's coordinate fallback (below) and
+# Build-EventLine. Parsed at most ONCE per process invocation (cached) so the
+# `event-id`/`append` dedupe-key computation and the actual envelope-building step
+# never validate the same --payload text twice or risk drifting apart.
+# --------------------------------------------------------------------------
+$script:PayloadParsed = $false
+$script:PayloadCache = $null
+function Get-ParsedPayload {
+    if (-not $script:PayloadParsed) {
+        $raw = [string](Opt 'payload' '{}')
+        $p = $null
+        try { $p = $raw | ConvertFrom-Json } catch { Fail 5 "--payload is not valid JSON" }
+        if ($null -eq $p) { $p = [pscustomobject]@{} }
+        $script:PayloadCache = $p
+        $script:PayloadParsed = $true
+    }
+    return $script:PayloadCache
+}
 
 # --------------------------------------------------------------------------
 # Contract constants: the versioned envelope + type set + payload allowlists.
@@ -188,8 +212,33 @@ function New-UuidV5 {
 function Get-CoordAttempt { $a = [string](Opt 'attempt' '1'); if ($a -notmatch '^\d+$') { Fail 2 "--attempt must be a non-negative integer" }; return [int]$a }
 function Get-CoordRound { $r = [string](Opt 'round' '1'); if ($r -notmatch '^\d+$') { Fail 2 "--round must be a non-negative integer" }; return [int]$r }
 
+# A stable-key coordinate that is ALSO always present in the type's documented
+# --payload (docs/queue_contract.md §19.2/19.3; agents/processor.md "Эскизы payload"):
+# an explicit CLI flag, when given, always wins (kept as the priority source even if
+# it disagrees with --payload - an intentional out-of-band caller is not treated as
+# an error here; see docs/queue_contract.md §19.2 for the documented rationale). When
+# the flag is absent, the SAME coordinate is read from --payload's field of the same
+# name, with the same format validation the flag would have had - so a caller no
+# longer has to duplicate a value the event's payload contract already requires as a
+# separate CLI flag (T-261: "outbox: missing required option --wave" trap). Only when
+# the coordinate is present in NEITHER place does this fail exactly like the old
+# always-Require-Opt shape (rc=2, same class of diagnostic).
+function Get-CoordFallback {
+    param([string]$FlagName, [string]$PayloadField, $Payload, [string]$Pattern = $null, [string]$PatternMsg = $null)
+    $val = $null
+    if ($opts.ContainsKey($FlagName) -and -not [string]::IsNullOrEmpty([string]$opts[$FlagName])) {
+        $val = [string]$opts[$FlagName]
+    } elseif ($null -ne $Payload -and (Has-Prop $Payload $PayloadField)) {
+        $pv = Get-Prop $Payload $PayloadField
+        if ($null -ne $pv -and -not [string]::IsNullOrEmpty([string]$pv)) { $val = [string]$pv }
+    }
+    if ($null -eq $val) { Fail 2 "missing required option --$FlagName (also absent from --payload field '$PayloadField')" }
+    if ($Pattern -and $val -notmatch $Pattern) { Fail 2 $PatternMsg }
+    return $val
+}
+
 function Get-CanonicalName {
-    param([string]$Type)
+    param([string]$Type, $Payload = $null)
     switch -Regex ($Type) {
         '^cohort\.(opened|admission_closed|join_started|published|closed)$' {
             $b = Require-Opt 'batch-id'
@@ -197,8 +246,7 @@ function Get-CanonicalName {
         }
         '^cohort\.round_(started|closed)$' {
             $b = Require-Opt 'batch-id'
-            $w = [string](Require-Opt 'wave')
-            if ($w -notmatch '^\d+$') { Fail 2 "--wave must be a non-negative integer" }
+            $w = Get-CoordFallback -FlagName 'wave' -PayloadField 'wave' -Payload $Payload -Pattern '^\d+$' -PatternMsg "--wave (or --payload field 'wave') must be a non-negative integer"
             return "orchestra/$Type/$b/w$w"
         }
         '^task\.captured$' {
@@ -208,10 +256,20 @@ function Get-CanonicalName {
         }
         '^task\.status_changed$' {
             $t = Require-Opt 'task-id'
-            $from = Require-Opt 'from'
-            $to = Require-Opt 'to'
+            # --from/--to fall back to --payload's own from/to (docs/queue_contract.md §19.3:
+            # "Смены статуса - это task.status_changed с from/to в payload" - the value is
+            # ALWAYS documented to be there, same trap class as cohort.round_*'s --wave).
+            $from = Get-CoordFallback -FlagName 'from' -PayloadField 'from' -Payload $Payload
+            $to = Get-CoordFallback -FlagName 'to' -PayloadField 'to' -Payload $Payload
             return "orchestra/$Type/$t/$from>$to/a$(Get-CoordAttempt)/r$(Get-CoordRound)"
         }
+        # codex.attempt / usage.recorded deliberately keep plain Require-Opt (no payload
+        # fallback, T-261): task_id/role/mode/attempt_number(/source) are already carried by
+        # the processor's tracked `Codex-попытка` telemetry reservation (agents/processor.md,
+        # "codex.attempt: схема и идемпотентность") through a dedicated crash-safe emission
+        # codepath, not a one-off free-text instruction like cohort.round_*/task.status_changed
+        # - so the "forgot to duplicate the flag" trap this task fixes is materially less
+        # likely here. Revisit if this assumption stops holding in practice.
         '^codex\.attempt$' {
             $t = Require-Opt 'task-id'
             $role = Require-Opt 'role'
@@ -489,7 +547,9 @@ function Assert-Owner {
 # ==========================================================================
 function Cmd-EventId {
     $type = Require-Opt 'type'
-    $name = Get-CanonicalName $type
+    # Get-ParsedPayload defaults to {} when --payload is absent, so a caller that never
+    # relies on the payload fallback (no --payload given) behaves exactly as before.
+    $name = Get-CanonicalName $type (Get-ParsedPayload)
     Write-Output (New-UuidV5 $name)
 }
 
@@ -503,10 +563,9 @@ function Build-EventLine {
     if ($occurred -notmatch $script:IsoUtcRegex) { Fail 5 "--occurred-at '$occurred' is not ISO-8601 UTC (yyyy-MM-ddTHH:mm:ss[.fff]Z)" }
     $actorKind = [string](Opt 'actor-kind' 'agent')
     $actorName = [string](Opt 'actor-name' 'processor')
-    $payloadRaw = [string](Opt 'payload' '{}')
-    $payload = $null
-    try { $payload = $payloadRaw | ConvertFrom-Json } catch { Fail 5 "--payload is not valid JSON" }
-    if ($null -eq $payload) { $payload = [pscustomobject]@{} }
+    # Same parsed/cached payload the event-id computation below (Cmd-Append) already used
+    # for its coordinate fallback - parsed exactly once per invocation (Get-ParsedPayload).
+    $payload = Get-ParsedPayload
 
     $rec = [ordered]@{ schema_version = $script:SchemaVersion; event_id = $EventId; occurred_at = $occurred; type = $type }
     if ($opts.ContainsKey('batch-id') -and $opts['batch-id']) { $rec['batch_id'] = [string]$opts['batch-id'] }
@@ -531,7 +590,7 @@ function Cmd-Append {
         $line = ($line -replace "`r", '').Trim()
     } else {
         if ($opts.ContainsKey('event-id') -and $opts['event-id']) { $eid = [string]$opts['event-id'] }
-        else { $eid = New-UuidV5 (Get-CanonicalName (Require-Opt 'type')) }
+        else { $eid = New-UuidV5 (Get-CanonicalName (Require-Opt 'type') (Get-ParsedPayload)) }
         $line = Build-EventLine $eid
     }
 
