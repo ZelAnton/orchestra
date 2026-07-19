@@ -1,6 +1,6 @@
 //! Supervise ONE child process outside Claude Code: enforce a wall-clock deadline,
 //! drain stdout/stderr on threads (so a large output cannot deadlock the child), and on
-//! timeout / cooperative cancel terminate the whole child tree, returning a structured,
+//! timeout / cooperative cancel / watchdog failure terminate the whole child tree, returning a structured,
 //! non-sensitive verdict.
 //!
 //! The reason / exit-code contract is kept byte-compatible with `tools/supervisor.ps1`
@@ -9,8 +9,8 @@
 //!
 //!   ok=0  timeout=3  cancelled=4  crash=5  error=6
 //!
-//! TREE TERMINATION (no-orphan guarantee). On timeout / cooperative cancel we tear down the
-//! child's WHOLE process tree, never just the direct child:
+//! TREE TERMINATION (no-orphan guarantee). On timeout / cooperative cancel / a failed watchdog
+//! poll we tear down the child's WHOLE process tree, never just the direct child:
 //!   * Windows — `taskkill /PID <pid> /T /F` reaches every descendant (mirrors
 //!     `supervisor.ps1`'s 5.1 path).
 //!   * Unix (Linux / macOS) — the child is spawned as the leader of its OWN process group
@@ -127,9 +127,7 @@ impl SpawnSpec {
     }
 }
 
-/// Run one child under supervision and classify the outcome.
-pub fn run(spec: &SpawnSpec) -> Verdict {
-    let started = Instant::now();
+fn configured_command(spec: &SpawnSpec) -> Command {
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args)
         .stdin(Stdio::piped())
@@ -153,6 +151,14 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
         // This is paired with `kill_tree`'s `killpg(child.id(), …)`, which relies on PGID==PID.
         cmd.process_group(0);
     }
+
+    cmd
+}
+
+/// Run one child under supervision and classify the outcome.
+pub fn run(spec: &SpawnSpec) -> Verdict {
+    let started = Instant::now();
+    let mut cmd = configured_command(spec);
 
     let mut child: Child = match cmd.spawn() {
         Ok(c) => c,
@@ -191,7 +197,13 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {}
-            Err(_) => break None,
+            Err(_) => {
+                // A failed poll leaves the child's liveness unknown. Tear down the whole tree
+                // before leaving the watchdog, but keep timeout/cancel flags false so `classify`
+                // reports the distinct infrastructure-crash outcome for the missing status.
+                kill_tree(&mut child);
+                break None;
+            }
         }
         if let Some(d) = spec.deadline {
             if started.elapsed() >= d {
@@ -357,6 +369,52 @@ mod tests {
         let v = run(&spec);
         assert_eq!(v.reason, Reason::Crash);
         assert!(v.outcome_reason.starts_with("spawn failed"));
+    }
+
+    // A real `Child::try_wait` error cannot be induced portably without corrupting or closing
+    // the child's private OS handle. Exercise the error branch's two observable contracts with
+    // equivalent inputs instead: emergency tree-kill makes reap immediate, while absent
+    // timeout/cancel flags keep the unavailable status classified as a crash.
+    #[test]
+    fn try_wait_error_cleanup_kills_child_without_masking_crash() {
+        let test_exe = std::env::current_exe().expect("resolve current test executable");
+        let spec = SpawnSpec::new(
+            test_exe.to_string_lossy(),
+            vec![
+                "--ignored".into(),
+                "--exact".into(),
+                "supervise::tests::emergency_kill_test_child".into(),
+            ],
+        );
+        // Reuse the production command builder so this test spawn gets CREATE_NO_WINDOW on
+        // Windows and the dedicated process group required by `kill_tree` on Unix.
+        let mut child = configured_command(&spec)
+            .spawn()
+            .expect("spawn long-lived test child");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            matches!(child.try_wait(), Ok(None)),
+            "test child must still be running before emergency cleanup"
+        );
+
+        kill_tree(&mut child);
+        let reap_started = Instant::now();
+        child.wait().expect("reap emergency-killed test child");
+        assert!(
+            reap_started.elapsed() < Duration::from_secs(1),
+            "reap blocked after emergency tree-kill"
+        );
+
+        let (reason, exit_code, outcome_reason) = classify(None, false, false, &spec);
+        assert_eq!(reason, Reason::Crash);
+        assert_eq!(exit_code, None);
+        assert_eq!(outcome_reason, "exit code unavailable after run");
+    }
+
+    #[test]
+    #[ignore = "spawned explicitly by try_wait_error_cleanup_kills_child_without_masking_crash"]
+    fn emergency_kill_test_child() {
+        thread::sleep(Duration::from_secs(30));
     }
 
     // The no-orphan guarantee outside Windows: a supervised child that spawns a longer-lived

@@ -62,6 +62,10 @@ workspace, коммитит результаты листовых агентов
   `YYYY-MM-DDTHH:MM:SSZ`; его используют engine run и TUI вместо локальных копий алгоритма
   Howard Hinnant `civil_from_days`, а проверки известных дат, leap day и лексической
   монотонности живут рядом с реализацией.
+- `engine/src/supervise.rs` гарантирует уничтожение всего дерева процесса не только при
+  timeout/cancel, но и при ошибке watchdog-вызова `Child::try_wait`: аварийная ветка вызывает
+  `kill_tree` до выхода из цикла, оставляя `timed_out=false` и `cancelled=false`, поэтому
+  результат остаётся отличимым `Reason::Crash`, а последующий reap не ждёт живой процесс.
 - **Decision Inbox TUI — исполняемый human gate (T-250).** `tui/src/inbox.rs` сохраняет прежнюю
   проекцию эскалаций/карантина/блокировок и read-only загружает
   `.work/approvals/*.json`: неистёкшие undecided-заявки образуют выбираемые карточки, истёкшие и
@@ -690,7 +694,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/merge_report.md` | результаты merge и причины карантина |
 | `.work/status.md` | текущий обзор processor |
 | `.work/journal.md` | постоянный журнал завершённых прогонов; read-only fallback для отсутствующих в событиях полей `tools/metrics.ps1` |
-| `.work/events.jsonl` | append-only машинный event-outbox; пишет только processor (одна JSON-строка на событие) при `EVENTS_OUTBOX:on` через транзакционный интерфейс `tools/outbox.ps1` (валидация конверта/payload, детерминированный `event_id`-дедуп-ключ, игнорирование whitespace-only строк, ремонт оборванного хвоста, single-writer); основной источник read-only агрегатора `tools/metrics.ps1`; машинный контракт для будущей платформы наблюдаемости (`docs/queue_contract.md`, §19); не привязан к одной когорте, переживает очистку Фазы 6, никогда не переписывается/не усекается; Markdown-артефакты остаются источником истины для человека |
+| `.work/events.jsonl` | append-only машинный event-outbox; пишет только processor (одна JSON-строка на событие) при `EVENTS_OUTBOX:on` через транзакционный интерфейс `tools/outbox.ps1` (валидация конверта/payload, детерминированный `event_id`-дедуп-ключ, отказ с rc=5 для многострочного raw-ввода `--json-line`/`--stdin`, игнорирование whitespace-only строк, ремонт оборванного хвоста, single-writer); основной источник read-only агрегатора `tools/metrics.ps1`; машинный контракт для будущей платформы наблюдаемости (`docs/queue_contract.md`, §19); не привязан к одной когорте, переживает очистку Фазы 6, никогда не переписывается/не усекается; Markdown-артефакты остаются источником истины для человека |
 | `.work/outbox-tx.lock` | краткоживущий атомарный лок дозаписи event-outbox (отдельный от `orchestrator.lock`/`queue-tx.lock`/`state-tx.lock`); держит `tools/outbox.ps1` на время одной дозаписи; обеспечивает single-writer инвариант `events.jsonl` |
 | `.work/events_cursor.json` | курсор референсного потребителя outbox (`tools/outbox.ps1 read`): byte-offset + доставленные `event_id` для дедупа; ведёт потребитель/тесты, не processor |
 | `.work/approvals/<apr-id>.json` | персистентный одноразовый запрос на человеческое подтверждение (T-095): subject (task/batch), причина (human-review/force-lock/policy-bypass), diff-фингерпринт затронутых путей, снапшот применённой политики, срок действия и решение; ведёт `tools/policy.ps1 approval-request`; approve/reject оператора потребляют ID ровно один раз; `approval-status` сверяет свежесть (истекает при смене кода/политики или к дедлайну — fail-closed) |
