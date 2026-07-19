@@ -70,7 +70,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::exit;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use orchestra_engine::claude::{ClaudeCall, PermissionPosture};
 use orchestra_engine::codex::{CodexCall, Sandbox};
@@ -82,7 +82,7 @@ use orchestra_engine::resolvers::{
     CohortThresholds, Domain, Level,
 };
 use orchestra_engine::run::{self, RunConfig};
-use orchestra_engine::state::{DeliveryTarget, Snapshot, TaskState};
+use orchestra_engine::state::{completed_ids, now_epoch_secs, DeliveryTarget, Snapshot, TaskState};
 use orchestra_engine::supervise::{self, SpawnSpec};
 
 fn main() {
@@ -366,7 +366,7 @@ fn cmd_plan(args: &[String]) {
 
     let snap = Snapshot::load(&work);
     let cfg = PlanConfig::load(&work);
-    let completed = completed_ids(&work, &snap);
+    let completed = completed_ids(Path::new(&work), &snap);
     print!("{}", render_plan(&snap, &cfg, &completed, now_epoch_secs()));
 }
 
@@ -638,14 +638,6 @@ fn render_plan(
     s
 }
 
-/// Current wall clock as seconds since the Unix epoch (0 if the clock is before the epoch).
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Parse a `YYYY-MM-DDTHH:MM:SS` UTC timestamp (as `cohort_state.md` `Начало когорты:` writes;
 /// any trailing zone suffix `Z`/`+00:00` is ignored and treated as UTC) into epoch seconds.
 /// `None` for a malformed timestamp. Uses Howard Hinnant's `days_from_civil` — no dependency.
@@ -710,35 +702,6 @@ fn config_bool(text: &str, key: &str) -> Option<bool> {
         "false" => Some(false),
         _ => None,
     }
-}
-
-/// The set of completed task ids for readiness: every `### [T-NNN]` record header in
-/// `Tasks_Done.md` (done tasks are removed from the queue) plus any descriptor already at
-/// `done`/`published`. Read-only.
-fn completed_ids(work: &str, snap: &Snapshot) -> BTreeSet<String> {
-    let mut set = BTreeSet::new();
-    if let Ok(text) = fs::read_to_string(Path::new(work).join("Tasks_Done.md")) {
-        set.extend(
-            text.lines()
-                .filter_map(archive_header_task_id)
-                .map(str::to_owned),
-        );
-    }
-    for d in &snap.descriptors {
-        if matches!(d.state, Some(TaskState::Done) | Some(TaskState::Published)) {
-            set.insert(d.id.clone());
-        }
-    }
-    set
-}
-
-fn archive_header_task_id(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("###")?.trim_start();
-    let rest = rest.strip_prefix('[')?;
-    let close = rest.find(']')?;
-    let id = rest[..close].trim();
-    let digits = id.strip_prefix("T-")?;
-    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(id)
 }
 
 /// `engine lease <acquire|heartbeat|release|status>` — take / renew / release / inspect the

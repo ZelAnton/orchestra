@@ -1,5 +1,49 @@
 //! Small shared, read-only parse helpers for the `state` sources (line fields, id tokens).
 
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::canonical::TaskState;
+use super::snapshot::Snapshot;
+
+/// Current wall clock as seconds since the Unix epoch (0 if the clock is before the epoch).
+pub fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The set of completed task ids for readiness: every `### [T-NNN]` record header in
+/// `Tasks_Done.md` plus any descriptor already `done`/`published`.
+pub fn completed_ids(work: &Path, snap: &Snapshot) -> BTreeSet<String> {
+    let mut set = BTreeSet::new();
+    if let Ok(text) = fs::read_to_string(work.join("Tasks_Done.md")) {
+        set.extend(
+            text.lines()
+                .filter_map(archive_header_task_id)
+                .map(str::to_owned),
+        );
+    }
+    for d in &snap.descriptors {
+        if matches!(d.state, Some(TaskState::Done) | Some(TaskState::Published)) {
+            set.insert(d.id.clone());
+        }
+    }
+    set
+}
+
+pub fn archive_header_task_id(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("###")?.trim_start();
+    let rest = rest.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let id = rest[..close].trim();
+    let digits = id.strip_prefix("T-")?;
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(id)
+}
+
 /// The value of the first line whose trimmed form starts with `key` (e.g. `"Статус:"`), i.e.
 /// the trimmed text after the key. `None` if no such line exists. Used for the single-value
 /// Markdown fields (`Статус:`, `Приём:`, `База:`, …).
@@ -45,6 +89,32 @@ pub(crate) fn find_batch_id(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_ids_ignore_task_mentions_in_archive_body() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let work = std::env::temp_dir().join(format!(
+            "orchestra-completed-ids-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&work).expect("create test work directory");
+        fs::write(
+            work.join("Tasks_Done.md"),
+            "### [T-100] Archived task — статус: готово\n\nPrerequisites: T-101\nCross-reference: [T-102]\n",
+        )
+        .expect("write archive fixture");
+
+        let snapshot = Snapshot::load(&work);
+        let completed = completed_ids(&work, &snapshot);
+        fs::remove_dir_all(&work).expect("remove test work directory");
+
+        assert!(completed.contains("T-100"));
+        assert!(!completed.contains("T-101"));
+        assert!(!completed.contains("T-102"));
+    }
 
     #[test]
     fn line_field_returns_first_trimmed_match() {

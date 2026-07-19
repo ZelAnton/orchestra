@@ -62,7 +62,7 @@
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -78,7 +78,7 @@ use crate::resolvers::{
     BaseReviewer, Candidate, CloseReason, CoderRoute, CoderRouteInput, CodexCoder, CodexReviewer,
     CycleDecision, Domain, ImplBy, Level, ReviewGate, ReviewerRoute,
 };
-use crate::state::{Snapshot, TaskState};
+use crate::state::{completed_ids, now_epoch_secs, Snapshot, TaskState};
 use crate::supervise::{self, Reason, SpawnSpec};
 use crate::time::epoch_to_iso;
 
@@ -687,14 +687,6 @@ fn integration_state_md(batch: &str, f_cycles: u32) -> String {
     let _ = writeln!(s, "Ревью-SHA: sandbox-integration-tip");
     let _ = writeln!(s, "F-циклов: {f_cycles}");
     s
-}
-
-/// Current wall clock as seconds since the Unix epoch (0 if before the epoch).
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// The current wall clock as an ISO-8601 UTC `date -u` mark — the freshness cutoff the review
@@ -2279,35 +2271,6 @@ struct IntegrationPass {
     supervised_ok: bool,
 }
 
-/// The set of completed task ids for readiness: every `### [T-NNN]` record header in
-/// `Tasks_Done.md` plus any descriptor already `done`/`published`. Mirrors the same computation
-/// `plan --dry-run` uses.
-fn completed_ids(work: &Path, snap: &Snapshot) -> std::collections::BTreeSet<String> {
-    let mut set = std::collections::BTreeSet::new();
-    if let Ok(text) = fs::read_to_string(work.join("Tasks_Done.md")) {
-        set.extend(
-            text.lines()
-                .filter_map(archive_header_task_id)
-                .map(str::to_owned),
-        );
-    }
-    for d in &snap.descriptors {
-        if matches!(d.state, Some(TaskState::Done) | Some(TaskState::Published)) {
-            set.insert(d.id.clone());
-        }
-    }
-    set
-}
-
-fn archive_header_task_id(line: &str) -> Option<&str> {
-    let rest = line.trim_start().strip_prefix("###")?.trim_start();
-    let rest = rest.strip_prefix('[')?;
-    let close = rest.find(']')?;
-    let id = rest[..close].trim();
-    let digits = id.strip_prefix("T-")?;
-    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(id)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2327,32 +2290,6 @@ mod tests {
         ] {
             assert_eq!(TaskState::from_markdown(task_literal(st)), Some(st));
         }
-    }
-
-    #[test]
-    fn completed_ids_ignore_task_mentions_in_archive_body() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos();
-        let work = std::env::temp_dir().join(format!(
-            "orchestra-completed-ids-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&work).expect("create test work directory");
-        fs::write(
-            work.join("Tasks_Done.md"),
-            "### [T-100] Archived task — статус: готово\n\nPrerequisites: T-101\nCross-reference: [T-102]\n",
-        )
-        .expect("write archive fixture");
-
-        let snapshot = Snapshot::load(&work);
-        let completed = completed_ids(&work, &snapshot);
-        fs::remove_dir_all(&work).expect("remove test work directory");
-
-        assert!(completed.contains("T-100"));
-        assert!(!completed.contains("T-101"));
-        assert!(!completed.contains("T-102"));
     }
 
     #[test]

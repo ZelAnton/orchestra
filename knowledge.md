@@ -62,6 +62,10 @@ workspace, коммитит результаты листовых агентов
   `YYYY-MM-DDTHH:MM:SSZ`; его используют engine run и TUI вместо локальных копий алгоритма
   Howard Hinnant `civil_from_days`, а проверки известных дат, leap day и лексической
   монотонности живут рядом с реализацией.
+- `engine/src/state/util.rs` — единый источник readiness-набора завершённых задач:
+  `completed_ids` читает только заголовки `### [T-NNN]` в `Tasks_Done.md` и добавляет
+  дескрипторы в состояниях `done`/`published`; `archive_header_task_id` и общий
+  `now_epoch_secs` экспортируются через `engine::state` для `plan --dry-run` и `run --once`.
 - **Decision Inbox TUI — исполняемый human gate (T-250).** `tui/src/inbox.rs` сохраняет прежнюю
   проекцию эскалаций/карантина/блокировок и read-only загружает
   `.work/approvals/*.json`: неистёкшие undecided-заявки образуют выбираемые карточки, истёкшие и
