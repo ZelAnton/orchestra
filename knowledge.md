@@ -62,6 +62,10 @@ workspace, коммитит результаты листовых агентов
   `YYYY-MM-DDTHH:MM:SSZ`; его используют engine run и TUI вместо локальных копий алгоритма
   Howard Hinnant `civil_from_days`, а проверки известных дат, leap day и лексической
   монотонности живут рядом с реализацией.
+- `engine/src/supervise.rs` гарантирует уничтожение всего дерева процесса не только при
+  timeout/cancel, но и при ошибке watchdog-вызова `Child::try_wait`: аварийная ветка вызывает
+  `kill_tree` до выхода из цикла, оставляя `timed_out=false` и `cancelled=false`, поэтому
+  результат остаётся отличимым `Reason::Crash`, а последующий reap не ждёт живой процесс.
 - **Decision Inbox TUI — исполняемый human gate (T-250).** `tui/src/inbox.rs` сохраняет прежнюю
   проекцию эскалаций/карантина/блокировок и read-only загружает
   `.work/approvals/*.json`: неистёкшие undecided-заявки образуют выбираемые карточки, истёкшие и
