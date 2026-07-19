@@ -170,9 +170,59 @@ function Write-TextAtomic {
 # concurrent callers can all "succeed" and enter the critical section together. CreateNew
 # fails the losers with an IOException, giving true mutual exclusion.) A crashed holder
 # leaves the file behind; a lock older than $StaleMs is treated as abandoned and broken.
+#
+# Read-LockSnapshot captures the (creation-time, recorded-PID) identity of the lock file on
+# disk right now, or $null if the file is gone / momentarily unreadable (e.g. read during the
+# holder's create->write window). The recorded PID is the ASCII text the holder wrote; it is
+# compared Ordinal (never through Get-PathComparer - that helper is for PATHS only, K-033).
 # --------------------------------------------------------------------------
+function Read-LockSnapshot {
+    param([string]$LockPath)
+    try {
+        $fi = [System.IO.FileInfo]::new($LockPath)
+        $fi.Refresh()
+        if (-not $fi.Exists) { return $null }
+        $creationUtc = $fi.CreationTimeUtc
+        # ASCII to match the holder's Encoding.ASCII.GetBytes("$PID") write; a fresh file
+        # still open by its creator throws a sharing violation -> caught below -> $null.
+        $content = [System.IO.File]::ReadAllText($LockPath, [System.Text.Encoding]::ASCII)
+        return [pscustomobject]@{
+            CreationTicks = $creationUtc.Ticks
+            AgeMs         = ([DateTime]::UtcNow - $creationUtc).TotalMilliseconds
+            Content       = $content
+        }
+    } catch {
+        return $null
+    }
+}
+# Decides whether a stale lock may be broken, given the snapshot that DECIDED it was stale and
+# a CONFIRM snapshot re-read immediately before removal. Break only if BOTH snapshots still
+# describe the SAME abandoned lock: it was genuinely old (Decided) AND its identity did not
+# change in the gap - same creation stamp AND same recorded PID. If a new holder released and
+# recreated the lock between the two reads, its creation stamp differs (or, under NTFS
+# tunneling, the stamp can be preserved but the recorded PID differs), so we refuse to delete
+# the stranger's fresh lock. Residual (documented, irreducible without holder-side lease
+# renewal / a per-acquire nonce, i.e. caller changes out of this task's scope): PID reuse AND
+# creation-time tunneling AND identical content coinciding inside the sub-millisecond
+# confirm->Remove window - astronomically unlikely, not closable by path-based Remove-Item.
+function Test-StaleLockBreakable {
+    param($Decided, $Confirm, [int]$StaleMs)
+    if ($null -eq $Decided -or $null -eq $Confirm) { return $false }
+    if ($Decided.AgeMs -le $StaleMs) { return $false }                       # not (yet) stale
+    if ($Confirm.CreationTicks -ne $Decided.CreationTicks) { return $false } # recreated (new stamp)
+    if (-not [string]::Equals([string]$Confirm.Content, [string]$Decided.Content, [System.StringComparison]::Ordinal)) {
+        return $false                                                        # recreated by a different holder
+    }
+    return $true
+}
+# $StaleMs default is deliberately generous (5 min): a legitimate .work transaction - e.g.
+# queue-tx Cmd-InboxDrain re-running Validate-Graph per record (quadratic I/O as the queue
+# grows) or outbox Cmd-Append re-reading a large events.jsonl under the lock - must NEVER be
+# mistaken for an abandoned holder and have its live lock broken (that is the lost-update this
+# guards against). Recovery from a genuinely crashed holder is still bounded: a caller that
+# opts into a TimeoutMs above this threshold breaks the abandoned lock once it ages past it.
 function Acquire-Lock {
-    param([string]$LockPath, [int]$TimeoutMs = 30000, [int]$StaleMs = 60000)
+    param([string]$LockPath, [int]$TimeoutMs = 30000, [int]$StaleMs = 300000)
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     while ($true) {
         try {
@@ -181,10 +231,16 @@ function Acquire-Lock {
             return
         } catch {
             if (Test-Path -LiteralPath $LockPath) {
-                try {
-                    $age = ([DateTime]::UtcNow - (Get-Item -LiteralPath $LockPath).CreationTimeUtc).TotalMilliseconds
-                    if ($age -gt $StaleMs) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue; continue }
-                } catch { }
+                $decided = Read-LockSnapshot $LockPath
+                if ($null -ne $decided -and $decided.AgeMs -gt $StaleMs) {
+                    # Re-read the lock's identity immediately before deleting it, so a lock a
+                    # new holder recreated in the age-check->Remove gap is not destroyed (TOCTOU).
+                    $confirm = Read-LockSnapshot $LockPath
+                    if (Test-StaleLockBreakable -Decided $decided -Confirm $confirm -StaleMs $StaleMs) {
+                        Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+                }
             }
             if ([DateTime]::UtcNow -gt $deadline) { Fail 7 "could not acquire $($script:LockName) lock at $LockPath (held by another writer)" }
             Start-Sleep -Milliseconds 50

@@ -259,6 +259,27 @@ jobs:
           set -euo pipefail
           shellcheck -x launchers/*.sh
 
+      - name: Check shared lock primitive
+        # tests/test-common.ps1 (T-265): drives the shared lock primitive in tools/common.ps1
+        # - Acquire-Lock / Release-Lock and the stale-break guard (Read-LockSnapshot /
+        # Test-StaleLockBreakable) that mutually excludes ALL .work/ writers (queue-tx,
+        # state-tx, outbox, harness). Covers the classic stale-break of an abandoned lock, the
+        # TOCTOU narrowing (age + recorded-PID re-check right before Remove-Item so a stranger's
+        # freshly recreated lock is never stolen), and the fresh-lock case where the waiter
+        # retries to TimeoutMs without disturbing a live lock. Deterministic and offline.
+        # K-007: tests/test-*.ps1 files are not discovered automatically, so this wiring is
+        # explicit; without it this regression cover for the high-risk lock primitive never runs.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-common.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check event outbox
         # tests/test-outbox.ps1 (T-089/T-248): drives tools/outbox.ps1 - the transactional,
         # validated, idempotent, torn-tail-safe single-writer for the durable event outbox

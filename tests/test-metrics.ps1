@@ -4,8 +4,8 @@
 .DESCRIPTION
     Runs the real tool as a child pwsh process against throwaway fixtures. Covers
     averages/nearest-rank p95, journal field fallback, last/since selection,
-    malformed and torn JSONL lines, unavailable token cost, empty input and the
-    read-only guarantee.
+    malformed and torn JSONL lines, unavailable token cost, empty input, usage
+    errors and the read-only guarantee.
 #>
 
 Set-StrictMode -Version Latest
@@ -166,7 +166,21 @@ $empty=New-Fixture; $emptyRun=Invoke-Metrics @('aggregate','--work',$empty,'--la
 Assert-Equal 0 $emptyRun.ExitCode 'empty input is success'; Assert-Contains $emptyRun.Out 'Нет данных' 'empty input has explicit no-data output'
 Assert-Contains $emptyRun.Out 'events.jsonl отсутствует' 'missing event stream has an explicit diagnostic'
 
+$unknown=Invoke-Metrics @('aggregate','--unknown')
+Assert-Equal 2 $unknown.ExitCode 'unknown option is a usage error'
+Assert-True ($unknown.Err.StartsWith('metrics: ', [StringComparison]::Ordinal)) 'unknown option has the clean metrics stderr prefix'
+Assert-True (-not $unknown.Err.Contains('METRICSERR|', [StringComparison]::Ordinal)) 'unknown option does not leak the coded error envelope'
+
+$missing=Invoke-Metrics @('aggregate','--work','--last')
+Assert-Equal 2 $missing.ExitCode 'option followed by another option is a usage error'
+Assert-True ($missing.Err.StartsWith('metrics: ', [StringComparison]::Ordinal)) 'missing value has the clean metrics stderr prefix'
+Assert-True (-not $missing.Err.Contains('METRICSERR|', [StringComparison]::Ordinal)) 'missing value does not leak the coded error envelope'
+
+$positional=Invoke-Metrics @('aggregate','--work',$work,'unexpected')
+Assert-Equal 2 $positional.ExitCode 'unexpected positional argument remains a usage error'
+Assert-Contains $positional.Err "metrics: unexpected argument 'unexpected'" 'unexpected positional argument is rejected cleanly'
+
 foreach ($dir in $script:Dirs) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 if ($script:Failures.Count -gt 0) { $script:Failures | ForEach-Object { Write-Host $_ -ForegroundColor Red }; exit 1 }
-Write-Host 'PASS - metrics aggregation, fallback, filtering, lenient JSONL, empty input and read-only contract'
+Write-Host 'PASS - metrics aggregation, fallback, filtering, usage errors, lenient JSONL, empty input and read-only contract'
 exit 0

@@ -622,4 +622,67 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Equal 0 $r.ExitCode '[delivery-propose] next_major -> next_major predecessor is allowed'
         Assert-Match $r.Output 'id=T-002' '[delivery-propose] the follow-up next_major task lands'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 20a: explicit task id already present in archive ------------
+    $W = New-Work
+    try {
+        $done = @(
+            '# Завершённые задачи', '',
+            '### [T-700] Archived task — статус: завершена',
+            'done'
+        ) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Done.md'), $done, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Reuse archived id', '--body', 'x', '--id', 'T-700')
+        Assert-Equal 5 $r.ExitCode '[explicit-id-archive] archived id rejected with exit 5'
+        Assert-Match $r.Output 'explicit id T-700 already exists in archive' '[explicit-id-archive] rejection names the archive source'
+        Assert-Equal 0 (Get-QueueIds $W).Count '[explicit-id-archive] rejected task never entered the queue'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 20b: explicit task id already present in active tasks -------
+    $W = New-Work
+    try {
+        $taskDir = Join-Path $W 'tasks\T-701'
+        New-Item -ItemType Directory -Force -Path $taskDir | Out-Null
+        $task = @(
+            '# Дескриптор задачи T-701', '',
+            '### [T-701] Active task'
+        ) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText((Join-Path $taskDir 'task.md'), $task, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Reuse active id', '--body', 'x', '--id', 'T-701')
+        Assert-Equal 5 $r.ExitCode '[explicit-id-active] active id rejected with exit 5'
+        Assert-Match $r.Output 'explicit id T-701 already exists in active tasks' '[explicit-id-active] rejection names the active-task source'
+        Assert-Equal 0 (Get-QueueIds $W).Count '[explicit-id-active] rejected task never entered the queue'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 20c: explicit task id already present in queue --------------
+    $W = New-Work
+    try {
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Original queued id', '--body', 'x', '--id', 'T-702')
+        Assert-Equal 0 $r.ExitCode '[explicit-id-queue] initial explicit id accepted'
+
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Reuse queued id', '--body', 'x', '--id', 'T-702')
+        Assert-Equal 5 $r.ExitCode '[explicit-id-queue] queued id rejected with exit 5'
+        Assert-Match $r.Output 'explicit id T-702 already in queue' '[explicit-id-queue] rejection names the queue source'
+        Assert-Equal 1 (Get-QueueIds $W).Count '[explicit-id-queue] duplicate id never entered the queue'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 20d: malformed explicit task id is a usage error ------------
+    $W = New-Work
+    try {
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Malformed explicit id', '--body', 'x', '--id', 'P-001')
+        Assert-Equal 2 $r.ExitCode '[explicit-id-invalid] malformed task id rejected with exit 2'
+        Assert-Match $r.Output 'invalid --id for --kind task: expected T-NNN, got P-001' '[explicit-id-invalid] usage error explains the expected task id form'
+        Assert-Equal 0 (Get-QueueIds $W).Count '[explicit-id-invalid] malformed id was not auto-allocated'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 20e: unused explicit task id remains accepted ---------------
+    $W = New-Work
+    try {
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Fresh explicit id', '--body', 'x', '--id', 'T-999')
+        Assert-Equal 0 $r.ExitCode '[explicit-id-fresh] unused explicit id accepted'
+        Assert-Match $r.Output 'id=T-999' '[explicit-id-fresh] requested id is preserved'
+        Assert-Match (Read-Queue $W) '### \[T-999\] Fresh explicit id' '[explicit-id-fresh] task entered the queue under the requested id'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }

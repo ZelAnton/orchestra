@@ -611,6 +611,10 @@ function Add-Proposal {
     $stateTasks = Get-StateTasks $State
     if ($ExplicitId -gt 0) {
         foreach ($t in $stateTasks) { if ($t.Id -eq $ExplicitId) { throw "DEP:explicit id $(Format-Id $ExplicitId) already in queue" } }
+        $doneIds = Get-DoneIds $Paths
+        if ($doneIds.Contains($ExplicitId)) { throw "DEP:explicit id $(Format-Id $ExplicitId) already exists in archive" }
+        $activeIds = Get-ActiveIds $Paths.TasksDir
+        if ($activeIds.Contains($ExplicitId)) { throw "DEP:explicit id $(Format-Id $ExplicitId) already exists in active tasks" }
         $id = $ExplicitId
     } else {
         $MaxIdRef.Value = $MaxIdRef.Value + 1
@@ -744,7 +748,11 @@ function Cmd-Propose {
     $body = Get-BodyArg
     $preds = Get-PredecessorsArg
     $explicitId = 0
-    if ($opts.ContainsKey('id')) { $m = [regex]::Match([string]$opts['id'], 'T-0*(\d+)'); if ($m.Success) { $explicitId = [int]$m.Groups[1].Value } }
+    if ($opts.ContainsKey('id')) {
+        $m = [regex]::Match([string]$opts['id'], '^T-0*(\d+)$')
+        if (-not $m.Success) { Fail 2 "invalid --id for --kind task: expected T-NNN, got $([string]$opts['id'])" }
+        $explicitId = [int]$m.Groups[1].Value
+    }
     $force = [bool](Opt 'force' $false)
 
     Acquire-Lock $paths.Lock
