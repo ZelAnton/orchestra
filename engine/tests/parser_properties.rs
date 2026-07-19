@@ -192,9 +192,12 @@ fn finding_status() -> impl Strategy<Value = (&'static str, Status)> {
 }
 
 fn finding_id() -> impl Strategy<Value = String> {
+    // R-/F- ids carry a monotonic counter that can legitimately be one digit (`R-9`), two
+    // (`R-42`), or three-plus (`R-100`) — cover the whole range, not only the zero-padded
+    // two-digit form, so the property exercises the loosened `is_marker_id` predicate.
     prop_oneof![
-        (0u8..100).prop_map(|n| format!("R-{n:02}")),
-        (0u8..100).prop_map(|n| format!("F-{n:02}")),
+        (0u32..1000).prop_map(|n| format!("R-{n}")),
+        (0u32..1000).prop_map(|n| format!("F-{n}")),
         (0u8..60).prop_map(|second| format!("SUMMARY-R-2026-07-16T12:34:{second:02}Z")),
     ]
 }
@@ -279,7 +282,10 @@ proptest! {
         let heading = match mutation {
             0 => format!("### ({id}] {title} — статус: новая"),
             1 => format!("## [{id}] {title} — статус: новая"),
-            2 => format!("### [R-1] {title} — статус: новая"),
+            // `R-` with NO digits at all stays invalid (the loosening is «≥1 digit», not «any
+            // suffix»); a single digit like `R-1` is now legitimate, so it is no longer a
+            // corruption case.
+            2 => format!("### [R-] {title} — статус: новая"),
             3 => format!("### [F-AA] {title} — статус: новая"),
             4 => format!("### [SUMMARY-R-not-a-time] {title} — статус: готово к слиянию"),
             _ => format!("### [{id}] {title} — статус:"),
