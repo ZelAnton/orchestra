@@ -27,6 +27,14 @@ All agent frontmatter (`permissionMode:`) and every `claude ... --permission-mod
 
 Consent for a risky autonomous Bash operation (launching the autonomous codex runtime, in either of its two layout forms - `pwsh -File tools/codex-runtime.ps1` from a repo checkout or `pwsh -File ~/.claude/scripts/codex-runtime.ps1` from a cc-sync mirror (task T-114); publishing via `git push`/`gh`; destructive worktree/branch removal or `rm -rf` under `.work/`; an arbitrary per-project `SMOKE_CMD`; any commit/merge that touches `.claude/settings*`) is **pre-granted by the user** — through the launchers' session `--allowedTools` and/or settings seeded by `cc-config` — never self-granted by an agent. No agent may widen its own permissions: do not edit `.claude/settings*` and do not rephrase a command to dodge the auto-mode classifier. A mid-run permission refusal is handled by the normal escalation of the role where it happened (the codex adapters' `CODEX_UNAVAILABLE` fallback; a processor/merger "manual intervention required" stop), not by halting the whole run. Consent is not inherited through a subagent — the classifier rejects a parent's relayed consent, so a settings-touching operation is finalized by the role whose own context shows the consent. The central allow-list stays minimal (only the three codex rules `Bash(pwsh -File tools/codex-runtime.ps1 *)`, `Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)` and `Bash(codex exec *)`); per-repository needs use a local `cc-config` grant. See `knowledge.md` ("Разрешения auto-режима и политика «согласие — заранее»") for the full operation-by-operation audit.
 
+The internal `.work/approvals` policy gate is separate from Claude/Codex tool permission.
+`ORCHESTRA_AUTO_APPROVE=on`, set by the operator in the OS User/Machine environment,
+pre-grants those gates across projects. Agents must still call `policy.ps1`; the runtime
+persists the one-time request and consumes it as
+`system-env:ORCHESTRA_AUTO_APPROVE` only while its diff fingerprint, policy snapshot, and
+deadline are fresh. Agents must never set this variable for themselves. Unset/`off` keeps
+manual approval; any other value fails closed.
+
 ## Testing Guidelines
 
 Test role boundaries: file ownership, VCS permissions, status transitions, retry limits, and fallbacks. For launchers, verify argument parsing and failures. Use a disposable repository for destructive flow tests.

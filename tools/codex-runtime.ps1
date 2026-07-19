@@ -380,6 +380,16 @@ function Invoke-Captured {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
+    # Codex may invoke dotnet/MSBuild inside its own sandbox. Reusable build workers are
+    # outside the lifetime contract of one autonomous call and were observed lingering
+    # after agents completed, so pin the short-lived policy here as well as in launchers.
+    if ($psi | Get-Member -Name 'Environment' -MemberType Property -ErrorAction SilentlyContinue) {
+        $psi.Environment['MSBUILDDISABLENODEREUSE'] = '1'
+        $psi.Environment['DOTNET_CLI_USE_MSBUILD_SERVER'] = '0'
+    } else {
+        $psi.EnvironmentVariables['MSBUILDDISABLENODEREUSE'] = '1'
+        $psi.EnvironmentVariables['DOTNET_CLI_USE_MSBUILD_SERVER'] = '0'
+    }
 
     # UTF-8 on every captured stream where the host exposes the property (.NET
     # Core / pwsh); Windows PowerShell 5.1 lacks the *Encoding setters and falls

@@ -161,6 +161,20 @@ function Get-EffCodex {
 }
 
 # =============================================================================
+# 0. Machine-wide operator pre-consent
+# =============================================================================
+
+Write-Host '== System autonomy =='
+$autoApprove = (Get-EnvTrimmed 'ORCHESTRA_AUTO_APPROVE').ToLowerInvariant()
+switch ($autoApprove) {
+    ''      { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = (default off) - human approval gates remain interactive' }
+    'off'   { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = off - human approval gates remain interactive' }
+    'on'    { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment) - fresh approval requests are audit-recorded and auto-approved' }
+    default { Write-Host ("FAIL ORCHESTRA_AUTO_APPROVE: invalid value '$autoApprove' (allowed: on | off); policy.ps1 fails closed") }
+}
+Write-Host ''
+
+# =============================================================================
 # 1. Codex preflight
 # =============================================================================
 
@@ -181,6 +195,26 @@ if (Test-Path -LiteralPath $authFile -PathType Leaf) {
 } else {
     Write-Host 'auth         : NOT found -> run: codex login'
 }
+
+Write-Host ''
+Write-Host '== Process containment =='
+$processkitPython = Get-EnvTrimmed 'CC_PROCESSKIT_PYTHON'
+if (-not $processkitPython) {
+    Write-Host 'INFO root containment: CC_PROCESSKIT_PYTHON is not set; launchers still disable .NET build-worker reuse and per-command supervisor cleanup remains active'
+} else {
+    $pkBin = Get-Command $processkitPython -ErrorAction SilentlyContinue
+    if (-not $pkBin) {
+        Write-Host ('FAIL root containment: CC_PROCESSKIT_PYTHON executable not found: ' + $processkitPython)
+    } else {
+        & $processkitPython -c 'import processkit' *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host ('OK   root containment: cc-processor/cc-resume will use ProcessKit via ' + $pkBin.Source)
+        } else {
+            Write-Host ('FAIL root containment: Python exists but cannot import processkit: ' + $pkBin.Source + ' (launchers fail closed with exit 10)')
+        }
+    }
+}
+Write-Host 'OK   build workers: processor launchers export MSBUILDDISABLENODEREUSE=1 and DOTNET_CLI_USE_MSBUILD_SERVER=0 to the whole agent tree'
 
 # Since T-075 the adapters run the runtime wrapper `pwsh -File tools/codex-runtime.ps1`
 # (which spawns the real `codex exec` as a child, past the Bash gate). So the allow-rule

@@ -158,6 +158,55 @@ exit $code
 }.Invoke()
 
 # =============================================================================
+# 0b. Trusted shell-command uses the native Bash environment and inherits the
+#     short-lived .NET worker policy injected by the supervisor.
+# =============================================================================
+{
+    $d = New-TempDir
+    $out = Join-Path $d 'shell.out'
+    $r = Invoke-Spv @(
+        'run', '--shell-command', 'printf "%s|%s" "$MSBUILDDISABLENODEREUSE" "$DOTNET_CLI_USE_MSBUILD_SERVER"',
+        '--working-directory', $d, '--stdout-file', $out, '--json'
+    )
+    Assert-Exit $r 0 'shell-command succeeds'
+    Assert-Equal '1|0' (Read-File $out) 'shell-command inherits disabled MSBuild reuse/server policy'
+}.Invoke()
+
+# =============================================================================
+# 0c. An explicitly configured kernel-containment backend is fail-closed.
+# =============================================================================
+{
+    $d = New-TempDir; $w = New-Worker $d
+    $marker = Join-Path $d 'must-not-run.txt'
+    $r = Invoke-Spv -ToolArgs @(
+        'run', '--file', $w, '--args-json', (ArgsJson @('--print', 'unexpected')),
+        '--stdout-file', $marker, '--json'
+    ) -EnvironmentOverrides @{ CC_PROCESSKIT_PYTHON = (Join-Path $d 'missing-python.exe') }
+    Assert-Exit $r 2 'missing ProcessKit backend -> fail-closed usage/config error'
+    Assert-True (-not (Test-Path -LiteralPath $marker)) 'missing ProcessKit backend must not start the target command'
+}.Invoke()
+
+# =============================================================================
+# 0d. Empty process snapshot diffs stay typed as empty arrays under StrictMode.
+# =============================================================================
+{
+    $d = New-TempDir
+    $diag = Join-Path $d 'empty-process-diagnostics.json'
+    $r = Invoke-Spv @(
+        'run', '--exe', $script:PsExe,
+        '--args-json', (ArgsJson @('-NoProfile', '-NonInteractive', '-Command', 'exit 0')),
+        '--process-diagnostics', '--process-log-file', $diag, '--json'
+    )
+    Assert-Exit $r 0 'empty process-diff diagnostics do not throw under StrictMode'
+    $o = $r.Out | ConvertFrom-Json
+    Assert-Equal 0 $o.temporal_candidate_count 'empty process-diff verdict reports zero temporal candidates'
+    Assert-True (Test-Path -LiteralPath $diag) 'empty process-diff writes diagnostics artifact'
+    $diagObj = Read-File $diag | ConvertFrom-Json
+    Assert-True ($null -ne $diagObj.PSObject.Properties['temporal_candidates']) 'empty process-diff artifact keeps temporal_candidates field'
+    Assert-Equal 0 (@($diagObj.temporal_candidates).Count) 'empty process-diff artifact serializes zero temporal candidates'
+}.Invoke()
+
+# =============================================================================
 # 1. Four-way stop classification -> distinct exit codes.
 # =============================================================================
 {
@@ -278,6 +327,53 @@ exit $code
         Assert-True (-not (Test-Path -LiteralPath $marker)) 'grandchild was terminated with the tree (no marker written)'
     } finally {
         # If the assertion is exercising a regression, do not leave its observed orphan alive.
+        foreach ($spawnedProcess in $spawnedProcesses) {
+            try {
+                $process = Get-Process -Id $spawnedProcess.Id -ErrorAction Stop
+                if ($process.StartTime.ToUniversalTime() -eq $spawnedProcess.StartTime) {
+                    $process | Stop-Process -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
+    }
+}.Invoke()
+
+# =============================================================================
+# 4b. Normal success also reaps reusable/background descendants and records lineage.
+# =============================================================================
+{
+    $d = New-TempDir; $w = New-Worker $d
+    $marker = Join-Path $d 'success-grandchild-marker.txt'
+    $ready = Join-Path $d 'success-spawned-processes.txt'
+    $diag = Join-Path $d 'process-diagnostics.json'
+    $spawnedProcesses = @()
+    try {
+        $r = Invoke-Spv @(
+            'run', '--file', $w,
+            '--args-json', (ArgsJson @('--spawn-marker', $marker, '--spawn-ready', $ready)),
+            '--process-diagnostics', '--process-log-file', $diag, '--task-id', 'T-44',
+            '--role', 'coder', '--label', 'smoke', '--json'
+        )
+        Assert-Exit $r 0 'normal-success cleanup scenario succeeds'
+        $o = $r.Out | ConvertFrom-Json
+        Assert-True ([bool]$o.cleanup_attempted) 'normal success attempts tree cleanup'
+        Assert-Equal 0 $o.survivor_count_after_cleanup 'normal success leaves no descendants'
+        Assert-True (Test-Path -LiteralPath $diag) 'normal success writes process diagnostics'
+        $diagObj = Read-File $diag | ConvertFrom-Json
+        Assert-Equal 'orchestra/process-diagnostics@1' $diagObj.schema 'diagnostics schema'
+        Assert-Equal 'T-44' $diagObj.task_id 'diagnostics carries task id'
+        Assert-Equal 'smoke' $diagObj.label 'diagnostics carries launch label'
+        Assert-True (@($diagObj.descendants_before_cleanup).Count -ge 1) 'diagnostics records the background descendant before cleanup'
+        Assert-Equal 0 (@($diagObj.survivors_after_cleanup).Count) 'diagnostics records no survivor after cleanup'
+        Assert-True (-not (Test-Path -LiteralPath $marker)) 'normal-success grandchild was reaped before writing its marker'
+
+        if (Test-Path -LiteralPath $ready) {
+            $spawnedProcesses = @((Read-File $ready).Trim() -split ',' | ForEach-Object {
+                $identity = $_ -split '\|', 2
+                [pscustomobject]@{ Id = [int]$identity[0]; StartTime = [DateTime]::new([long]$identity[1], [DateTimeKind]::Utc) }
+            })
+        }
+    } finally {
         foreach ($spawnedProcess in $spawnedProcesses) {
             try {
                 $process = Get-Process -Id $spawnedProcess.Id -ErrorAction Stop

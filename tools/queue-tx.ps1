@@ -336,7 +336,14 @@ function Get-ArchiveHeaderIds {
     param([string]$Text)
     $ids = New-Object System.Collections.Generic.HashSet[int]
     foreach ($line in ($Text -split "`r?`n")) {
-        $m = [regex]::Match($line, '^\s*###\s*\[\s*T-0*(\d+)\s*\]')
+        # Archive writers in the wild use both H2 and H3 bracketed headings. Older
+        # processor revisions also emitted an H1 "Активная задача T-NNN" heading.
+        # Read only those heading shapes: a T-ID mentioned in an archive body must
+        # never satisfy a prerequisite.
+        $m = [regex]::Match($line, '^\s*#{2,3}\s*\[\s*T-0*(\d+)\s*\]')
+        if (-not $m.Success) {
+            $m = [regex]::Match($line, '^\s*#\s+(?:Активная\s+задача|Active\s+task)\s+T-0*(\d+)\b', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
         if ($m.Success) { [void]$ids.Add([int]$m.Groups[1].Value) }
     }
     return ,$ids

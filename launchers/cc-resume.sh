@@ -37,13 +37,29 @@
 # compare against `<CODEX_CMD> exec` (not the pwsh wrapper). With it, no persistent
 # allow-rule is required.
 export CC_CODEX_EXEC_GRANT="codex exec"
+export MSBUILDDISABLENODEREUSE=1
+export DOTNET_CLI_USE_MSBUILD_SERVER=0
+# Keep long codex-runtime calls in the foreground so the existing allow-rule applies.
+# Explicit user/system values override these per-session defaults.
+export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
+export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
+if [ -n "${CC_PROCESSKIT_PYTHON:-}" ] && ! "$CC_PROCESSKIT_PYTHON" -c 'import processkit' >/dev/null 2>&1; then
+  echo "CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: $CC_PROCESSKIT_PYTHON" >&2
+  exit 10
+fi
 # Addressed check: an addressed processor lease exists only if the lease file is
 # present AND carries role=processor. The role line's spacing differs between
 # PowerShell 7 ("role": ) and 5.1 ("role":  ), so a spacing-tolerant regex is used.
 LEASE=".work/orchestrator.lock/lease.json"
 if [ -f "$LEASE" ] && grep -Eq '"role"[[:space:]]*:[[:space:]]*"processor"' "$LEASE"; then
+  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+  fi
   exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 else
   echo "No addressed processor lease (.work/orchestrator.lock/lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session."
+  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+  fi
   exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 fi

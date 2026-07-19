@@ -62,7 +62,10 @@ function Write-Utf8 { param([string]$Path, [string]$Text) [System.IO.File]::Writ
 
 # Runs policy.ps1 as a child pwsh process; returns @{ ExitCode; Out; Err }.
 function Invoke-Policy {
-    param([string[]]$ToolArgs)
+    param(
+        [string[]]$ToolArgs,
+        [ValidateSet('', 'off', 'on', 'invalid')][string]$AutoApprove = ''
+    )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:PsExe
     $psi.UseShellExecute = $false
@@ -71,6 +74,9 @@ function Invoke-Policy {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
+    # Never inherit the operator machine's autonomy setting into baseline fail-closed
+    # scenarios; dedicated tests opt in explicitly below.
+    $psi.Environment['ORCHESTRA_AUTO_APPROVE'] = $AutoApprove
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
     }
@@ -296,6 +302,36 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         Assert-Exit $r 6 'guard-path(vcs): an unregistered dir masquerading as a worktree is rejected'
     } else {
         Write-Host 'SKIP - git not on PATH - guard-path VCS registration case skipped'
+    }
+}.Invoke()
+
+# =============================================================================
+# 6b. guard-path VCS check: pure-jj workspaces reject ancestor .git capture
+# =============================================================================
+{
+    if ((Get-Command jj -ErrorAction SilentlyContinue) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        $root = New-TempDir
+        Write-Utf8 (Join-Path $root '.gitignore') ".work/`n"
+        & jj git init --colocate $root 2>&1 | Out-Null
+        & jj -R $root describe -m base 2>&1 | Out-Null
+        $work = Join-Path $root '.work'
+        New-Item -ItemType Directory -Force -Path (Join-Path $work 'worktrees') | Out-Null
+        $wt = Join-Path $work 'worktrees\T-045'
+        & jj -R $root workspace add --name T-045 $wt -r '@' 2>&1 | Out-Null
+
+        $gitTop = [string](@(& git -C $wt rev-parse --show-toplevel 2>$null)[0])
+        $gitTopFull = ([System.IO.Path]::GetFullPath($gitTop)).TrimEnd('\', '/')
+        $wtFull = ([System.IO.Path]::GetFullPath($wt)).TrimEnd('\', '/')
+        Assert-True ($gitTop -and -not [string]::Equals($gitTopFull, $wtFull, [System.StringComparison]::OrdinalIgnoreCase)) 'pure-jj reproducer: git silently resolves the ancestor main checkout'
+
+        $r = Invoke-Policy @('guard-path', '--root', $root, '--work', $work, '--object', 'worktree', '--task', 'T-045', '--path', $wt, '--expect-vcs', 'jj')
+        Assert-Exit $r 0 'guard-path(vcs): exact pure-jj workspace root passes as jj'
+
+        $r = Invoke-Policy @('guard-path', '--root', $root, '--work', $work, '--object', 'worktree', '--task', 'T-045', '--path', $wt, '--expect-vcs', 'git')
+        Assert-Exit $r 6 'guard-path(vcs): pure-jj workspace is rejected as git despite ancestor .git'
+        Assert-OutMatch $r '(ancestor \.git capture|not the addressed worktree)' 'guard-path(vcs): rejection explains ancestor git capture'
+    } else {
+        Write-Host 'SKIP - jj/git not on PATH - pure-jj ancestor-capture case skipped'
     }
 }.Invoke()
 
@@ -831,6 +867,48 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     $idI = (APJson $r).id
     $r = AP @('approval-status', '--work', $work, '--id', $idI, '--fingerprint', 'ee', '--policy-hash', 'ff', '--now', '2026-01-01T00:10:00Z', '--json')
     Assert-Exit $r 12 'approval-status: an unrelated subject stays pending (independent, not blocked by another approval)'
+}.Invoke()
+
+# =============================================================================
+# 12. system pre-consent: autonomous approval without losing freshness/audit semantics
+# =============================================================================
+{
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+    Write-Utf8 (Join-Path $work 'constraints.md') "## Категории обязательного human review`n`n- API`n"
+    New-Item -ItemType Directory -Force -Path (Join-Path $sb 'src') | Out-Null
+    Write-Utf8 (Join-Path $sb 'src/api.rs') "pub fn api() {}`n"
+    $changed = Join-Path $sb 'changed.txt'
+    Write-Utf8 $changed "src/api.rs`n"
+
+    # A new request is still persisted, but is consumed immediately by the operator-owned
+    # system environment pre-grant.
+    $r = Invoke-Policy @('approval-request', '--work', $work, '--task', 'T-201', '--reason', 'human-review', '--root', $sb, '--paths-from', $changed, '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json') -AutoApprove on
+    Assert-Exit $r 0 'auto-approve: request succeeds without parking the processor'
+    $j = $r.Out.Trim() | ConvertFrom-Json
+    Assert-Equal 'created-auto-approved' $j.state 'auto-approve: request reports immediate system decision'
+    Assert-Equal 'approve' $j.decision 'auto-approve: decision is approve'
+    Assert-Equal 'system-env:ORCHESTRA_AUTO_APPROVE' $j.decided_by 'auto-approve: audit identity names the operator pre-grant'
+    Assert-True (Test-Path -LiteralPath (Join-Path $work "approvals/$($j.id).json")) 'auto-approve: audit artifact remains persisted'
+
+    $r = Invoke-Policy @('approval-status', '--work', $work, '--id', $j.id, '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:01:00Z', '--json') -AutoApprove on
+    Assert-Exit $r 0 'auto-approve: fresh persisted decision passes status gate'
+    Assert-Equal 'approved' (($r.Out.Trim() | ConvertFrom-Json).verdict) 'auto-approve: status verdict approved'
+
+    # Crash recovery may enter directly at approval-status with an already-pending request.
+    # The system pre-grant consumes that live request after verifying current content/policy.
+    $r = Invoke-Policy @('approval-request', '--work', $work, '--task', 'T-202', '--reason', 'human-review', '--root', $sb, '--paths-from', $changed, '--deadline-sec', '3600', '--now', '2026-01-01T00:00:00Z', '--json')
+    $pendingId = ($r.Out.Trim() | ConvertFrom-Json).id
+    $r = Invoke-Policy @('approval-status', '--work', $work, '--id', $pendingId, '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:02:00Z', '--json') -AutoApprove on
+    Assert-Exit $r 0 'auto-approve: status-only recovery consumes a live pending request'
+    $status = $r.Out.Trim() | ConvertFrom-Json
+    Assert-Equal 'approved' $status.verdict 'auto-approve: recovered pending verdict approved'
+    Assert-Equal 'system-env:ORCHESTRA_AUTO_APPROVE' $status.decided_by 'auto-approve: recovered request preserves system audit identity'
+
+    # Invalid values are not interpreted truthily and cannot silently widen policy.
+    $r = Invoke-Policy @('approval-request', '--work', $work, '--task', 'T-203', '--reason', 'human-review', '--fingerprint', 'aa', '--policy-hash', 'bb', '--json') -AutoApprove invalid
+    Assert-Exit $r 2 'auto-approve: invalid environment value fails closed'
+    Assert-OutMatch $r 'must be.*on.*off' 'auto-approve: invalid value diagnostic names the allowed contract'
 }.Invoke()
 
 # =============================================================================

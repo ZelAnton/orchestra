@@ -174,12 +174,18 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
             FAKE_ENV_FILE       = $envFile
             FAKE_EXIT_CODE      = '0'
             CC_CODEX_EXEC_GRANT = ''
+            BASH_DEFAULT_TIMEOUT_MS = ''
+            BASH_MAX_TIMEOUT_MS = ''
         }
         Assert-Equal 0 $result.ExitCode '[session grant] exit code'
 
         $expectedGrant = Get-ExpectedGrant 'cc-processor.cmd'
         Assert-Equal 'codex exec' $expectedGrant '[session grant] launcher source must set CC_CODEX_EXEC_GRANT=codex exec'
         Assert-Equal $expectedGrant (Get-CapturedGrant $envFile) '[session grant] claude must inherit CC_CODEX_EXEC_GRANT with the launcher-set value'
+        Assert-Equal '1' (Get-CapturedEnvValue $envFile 'MSBUILDDISABLENODEREUSE') '[process containment] claude must inherit disabled MSBuild node reuse'
+        Assert-Equal '0' (Get-CapturedEnvValue $envFile 'DOTNET_CLI_USE_MSBUILD_SERVER') '[process containment] claude must inherit disabled MSBuild server use'
+        Assert-Equal '1900000' (Get-CapturedEnvValue $envFile 'BASH_DEFAULT_TIMEOUT_MS') '[foreground codex] launcher raises Claude Bash default timeout'
+        Assert-Equal '1900000' (Get-CapturedEnvValue $envFile 'BASH_MAX_TIMEOUT_MS') '[foreground codex] launcher raises Claude Bash maximum timeout'
 
         # The session-grant env signal is in ADDITION to the --allowedTools grants,
         # not a replacement: both allow-rules must still be present on the claude
@@ -189,6 +195,24 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         $capturedArgs = Get-CapturedArgs $captureFile
         Assert-True ($capturedArgs -contains 'Bash(codex exec:*)') '[session grant] --allowedTools "Bash(codex exec:*)" must still be forwarded'
         Assert-True ($capturedArgs -contains 'Bash(pwsh -File tools/codex-runtime.ps1:*)') '[session grant] --allowedTools "Bash(pwsh -File tools/codex-runtime.ps1:*)" (the actually-executed runtime wrapper) must be forwarded'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 8: explicitly configured containment is fail-closed --------
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
+        Install-FakeClaude -Paths $paths
+        $captureFile = Join-Path $paths.Root 'claude-args.txt'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -EnvVars @{
+            FAKE_ARGS_FILE       = $captureFile
+            FAKE_EXIT_CODE       = '0'
+            CC_PROCESSKIT_PYTHON = (Join-Path $paths.Root 'missing-python.exe')
+        }
+        Assert-Equal 10 $result.ExitCode '[containment backend missing] launcher must fail closed'
+        Assert-NoFileExists $captureFile '[containment backend missing] claude must not start uncontained'
     }
     finally {
         Remove-Sandbox $paths

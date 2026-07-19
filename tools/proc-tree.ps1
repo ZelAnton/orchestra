@@ -6,8 +6,8 @@
     `Stop-ProcessTree` terminates a spawned child process AND every descendant it
     created, so a call that itself spawned helper workers leaves nothing behind. It
     is dot-sourced by every Orchestra tool that captures a child process
-    (tools/supervisor.ps1 on cancel/timeout; tools/codex-runtime.ps1 on EVERY
-    `Invoke-Captured` exit path) so there is exactly ONE hardened implementation, not
+    (tools/supervisor.ps1 and tools/codex-runtime.ps1 on EVERY captured-call exit path)
+    so there is exactly ONE hardened implementation, not
     a per-call copy that could drift (the reflection-based Kill(bool) overload
     detection and the Windows PowerShell 5.1 taskkill fallback both live here once).
 
@@ -150,7 +150,7 @@ public static extern int killpg(int pgrp, int sig);
 
 # --------------------------------------------------------------------------
 # Terminate the whole child process TREE (so a call that itself spawned workers leaves
-# nothing behind on cancel/timeout, or after a normal exit that leaked a descendant). See
+# nothing behind on any exit, including normal success/error). See
 # the file header for the exited-root, reparenting and PID-reuse rationale.
 #
 #   -PosixProcessGroupId : optional. When > 1 (and off Windows) ALSO SIGKILL this whole POSIX

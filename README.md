@@ -136,6 +136,36 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
 3. `cc-processor` — starts `processor`, which processes `.work\Tasks_Queue.md` end
    to end in parallel batches until no not-started tasks remain.
 
+For a fully unattended machine, the operator can pre-grant all fresh Orchestra human
+approval gates once, for every target project:
+
+```powershell
+[Environment]::SetEnvironmentVariable('ORCHESTRA_AUTO_APPROVE', 'on', 'User')
+```
+
+Open a new terminal, run `cc-sync`, then verify with `cc-doctor`. This is separate from
+Claude/Codex sandbox permissions: `policy.ps1` still creates the normal one-time approval
+artifact, binds it to the current diff and policy, and records
+`decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; it simply does not park the processor.
+Use `off` (or remove the variable) to restore interactive approvals.
+
+On Windows, optional kernel-backed containment for the entire processor session can be
+enabled with a user/system environment variable pointing to a Python installation of
+`processkit`:
+
+```powershell
+setx CC_PROCESSKIT_PYTHON "C:\path\to\python.exe"
+```
+
+Open a new terminal after `setx`; `cc-doctor` verifies the import. When configured,
+`cc-processor` and `cc-resume` run Claude through `python -m processkit run -- ...` and fail
+closed if that backend is broken. With or without ProcessKit, those launchers disable
+persistent MSBuild worker/server reuse in their child environment, and leaf build/test
+commands use Orchestra's per-command supervisor cleanup and process diagnostics. They also
+keep the bounded `codex-runtime.ps1` calls in the foreground by supplying 1,900,000 ms Claude
+Bash timeout defaults when those variables are not already set; this avoids the extra
+background-operator approval prompt without widening the permission allow-list.
+
 Other launchers: `cc-resume` continues an interrupted processor session,
 `cc-status` / `cc-journal` read current/past run state, `cc-doctor` runs a
 read-only Codex/configuration/orchestration preflight (a thin wrapper, like

@@ -52,6 +52,66 @@ it never appears as an admission-close reason.
 If Claude Code isn't running at all and you want a fuller live view (or to resume
 work), see §6 and `launchers/cc-resume.cmd`.
 
+**Process leaks / hung build workers.** External build/test runs supervised by current
+agents leave durable (but local/gitignored) records under
+`.work/processes/<T-ID|_integration>/*.json`. They survive Phase-6 deletion of
+`.work/tasks/<T-ID>` and show the run label, root PID, PID/PPID/name of descendants before
+cleanup, survivors afterwards, and safe command hints such as
+`/nodemode:1 /nodeReuse:true`; raw argv is deliberately absent. A nonzero
+`survivor_count_after_cleanup` is actionable evidence. If a suspected command has no record,
+it bypassed the per-command supervisor: capture its role/phase from `status.md` and treat that
+as an instruction/runtime gap. Do not kill `conhost.exe` or `dotnet.exe` globally — parallel
+agents and active Claude/Codex/Bash/MCP sessions can legitimately own processes with those
+names.
+`temporal_candidates_after_cleanup` catches processes created during the call even when a
+dead intermediate parent severed the live PID chain. Under parallel execution it is a
+time-window candidate rather than proof of ownership; correlate its creation time/hint across
+the overlapping task records.
+
+For a whole-session Windows backstop, set `CC_PROCESSKIT_PYTHON` to a Python executable with
+`processkit` installed and open a new terminal; `cc-doctor` must report `OK root containment`.
+`cc-processor`/`cc-resume` then fail closed if containment cannot start. Independently, they
+always disable MSBuild node reuse/build-server use inside the agent environment.
+The same backend is inherited by the per-command supervisor, so each build/test gets its own
+Job/cgroup boundary; check the verdict's `containment` field when diagnosing a fallback.
+
+**Repeated approval for `codex-runtime.ps1 … &`.** The trailing `&` is the cause: it lets
+the process outlive Claude Code's permission-time safety check, so the foreground allow rule
+does not suppress that separate background-operation prompt. Current `coder_codex` and
+`reviewer_codex` must run the runtime in the foreground, sequentially, with an 1800-second
+runtime limit. `cc-processor` and `cc-resume` also default both Claude Bash timeouts to
+1,900,000 ms for their child session, leaving 100 seconds for runtime startup and cleanup.
+They do not overwrite an existing environment value.
+
+Normally, starting a fresh processor/resume session is enough. To apply the same defaults to
+Claude sessions started directly, set the user environment once on Windows and open a new
+terminal:
+
+```powershell
+[Environment]::SetEnvironmentVariable('BASH_DEFAULT_TIMEOUT_MS', '1900000', 'User')
+[Environment]::SetEnvironmentVariable('BASH_MAX_TIMEOUT_MS', '1900000', 'User')
+```
+
+These variables control waiting, not authorization: direct sessions still need the narrow
+`codex-runtime.ps1` allow rules seeded by `cc-config`. Do not restore background execution to
+avoid waiting; if foreground execution is unavailable, the adapter must return
+`CODEX_UNAVAILABLE` and use its normal Claude fallback.
+
+**Unattended internal approvals.** Orchestra's `.work/approvals` gate is separate from
+Claude/Codex permissions. To keep `human-review`, `force-lock`, and `policy-bypass` gates
+autonomous across all projects, set the operator-owned user environment and open a new
+terminal:
+
+```powershell
+[Environment]::SetEnvironmentVariable('ORCHESTRA_AUTO_APPROVE', 'on', 'User')
+```
+
+Run `cc-doctor` to verify the effective value. The gate still records its one-time artifact,
+current code fingerprint, policy snapshot, deadline, and
+`decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; it no longer parks the processor. Set `off`
+or remove the variable to restore manual decisions. Any other value fails closed. Agents
+must never set this operator consent variable themselves.
+
 ## 2. An escalated task
 
 A task's queue entry with `— статус: эскалирована · причина=<кратко>` (in

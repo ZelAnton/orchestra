@@ -53,6 +53,8 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
             FAKE_ENV_FILE       = $envFile
             FAKE_EXIT_CODE      = '2'
             CC_CODEX_EXEC_GRANT = ''
+            BASH_DEFAULT_TIMEOUT_MS = ''
+            BASH_MAX_TIMEOUT_MS = ''
         }
 
         Assert-Equal 2 $result.ExitCode '[addressed] exit code must be forwarded from claude'
@@ -67,6 +69,10 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
         $expectedGrant = Get-ExpectedGrant 'cc-resume.cmd'
         Assert-Equal 'codex exec' $expectedGrant '[addressed] launcher source sets CC_CODEX_EXEC_GRANT=codex exec'
         Assert-Equal $expectedGrant (Get-CapturedGrant $envFile) '[addressed] claude inherits CC_CODEX_EXEC_GRANT'
+        Assert-Equal '1' (Get-CapturedEnvValue $envFile 'MSBUILDDISABLENODEREUSE') '[addressed] claude inherits disabled MSBuild node reuse'
+        Assert-Equal '0' (Get-CapturedEnvValue $envFile 'DOTNET_CLI_USE_MSBUILD_SERVER') '[addressed] claude inherits disabled MSBuild server use'
+        Assert-Equal '1900000' (Get-CapturedEnvValue $envFile 'BASH_DEFAULT_TIMEOUT_MS') '[addressed] claude inherits foreground Bash default timeout'
+        Assert-Equal '1900000' (Get-CapturedEnvValue $envFile 'BASH_MAX_TIMEOUT_MS') '[addressed] claude inherits foreground Bash maximum timeout'
     }
     finally {
         Remove-Sandbox $paths
@@ -113,6 +119,24 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
         $captured = Get-CapturedArgs $captureFile
         Assert-True (-not ($captured -contains '--continue')) '[non-processor] a non-processor lease must not trigger --continue'
         Assert-True ($captured[-1] -match '^Cold start: no addressed processor session to continue') '[non-processor] falls back to cold recovery'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 4: explicitly configured containment is fail-closed --------
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-resume.cmd'
+        Install-FakeClaude -Paths $paths
+        $captureFile = Join-Path $paths.Root 'claude-args.txt'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -EnvVars @{
+            FAKE_ARGS_FILE       = $captureFile
+            FAKE_EXIT_CODE       = '0'
+            CC_PROCESSKIT_PYTHON = (Join-Path $paths.Root 'missing-python.exe')
+        }
+        Assert-Equal 10 $result.ExitCode '[containment backend missing] launcher must fail closed'
+        Assert-NoFileExists $captureFile '[containment backend missing] claude must not start uncontained'
     }
     finally {
         Remove-Sandbox $paths

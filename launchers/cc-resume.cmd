@@ -1,6 +1,12 @@
 @echo off
 chcp 65001 >nul
 setlocal
+set "MSBUILDDISABLENODEREUSE=1"
+set "DOTNET_CLI_USE_MSBUILD_SERVER=0"
+rem Keep long codex-runtime calls in the foreground so the existing allow-rule applies.
+rem Explicit user/system values override these per-session defaults.
+if not defined BASH_DEFAULT_TIMEOUT_MS set "BASH_DEFAULT_TIMEOUT_MS=1900000"
+if not defined BASH_MAX_TIMEOUT_MS set "BASH_MAX_TIMEOUT_MS=1900000"
 rem Возобновляет прерванную сессию processor в текущей папке (последнюю сессию
 rem Claude Code здесь — через --continue), вместо холодного старта с нуля.
 rem processor и так умеет восстанавливаться с нуля (Фаза 0 его системного промпта),
@@ -39,6 +45,10 @@ rem который они сверяют с `<CODEX_CMD> exec` (не с pwsh-о�
 rem allow-правило не требуется.
 rem Внутри setlocal (см. выше) — видна дочернему claude, не утекает в вызывающую оболочку.
 set "CC_CODEX_EXEC_GRANT=codex exec"
+if not defined CC_PROCESSKIT_PYTHON goto :containment_checked
+"%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
+if errorlevel 1 goto :containment_error
+:containment_checked
 rem Addressed check: an addressed processor lease exists only if the lease file is
 rem present AND carries role=processor. The role line's spacing differs between
 rem PowerShell 7 ("role": ) and 5.1 ("role":  ), so match "role" and "processor"
@@ -48,9 +58,21 @@ set "LEASE=.work\orchestrator.lock\lease.json"
 if not exist "%LEASE%" goto :coldstart
 findstr /C:"\"role\"" "%LEASE%" >nul 2>&1 || goto :coldstart
 findstr /C:"\"processor\"" "%LEASE%" >nul 2>&1 || goto :coldstart
+if defined CC_PROCESSKIT_PYTHON goto :resume_contained
 claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+goto :done
+:resume_contained
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 goto :done
 :coldstart
 echo No addressed processor lease (.work\orchestrator.lock\lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session.
+if defined CC_PROCESSKIT_PYTHON goto :coldstart_contained
 claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+goto :done
+:coldstart_contained
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+goto :done
+:containment_error
+echo CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: "%CC_PROCESSKIT_PYTHON%"
+exit /b 10
 :done

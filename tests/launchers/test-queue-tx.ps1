@@ -156,6 +156,30 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Match $r.Output 'not-ready: T-102.*waiting on T-101' '[archive-header] body mention does not complete T-101'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 3c: all supported archive heading shapes satisfy prerequisites
+    $W = New-Work
+    try {
+        $q = @(
+            '# Очередь задач', '',
+            '### [T-093] Dependent task — статус: не начата',
+            'body',
+            'Предпосылки: T-090, T-091, T-092'
+        ) -join "`n"
+        $done = @(
+            '# Завершённые задачи', '',
+            '## [T-090] H2 archive entry — статус: завершена',
+            '### [T-091] H3 archive entry — статус: завершена',
+            '# Активная задача T-092',
+            'Состояние: завершена'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Done.md'), $done, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('ready', '--work', $W, '--id', 'T-093')
+        Assert-Equal 0 $r.ExitCode '[archive-heading-variants] dependent task is ready'
+        Assert-Match $r.Output 'ready\s+T-093' '[archive-heading-variants] H2, H3 and legacy H1 headings are recognized'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 4: fan-in (one task waits on several predecessors) --------
     $W = New-Work
     try {

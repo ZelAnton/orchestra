@@ -91,7 +91,7 @@ $script:ErrPrefix = 'SPVERR'  # coded-error tag decoded by the catch dispatcher
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...  (shape of queue-tx.ps1)
 # --------------------------------------------------------------------------
-$parsed = Parse-CliArgs $args -BoolFlags @('json', 'reset', 'no-checkpoint')
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'reset', 'no-checkpoint', 'process-diagnostics')
 $Command = $parsed.Command
 $opts = $parsed.Opts
 
@@ -154,13 +154,43 @@ function Parse-IntList {
 
 # --------------------------------------------------------------------------
 # Resolve the call target: --file <script.ps1> runs through this pwsh host; --exe
-# <path> is spawned directly. Arguments come as a JSON array (--args-json), so a value
-# with spaces/quotes/metacharacters is one argv element, never a shell fragment.
+# <path> is spawned directly; --shell-command <text> runs the explicitly trusted command
+# through bash -lc (the same shell family as Claude's Bash tool). Arguments come as a JSON
+# array (--args-json), so a value with spaces/quotes/metacharacters is one argv element,
+# never a shell fragment. --shell-command is intentionally separate: it exists for the
+# operator-owned SMOKE_CMD string and must not be used for untrusted external text.
 # --------------------------------------------------------------------------
+function Resolve-BashExecutable {
+    # Claude's Bash tool on Windows uses a native Bash environment; WindowsApps\bash.exe is
+    # WSL and would silently change filesystem/toolchain semantics. Prefer Git for Windows,
+    # which Orchestra already relies on for git projects, and only use PATH directly off
+    # Windows.
+    if (Test-OnWindows) {
+        $candidates = New-Object System.Collections.Generic.List[string]
+        if ($env:ProgramFiles) { [void]$candidates.Add((Join-Path $env:ProgramFiles 'Git\bin\bash.exe')) }
+        if (${env:ProgramFiles(x86)}) { [void]$candidates.Add((Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe')) }
+        try {
+            $git = @(Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+            if ($git -and $git.Source) {
+                $gitRoot = Split-Path -Parent (Split-Path -Parent ([string]$git.Source))
+                [void]$candidates.Add((Join-Path $gitRoot 'bin\bash.exe'))
+            }
+        } catch { }
+        foreach ($candidate in $candidates) {
+            if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+        }
+        Fail 2 '--shell-command requires Git for Windows bash.exe; use --exe/--args-json when it is unavailable'
+    }
+    $bash = @(Get-Command bash -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if (-not $bash) { Fail 2 '--shell-command requires bash; use --exe/--args-json when it is unavailable' }
+    return [string]$bash.Source
+}
 function Resolve-Target {
     $file = [string](Opt 'file' '')
     $exe = [string](Opt 'exe' '')
-    if ($file -and $exe) { Fail 2 "use either --file or --exe, not both" }
+    $shellCommand = [string](Opt 'shell-command' '')
+    $targetCount = @(@($file, $exe, $shellCommand) | Where-Object { -not [string]::IsNullOrEmpty([string]$_) }).Count
+    if ($targetCount -gt 1) { Fail 2 "use exactly one of --file, --exe, or --shell-command" }
     $extraArgs = @()
     $argsJson = [string](Opt 'args-json' '')
     if ($argsJson) {
@@ -172,19 +202,154 @@ function Resolve-Target {
     }
     if ($file) {
         $psHost = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
-        return [pscustomobject]@{ FilePath = $psHost; Args = (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $file) + $extraArgs) }
+        return [pscustomobject]@{ FilePath = $psHost; Args = (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $file) + $extraArgs); WorkingDirectory = [string](Opt 'working-directory' '') }
     }
-    if (-not $exe) { Fail 2 "need --file <script.ps1> or --exe <path>" }
-    return [pscustomobject]@{ FilePath = $exe; Args = @($extraArgs) }
+    if ($shellCommand) {
+        if ($argsJson) { Fail 2 "--args-json cannot be combined with --shell-command" }
+        return [pscustomobject]@{ FilePath = (Resolve-BashExecutable); Args = @('-lc', $shellCommand); WorkingDirectory = [string](Opt 'working-directory' '') }
+    }
+    if (-not $exe) { Fail 2 "need --file <script.ps1>, --exe <path>, or --shell-command <text>" }
+    return [pscustomobject]@{ FilePath = $exe; Args = @($extraArgs); WorkingDirectory = [string](Opt 'working-directory' '') }
 }
 
 # --------------------------------------------------------------------------
 # Terminate the whole child process TREE (so a call that itself spawned workers
-# leaves nothing behind on cancel/timeout). Single-sourced in tools/proc-tree.ps1
+# leaves nothing behind after any outcome). Single-sourced in tools/proc-tree.ps1
 # so this and tools/codex-runtime.ps1 share one hardened implementation rather than
 # a per-file copy that could drift (T-256).
 # --------------------------------------------------------------------------
 . (Join-Path $PSScriptRoot 'proc-tree.ps1')
+
+# --------------------------------------------------------------------------
+# Best-effort survivor diagnostics. The durable verdict keeps only scalar counts and a
+# local artifact path; the artifact deliberately avoids raw argv. It stores a SHA-256
+# fingerprint and a narrow, non-sensitive hint for known persistent build workers. This
+# is sufficient to identify `/nodemode:1 /nodeReuse:true` without copying secrets that a
+# command may have received on its command line.
+# --------------------------------------------------------------------------
+function Get-CommandHint {
+    param([string]$Name, [string]$CommandLine)
+    $parts = New-Object System.Collections.Generic.List[string]
+    if ($CommandLine -match '(?i)(/nodemode:\d+)') { [void]$parts.Add($Matches[1]) }
+    if ($CommandLine -match '(?i)(/nodeReuse:(?:true|false))') { [void]$parts.Add($Matches[1]) }
+    if ($CommandLine -match '(?i)(MSBuild\.dll)') { [void]$parts.Add($Matches[1]) }
+    if ($Name -match '(?i)^conhost(?:\.exe)?$') { [void]$parts.Add('console-host') }
+    return ($parts -join ' ')
+}
+function Get-AllProcessRows {
+    $rows = @()
+    try {
+        if (Test-OnWindows) {
+            $rows = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+                [pscustomobject]@{
+                    pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId
+                    name = [string]$_.Name; command_line = [string]$_.CommandLine
+                    started_at = if ($_.CreationDate) { ([datetime]$_.CreationDate).ToUniversalTime().ToString('o') } else { '' }
+                }
+            })
+        } else {
+            $rows = @(& ps -eo pid=,ppid=,comm=,args= 2>$null | ForEach-Object {
+                if ($_ -match '^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$') {
+                    [pscustomobject]@{ pid = [int]$Matches[1]; ppid = [int]$Matches[2]; name = [string]$Matches[3]; command_line = [string]$Matches[4]; started_at = '' }
+                }
+            })
+        }
+    } catch { return @() }
+    return @($rows)
+}
+function ConvertTo-SafeProcessRecord {
+    param($Row, [string]$Attribution = 'lineage')
+    $cmdBytes = $script:Utf8.GetBytes([string]$Row.command_line)
+    return [pscustomobject]@{
+        pid = $Row.pid; ppid = $Row.ppid; name = $Row.name
+        started_at = $Row.started_at
+        command_sha256 = (Sha256Hex $cmdBytes)
+        command_hint = (Get-CommandHint $Row.name $Row.command_line)
+        attribution = $Attribution
+    }
+}
+function Get-ProcessDescendants {
+    param([int]$RootPid, [object[]]$Rows = @())
+    if ($RootPid -le 0) { return @() }
+    if (@($Rows).Count -eq 0) { $Rows = @(Get-AllProcessRows) }
+
+    $children = @{}
+    foreach ($row in $Rows) {
+        $key = [int]$row.ppid
+        if (-not $children.ContainsKey($key)) { $children[$key] = New-Object System.Collections.Generic.List[object] }
+        [void]$children[$key].Add($row)
+    }
+    $queue = New-Object System.Collections.Generic.Queue[int]
+    $queue.Enqueue($RootPid)
+    $seen = @{}
+    $out = New-Object System.Collections.Generic.List[object]
+    while ($queue.Count -gt 0) {
+        $parent = $queue.Dequeue()
+        if (-not $children.ContainsKey($parent)) { continue }
+        foreach ($row in $children[$parent]) {
+            if ($seen.ContainsKey($row.pid)) { continue }
+            $seen[$row.pid] = $true
+            $queue.Enqueue([int]$row.pid)
+            [void]$out.Add((ConvertTo-SafeProcessRecord $row 'lineage'))
+        }
+    }
+    return @($out.ToArray())
+}
+function Get-NewProcessCandidates {
+    param([object[]]$Before, [object[]]$After)
+    $known = @{}
+    foreach ($row in @($Before)) {
+        if ($null -eq $row) { continue }
+        $known["$($row.pid)|$($row.started_at)"] = $true
+    }
+    return @($After | Where-Object { -not $known.ContainsKey("$($_.pid)|$($_.started_at)") } | ForEach-Object {
+        ConvertTo-SafeProcessRecord $_ 'temporal-candidate'
+    })
+}
+function Get-StillPresentCandidates {
+    param([object[]]$Candidates, [object[]]$Rows)
+    $present = @{}
+    foreach ($row in @($Rows)) {
+        if ($null -eq $row) { continue }
+        $present["$($row.pid)|$($row.started_at)"] = $true
+    }
+    if ($null -eq $Candidates) { return @() }
+    return @($Candidates | Where-Object { $present.ContainsKey("$($_.pid)|$($_.started_at)") })
+}
+function Test-ProcessDiagnosticsEnabled {
+    if ([bool](Opt 'process-diagnostics' $false)) { return $true }
+    return [bool]([string](Opt 'process-log-file' ''))
+}
+
+function Resolve-ProcessKitPython {
+    $configured = [string][Environment]::GetEnvironmentVariable('CC_PROCESSKIT_PYTHON')
+    if ([string]::IsNullOrWhiteSpace($configured)) { return '' }
+    $configured = $configured.Trim()
+    $cmd = @(Get-Command $configured -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+    if (-not $cmd -or -not $cmd.Source) {
+        Fail 2 "CC_PROCESSKIT_PYTHON executable not found: $configured"
+    }
+    # Launchers preflight the import once for the session. A direct supervisor call may not
+    # have passed through them, so keep the explicit backend fail-closed here too. Avoid a
+    # shell: the configured executable and fixed import probe are separate argv values.
+    $probePsi = New-Object System.Diagnostics.ProcessStartInfo
+    $probePsi.FileName = [string]$cmd.Source
+    $probePsi.UseShellExecute = $false
+    $probePsi.CreateNoWindow = $true
+    $probePsi.RedirectStandardOutput = $true
+    $probePsi.RedirectStandardError = $true
+    if ($probePsi | Get-Member -Name 'ArgumentList' -MemberType Property -ErrorAction SilentlyContinue) {
+        $probePsi.ArgumentList.Add('-c'); $probePsi.ArgumentList.Add('import processkit')
+    } else { $probePsi.Arguments = '-c "import processkit"' }
+    $probe = $null
+    try {
+        $probe = [System.Diagnostics.Process]::Start($probePsi)
+        $probe.WaitForExit()
+        if ($probe.ExitCode -ne 0) { Fail 2 "CC_PROCESSKIT_PYTHON cannot import processkit: $($cmd.Source)" }
+    } catch { Fail 2 "CC_PROCESSKIT_PYTHON preflight failed: $($_.Exception.Message)" }
+    finally { if ($probe) { try { $probe.Dispose() } catch { } } }
+    return [string]$cmd.Source
+}
 
 # --------------------------------------------------------------------------
 # Cap a captured stream to $MaxBytes (0 = unlimited) on a UTF-8 byte budget, reporting
@@ -209,13 +374,30 @@ function Get-CappedText {
 function Invoke-SupervisedCall {
     param(
         [string]$FilePath, [string[]]$CallArgs, [string]$StdinText,
+        [string]$WorkingDirectory,
         [int]$DeadlineSec, [string]$CancelFile, [int]$OutputMaxBytes,
         [int[]]$CrashExitCodes, [int[]]$ErrorExitCodes
     )
+    $processkitPython = Resolve-ProcessKitPython
+    $setsidLauncher = if ($processkitPython) { $null } else { Resolve-SetsidLauncher }
+    $launchFile = $FilePath
+    $launchArgs = @($CallArgs)
+    if ($processkitPython) {
+        # ProcessKit owns a race-free kernel container for this individual call
+        # (CREATE_SUSPENDED -> Job Object assign -> resume on Windows). This reaches
+        # persistent grandchildren even after every intermediate parent has exited, which
+        # a retrospective PPID tree walk cannot reconstruct.
+        $launchFile = $processkitPython
+        $launchArgs = @('-m', 'processkit', 'run', '--', $FilePath) + @($CallArgs)
+    } elseif ($setsidLauncher) {
+        $launchFile = $setsidLauncher
+        $launchArgs = @($FilePath) + @($CallArgs)
+    }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $FilePath
+    $psi.FileName = $launchFile
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
     $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
@@ -223,9 +405,20 @@ function Invoke-SupervisedCall {
         if ($psi | Get-Member -Name $prop -MemberType Property -ErrorAction SilentlyContinue) { try { $psi.$prop = $script:Utf8 } catch { } }
     }
     $hasArgList = [bool]($psi | Get-Member -Name 'ArgumentList' -MemberType Property -ErrorAction SilentlyContinue)
-    if ($hasArgList) { foreach ($a in $CallArgs) { $psi.ArgumentList.Add($a) } }
-    else { $psi.Arguments = ConvertTo-Win32CommandLine $CallArgs }
+    if ($hasArgList) { foreach ($a in $launchArgs) { $psi.ArgumentList.Add($a) } }
+    else { $psi.Arguments = ConvertTo-Win32CommandLine $launchArgs }
+    # Build daemons are counterproductive in an isolated agent run and are the most common
+    # source of observed dotnet/MSBuild survivors. These values affect only this child tree.
+    if ($psi | Get-Member -Name 'Environment' -MemberType Property -ErrorAction SilentlyContinue) {
+        $psi.Environment['MSBUILDDISABLENODEREUSE'] = '1'
+        $psi.Environment['DOTNET_CLI_USE_MSBUILD_SERVER'] = '0'
+    } else {
+        $psi.EnvironmentVariables['MSBUILDDISABLENODEREUSE'] = '1'
+        $psi.EnvironmentVariables['DOTNET_CLI_USE_MSBUILD_SERVER'] = '0'
+    }
 
+    $diagEnabled = Test-ProcessDiagnosticsEnabled
+    $globalBefore = if ($diagEnabled) { @(Get-AllProcessRows) } else { @() }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -238,8 +431,10 @@ function Invoke-SupervisedCall {
             duration_ms = [int]$sw.Elapsed.TotalMilliseconds; output_bytes = 0; output_truncated = $false
             output_sha256 = (Sha256Hex ([byte[]]@())); stdout = ''; stderr = ''
             outcome_reason = "spawn failed: $($_.Exception.Message)"; pid = $null
+            containment = if ($processkitPython) { 'processkit' } elseif ($setsidLauncher) { 'process-group' } else { 'pid-tree' }
         }
     }
+    $posixPgid = if ($setsidLauncher) { [int]$proc.Id } else { 0 }
 
     # Async .NET reads (Task<string>, no PowerShell scriptblock on a raw thread) so a large
     # stdout/stderr cannot deadlock against the stdin write; the byte cap is applied after.
@@ -257,8 +452,37 @@ function Invoke-SupervisedCall {
         if ($deadlineMs -gt 0 -and $sw.Elapsed.TotalMilliseconds -ge $deadlineMs) { $timedOut = $true; break }
         if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) { $cancelled = $true; break }
     }
-    if ($timedOut -or $cancelled) { Stop-ProcessTree $proc }
-    else { try { $proc.WaitForExit() } catch { } }
+    if (-not ($timedOut -or $cancelled)) { try { $proc.WaitForExit() } catch { } }
+    $procId = $null
+    try { $procId = $proc.Id } catch { $procId = $null }
+    [object[]]$globalAtExit = @()
+    [object[]]$descendantsBefore = @()
+    if ($diagEnabled) { $globalAtExit = [object[]]@(Get-AllProcessRows) }
+    if ($diagEnabled -and $null -ne $procId) {
+        $descendantsBefore = [object[]]@(Get-ProcessDescendants -RootPid $procId -Rows $globalAtExit)
+    }
+    # A Windows worker can retain the PPID of an intermediate process that has already
+    # disappeared, severing the live lineage back to our root. The global before/after diff
+    # records such processes as temporal candidates. Under concurrency this is evidence, not
+    # proof of ownership, so the attribution field is deliberately explicit.
+    [object[]]$temporalCandidates = @()
+    if ($diagEnabled) {
+        $temporalCandidates = [object[]]@(Get-NewProcessCandidates -Before $globalBefore -After $globalAtExit)
+    }
+    # Cleanup is an invariant of the call, not an exceptional timeout path. A successful
+    # build may deliberately leave reusable workers behind; they still belong to this
+    # isolated invocation and must not survive it.
+    Stop-ProcessTree $proc -PosixProcessGroupId $posixPgid
+    [object[]]$globalAfterCleanup = @()
+    [object[]]$descendantsAfter = @()
+    [object[]]$temporalAfter = @()
+    if ($diagEnabled) { $globalAfterCleanup = [object[]]@(Get-AllProcessRows) }
+    if ($diagEnabled -and $null -ne $procId) {
+        $descendantsAfter = [object[]]@(Get-ProcessDescendants -RootPid $procId -Rows $globalAfterCleanup)
+    }
+    if ($diagEnabled) {
+        $temporalAfter = [object[]]@(Get-StillPresentCandidates -Candidates $temporalCandidates -Rows $globalAfterCleanup)
+    }
     $sw.Stop()
 
     $stdoutFull = ''; $stderrFull = ''
@@ -276,8 +500,6 @@ function Invoke-SupervisedCall {
 
     $rc = $null
     try { $rc = $proc.ExitCode } catch { $rc = $null }
-    $procId = $null
-    try { $procId = $proc.Id } catch { $procId = $null }
     try { $proc.Dispose() } catch { }
 
     # Classify the four stop reasons.
@@ -305,7 +527,10 @@ function Invoke-SupervisedCall {
         reason = $reason; exit_code = $rc; timed_out = $timedOut; cancelled = $cancelled
         duration_ms = [int]$sw.Elapsed.TotalMilliseconds; output_bytes = $totalBytes
         output_truncated = $truncated; output_sha256 = $sha; stdout = $stdout; stderr = $stderr
-        outcome_reason = $outcomeReason; pid = $procId
+        outcome_reason = $outcomeReason; pid = $procId; cleanup_attempted = $true
+        containment = if ($processkitPython) { 'processkit' } elseif ($setsidLauncher) { 'process-group' } else { 'pid-tree' }
+        descendants_before_cleanup = $descendantsBefore; survivors_after_cleanup = $descendantsAfter
+        temporal_candidates = $temporalCandidates; temporal_candidates_after_cleanup = $temporalAfter
     }
 }
 
@@ -324,12 +549,49 @@ function Save-CallArtifacts {
     $stderrFile = [string](Opt 'stderr-file' '')
     if ($stdoutFile) { Write-TextNoBom $stdoutFile $Res.stdout }
     if ($stderrFile) { Write-TextNoBom $stderrFile $Res.stderr }
+    $diagnosticsFile = Save-ProcessDiagnostics $Res $Attempt
     $verdict = New-Verdict $Res $Attempt $BudgetRemainingMs
+    if ($diagnosticsFile) { $verdict['process_diagnostics_file'] = $diagnosticsFile }
     if ($TotalDurationMs -ge 0) { $verdict['total_duration_ms'] = $TotalDurationMs }
     if ($Checkpoint) { $verdict['checkpoint'] = $Checkpoint }
     $resultFile = [string](Opt 'result-file' '')
     if ($resultFile) { Write-JsonAtomic $resultFile $verdict }
     return $verdict
+}
+function Save-ProcessDiagnostics {
+    param($Res, [int]$Attempt)
+    if (-not (Test-ProcessDiagnosticsEnabled)) { return '' }
+    if (-not (Has-Prop $Res 'descendants_before_cleanup')) { return '' }
+    $path = [string](Opt 'process-log-file' '')
+    if (-not $path) {
+        $work = [string](Opt 'work' '')
+        $task = [string](Opt 'task-id' '')
+        if (-not ($work -and $task)) { return '' }
+        $role = ([string](Opt 'role' 'executor')) -replace '[^A-Za-z0-9_.-]', '_'
+        $label = ([string](Opt 'label' 'call')) -replace '[^A-Za-z0-9_.-]', '_'
+        $pidPart = if ($null -ne $Res.pid) { [string]$Res.pid } else { 'spawn-failed' }
+        # Keep diagnostics outside tasks/<T-ID>: Phase 6 deliberately deletes terminal
+        # task descriptors, while process evidence must survive for post-run diagnosis.
+        $path = Join-Path $work "processes/$task/$role-$label-a$Attempt-p$pidPart.json"
+    }
+    $record = [ordered]@{
+        schema = 'orchestra/process-diagnostics@1'
+        task_id = [string](Opt 'task-id' '')
+        role = [string](Opt 'role' '')
+        label = [string](Opt 'label' '')
+        attempt = $Attempt
+        root_pid = $Res.pid
+        outcome = $Res.reason
+        cleanup_attempted = [bool](Get-Prop $Res 'cleanup_attempted')
+        containment      = [string](Get-Prop $Res 'containment')
+        descendants_before_cleanup = @($Res.descendants_before_cleanup)
+        survivors_after_cleanup = @($Res.survivors_after_cleanup)
+        temporal_candidates = @((Get-Prop $Res 'temporal_candidates'))
+        temporal_candidates_after_cleanup = @((Get-Prop $Res 'temporal_candidates_after_cleanup'))
+        occurred_at = (Format-UtcNow)
+    }
+    Write-JsonAtomic $path $record
+    return $path
 }
 # The DURABLE verdict: scalars only, NO raw stdout/stderr (privacy).
 function New-Verdict {
@@ -345,6 +607,13 @@ function New-Verdict {
         output_truncated = $Res.output_truncated
         output_sha256    = $Res.output_sha256
         outcome_reason   = $Res.outcome_reason
+        root_pid         = $Res.pid
+        cleanup_attempted = [bool](Get-Prop $Res 'cleanup_attempted')
+        containment      = [string](Get-Prop $Res 'containment')
+        descendant_count_before_cleanup = @((Get-Prop $Res 'descendants_before_cleanup')).Count
+        survivor_count_after_cleanup = @((Get-Prop $Res 'survivors_after_cleanup')).Count
+        temporal_candidate_count = @((Get-Prop $Res 'temporal_candidates')).Count
+        temporal_candidate_count_after_cleanup = @((Get-Prop $Res 'temporal_candidates_after_cleanup')).Count
         occurred_at      = (Format-UtcNow)
     }
     if ($BudgetRemainingMs -ge 0) { $v['budget_remaining_ms'] = $BudgetRemainingMs }
@@ -461,6 +730,7 @@ function Cmd-Run {
     $target = Resolve-Target
     $co = Resolve-CallOptions
     $res = Invoke-SupervisedCall -FilePath $target.FilePath -CallArgs $target.Args -StdinText $co.Stdin `
+        -WorkingDirectory $target.WorkingDirectory `
         -DeadlineSec $co.Deadline -CancelFile $co.CancelFile -OutputMaxBytes $co.OutputMax `
         -CrashExitCodes $co.Crash -ErrorExitCodes $co.ErrorCodes
     $verdict = Save-CallArtifacts $res 1 -1
@@ -505,6 +775,7 @@ function Cmd-Supervise {
             if ($callDeadline -le 0 -or $remainingSec -lt $callDeadline) { $callDeadline = $remainingSec }
         }
         $res = Invoke-SupervisedCall -FilePath $target.FilePath -CallArgs $target.Args -StdinText $co.Stdin `
+            -WorkingDirectory $target.WorkingDirectory `
             -DeadlineSec $callDeadline -CancelFile $co.CancelFile -OutputMaxBytes $co.OutputMax `
             -CrashExitCodes $co.Crash -ErrorExitCodes $co.ErrorCodes
         $totalMs += $res.duration_ms

@@ -81,7 +81,7 @@ function Invoke-Doctor {
     # CODEX_REVIEWER env fallback, CC_CODEX_EXEC_GRANT session grant). Set them on the
     # parent so the spawned child inherits them, then restore. Unset ambient routing by
     # default so a machine with real CODEX_* set cannot make these scenarios flaky.
-    $defaults = @{ CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = '' }
+    $defaults = @{ CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = ''; ORCHESTRA_AUTO_APPROVE = '' }
     foreach ($k in $Env.Keys) { $defaults[$k] = $Env[$k] }
 
     $saved = @{}
@@ -129,6 +129,16 @@ $r = Invoke-Doctor -Case $c
 Assert-True ($r.ExitCode -eq 0) "routing-off exits 0 (got $($r.ExitCode); err=$($r.Err))"
 Assert-Contains $r.Out 'OK   exec permission: not found, but not required' 'routing-off: OK not WARN'
 Assert-NotContains $r.Out 'WARN exec permission' 'routing-off: must not WARN'
+Remove-Case $c
+
+# =============================================================================
+# 1a) system autonomy: explicit pre-consent and invalid values are visible
+# =============================================================================
+$c = New-Case
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'on' }
+Assert-Contains $r.Out 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment)' 'auto-approve on: doctor reports effective machine-wide pre-consent'
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'maybe' }
+Assert-Contains $r.Out "FAIL ORCHESTRA_AUTO_APPROVE: invalid value 'maybe'" 'auto-approve invalid: doctor reports fail-closed value'
 Remove-Case $c
 
 # =============================================================================

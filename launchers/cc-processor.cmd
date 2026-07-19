@@ -25,6 +25,17 @@ rem боремся: не передавайте в EXTRA_ARGS произволь
 setlocal
 set MODEL_ARG=
 set EXTRA_ARGS=
+rem An agent run is an isolated build environment: persistent MSBuild nodes/servers only
+rem leak resources into later tasks. Force the child session (and every subagent/tool it
+rem spawns) to use short-lived build workers. These values stay inside setlocal.
+set "MSBUILDDISABLENODEREUSE=1"
+set "DOTNET_CLI_USE_MSBUILD_SERVER=0"
+rem Codex xhigh reviews routinely outlive Claude Code's short Bash default. If Claude
+rem auto-backgrounds the runtime command it appends `&`, which intentionally bypasses the
+rem pre-granted foreground allow-rule and causes an approval prompt. Keep the wrapper in
+rem foreground; explicit user/system values win over these session-scoped defaults.
+if not defined BASH_DEFAULT_TIMEOUT_MS set "BASH_DEFAULT_TIMEOUT_MS=1900000"
+if not defined BASH_MAX_TIMEOUT_MS set "BASH_MAX_TIMEOUT_MS=1900000"
 
 :parse
 if "%~1"=="" goto :run
@@ -84,4 +95,17 @@ rem дублирующего постоянного allow-правила в sett
 rem поиск заново. Внутри setlocal — переменная видна дочернему процессу claude и не утекает
 rem в окружение вызывающей оболочки.
 set "CC_CODEX_EXEC_GRANT=codex exec"
+rem Optional kernel-backed containment for the WHOLE Claude session. Set the user/system
+rem variable CC_PROCESSKIT_PYTHON to a Python executable where `import processkit` works.
+rem An explicitly configured but broken backend is fail-closed: silently running without
+rem containment would defeat the operator's expectation.
+if not defined CC_PROCESSKIT_PYTHON goto :run_uncontained
+"%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
+if errorlevel 1 goto :containment_error
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+exit /b
+:containment_error
+echo CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: "%CC_PROCESSKIT_PYTHON%"
+exit /b 10
+:run_uncontained
 claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."

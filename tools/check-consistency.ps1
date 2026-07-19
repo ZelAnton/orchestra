@@ -6,7 +6,7 @@
     Agent role files reference each other only through plain text: config keys,
     processor phase numbers, and runtime-artifact filenames. Nothing enforces that
     these references stay in sync with their sources of truth, so drift is currently
-    only caught by manual review. This script machine-checks three classes of such
+    only caught by manual review. This script machine-checks these classes of
     cross-file contracts:
 
       1. Config keys      — every UPPER_SNAKE_CASE config key referenced in an agent
@@ -17,9 +17,11 @@
                              file (other than as that file's own section heading)
                              actually appears somewhere in processor.md.
       3. Runtime artifacts — every `.work/`-style runtime-artifact filename (e.g.
-                             review_integration.md, merge_report.md, cohort_state.md)
-                             referenced in an agent file appears in the runtime-artifact
-                             table of knowledge.md.
+                              review_integration.md, merge_report.md, cohort_state.md)
+                              referenced in an agent file appears in the runtime-artifact
+                              table of knowledge.md.
+      6. Worktree/build      — worktree roles retain the explicit VCS handoff, and
+                              merger/processor retain final build-evidence markers.
 
     "Agent files" = the *.md files under the agents/ directory that start with a YAML
     frontmatter block (`---` as the very first line) — i.e. the actual role definitions
@@ -139,6 +141,7 @@ $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CC_CODEX_EXEC_GRANT', 'CODEX_FAILED', 'CODEX_RT', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
         'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NEED_IMAGE_VIEW', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
+        'ORCHESTRA_AUTO_APPROVE',
         'OTHER_FAILURE', 'PROMPT_RESUME', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
         'THREAD_ID', 'UPPER_SNAKE_CASE'
     ), [StringComparer]::Ordinal)
@@ -444,11 +447,58 @@ foreach ($ck in $valEnum.Keys) {
 }
 
 # =============================================================================
+# Class 6 — worktree VCS handoff + merger verification evidence
+# =============================================================================
+
+$vcsContractFiles = @(
+    'processor.md', 'coder.template.md', 'reviewer.template.md', 'coder_codex.md',
+    'reviewer_codex.md', 'merger.md', 'full_reviewer.md'
+)
+foreach ($name in $vcsContractFiles) {
+    $path = Join-Path $AgentsDir $name
+    $text = Get-Content -LiteralPath $path -Raw -Encoding utf8
+    if ($text -notmatch 'VCS=jj\|git') {
+        Add-Finding -FileRef "agents/$name" -Check 'worktree-vcs-handoff' `
+            -Detail 'missing the explicit VCS=jj|git handoff; pure-jj workspaces may be captured by an ancestor .git'
+    }
+}
+
+$mergerText = Get-Content -LiteralPath (Join-Path $AgentsDir 'merger.md') -Raw -Encoding utf8
+$processorText = Get-Content -LiteralPath $ProcessorFile -Raw -Encoding utf8
+foreach ($marker in @('Проверка сборки: SMOKE_CMD', 'Проверенная вершина:')) {
+    if ($mergerText.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
+        Add-Finding -FileRef 'agents/merger.md' -Check 'merger-build-evidence' -Detail "missing report marker '$marker'"
+    }
+    if ($processorText.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
+        Add-Finding -FileRef 'agents/processor.md' -Check 'merger-build-evidence' -Detail "does not validate report marker '$marker'"
+    }
+}
+
+foreach ($name in @('coder_codex.md', 'reviewer_codex.md')) {
+    $text = Get-Content -LiteralPath (Join-Path $AgentsDir $name) -Raw -Encoding utf8
+    if ($text.IndexOf('Foreground-инвариант', [System.StringComparison]::Ordinal) -lt 0 -or
+        $text.IndexOf('--timeout-sec 1800', [System.StringComparison]::Ordinal) -lt 0) {
+        Add-Finding -FileRef "agents/$name" -Check 'codex-foreground' `
+            -Detail 'missing the foreground-only runtime contract or its bounded 1800s timeout'
+    }
+}
+
+foreach ($name in @('cc-processor.cmd', 'cc-resume.cmd', 'cc-processor.sh', 'cc-resume.sh')) {
+    $text = Get-Content -LiteralPath (Join-Path $RepoRoot "launchers/$name") -Raw -Encoding utf8
+    foreach ($key in @('BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS')) {
+        if ($text.IndexOf($key, [System.StringComparison]::Ordinal) -lt 0) {
+            Add-Finding -FileRef "launchers/$name" -Check 'codex-foreground' `
+                -Detail "missing $key; Claude may auto-background a long runtime call and re-prompt"
+        }
+    }
+}
+
+# =============================================================================
 # Report
 # =============================================================================
 
 if ($findings.Count -eq 0) {
-    Write-Host "OK - no cross-agent contract inconsistencies found (config keys, processor phases, runtime artifacts, policy schema)."
+    Write-Host "OK - no cross-agent contract inconsistencies found (config keys, processor phases, runtime artifacts, policy schema, VCS/build evidence)."
     exit 0
 }
 

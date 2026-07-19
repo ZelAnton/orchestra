@@ -23,10 +23,13 @@ fast-path одного прогона (~100 изменённых строк пр
 
 # Адресация координационных файлов
 
-processor передаёт абсолютный `WORK` (и `T-ID`, ветку `task/<T-ID>`, базу `<BASE>`,
+processor передаёт абсолютный `WORK`, явный `VCS=jj|git`, абсолютный worktree (и `T-ID`, ветку `task/<T-ID>`, базу `<BASE>`,
 на повторных циклах — `Previous review SHA`) — используй переданное значение. **Если
-`WORK` не передан — не вычисляй его сам: останови работу и верни ошибку** «WORK не
-передан processor».
+`WORK` или `VCS` не передан — не вычисляй его сам: останови работу и верни ошибку**
+«WORK/VCS не передан processor». При `VCS=jj` не выполняй git-команд в worktree: Git
+в pure-jj workspace молча захватывает `.git` основного дерева. При `VCS=git`
+`git -C <worktree> rev-parse --show-toplevel` обязан канонически совпасть с переданным
+worktree; иначе остановись как при ошибке адресации.
 
 Твои файлы: `$WORK/tasks/<T-ID>/task.md` (читаешь), `$WORK/tasks/<T-ID>/review.md`
 (ведёшь), `$WORK/tasks/<T-ID>/status.md` (пишешь свой статус).

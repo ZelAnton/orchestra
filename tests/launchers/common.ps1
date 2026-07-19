@@ -171,7 +171,13 @@ if ($dest) {
 }
 $envDest = $env:FAKE_ENV_FILE
 if ($envDest) {
-    Set-Content -LiteralPath $envDest -Value ("CC_CODEX_EXEC_GRANT=" + $env:CC_CODEX_EXEC_GRANT) -Encoding utf8
+    Set-Content -LiteralPath $envDest -Value @(
+        ("CC_CODEX_EXEC_GRANT=" + $env:CC_CODEX_EXEC_GRANT),
+        ("MSBUILDDISABLENODEREUSE=" + $env:MSBUILDDISABLENODEREUSE),
+        ("DOTNET_CLI_USE_MSBUILD_SERVER=" + $env:DOTNET_CLI_USE_MSBUILD_SERVER),
+        ("BASH_DEFAULT_TIMEOUT_MS=" + $env:BASH_DEFAULT_TIMEOUT_MS),
+        ("BASH_MAX_TIMEOUT_MS=" + $env:BASH_MAX_TIMEOUT_MS)
+    ) -Encoding utf8
 }
 $code = 0
 if ($env:FAKE_EXIT_CODE) { $code = [int]$env:FAKE_EXIT_CODE }
@@ -357,6 +363,15 @@ function Get-CapturedGrant {
     $line = (Get-Content -LiteralPath $EnvFile -Encoding utf8 | Select-Object -First 1)
     if ($null -eq $line) { return '' }
     return ($line -replace '^CC_CODEX_EXEC_GRANT=', '')
+}
+
+function Get-CapturedEnvValue {
+    param([Parameter(Mandatory)] [string] $EnvFile, [Parameter(Mandatory)] [string] $Name)
+    if (-not (Test-Path -LiteralPath $EnvFile)) { return $null }
+    $prefix = $Name + '='
+    $line = Get-Content -LiteralPath $EnvFile -Encoding utf8 | Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) } | Select-Object -First 1
+    if ($null -eq $line) { return $null }
+    return $line.Substring($prefix.Length)
 }
 
 function Assert-True {

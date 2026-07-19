@@ -70,7 +70,10 @@
                          decision goes stale (exit 11) once the affected code or
                          constraints.md/policy-schema changes, and no answer by the deadline is
                          a fail-closed rejection (exit 11), never a default approval. Exit 12 =
-                         pending (awaiting the operator).
+                         pending (awaiting the operator). With operator-owned OS environment
+                         `ORCHESTRA_AUTO_APPROVE=on`, a fresh request is audit-recorded and
+                         consumed immediately; unset/`off` keeps manual approval and any other
+                         value fails closed.
 
     Degradation without errors: a missing .work/constraints.md, or an empty section, means
     "no constraint" - the corresponding check returns OK, exactly as the roles behaved before
@@ -388,23 +391,48 @@ function Assert-LeafAndContainment {
     }
 }
 
-# Optional VCS-relationship check: when git is available and the worktree already exists,
-# confirm the target is a registered worktree of THIS repo (not an arbitrary directory
-# masquerading as one). A not-yet-created worktree, or no git, degrades to a pass (there is
-# nothing to substitute yet) - the path containment above is the primary guard.
+# Optional VCS-relationship check. Once the target exists, the selected VCS must resolve
+# that exact directory as its workspace/worktree root. This deliberately rejects a raw
+# `git -C <pure-jj-workspace> ...`: Git otherwise walks upward and silently operates on the
+# main checkout's .git. A not-yet-created target still degrades to a pass so the same guard
+# can be used immediately before creation and repeated immediately after it.
 function Assert-VcsWorktree {
     param([string]$Root, [string]$Target)
     $expect = [string](Opt 'expect-vcs' '')
     if ($expect -eq '' -or $expect -eq 'none') { return }
-    if ($expect -ne 'git') { return }
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return }
     $real = Get-RealFsPath $Target
     if (-not (Test-Path -LiteralPath $real)) { return }   # not created yet - nothing registered to verify
+    $cmp = Get-PathComparer
+
+    if ($expect -eq 'jj') {
+        if (-not (Get-Command jj -ErrorAction SilentlyContinue)) {
+            Fail 6 "expected a jj workspace at '$Target', but jj is not available"
+        }
+        $resolved = $null
+        try { $resolved = @(& jj -R $Target root 2>$null)[0] } catch { $resolved = $null }
+        if (-not $resolved) { Fail 6 "path '$Target' is not a jj workspace root" }
+        $resolvedReal = Get-RealFsPath ([string]$resolved).Trim()
+        if (-not [string]::Equals($resolvedReal, $real, $cmp)) {
+            Fail 6 "jj from '$Target' resolved workspace root '$resolvedReal', not the addressed path '$real'"
+        }
+        return
+    }
+
+    if ($expect -ne 'git') { Fail 2 "invalid --expect-vcs '$expect' (valid: git, jj, none)" }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Fail 6 "expected a git worktree at '$Target', but git is not available"
+    }
+    $resolved = $null
+    try { $resolved = @(& git -C $Target rev-parse --show-toplevel 2>$null)[0] } catch { $resolved = $null }
+    if (-not $resolved) { Fail 6 "path '$Target' is not a git worktree root" }
+    $resolvedReal = Get-RealFsPath ([string]$resolved).Trim()
+    if (-not [string]::Equals($resolvedReal, $real, $cmp)) {
+        Fail 6 "git from '$Target' resolved top-level '$resolvedReal', not the addressed worktree '$real' (possible ancestor .git capture)"
+    }
     $listed = $null
     try { $listed = & git -C $Root worktree list --porcelain 2>$null } catch { return }
     if (-not $listed) { return }
     $paths = @($listed | Where-Object { $_ -like 'worktree *' } | ForEach-Object { Get-RealFsPath ($_ -replace '^worktree ', '') })
-    $cmp = Get-PathComparer
     $ok = $false
     foreach ($p in $paths) { if ([string]::Equals($p, $real, $cmp)) { $ok = $true; break } }
     if (-not $ok) {
@@ -777,7 +805,28 @@ function Get-ApprovalNow {
 # tools/common.ps1's millisecond Format-Utc. Defined after the common dot-source so this wins.
 function Format-Utc { param([datetime]$T) return $T.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
 
+# Machine-wide, operator-owned pre-consent for unattended Orchestra installations.
+# This is deliberately an OS environment variable rather than a project config key: an
+# agent cannot create it for itself, while one operator setting applies consistently to
+# every checkout processed on the machine. We still persist and consume the ordinary
+# one-time approval record so the audit trail and freshness checks are not bypassed.
+function Get-SystemAutoApprove {
+    $raw = [Environment]::GetEnvironmentVariable('ORCHESTRA_AUTO_APPROVE')
+    if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Trim().ToLowerInvariant() -eq 'off') { return $false }
+    if ($raw.Trim().ToLowerInvariant() -eq 'on') { return $true }
+    Fail 2 "ORCHESTRA_AUTO_APPROVE must be 'on' or 'off' (got '$raw'); refusing an ambiguous approval policy"
+}
+
+function Set-SystemAutoApproval {
+    param($Record, [datetime]$Now)
+    $Record.decision = 'approve'
+    $Record.decided_by = 'system-env:ORCHESTRA_AUTO_APPROVE'
+    $Record.decided_at = (Format-Utc $Now)
+    $Record.note = 'pre-granted by operator through the machine/user environment'
+}
+
 function Cmd-ApprovalRequest {
+    $autoApprove = Get-SystemAutoApprove
     $subject = Get-ApprovalSubject
     $reason = [string](Opt 'reason' '')
     if ($reason -eq '') { Fail 2 "approval-request needs --reason <category> (e.g. human-review, force-lock, policy-bypass)" }
@@ -789,7 +838,21 @@ function Cmd-ApprovalRequest {
     if ($null -ne $existing) {
         # Idempotent: the SAME request already exists (open OR decided). Never recreate it -
         # a resume of the same gate reuses the same one-time id and its decision, if any.
-        Emit-Approval $existing 'existing'
+        $state = 'existing'
+        if ($autoApprove -and (JProp $existing 'decision') -eq '') {
+            $now = Get-ApprovalNow
+            $deadline = JProp $existing 'deadline'
+            $pastDeadline = $false
+            if ($deadline -ne '') {
+                try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { $pastDeadline = $true }
+            }
+            if (-not $pastDeadline) {
+                Set-SystemAutoApproval $existing $now
+                Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $existing
+                $state = 'existing-auto-approved'
+            }
+        }
+        Emit-Approval $existing $state
         return
     }
     $now = Get-ApprovalNow
@@ -810,8 +873,13 @@ function Cmd-ApprovalRequest {
         decided_at  = ''
         note        = ''
     }
+    $state = 'created'
+    if ($autoApprove) {
+        Set-SystemAutoApproval $rec $now
+        $state = 'created-auto-approved'
+    }
     Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
-    Emit-Approval ([pscustomobject]$rec) 'created'
+    Emit-Approval ([pscustomobject]$rec) $state
 }
 
 function Cmd-ApprovalDecide {
@@ -840,6 +908,7 @@ function Cmd-ApprovalDecide {
 }
 
 function Cmd-ApprovalStatus {
+    $autoApprove = Get-SystemAutoApprove
     # Locate the request: by --id, or re-derive the deterministic id from the CURRENT
     # subject/reason/fingerprint/policy (the natural resume path - the same inputs rebuild the
     # same id). Then judge freshness against the CURRENT fingerprint/policy and the clock.
@@ -880,6 +949,15 @@ function Cmd-ApprovalStatus {
     $deadline = JProp $rec 'deadline'
     $pastDeadline = $false
     if ($deadline -ne '') { try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { } }
+
+    # A status-only crash recovery may not repeat approval-request first. Consume a still-live
+    # pending request here too, but only after the caller supplied BOTH freshness inputs and
+    # they matched. Rejected, expired, stale and already-consumed records remain terminal.
+    if ($autoApprove -and $decision -eq '' -and $curFp -ne '' -and $curPh -ne '' -and $fresh -and -not $pastDeadline) {
+        Set-SystemAutoApproval $rec $now
+        Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
+        $decision = 'approve'
+    }
 
     if ($decision -eq 'approve') {
         # Fail-closed freshness guard (the regression this closes): an approved decision may be

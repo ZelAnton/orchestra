@@ -19,6 +19,16 @@
 MODEL_ARG=()
 EXTRA_ARGS=()
 
+# Agent builds are isolated runs: do not leave reusable .NET build workers behind.
+export MSBUILDDISABLENODEREUSE=1
+export DOTNET_CLI_USE_MSBUILD_SERVER=0
+# Codex xhigh reviews can exceed Claude Code's short Bash default. Auto-backgrounding
+# appends `&`, which no longer matches the pre-granted foreground runtime call. Preserve
+# explicit user/system overrides; otherwise allow the bounded 30-minute runtime call plus
+# shutdown overhead to finish in the foreground.
+export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
+export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force-lock)
@@ -77,4 +87,11 @@ done
 # no duplicate persistent allow-rule in the settings files and does not re-run the static
 # search.
 export CC_CODEX_EXEC_GRANT="codex exec"
+if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+  if ! "$CC_PROCESSKIT_PYTHON" -c 'import processkit' >/dev/null 2>&1; then
+    echo "CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: $CC_PROCESSKIT_PYTHON" >&2
+    exit 10
+  fi
+  exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+fi
 exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
