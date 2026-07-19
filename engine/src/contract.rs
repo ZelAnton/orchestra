@@ -527,7 +527,10 @@ mod tests {
         ] {
             let text = format!("### [{id}] not a marker — статус: новая\n");
             let p = parse_review(&text);
-            assert!(p.findings.is_empty(), "{id} must be rejected as a marker id");
+            assert!(
+                p.findings.is_empty(),
+                "{id} must be rejected as a marker id"
+            );
         }
     }
 
