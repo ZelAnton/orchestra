@@ -14,22 +14,10 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'METRICSERR'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
-$Command = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
-$opts = @{}
-for ($i = 1; $i -lt $args.Count; $i++) {
-    $arg = [string]$args[$i]
-    if ($arg -notlike '--*') { throw "METRICSERR|2|unexpected argument '$arg'" }
-    $key = $arg.Substring(2)
-    if ($key -eq 'json') { $opts[$key] = $true; continue }
-    $i++
-    if ($i -ge $args.Count) { throw "METRICSERR|2|missing value for --$key" }
-    $opts[$key] = [string]$args[$i]
-}
-
-function Fail { param([int]$Code, [string]$Message) throw ('METRICSERR|' + $Code + '|' + $Message) }
-function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] }; return $Default }
 function Has-Prop {
     param($Object, [string]$Name)
     if ($null -eq $Object) { return $false }
@@ -300,8 +288,7 @@ function Format-Duration {
 function Format-Percent { param($Numerator, $Denominator) if ($Denominator -le 0) { return 'недоступно' }; return ([Math]::Round(100.0 * $Numerator / $Denominator, 2)).ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + '%' }
 
 function Cmd-Aggregate {
-    $work = [string](Opt 'work' '')
-    if ([string]::IsNullOrWhiteSpace($work)) { Fail 2 'missing required option --work' }
+    $work = Require-Opt 'work'
     if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
     foreach ($key in $opts.Keys) { if (@('work','last','since','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
     if ($opts.ContainsKey('last') -and $opts.ContainsKey('since')) { Fail 2 'use either --last or --since, not both' }
@@ -395,9 +382,18 @@ function Cmd-Aggregate {
 }
 
 try {
+    $parsed = Parse-CliArgs -Argv $args -BoolFlags @('json')
+    for ($i = 1; $i -lt $args.Count; $i++) {
+        $arg = [string]$args[$i]
+        if ($arg -notlike '--*') { Fail 2 "unexpected argument '$arg'" }
+        $key = $arg.Substring(2)
+        if ($key -eq 'json') { continue }
+        if ($i + 1 -ge $args.Count -or [string]$args[$i + 1] -like '--*') { Fail 2 "missing value for --$key" }
+        $i++
+    }
+    $Command = $parsed.Command
+    $opts = $parsed.Opts
     switch ($Command) { 'aggregate' { Cmd-Aggregate }; default { Fail 2 "unknown command '$Command'. Valid: aggregate" } }
 } catch {
-    $message=[string]$_.Exception.Message
-    if ($message -like 'METRICSERR|*') { $parts=$message -split '\|',3; [Console]::Error.WriteLine("metrics: $($parts[2])"); exit ([int]$parts[1]) }
-    [Console]::Error.WriteLine("metrics: $message"); if ($env:METRICS_DEBUG) { [Console]::Error.WriteLine($_.ScriptStackTrace) }; exit 1
+    exit (Resolve-CatchExit $_ 'METRICSERR' 'metrics' 'METRICS_DEBUG')
 }
