@@ -62,19 +62,25 @@ function New-EventsFile { param([string]$Dir) return (Join-Path $Dir 'events.jso
 # Runs outbox.ps1 as a child pwsh process; returns @{ ExitCode; Out; Err }. Args are
 # passed verbatim through ArgumentList (no shell), so JSON with backslashes is exact.
 function Invoke-Outbox {
-    param([string[]]$ToolArgs)
+    param([string[]]$ToolArgs, [AllowNull()][string]$InputText)
+    $hasInput = $PSBoundParameters.ContainsKey('InputText')
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:PsExe
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $hasInput
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
     }
     $proc = [System.Diagnostics.Process]::Start($psi)
+    if ($hasInput) {
+        $proc.StandardInput.Write($InputText)
+        $proc.StandardInput.Close()
+    }
     $outT = $proc.StandardOutput.ReadToEndAsync()
     $errT = $proc.StandardError.ReadToEndAsync()
     $proc.WaitForExit()
@@ -521,6 +527,52 @@ function Ref-UuidV5 {
     Assert-Equal $tExplicit $tViaPayload 'task.status_changed: event_id from --payload-only from/to matches the explicit --from/--to branch'
     $tMissing = Invoke-Outbox @('event-id', '--type', 'task.status_changed', '--task-id', 'T-014', '--attempt', '1', '--round', '1')
     Assert-Exit $tMissing 2 'task.status_changed: from/to absent from both CLI and payload is still a usage error (rc=2)'
+}.Invoke()
+
+# =============================================================================
+# 14. Raw append is physically single-line: pretty-printed JSON supplied through
+#     --json-line or --stdin is rejected before validation/write, while compact
+#     raw JSON and subsequent appends remain valid.
+# =============================================================================
+{
+    $dir = New-TempDir; $ev = New-EventsFile $dir
+    $singleLine1 = '{"schema_version":1,"event_id":"10000000-0000-4000-8000-000000000001","occurred_at":"2026-07-19T10:00:00Z","type":"cohort.opened","batch_id":"B-raw","actor":{"kind":"agent","name":"processor"},"payload":{}}'
+    $singleLine2 = '{"schema_version":1,"event_id":"10000000-0000-4000-8000-000000000002","occurred_at":"2026-07-19T10:01:00Z","type":"cohort.closed","batch_id":"B-raw","actor":{"kind":"agent","name":"processor"},"payload":{}}'
+    $pretty = @'
+{
+  "schema_version": 1,
+  "event_id": "10000000-0000-4000-8000-000000000003",
+  "occurred_at": "2026-07-19T10:02:00Z",
+  "type": "cohort.opened",
+  "batch_id": "B-raw",
+  "actor": { "kind": "agent", "name": "processor" },
+  "payload": {}
+}
+'@
+
+    $compact = Invoke-Outbox @('append', '--events', $ev, '--json-line', $singleLine1)
+    Assert-Exit $compact 0 'single-line --json-line append still succeeds'
+    Assert-Equal 1 (Line-Count $ev) 'single-line raw append writes exactly one physical line'
+
+    $jsonLine = Invoke-Outbox @('append', '--events', $ev, '--json-line', $pretty)
+    Assert-Exit $jsonLine 5 'multiline --json-line is rejected before append'
+    Assert-Contains $jsonLine.Err 'serialized event contains a newline' 'multiline --json-line reports the newline guard'
+    Assert-Equal 1 (Line-Count $ev) 'rejected multiline --json-line does not alter events.jsonl'
+
+    $afterJsonLine = Invoke-Outbox @('append', '--events', $ev, '--json-line', $singleLine2)
+    Assert-Exit $afterJsonLine 0 'single-line raw append still works after --json-line rejection'
+    Assert-Equal 2 (Line-Count $ev) 'subsequent raw append remains one event per physical line'
+
+    $stdin = Invoke-Outbox -ToolArgs @('append', '--events', $ev, '--stdin') -InputText $pretty
+    Assert-Exit $stdin 5 'multiline --stdin is rejected before append'
+    Assert-Contains $stdin.Err 'serialized event contains a newline' 'multiline --stdin reports the same newline guard'
+    Assert-Equal 2 (Line-Count $ev) 'rejected multiline --stdin does not alter events.jsonl'
+
+    $afterStdin = Invoke-Outbox @('append', '--events', $ev, '--type', 'cohort.published', '--batch-id', 'B-raw', '--payload', '{}')
+    Assert-Exit $afterStdin 0 'built append still works after --stdin rejection'
+    Assert-Equal 3 (Line-Count $ev) 'built append after raw rejection preserves physical line boundaries'
+    $verify = Invoke-Outbox @('verify', '--events', $ev, '--json')
+    Assert-Exit $verify 0 'events.jsonl remains line-by-line valid after raw multiline rejections'
 }.Invoke()
 
 # =============================================================================
