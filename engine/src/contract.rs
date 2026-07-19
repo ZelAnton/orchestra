@@ -237,9 +237,16 @@ fn parse_heading(line: &str) -> Option<Finding> {
 }
 
 fn is_marker_id(id: &str) -> bool {
-    let two_digits = |rest: &str| rest.len() == 2 && rest.as_bytes().iter().all(u8::is_ascii_digit);
-    id.strip_prefix("R-").is_some_and(two_digits)
-        || id.strip_prefix("F-").is_some_and(two_digits)
+    // `R-`/`F-` findings carry a monotonic, never-reused counter (agents/reviewer.template.md),
+    // so over a long review cycle a legitimate id can be one digit (`R-9`) or three-plus
+    // (`R-100`), not only the two-digit `R-NN` form. Accept one-or-more ASCII digits. This is a
+    // deliberately narrow loosening — «≥1 digit», NOT «any suffix after the dash»: an empty
+    // suffix (`R-`) or a non-digit one (`R-a1`) is still rejected, as is any id that does not
+    // start with a known marker prefix. `SUMMARY-R-`/`SUMMARY-F-` still require a full UTC
+    // timestamp and are unchanged.
+    let digits = |rest: &str| !rest.is_empty() && rest.as_bytes().iter().all(u8::is_ascii_digit);
+    id.strip_prefix("R-").is_some_and(digits)
+        || id.strip_prefix("F-").is_some_and(digits)
         || id.strip_prefix("SUMMARY-R-").is_some_and(is_utc_timestamp)
         || id.strip_prefix("SUMMARY-F-").is_some_and(is_utc_timestamp)
 }
@@ -468,6 +475,60 @@ mod tests {
         let p = parse_review(&text);
         assert_eq!(p.open_review_findings().len(), 1);
         assert!(!p.is_clean_pass("2026-07-10T17:00:00Z"));
+    }
+
+    #[test]
+    fn marker_ids_accept_one_or_more_digits() {
+        // The counter behind R-/F- can legitimately be one digit (`R-9`) or three-plus
+        // (`R-100`) over a long review cycle, not only the historical two-digit `R-NN`.
+        for id in ["R-9", "R-42", "R-100", "F-9", "F-100"] {
+            let text = format!("### [{id}] finding — статус: новая\n");
+            let p = parse_review(&text);
+            assert_eq!(p.findings.len(), 1, "{id} must parse as a valid marker id");
+            assert_eq!(p.findings[0].id, id);
+            assert_eq!(p.findings[0].status, Status::New);
+        }
+    }
+
+    #[test]
+    fn open_non_two_digit_finding_blocks_clean_pass() {
+        // The fail-open bug this task closes: a three-digit open `R-100` was silently dropped by
+        // the parser, so a fresh SUMMARY-R falsely cleared the gate. It must now block the pass.
+        let text = format!("{REVIEW_CLEAN}### [R-100] regression — статус: новая\n");
+        let p = parse_review(&text);
+        assert_eq!(p.open_review_findings().len(), 1);
+        assert_eq!(p.open_review_findings()[0].id, "R-100");
+        assert!(!p.is_clean_pass("2026-07-10T17:00:00Z"));
+
+        // Same for the batch-level integration gate over a single-digit open `F-9`.
+        let integ = "\
+### [SUMMARY-F-2026-07-12T18:00:00Z] Итог интеграционного ревью — статус: готово к слиянию\n\
+### [F-9] build break — статус: новая\n";
+        let p = parse_review(integ);
+        assert_eq!(p.open_integration_findings().len(), 1);
+        assert_eq!(p.open_integration_findings()[0].id, "F-9");
+        assert!(!p.is_clean_integration_pass("2026-07-12T17:00:00Z"));
+    }
+
+    #[test]
+    fn marker_ids_reject_empty_or_non_digit_suffixes() {
+        // The loosening is «≥1 digit», not «anything after the dash»: a bare/empty suffix and a
+        // non-digit one stay invalid, as do ids without a known marker prefix and a SUMMARY-R/F
+        // whose tail is not a UTC timestamp.
+        for id in [
+            "R-",
+            "F-",
+            "R-a1",
+            "F-1a",
+            "R-1.2",
+            "X-01",
+            "SUMMARY-R-nope",
+            "note",
+        ] {
+            let text = format!("### [{id}] not a marker — статус: новая\n");
+            let p = parse_review(&text);
+            assert!(p.findings.is_empty(), "{id} must be rejected as a marker id");
+        }
     }
 
     #[test]
