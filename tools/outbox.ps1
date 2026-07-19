@@ -588,6 +588,7 @@ function Cmd-Append {
     if ($opts.ContainsKey('json-line') -or $opts.ContainsKey('stdin')) {
         $line = if ($opts.ContainsKey('json-line')) { [string]$opts['json-line'] } else { [Console]::In.ReadToEnd() }
         $line = ($line -replace "`r", '').Trim()
+        if ($line -match "[\r\n]") { Fail 5 "serialized event contains a newline (payload has a raw control char)" }
     } else {
         if ($opts.ContainsKey('event-id') -and $opts['event-id']) { $eid = [string]$opts['event-id'] }
         else { $eid = New-UuidV5 (Get-CanonicalName (Require-Opt 'type') (Get-ParsedPayload)) }
