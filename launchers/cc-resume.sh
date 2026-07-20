@@ -65,7 +65,7 @@ if [ -n "${CC_PROCESSKIT_PYTHON:-}" ] && ! "$CC_PROCESSKIT_PYTHON" -c 'import pr
 fi
 
 if [ "$PROVIDER" = "codex" ]; then
-  SCRIPT_DIR="$(CDPATH= cd -- "${0%/*}" && pwd)"
+  SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd)"
   CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/../tools/codex-processor-runtime.ps1"
   if [ ! -f "$CODEX_PROCESSOR_RUNTIME" ]; then
     CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/codex-processor-runtime.ps1"
