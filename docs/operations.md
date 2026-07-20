@@ -66,7 +66,9 @@ names.
 `temporal_candidates_after_cleanup` catches processes created during the call even when a
 dead intermediate parent severed the live PID chain. Under parallel execution it is a
 time-window candidate rather than proof of ownership; correlate its creation time/hint across
-the overlapping task records.
+the overlapping task records. On POSIX, a quickly reparented background child may therefore
+appear under `temporal_candidates` rather than `descendants_before_cleanup`; the supervisor's
+own short-lived `ps` snapshot helper is filtered and must not appear in either count.
 
 For a whole-session Windows backstop, set `CC_PROCESSKIT_PYTHON` to a Python executable with
 `processkit` installed and open a new terminal; `cc-doctor` must report `OK root containment`.

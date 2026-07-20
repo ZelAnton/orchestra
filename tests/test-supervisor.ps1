@@ -187,7 +187,9 @@ exit $code
 }.Invoke()
 
 # =============================================================================
-# 0d. Empty process snapshot diffs stay typed as empty arrays under StrictMode.
+# 0d. Process snapshot diffs stay typed and consistent under StrictMode.
+#     A real global snapshot cannot deterministically require zero candidates: another
+#     process on a shared CI/desktop host may start during this call.
 # =============================================================================
 {
     $d = New-TempDir
@@ -197,13 +199,13 @@ exit $code
         '--args-json', (ArgsJson @('-NoProfile', '-NonInteractive', '-Command', 'exit 0')),
         '--process-diagnostics', '--process-log-file', $diag, '--json'
     )
-    Assert-Exit $r 0 'empty process-diff diagnostics do not throw under StrictMode'
+    Assert-Exit $r 0 'process-diff diagnostics do not throw under StrictMode'
     $o = $r.Out | ConvertFrom-Json
-    Assert-Equal 0 $o.temporal_candidate_count 'empty process-diff verdict reports zero temporal candidates'
-    Assert-True (Test-Path -LiteralPath $diag) 'empty process-diff writes diagnostics artifact'
+    Assert-True ([int]$o.temporal_candidate_count -ge 0) 'process-diff verdict reports a non-negative temporal candidate count'
+    Assert-True (Test-Path -LiteralPath $diag) 'process-diff writes diagnostics artifact'
     $diagObj = Read-File $diag | ConvertFrom-Json
-    Assert-True ($null -ne $diagObj.PSObject.Properties['temporal_candidates']) 'empty process-diff artifact keeps temporal_candidates field'
-    Assert-Equal 0 (@($diagObj.temporal_candidates).Count) 'empty process-diff artifact serializes zero temporal candidates'
+    Assert-True ($null -ne $diagObj.PSObject.Properties['temporal_candidates']) 'process-diff artifact keeps temporal_candidates field'
+    Assert-Equal ([int]$o.temporal_candidate_count) (@($diagObj.temporal_candidates).Count) 'verdict and process-diff artifact serialize the same candidate count'
 }.Invoke()
 
 # =============================================================================
@@ -363,16 +365,22 @@ exit $code
         Assert-Equal 'orchestra/process-diagnostics@1' $diagObj.schema 'diagnostics schema'
         Assert-Equal 'T-44' $diagObj.task_id 'diagnostics carries task id'
         Assert-Equal 'smoke' $diagObj.label 'diagnostics carries launch label'
-        Assert-True (@($diagObj.descendants_before_cleanup).Count -ge 1) 'diagnostics records the background descendant before cleanup'
-        Assert-Equal 0 (@($diagObj.survivors_after_cleanup).Count) 'diagnostics records no survivor after cleanup'
-        Assert-True (-not (Test-Path -LiteralPath $marker)) 'normal-success grandchild was reaped before writing its marker'
-
         if (Test-Path -LiteralPath $ready) {
             $spawnedProcesses = @((Read-File $ready).Trim() -split ',' | ForEach-Object {
                 $identity = $_ -split '\|', 2
                 [pscustomobject]@{ Id = [int]$identity[0]; StartTime = [DateTime]::new([long]$identity[1], [DateTimeKind]::Utc) }
             })
         }
+        # Windows retains the exited parent's PPID and reports the helper through lineage.
+        # POSIX reparents it before this snapshot, so the global before/after diff reports it
+        # as a temporal candidate instead. Require the fixture child PID, not an unrelated
+        # process that happened to start during the same global snapshot window.
+        Assert-Equal 2 (@($spawnedProcesses).Count) 'normal-success fixture records parent + background child identities'
+        $fixtureChildId = if (@($spawnedProcesses).Count -eq 2) { $spawnedProcesses[1].Id } else { -1 }
+        $observedBeforeCleanupIds = @((@($diagObj.descendants_before_cleanup) + @($diagObj.temporal_candidates)) | ForEach-Object { [int]$_.pid })
+        Assert-True ($observedBeforeCleanupIds -contains $fixtureChildId) 'diagnostics records the fixture background descendant as lineage or temporal evidence before cleanup'
+        Assert-Equal 0 (@($diagObj.survivors_after_cleanup).Count) 'diagnostics records no survivor after cleanup'
+        Assert-True (-not (Test-Path -LiteralPath $marker)) 'normal-success grandchild was reaped before writing its marker'
     } finally {
         foreach ($spawnedProcess in $spawnedProcesses) {
             try {

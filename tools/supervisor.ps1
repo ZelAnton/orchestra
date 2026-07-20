@@ -250,7 +250,12 @@ function Get-AllProcessRows {
         } else {
             $rows = @(& ps -eo pid=,ppid=,comm=,args= 2>$null | ForEach-Object {
                 if ($_ -match '^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$') {
-                    [pscustomobject]@{ pid = [int]$Matches[1]; ppid = [int]$Matches[2]; name = [string]$Matches[3]; command_line = [string]$Matches[4]; started_at = '' }
+                    $row = [pscustomobject]@{ pid = [int]$Matches[1]; ppid = [int]$Matches[2]; name = [string]$Matches[3]; command_line = [string]$Matches[4]; started_at = '' }
+                    # The snapshot's own short-lived `ps` child is observable in its output.
+                    # Its PID necessarily differs between the before/after snapshots, so
+                    # retaining it manufactures one temporal candidate on every POSIX call.
+                    # Exclude only our direct helper; a target-owned `ps` has another PPID.
+                    if (-not ($row.ppid -eq $PID -and [IO.Path]::GetFileName($row.name) -eq 'ps')) { $row }
                 }
             })
         }
@@ -380,6 +385,21 @@ function Invoke-SupervisedCall {
     )
     $processkitPython = Resolve-ProcessKitPython
     $setsidLauncher = if ($processkitPython) { $null } else { Resolve-SetsidLauncher }
+    # `setsid missing-target` itself starts successfully and reports 127 after its exec
+    # fails. Preserve the supervisor contract that an unresolvable executable is a spawn
+    # crash by skipping the wrapper in that case, so Process.Start surfaces the native
+    # spawn failure on every OS. A bare command name may resolve through PATH.
+    if ($setsidLauncher) {
+        $targetResolved = $false
+        if (Test-Path -LiteralPath $FilePath -PathType Leaf) { $targetResolved = $true }
+        else {
+            try {
+                $targetCommand = @(Get-Command $FilePath -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
+                $targetResolved = [bool]($targetCommand -and $targetCommand.Source)
+            } catch { $targetResolved = $false }
+        }
+        if (-not $targetResolved) { $setsidLauncher = $null }
+    }
     $launchFile = $FilePath
     $launchArgs = @($CallArgs)
     if ($processkitPython) {
