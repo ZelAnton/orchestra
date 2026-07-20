@@ -149,6 +149,8 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
         Install-FakeClaude -Paths $paths
         $claudeCapture = Join-Path $paths.Root 'claude-args.txt'
         $runtimeCapture = Join-Path $paths.Root 'codex-runtime-args.txt'
+        $rootMarkerName = '.codex-project-root-marker'
+        Set-Content -LiteralPath (Join-Path $paths.Project $rootMarkerName) -Value 'expected-root' -Encoding ascii
         @'
 $args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
 exit 0
@@ -164,7 +166,10 @@ exit 0
         Assert-NoFileExists $claudeCapture '[codex resume] Claude must never be invoked'
         $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
         Assert-True ($captured[0] -eq 'resume') '[codex resume] runtime action is resume'
-        Assert-True ($captured -contains '-Root' -and $captured -contains $paths.Project) '[codex resume] project root forwarded'
+        $rootIndex = [Array]::IndexOf($captured, '-Root')
+        Assert-True ($rootIndex -ge 0 -and ($rootIndex + 1) -lt $captured.Count) '[codex resume] project root argument is explicit'
+        $capturedRoot = $captured[$rootIndex + 1]
+        Assert-True (Test-Path -LiteralPath (Join-Path $capturedRoot $rootMarkerName) -PathType Leaf) '[codex resume] project root addresses the project directory'
     }
     finally {
         Remove-Sandbox $paths

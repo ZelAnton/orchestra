@@ -226,6 +226,8 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         Install-FakeClaude -Paths $paths
         $claudeCapture = Join-Path $paths.Root 'claude-args.txt'
         $runtimeCapture = Join-Path $paths.Root 'codex-runtime-args.txt'
+        $rootMarkerName = '.codex-project-root-marker'
+        Set-Content -LiteralPath (Join-Path $paths.Project $rootMarkerName) -Value 'expected-root' -Encoding ascii
         @'
 $args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
 exit 0
@@ -242,8 +244,10 @@ exit 0
         Assert-NoFileExists $claudeCapture '[codex provider] Claude must never be invoked'
         $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
         Assert-True ($captured[0] -eq 'start') '[codex provider] runtime action is start'
-        Assert-True ($captured -contains '-Root') '[codex provider] target root is explicit'
-        Assert-True ($captured -contains $paths.Project) '[codex provider] target root value forwarded'
+        $rootIndex = [Array]::IndexOf($captured, '-Root')
+        Assert-True ($rootIndex -ge 0 -and ($rootIndex + 1) -lt $captured.Count) '[codex provider] target root is explicit'
+        $capturedRoot = $captured[$rootIndex + 1]
+        Assert-True (Test-Path -LiteralPath (Join-Path $capturedRoot $rootMarkerName) -PathType Leaf) '[codex provider] target root addresses the project directory'
         Assert-True ($captured -contains '-Model' -and $captured -contains 'gpt-test') '[codex provider] --model translated to runtime -Model'
         Assert-True ($captured -contains '--extra-codex-flag') '[codex provider] remaining Codex args forwarded'
     }
