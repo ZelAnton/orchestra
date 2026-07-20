@@ -2,6 +2,9 @@
 chcp 65001 >nul
 setlocal
 set "LAUNCHER_DIR=%~dp0"
+rem Do not use %%CD%% for the target root: a real environment variable named CD
+rem shadows cmd.exe's dynamic current-directory value (GitHub Windows runners set one).
+for %%I in (.) do set "PROJECT_ROOT=%%~fI"
 set "MSBUILDDISABLENODEREUSE=1"
 set "DOTNET_CLI_USE_MSBUILD_SERVER=0"
 set "PROVIDER=%ORCHESTRA_PROVIDER%"
@@ -114,8 +117,8 @@ exit /b 12
 if not defined CC_PROCESSKIT_PYTHON goto :codex_resume_uncontained
 "%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
 if errorlevel 1 goto :containment_error
-"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%CD%" %*
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %*
 exit /b %ERRORLEVEL%
 :codex_resume_uncontained
-pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%CD%" %*
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %*
 exit /b %ERRORLEVEL%

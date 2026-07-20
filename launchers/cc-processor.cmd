@@ -27,6 +27,9 @@ rem боремся: не передавайте в EXTRA_ARGS произволь
 
 setlocal
 set "LAUNCHER_DIR=%~dp0"
+rem Do not use %%CD%% for the target root: a real environment variable named CD
+rem shadows cmd.exe's dynamic current-directory value (GitHub Windows runners set one).
+for %%I in (.) do set "PROJECT_ROOT=%%~fI"
 set MODEL_ARG=
 set MODEL_VALUE=
 set EXTRA_ARGS=
@@ -157,15 +160,15 @@ if not defined CC_PROCESSKIT_PYTHON goto :run_codex_uncontained
 "%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
 if errorlevel 1 goto :containment_error
 if defined MODEL_VALUE goto :run_codex_contained_model
-"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" %EXTRA_ARGS%
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :run_codex_contained_model
-"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :run_codex_uncontained
 if defined MODEL_VALUE goto :run_codex_uncontained_model
-pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" %EXTRA_ARGS%
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :run_codex_uncontained_model
-pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%

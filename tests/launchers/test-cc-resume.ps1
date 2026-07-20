@@ -158,6 +158,7 @@ exit 0
             FAKE_CODEX_PROCESSOR_ARGS = $runtimeCapture
             FAKE_EXIT_CODE = '0'
             ORCHESTRA_PROVIDER = ''
+            CD = (Join-Path $paths.Root 'shadowed-cd-must-not-be-used')
         }
         Assert-Equal 0 $result.ExitCode '[codex resume] exit code'
         Assert-NoFileExists $claudeCapture '[codex resume] Claude must never be invoked'
