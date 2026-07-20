@@ -52,6 +52,12 @@ param(
     # never touch the real mirror.
     [string]$DestinationRoot,
 
+    # Target Codex environment root for generated custom agents. Defaults to
+    # $CODEX_HOME or ~/.codex in a normal run. When DestinationRoot is explicitly
+    # overridden by a fixture and this value is omitted, a sibling test-local
+    # <DestinationRoot>/.codex is used so tests never touch the real profile.
+    [string]$CodexDestinationRoot,
+
     # Glob for the launchers to mirror. Defaults to *.cmd on Windows / *.sh on POSIX;
     # tests pass an explicit value to exercise the transaction OS-independently.
     [string]$LauncherGlob,
@@ -84,12 +90,28 @@ function Stop-Sync {
 
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
+function Test-PathWithinRoot {
+    param([string]$Path, [string]$Root)
+    try {
+        $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        $pathFull = [System.IO.Path]::GetFullPath($Path)
+        $prefix = $rootFull + [System.IO.Path]::DirectorySeparatorChar
+        $comparison = if ($script:OnWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        return $pathFull.StartsWith($prefix, $comparison)
+    } catch {
+        return $false
+    }
+}
+
 function Get-RelativeDest {
     # Manifest entries are stored relative to $DestinationRoot with forward slashes,
     # so the same manifest is portable between a Windows and a POSIX mirror.
     param([string]$FullPath, [string]$Root)
     $rootFull = [System.IO.Path]::GetFullPath($Root)
     $full = [System.IO.Path]::GetFullPath($FullPath)
+    if (-not (Test-PathWithinRoot -Path $full -Root $rootFull)) {
+        throw "managed destination escapes sync root: $full"
+    }
     $rel = $full.Substring($rootFull.Length).TrimStart('\', '/')
     return ($rel -replace '\\', '/')
 }
@@ -113,7 +135,17 @@ function Read-Manifest {
         $obj = $raw | ConvertFrom-Json
         if ($obj -and $obj.managed) {
             foreach ($rel in $obj.managed) {
-                [void]$result.Add([System.IO.Path]::GetFullPath((Resolve-DestFromRelative $rel $Root)))
+                $relText = [string]$rel
+                if (-not $relText -or [System.IO.Path]::IsPathRooted($relText)) {
+                    Write-SyncWarn "cc-sync: warning - ignored unsafe managed path '$relText' in $ManifestPath."
+                    continue
+                }
+                $candidate = [System.IO.Path]::GetFullPath((Resolve-DestFromRelative $relText $Root))
+                if (-not (Test-PathWithinRoot -Path $candidate -Root $Root)) {
+                    Write-SyncWarn "cc-sync: warning - ignored managed path escaping sync root ('$relText') in $ManifestPath."
+                    continue
+                }
+                [void]$result.Add($candidate)
             }
         }
     } catch {
@@ -148,8 +180,10 @@ function Write-Manifest {
 
 function New-TxContext {
     param([string]$Root)
-    $txDir = Join-Path $Root '.orchestra-sync-tx'
+    $rootFull = [System.IO.Path]::GetFullPath($Root)
+    $txDir = Join-Path $rootFull '.orchestra-sync-tx'
     return [ordered]@{
+        Root     = $rootFull
         Dir      = $txDir
         Stage    = Join-Path $txDir 'stage'
         Backup   = Join-Path $txDir 'backup'
@@ -169,11 +203,17 @@ function Write-JournalEntry {
 function Invoke-Undo {
     # Reverses a single recorded op. 'restore' copies the backup back over dest;
     # 'remove' deletes a file this run had created.
-    param([hashtable]$Entry)
+    param([hashtable]$Entry, [string]$Root, [string]$TxDir)
     $dest = [string]$Entry.dest
+    if (-not (Test-PathWithinRoot -Path $dest -Root $Root)) {
+        throw "journal destination escapes sync root: $dest"
+    }
     switch ([string]$Entry.undo) {
         'restore' {
             $backup = [string]$Entry.backup
+            if ($backup -and -not (Test-PathWithinRoot -Path $backup -Root $TxDir)) {
+                throw "journal backup escapes transaction root: $backup"
+            }
             if ($backup -and (Test-Path -LiteralPath $backup -PathType Leaf)) {
                 $parent = Split-Path -Parent $dest
                 if ($parent -and -not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
@@ -189,7 +229,7 @@ function Invoke-Undo {
 function Invoke-Rollback {
     param($Tx)
     for ($i = $Tx.Applied.Count - 1; $i -ge 0; $i--) {
-        try { Invoke-Undo -Entry $Tx.Applied[$i] } catch { }
+        try { Invoke-Undo -Entry $Tx.Applied[$i] -Root $Tx.Root -TxDir $Tx.Dir } catch { }
     }
 }
 
@@ -208,7 +248,11 @@ function Invoke-JournalRecovery {
     for ($i = $lines.Count - 1; $i -ge 0; $i--) {
         $l = $lines[$i]
         if (-not $l) { continue }
-        try { Invoke-Undo -Entry ([hashtable](@{} + ($l | ConvertFrom-Json | ForEach-Object { @{ dest = $_.dest; undo = $_.undo; backup = $_.backup } }))) } catch { }
+        try {
+            Invoke-Undo -Entry ([hashtable](@{} + ($l | ConvertFrom-Json | ForEach-Object { @{ dest = $_.dest; undo = $_.undo; backup = $_.backup } }))) -Root $Root -TxDir $txDir
+        } catch {
+            Write-SyncWarn "cc-sync: warning - ignored unsafe or invalid recovery journal entry."
+        }
     }
     Remove-Item -LiteralPath $txDir -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -302,6 +346,14 @@ function Get-ManagedPairs {
         }
     }
 
+    # The root Codex processor prompt is consumed by codex-processor-runtime.ps1.
+    # It travels beside the launcher runtimes so the mirror-only layout needs no
+    # Orchestra checkout at execution time.
+    $codexPrompt = Join-Path $Repo 'codex\processor.md'
+    if (Test-Path -LiteralPath $codexPrompt -PathType Leaf) {
+        $pairs.Add([ordered]@{ Source = $codexPrompt; Dest = (Join-Path $scriptsDst 'codex-processor.md'); Kind = 'codex_prompt' })
+    }
+
     # Tools runtimes: mirror the ENTIRE tools/*.ps1 set next to the launchers (task T-115),
     # not a curated allowlist, so EVERY runner an agent or launcher drives by a bare
     # tools/<name>.ps1 path resolves from a mirror-only target project (no orchestra checkout)
@@ -331,6 +383,19 @@ function Get-ManagedPairs {
     return $pairs
 }
 
+function Get-CodexManagedPairs {
+    param([string]$Repo, [string]$Dest)
+    $pairs = [System.Collections.Generic.List[object]]::new()
+    $src = Join-Path $Repo 'codex\agents'
+    $dst = Join-Path $Dest 'agents'
+    if (Test-Path -LiteralPath $src) {
+        foreach ($f in (Get-ChildItem -LiteralPath $src -File -Filter 'orchestra_*.toml' -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $pairs.Add([ordered]@{ Source = $f.FullName; Dest = (Join-Path $dst $f.Name); Kind = 'codex_agent' })
+        }
+    }
+    return $pairs
+}
+
 # =============================================================================
 # Regeneration + validation (delegated to the existing single-source scripts)
 # =============================================================================
@@ -349,14 +414,27 @@ function Invoke-Regen {
     if ($LASTEXITCODE -ne 0) {
         Stop-Sync 1 "generate-coders.ps1 exited with code $LASTEXITCODE. Aborting before mirroring."
     }
+    $codexGen = Join-Path $Repo 'generate-codex-agents.ps1'
+    if (Test-Path -LiteralPath $codexGen -PathType Leaf) {
+        Write-SyncInfo "Regenerating Codex-native role package (generate-codex-agents.ps1)..."
+        $global:LASTEXITCODE = 0
+        try {
+            & $codexGen | ForEach-Object { Write-SyncInfo $_ }
+        } catch {
+            Stop-Sync 1 "generate-codex-agents.ps1 failed ($($_.Exception.Message)). Aborting before mirroring."
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Stop-Sync 1 "generate-codex-agents.ps1 exited with code $LASTEXITCODE. Aborting before mirroring."
+        }
+    }
     # Informational drift check (non-fatal, mirrors the pre-T-090 T-011 behaviour):
     # the on-disk variants are already correct after the call above; we only note
     # that they differed from what is committed so they get committed.
     if (Test-Path -LiteralPath (Join-Path $Repo '.git')) {
         try {
-            & git -C $Repo diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md agents/reviewer.md agents/reviewer_std.md *> $null
+            & git -C $Repo diff --exit-code -- agents/coder.md agents/coder_fast.md agents/coder_deep.md agents/reviewer.md agents/reviewer_std.md codex/processor.md codex/agents *> $null
             if ($LASTEXITCODE -ne 0) {
-                Write-SyncWarn "cc-sync: warning - generated agent variants differed from their committed copies and were regenerated; commit agents/coder*.md / reviewer*.md."
+                Write-SyncWarn "cc-sync: warning - generated agent variants differed from their committed copies and were regenerated; commit agents/coder*.md, reviewer*.md, and codex/ generated outputs."
             }
         } catch { }
     }
@@ -394,7 +472,17 @@ if (-not $isCheckout) {
     exit 0
 }
 
+$destinationWasExplicit = -not [string]::IsNullOrWhiteSpace($DestinationRoot)
 if (-not $DestinationRoot) { $DestinationRoot = Join-Path $HOME '.claude' }
+if (-not $CodexDestinationRoot) {
+    if ($destinationWasExplicit) {
+        $CodexDestinationRoot = Join-Path $DestinationRoot '.codex'
+    } elseif ($env:CODEX_HOME) {
+        $CodexDestinationRoot = $env:CODEX_HOME
+    } else {
+        $CodexDestinationRoot = Join-Path $HOME '.codex'
+    }
+}
 if (-not $LauncherGlob) { $LauncherGlob = if ($script:OnWindows) { '*.cmd' } else { '*.sh' } }
 
 if (-not $SkipRegen)    { Invoke-Regen    -Repo $RepoRoot }
@@ -416,7 +504,7 @@ $tx = New-TxContext -Root $DestinationRoot
 New-Item -ItemType Directory -Force -Path $tx.Stage | Out-Null
 New-Item -ItemType Directory -Force -Path $tx.Backup | Out-Null
 
-$counts = @{ agent = 0; launcher = 0; template = 0; runtime = 0 }
+$counts = @{ agent = 0; launcher = 0; template = 0; runtime = 0; codex_prompt = 0 }
 $removed = 0
 try {
     foreach ($p in $pairs) {
@@ -442,13 +530,49 @@ try {
 # Success: drop the transaction workspace (journal + staging + backups).
 Remove-Item -LiteralPath $tx.Dir -Recurse -Force -ErrorAction SilentlyContinue
 
+# Publish the namespaced Codex custom-agent package under its own transactional
+# manifest. The Claude mirror and Codex home are different roots, so each has an
+# independent crash-recoverable transaction and stale-file allowlist. Foreign Codex
+# agents are never touched.
+New-Item -ItemType Directory -Force -Path $CodexDestinationRoot | Out-Null
+Invoke-JournalRecovery -Root $CodexDestinationRoot
+$codexManifestPath = Join-Path $CodexDestinationRoot '.orchestra-agent-sync-manifest.json'
+$codexPrevious = Read-Manifest -ManifestPath $codexManifestPath -Root $CodexDestinationRoot
+$codexPairs = Get-CodexManagedPairs -Repo $RepoRoot -Dest $CodexDestinationRoot
+$codexManaged = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($p in $codexPairs) { [void]$codexManaged.Add([System.IO.Path]::GetFullPath($p.Dest)) }
+$codexTx = New-TxContext -Root $CodexDestinationRoot
+New-Item -ItemType Directory -Force -Path $codexTx.Stage | Out-Null
+New-Item -ItemType Directory -Force -Path $codexTx.Backup | Out-Null
+$codexRemoved = 0
+try {
+    foreach ($p in $codexPairs) { Publish-One -Tx $codexTx -Source $p.Source -Dest $p.Dest }
+    foreach ($old in $codexPrevious) {
+        if (-not $codexManaged.Contains($old)) {
+            Remove-Stale -Tx $codexTx -Dest $old
+            $codexRemoved++
+        }
+    }
+    Write-Manifest -ManifestPath $codexManifestPath -Root $CodexDestinationRoot -AbsoluteDests @($codexManaged)
+} catch {
+    Invoke-Rollback -Tx $codexTx
+    Remove-Item -LiteralPath $codexTx.Dir -Recurse -Force -ErrorAction SilentlyContinue
+    Stop-Sync 1 "Codex role mirror failed and was rolled back - $($_.Exception.Message)"
+}
+Remove-Item -LiteralPath $codexTx.Dir -Recurse -Force -ErrorAction SilentlyContinue
+
 $agentsDst = Join-Path $DestinationRoot 'agents'
 $scriptsDst = Join-Path $DestinationRoot 'scripts'
 Write-SyncInfo ("Synced {0} agent definition(s) -> {1}" -f $counts['agent'], $agentsDst)
 Write-SyncInfo ("Synced {0} launcher script(s) -> {1}" -f $counts['launcher'], $scriptsDst)
 Write-SyncInfo ("Synced {0} config template(s) -> {1}" -f $counts['template'], $scriptsDst)
 Write-SyncInfo ("Synced {0} launcher runtime(s) -> {1}" -f $counts['runtime'], $scriptsDst)
+Write-SyncInfo ("Synced {0} Codex processor prompt(s) -> {1}" -f $counts['codex_prompt'], $scriptsDst)
+Write-SyncInfo ("Synced {0} Codex custom agent(s) -> {1}" -f $codexPairs.Count, (Join-Path $CodexDestinationRoot 'agents'))
 if ($removed -gt 0) {
     Write-SyncInfo ("Removed {0} stale previously-managed mirror entry(ies)." -f $removed)
+}
+if ($codexRemoved -gt 0) {
+    Write-SyncInfo ("Removed {0} stale previously-managed Codex agent entry(ies)." -f $codexRemoved)
 }
 exit 0

@@ -217,4 +217,56 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
     finally {
         Remove-Sandbox $paths
     }
+
+    # --- Scenario 9: explicit Codex provider bypasses Claude and delegates to
+    # the full native processor runtime with translated model/extra arguments.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
+        Install-FakeClaude -Paths $paths
+        $claudeCapture = Join-Path $paths.Root 'claude-args.txt'
+        $runtimeCapture = Join-Path $paths.Root 'codex-runtime-args.txt'
+        @'
+$args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -LauncherArgs @('codex', '--model', 'gpt-test', '--extra-codex-flag') -EnvVars @{
+            FAKE_ARGS_FILE = $claudeCapture
+            FAKE_CODEX_PROCESSOR_ARGS = $runtimeCapture
+            FAKE_EXIT_CODE = '0'
+            ORCHESTRA_PROVIDER = ''
+        }
+        Assert-Equal 0 $result.ExitCode ("[codex provider] exit code; output=" + $result.Output.Trim())
+        Assert-NoFileExists $claudeCapture '[codex provider] Claude must never be invoked'
+        $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
+        Assert-True ($captured[0] -eq 'start') '[codex provider] runtime action is start'
+        Assert-True ($captured -contains '-Root') '[codex provider] target root is explicit'
+        Assert-True ($captured -contains $paths.Project) '[codex provider] target root value forwarded'
+        Assert-True ($captured -contains '-Model' -and $captured -contains 'gpt-test') '[codex provider] --model translated to runtime -Model'
+        Assert-True ($captured -contains '--extra-codex-flag') '[codex provider] remaining Codex args forwarded'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 10: system provider selects Codex without a positional token.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
+        $runtimeCapture = Join-Path $paths.Root 'codex-runtime-args.txt'
+        @'
+$args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -EnvVars @{
+            FAKE_CODEX_PROCESSOR_ARGS = $runtimeCapture
+            ORCHESTRA_PROVIDER = 'codex'
+        }
+        Assert-Equal 0 $result.ExitCode '[system codex provider] exit code'
+        Assert-True ((Get-Content -LiteralPath $runtimeCapture -First 1) -eq 'start') '[system codex provider] ORCHESTRA_PROVIDER=codex selects native runtime'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }

@@ -141,4 +141,31 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
     finally {
         Remove-Sandbox $paths
     }
+
+    # --- Scenario 5: Codex provider uses its exact-session runtime and never Claude.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-resume.cmd'
+        Install-FakeClaude -Paths $paths
+        $claudeCapture = Join-Path $paths.Root 'claude-args.txt'
+        $runtimeCapture = Join-Path $paths.Root 'codex-runtime-args.txt'
+        @'
+$args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -LauncherArgs @('codex') -EnvVars @{
+            FAKE_ARGS_FILE = $claudeCapture
+            FAKE_CODEX_PROCESSOR_ARGS = $runtimeCapture
+            FAKE_EXIT_CODE = '0'
+            ORCHESTRA_PROVIDER = ''
+        }
+        Assert-Equal 0 $result.ExitCode '[codex resume] exit code'
+        Assert-NoFileExists $claudeCapture '[codex resume] Claude must never be invoked'
+        $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
+        Assert-True ($captured[0] -eq 'resume') '[codex resume] runtime action is resume'
+        Assert-True ($captured -contains '-Root' -and $captured -contains $paths.Project) '[codex resume] project root forwarded'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }

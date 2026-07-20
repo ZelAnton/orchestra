@@ -13,6 +13,35 @@
 дефолт этого ключа). Удобно включить codex или выключить KB глобально (в профиле/CI) без
 правки `config.md` каждого проекта. Остальные ключи — только из `config.md`.
 
+## Системный выбор корневого provider
+
+Provider всего оркестра выбирается вне `.work/config.md`, чтобы агент не мог переключить
+себе backend в ходе прогона:
+
+- `ORCHESTRA_PROVIDER=claude|codex` — системный default (`claude`, если переменной нет);
+- `cc-processor codex` / `cc-resume codex` — явное переопределение для одного запуска;
+- `cc-processor claude` / `cc-resume claude` — явный возврат на legacy-provider.
+
+`codex` — самостоятельный root processor: все planner/coder/reviewer/merger/curator-роли
+исполняются отдельными namespaced Codex custom-agent threads; Claude не запускается и не
+используется как fallback. `CODEX_CODER`/`CODEX_REVIEWER`/`CODEX_CIFIX` относятся только к
+гибридному Claude-root режиму и в Codex-root режиме игнорируются.
+
+Operator-owned системные настройки Codex-root:
+
+| Переменная | Разрешённые значения | Default |
+|---|---|---|
+| `ORCHESTRA_CODEX_MODEL` | model id, пусто = default Codex CLI | пусто |
+| `ORCHESTRA_CODEX_REASONING` | `low` \| `medium` \| `high` \| `xhigh` | `high` |
+| `ORCHESTRA_CODEX_SANDBOX` | `workspace-write` \| `danger-full-access` | `danger-full-access` |
+| `ORCHESTRA_CODEX_MAX_THREADS` | целое `2..32` | `6` |
+
+Root runtime всегда пинит `approval_policy=never`, `features.multi_agent=true` и
+`agents.max_depth=1`; subagents наследуют выбранный sandbox. `cc-sync` генерирует роли из
+канонических `agents/*.md` и устанавливает их в `$CODEX_HOME/agents`. `cc-resume codex`
+использует точный UUID из `.work/codex_processor_session.json`, не `--last`; при отсутствии
+валидного UUID запускается холодная Phase-0 recovery.
+
 `launchers/cc-config.cmd` сеет `.work/config.md` из блока ниже, ограниченного
 маркерами `# >>> config.md seed start >>>` / `# <<< config.md seed end <<<`, —
 копируются только сами маркеры-границы и всё между ними, без заголовков и
@@ -301,13 +330,13 @@ PID/PPID/имя потомков до очистки,
 
 Корневой дополнительный слой задаётся **системной переменной** `CC_PROCESSKIT_PYTHON`:
 точный Python executable, в котором работает `import processkit`. Тогда `cc-processor` и
-`cc-resume` оборачивают всю Claude-сессию в `python -m processkit run -- ...` (Windows Job
+`cc-resume` оборачивают всю сессию выбранного provider в `python -m processkit run -- ...` (Windows Job
 Object/Linux cgroup или pgroup); неверно заданный backend останавливает launcher с exit 10.
 Без переменной поведение обратно совместимо. В любом случае эти launchers принудительно
 передают всему дереву `MSBUILDDISABLENODEREUSE=1` и `DOTNET_CLI_USE_MSBUILD_SERVER=0`.
 Та же переменная наследуется `tools/supervisor.ps1`: каждый его внешний вызов дополнительно
 идёт через отдельный `processkit run`, поэтому Job/cgroup закрывается на границе команды, а
-не только в конце всей Claude-сессии. Поле verdict `containment` показывает
+не только в конце всей корневой сессии. Поле verdict `containment` показывает
 `processkit`/`process-group`/`pid-tree`.
 
 Матрица устойчивости этого пути — `tools/harness.ps1` (полный жизненный цикл когорты для

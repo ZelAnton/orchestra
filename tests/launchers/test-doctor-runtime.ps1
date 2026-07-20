@@ -81,7 +81,13 @@ function Invoke-Doctor {
     # CODEX_REVIEWER env fallback, CC_CODEX_EXEC_GRANT session grant). Set them on the
     # parent so the spawned child inherits them, then restore. Unset ambient routing by
     # default so a machine with real CODEX_* set cannot make these scenarios flaky.
-    $defaults = @{ CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = ''; ORCHESTRA_AUTO_APPROVE = '' }
+    $defaults = @{
+        CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = ''
+        ORCHESTRA_AUTO_APPROVE = ''; ORCHESTRA_PROVIDER = ''
+        ORCHESTRA_CODEX_MODEL = ''; ORCHESTRA_CODEX_REASONING = ''
+        ORCHESTRA_CODEX_SANDBOX = ''; ORCHESTRA_CODEX_MAX_THREADS = ''
+        CODEX_HOME = (Join-Path $Case.Home '.codex')
+    }
     foreach ($k in $Env.Keys) { $defaults[$k] = $Env[$k] }
 
     $saved = @{}
@@ -139,6 +145,11 @@ $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'on' }
 Assert-Contains $r.Out 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment)' 'auto-approve on: doctor reports effective machine-wide pre-consent'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'maybe' }
 Assert-Contains $r.Out "FAIL ORCHESTRA_AUTO_APPROVE: invalid value 'maybe'" 'auto-approve invalid: doctor reports fail-closed value'
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_PROVIDER = 'codex' }
+Assert-Contains $r.Out 'OK   ORCHESTRA_PROVIDER = codex (Claude-free native Codex root processor)' 'provider codex: doctor reports full native provider'
+Assert-Contains $r.Out 'FAIL Codex-native processor preflight exited' 'provider codex: incomplete native package fails preflight visibly'
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_PROVIDER = 'invalid' }
+Assert-Contains $r.Out "FAIL ORCHESTRA_PROVIDER: invalid value 'invalid'" 'provider invalid: doctor reports allowed system values'
 Remove-Case $c
 
 # =============================================================================

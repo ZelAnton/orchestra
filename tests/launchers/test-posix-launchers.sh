@@ -12,6 +12,7 @@ MOCK_DIR="$(mktemp -d)"
 MISSING_PATH="$(mktemp -d)"
 ARGS_FILE="$MOCK_DIR/claude-args"
 RC_FILE="$MOCK_DIR/claude-rc"
+PWSH_ARGS_FILE="$MOCK_DIR/pwsh-args"
 FAILURES=0
 
 cleanup() {
@@ -26,12 +27,15 @@ printf '%s\n' "${CLAUDE_EXIT_CODE:-0}" > "$CLAUDE_RC_FILE"
 exit "${CLAUDE_EXIT_CODE:-0}"
 EOF
 
-for command_name in codex pwsh; do
-    cat > "$MOCK_DIR/$command_name" <<'EOF'
+cat > "$MOCK_DIR/codex" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-done
+cat > "$MOCK_DIR/pwsh" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$PWSH_ARGS_FILE"
+exit 0
+EOF
 chmod +x "$MOCK_DIR/claude" "$MOCK_DIR/codex" "$MOCK_DIR/pwsh"
 
 pass() {
@@ -130,6 +134,35 @@ test_launcher() {
     run_without_claude "$launcher"
 }
 
+run_with_mock_codex_processor() {
+    local launcher="$1"
+    local action="$2"
+    local name="$launcher (Codex-native provider)"
+    local launcher_path="$REPO_ROOT/launchers/$launcher"
+    local rc
+
+    : > "$PWSH_ARGS_FILE"
+    (
+        cd "$RUN_DIR" || exit 99
+        PATH="$MOCK_DIR" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" ORCHESTRA_PROVIDER=claude \
+            "$BASH" "$launcher_path" codex
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "launcher exited $rc"
+        return
+    fi
+    if ! grep -Fxq "$action" "$PWSH_ARGS_FILE"; then
+        fail "$name" "native runtime action '$action' was not passed to pwsh"
+        return
+    fi
+    if ! grep -Eq 'codex-processor-runtime\.ps1$' "$PWSH_ARGS_FILE"; then
+        fail "$name" "codex-processor-runtime.ps1 was not selected"
+        return
+    fi
+    pass "$name"
+}
+
 test_launcher cc-audit.sh code_auditor
 test_launcher cc-enhance.sh enhancement_scout
 test_launcher cc-github.sh github_sync
@@ -137,10 +170,12 @@ test_launcher cc-processor.sh processor
 test_launcher cc-queue.sh queue_builder
 test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
+run_with_mock_codex_processor cc-processor.sh start
+run_with_mock_codex_processor cc-resume.sh resume
 
 if [ "$FAILURES" -ne 0 ]; then
     printf 'POSIX launcher tests failed: %s scenario(s) failed.\n' "$FAILURES"
     exit 1
 fi
 
-printf 'POSIX launcher tests passed: all 21 scenarios succeeded.\n'
+printf 'POSIX launcher tests passed: all 23 scenarios succeeded.\n'

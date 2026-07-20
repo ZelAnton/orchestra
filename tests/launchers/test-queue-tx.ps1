@@ -431,13 +431,35 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
     try {
         $N = 8
         $procs = @()
+        $exitFiles = @()
+        $writerWrapper = Join-Path $W 'concurrent-writer.ps1'
+        $writerWrapperText = @'
+param([string]$ToolPath, [string]$Work, [string]$Title, [string]$Body, [string]$ExitFile)
+$hostPath = (Get-Process -Id $PID).Path
+& $hostPath -NoProfile -ExecutionPolicy Bypass -File $ToolPath propose --work $Work --title $Title --body $Body
+$rc = $LASTEXITCODE
+[System.IO.File]::WriteAllText($ExitFile, [string]$rc)
+exit $rc
+'@
+        [System.IO.File]::WriteAllText($writerWrapper, $writerWrapperText, (New-Object System.Text.UTF8Encoding($false)))
         for ($i = 1; $i -le $N; $i++) {
-            $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:ToolPath,
-                'propose', '--work', $W, '--title', "Concurrent-$i", '--body', "body-$i")
+            $exitFile = Join-Path $W ("writer-$i.exit")
+            $exitFiles += $exitFile
+            $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $writerWrapper,
+                '-ToolPath', $script:ToolPath, '-Work', $W,
+                '-Title', "Concurrent-$i", '-Body', "body-$i", '-ExitFile', $exitFile)
             $procs += Start-Process -FilePath $script:PwshHost -ArgumentList $a -NoNewWindow -PassThru
         }
-        $procs | Wait-Process -Timeout 90
-        foreach ($p in $procs) { Assert-Equal 0 $p.ExitCode "[concurrent] writer pid $($p.Id) exit" }
+        # PowerShell 7.6 installed through WindowsApps can leave Start-Process.Process.ExitCode
+        # as $null even after WaitForExit()/Refresh(). Each wrapper therefore persists the real
+        # child exit code; the retained handles are used only for bounded waiting.
+        for ($i = 0; $i -lt $procs.Count; $i++) {
+            $p = $procs[$i]
+            Assert-True ($p.WaitForExit(90000)) "[concurrent] writer pid $($p.Id) completed within 90s"
+            Assert-True (Test-Path -LiteralPath $exitFiles[$i] -PathType Leaf) "[concurrent] writer pid $($p.Id) persisted its exit code"
+            $writerExit = if (Test-Path -LiteralPath $exitFiles[$i] -PathType Leaf) { [System.IO.File]::ReadAllText($exitFiles[$i]).Trim() } else { '(missing)' }
+            Assert-Equal '0' $writerExit "[concurrent] writer pid $($p.Id) exit"
+        }
 
         $ids = Get-QueueIds $W
         Assert-Equal $N $ids.Count "[concurrent] all $N proposals present (no lost update)"

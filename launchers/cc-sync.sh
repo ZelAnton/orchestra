@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Thin POSIX launcher for cc-sync (task T-090). The real work - regenerating the
-# template-driven coder/reviewer variants, validating agent .md invariants, and
-# mirroring agents/launchers/config-templates into ~/.claude TRANSACTIONALLY (staged
-# publish, journal-backed rollback, manifest-scoped pruning) - lives in
+# Claude/Codex role variants, validating agent .md invariants, mirroring
+# agents/launchers/config-templates into ~/.claude, and installing namespaced custom
+# agents into $CODEX_HOME/agents (normally ~/.codex/agents), each transactionally - lives in
 # tools/sync-runtime.ps1, the single cross-platform engine shared verbatim with the
 # Windows launcher cc-sync.cmd. This wrapper only locates PowerShell 7 and forwards
 # the runtime's exit code, so Windows and POSIX behave identically.

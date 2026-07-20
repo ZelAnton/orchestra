@@ -1,9 +1,12 @@
 @echo off
 chcp 65001 >nul
-rem Запуск оркестратора processor в текущей папке (Claude Code, auto-режим).
+rem Запуск оркестратора processor в текущей папке.
 rem Обрабатывает очередь .work/Tasks_Queue.md параллельными батчами до конца.
 rem
 rem Необязательные флаги (в любом порядке, перед остальными аргументами):
+rem   claude|codex       явный provider (также: --provider <claude|codex>).
+rem                      Если не задан, читается системная ORCHESTRA_PROVIDER;
+rem                      default = claude.
 rem   --force-lock       операторский force-takeover аренды: удалить каталог аренды
 rem                      .work\orchestrator.lock (вместе с lease.json) перед стартом —
 rem                      только если точно знаешь, что предыдущий processor уже не
@@ -23,8 +26,12 @@ rem cc-queue.cmd/cc-thinker.cmd) — с кавычками внутри знач
 rem боремся: не передавайте в EXTRA_ARGS произвольный текст с кавычками.
 
 setlocal
+set "LAUNCHER_DIR=%~dp0"
 set MODEL_ARG=
+set MODEL_VALUE=
 set EXTRA_ARGS=
+set "PROVIDER=%ORCHESTRA_PROVIDER%"
+if not defined PROVIDER set "PROVIDER=claude"
 rem An agent run is an isolated build environment: persistent MSBuild nodes/servers only
 rem leak resources into later tasks. Force the child session (and every subagent/tool it
 rem spawns) to use short-lived build workers. These values stay inside setlocal.
@@ -39,6 +46,26 @@ if not defined BASH_MAX_TIMEOUT_MS set "BASH_MAX_TIMEOUT_MS=1900000"
 
 :parse
 if "%~1"=="" goto :run
+if /I "%~1"=="claude" (
+  set "PROVIDER=claude"
+  shift
+  goto :parse
+)
+if /I "%~1"=="codex" (
+  set "PROVIDER=codex"
+  shift
+  goto :parse
+)
+if /I "%~1"=="--provider" (
+  if "%~2"=="" (
+    echo Флаг --provider без значения.
+    exit /b 2
+  )
+  set "PROVIDER=%~2"
+  shift
+  shift
+  goto :parse
+)
 if /I "%~1"=="--force-lock" (
   if exist ".work\orchestrator.lock" (
     echo Удаляю .work\orchestrator.lock — используй только если уверен, что предыдущий processor не работает.
@@ -54,17 +81,23 @@ if /I "%~1"=="--model" (
     shift
     goto :parse
   )
+  set "MODEL_VALUE=%~2"
   set MODEL_ARG=--model %~2
   shift
   shift
   goto :parse
 )
-rem Прочие аргументы пробрасываются в claude как есть (после %MODEL_ARG%, перед промптом).
+rem Прочие аргументы пробрасываются выбранному provider как есть.
 set EXTRA_ARGS=%EXTRA_ARGS% %1
 shift
 goto :parse
 
 :run
+if /I "%PROVIDER%"=="codex" goto :run_codex
+if /I not "%PROVIDER%"=="claude" (
+  echo Недопустимый provider "%PROVIDER%". Разрешены: claude, codex.
+  exit /b 2
+)
 rem --allowedTools (грант): предвыданный сессионный грант на автономный запуск codex
 rem адаптерами (coder_codex/reviewer_codex). Запуск launcher'а пользователем и есть
 rem выдача согласия; без покрывающего гранта classifier auto-режима отклоняет вызов
@@ -109,3 +142,30 @@ echo CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: "%CC_PROCESS
 exit /b 10
 :run_uncontained
 claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+exit /b %ERRORLEVEL%
+
+:run_codex
+set "CODEX_PROCESSOR_RUNTIME=%LAUNCHER_DIR%..\tools\codex-processor-runtime.ps1"
+if exist "%CODEX_PROCESSOR_RUNTIME%" goto :codex_runtime_found
+set "CODEX_PROCESSOR_RUNTIME=%LAUNCHER_DIR%codex-processor-runtime.ps1"
+if exist "%CODEX_PROCESSOR_RUNTIME%" goto :codex_runtime_found
+echo Codex processor runtime не найден. Запусти cc-sync из checkout Orchestra.
+echo Проверены: "%LAUNCHER_DIR%..\tools\codex-processor-runtime.ps1" и "%LAUNCHER_DIR%codex-processor-runtime.ps1".
+exit /b 12
+:codex_runtime_found
+if not defined CC_PROCESSKIT_PYTHON goto :run_codex_uncontained
+"%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
+if errorlevel 1 goto :containment_error
+if defined MODEL_VALUE goto :run_codex_contained_model
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" %EXTRA_ARGS%
+exit /b %ERRORLEVEL%
+:run_codex_contained_model
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
+exit /b %ERRORLEVEL%
+:run_codex_uncontained
+if defined MODEL_VALUE goto :run_codex_uncontained_model
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" %EXTRA_ARGS%
+exit /b %ERRORLEVEL%
+:run_codex_uncontained_model
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%CD%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
+exit /b %ERRORLEVEL%

@@ -165,6 +165,13 @@ function Get-EffCodex {
 # =============================================================================
 
 Write-Host '== System autonomy =='
+$provider = (Get-EnvTrimmed 'ORCHESTRA_PROVIDER').ToLowerInvariant()
+if (-not $provider) { $provider = 'claude' }
+switch ($provider) {
+    'claude' { Write-Host 'OK   ORCHESTRA_PROVIDER = claude (legacy Claude root processor)' }
+    'codex'  { Write-Host 'OK   ORCHESTRA_PROVIDER = codex (Claude-free native Codex root processor)' }
+    default  { Write-Host ("FAIL ORCHESTRA_PROVIDER: invalid value '$provider' (allowed: claude | codex)") }
+}
 $autoApprove = (Get-EnvTrimmed 'ORCHESTRA_AUTO_APPROVE').ToLowerInvariant()
 switch ($autoApprove) {
     ''      { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = (default off) - human approval gates remain interactive' }
@@ -172,6 +179,28 @@ switch ($autoApprove) {
     'on'    { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment) - fresh approval requests are audit-recorded and auto-approved' }
     default { Write-Host ("FAIL ORCHESTRA_AUTO_APPROVE: invalid value '$autoApprove' (allowed: on | off); policy.ps1 fails closed") }
 }
+Write-Host ''
+
+Write-Host '== Codex-native processor provider =='
+$nativeRuntime = Join-Path $PSScriptRoot 'codex-processor-runtime.ps1'
+if ($provider -ne 'codex') {
+    Write-Host 'OK   Codex-native processor package check deferred (ORCHESTRA_PROVIDER is not codex)'
+} elseif (-not (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
+    Write-Host 'FAIL Codex processor runtime missing beside cc-doctor; run cc-sync from the Orchestra checkout'
+} else {
+    & pwsh -NoProfile -File $nativeRuntime check -Root $ProjectRoot
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ('FAIL Codex-native processor preflight exited ' + $LASTEXITCODE + '; run cc-sync and codex login, then retry')
+    }
+}
+$nativeModel = Get-EnvTrimmed 'ORCHESTRA_CODEX_MODEL'
+$nativeReasoning = Get-EnvTrimmed 'ORCHESTRA_CODEX_REASONING'
+$nativeSandbox = Get-EnvTrimmed 'ORCHESTRA_CODEX_SANDBOX'
+$nativeThreads = Get-EnvTrimmed 'ORCHESTRA_CODEX_MAX_THREADS'
+Write-Host ('  ORCHESTRA_CODEX_MODEL       = ' + $(if ($nativeModel) { $nativeModel } else { '(Codex default)' }))
+Write-Host ('  ORCHESTRA_CODEX_REASONING   = ' + $(if ($nativeReasoning) { $nativeReasoning } else { 'high (default)' }))
+Write-Host ('  ORCHESTRA_CODEX_SANDBOX     = ' + $(if ($nativeSandbox) { $nativeSandbox } else { 'danger-full-access (default)' }))
+Write-Host ('  ORCHESTRA_CODEX_MAX_THREADS = ' + $(if ($nativeThreads) { $nativeThreads } else { '6 (default)' }))
 Write-Host ''
 
 # =============================================================================

@@ -1,9 +1,9 @@
 @echo off
 rem Thin Windows launcher for cc-sync (task T-090). All of the real work -
-rem regenerating the template-driven coder/reviewer variants, validating agent .md
-rem invariants, and mirroring agents/launchers/config-templates into
-rem %USERPROFILE%\.claude TRANSACTIONALLY (staged publish, journal-backed rollback,
-rem manifest-scoped pruning) - lives in tools\sync-runtime.ps1, the single
+rem regenerating Claude/Codex role variants, validating agent .md invariants,
+rem mirroring agents/launchers/config-templates into %USERPROFILE%\.claude, and
+rem installing namespaced custom agents into %CODEX_HOME%\agents (normally
+rem %USERPROFILE%\.codex\agents) transactionally - lives in tools\sync-runtime.ps1, the single
 rem cross-platform engine shared verbatim with the POSIX launcher cc-sync.sh. This
 rem file only resolves a PowerShell host and forwards the runtime's exit code.
 rem

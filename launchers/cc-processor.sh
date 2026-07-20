@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Run the processor orchestrator in the current folder (Claude Code, auto mode).
+# Run the processor orchestrator in the current folder (Claude or Codex provider).
 # Processes the .work/Tasks_Queue.md queue in parallel batches end to end.
 #
 # Optional flags (any order, before the remaining arguments):
+#   claude|codex     explicit provider (also --provider <claude|codex>).
+#                    Otherwise ORCHESTRA_PROVIDER is used; default is claude.
 #   --force-lock     operator force-takeover of the lease: remove the lease directory
 #                    .work/orchestrator.lock (with its lease.json) before starting -
 #                    only if you are sure the previous processor is no longer running.
@@ -18,6 +20,7 @@
 
 MODEL_ARG=()
 EXTRA_ARGS=()
+PROVIDER="${ORCHESTRA_PROVIDER:-claude}"
 
 # Agent builds are isolated runs: do not leave reusable .NET build workers behind.
 export MSBUILDDISABLENODEREUSE=1
@@ -31,6 +34,18 @@ export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    claude|codex)
+      PROVIDER="$1"
+      shift
+      ;;
+    --provider)
+      if [ "$#" -lt 2 ]; then
+        echo "Flag --provider requires claude or codex." >&2
+        exit 2
+      fi
+      PROVIDER="$2"
+      shift 2
+      ;;
     --force-lock)
       if [ -d ".work/orchestrator.lock" ]; then
         echo "Removing .work/orchestrator.lock - use only if you are sure the previous processor is not running."
@@ -56,6 +71,36 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$PROVIDER" != "claude" ] && [ "$PROVIDER" != "codex" ]; then
+  echo "Invalid provider '$PROVIDER'. Allowed: claude, codex." >&2
+  exit 2
+fi
+
+if [ "$PROVIDER" = "codex" ]; then
+  SCRIPT_DIR="$(CDPATH= cd -- "${0%/*}" && pwd)"
+  CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/../tools/codex-processor-runtime.ps1"
+  if [ ! -f "$CODEX_PROCESSOR_RUNTIME" ]; then
+    CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/codex-processor-runtime.ps1"
+  fi
+  if [ ! -f "$CODEX_PROCESSOR_RUNTIME" ]; then
+    echo "Codex processor runtime is missing; run cc-sync from the Orchestra checkout." >&2
+    exit 12
+  fi
+  CODEX_LAUNCH=(pwsh -NoProfile -File "$CODEX_PROCESSOR_RUNTIME" start -Root "$PWD")
+  if [ "${#MODEL_ARG[@]}" -gt 0 ]; then
+    CODEX_LAUNCH+=(-Model "${MODEL_ARG[1]}")
+  fi
+  CODEX_LAUNCH+=("${EXTRA_ARGS[@]}")
+  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+    if ! "$CC_PROCESSKIT_PYTHON" -c 'import processkit' >/dev/null 2>&1; then
+      echo "CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: $CC_PROCESSKIT_PYTHON" >&2
+      exit 10
+    fi
+    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- "${CODEX_LAUNCH[@]}"
+  fi
+  exec "${CODEX_LAUNCH[@]}"
+fi
 
 # --allowedTools grants: pre-granted session permission for the codex adapters
 # (coder_codex/reviewer_codex) to run codex autonomously. Running this launcher IS the

@@ -49,7 +49,7 @@ a transient per-round state (a candidate overlaps a still-active task's domain a
 unblock later in the same cohort) that keeps admission open rather than closing it, so
 it never appears as an admission-close reason.
 
-If Claude Code isn't running at all and you want a fuller live view (or to resume
+If the selected root provider isn't running at all and you want a fuller live view (or to resume
 work), see §6 and `launchers/cc-resume.cmd`.
 
 **Process leaks / hung build workers.** External build/test runs supervised by current
@@ -76,6 +76,26 @@ For a whole-session Windows backstop, set `CC_PROCESSKIT_PYTHON` to a Python exe
 always disable MSBuild node reuse/build-server use inside the agent environment.
 The same backend is inherited by the per-command supervisor, so each build/test gets its own
 Job/cgroup boundary; check the verdict's `containment` field when diagnosing a fallback.
+
+**Running without Claude.** Run `cc-sync` once after updating Orchestra, then select Codex
+for one session with `cc-processor codex`, or machine-wide with:
+
+```powershell
+[Environment]::SetEnvironmentVariable('ORCHESTRA_PROVIDER', 'codex', 'User')
+```
+
+Open a new terminal and run `cc-doctor`. A Codex-root run dispatches every canonical role
+to a separate `orchestra_*` Codex custom agent and never starts or falls back to Claude.
+`cc-resume codex` resumes the exact root thread stored in
+`.work/codex_processor_session.json`; it does not use the ambiguous `--last`. Explicit
+`cc-processor claude`/`cc-resume claude` override the environment for one run.
+
+The autonomous Codex root defaults to `ORCHESTRA_CODEX_REASONING=high`,
+`ORCHESTRA_CODEX_SANDBOX=danger-full-access`, and six threads. Set
+`ORCHESTRA_CODEX_MODEL`, `ORCHESTRA_CODEX_REASONING`, `ORCHESTRA_CODEX_SANDBOX`, or
+`ORCHESTRA_CODEX_MAX_THREADS` only as operator-owned User/Machine environment variables.
+The runtime pins approval policy `never`; agents must not modify these values or
+`.codex/agents` during a run.
 
 **Repeated approval for `codex-runtime.ps1 … &`.** The trailing `&` is the cause: it lets
 the process outlive Claude Code's permission-time safety check, so the foreground allow rule

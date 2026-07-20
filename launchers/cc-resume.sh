@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Resume an interrupted processor session in the current folder (the most recent
-# Claude Code session here, via --continue) instead of a cold start from scratch.
+# Resume an interrupted Claude- or Codex-backed processor session in this folder.
 # processor can recover from scratch anyway (Фаза 0 of its system prompt), but
 # --continue saves re-discovering context when the session is still alive.
 #
@@ -36,6 +35,23 @@
 # 1.1 gate and cc-doctor read; its value stays the canonical "codex exec" prefix they
 # compare against `<CODEX_CMD> exec` (not the pwsh wrapper). With it, no persistent
 # allow-rule is required.
+PROVIDER="${ORCHESTRA_PROVIDER:-claude}"
+if [ "${1:-}" = "claude" ] || [ "${1:-}" = "codex" ]; then
+  PROVIDER="$1"
+  shift
+elif [ "${1:-}" = "--provider" ]; then
+  if [ "$#" -lt 2 ]; then
+    echo "Flag --provider requires claude or codex." >&2
+    exit 2
+  fi
+  PROVIDER="$2"
+  shift 2
+fi
+if [ "$PROVIDER" != "claude" ] && [ "$PROVIDER" != "codex" ]; then
+  echo "Invalid provider '$PROVIDER'. Allowed: claude, codex." >&2
+  exit 2
+fi
+
 export CC_CODEX_EXEC_GRANT="codex exec"
 export MSBUILDDISABLENODEREUSE=1
 export DOTNET_CLI_USE_MSBUILD_SERVER=0
@@ -47,6 +63,24 @@ if [ -n "${CC_PROCESSKIT_PYTHON:-}" ] && ! "$CC_PROCESSKIT_PYTHON" -c 'import pr
   echo "CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: $CC_PROCESSKIT_PYTHON" >&2
   exit 10
 fi
+
+if [ "$PROVIDER" = "codex" ]; then
+  SCRIPT_DIR="$(CDPATH= cd -- "${0%/*}" && pwd)"
+  CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/../tools/codex-processor-runtime.ps1"
+  if [ ! -f "$CODEX_PROCESSOR_RUNTIME" ]; then
+    CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/codex-processor-runtime.ps1"
+  fi
+  if [ ! -f "$CODEX_PROCESSOR_RUNTIME" ]; then
+    echo "Codex processor runtime is missing; run cc-sync from the Orchestra checkout." >&2
+    exit 12
+  fi
+  CODEX_LAUNCH=(pwsh -NoProfile -File "$CODEX_PROCESSOR_RUNTIME" resume -Root "$PWD" "$@")
+  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- "${CODEX_LAUNCH[@]}"
+  fi
+  exec "${CODEX_LAUNCH[@]}"
+fi
+
 # Addressed check: an addressed processor lease exists only if the lease file is
 # present AND carries role=processor. The role line's spacing differs between
 # PowerShell 7 ("role": ) and 5.1 ("role":  ), so a spacing-tolerant regex is used.

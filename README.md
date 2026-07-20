@@ -115,8 +115,11 @@ prior state rather than leaving a half-applied mirror. The runtime keeps a manif
 (`~/.claude/.orchestra-sync-manifest.json`) of the files it manages; on a later sync it
 prunes only entries it previously wrote that are no longer sourced (a renamed/deleted
 agent or launcher). Files it never wrote — other agents you added to the mirror by hand
-— are never touched. Re-run the sync launcher after editing any agent definition or
-launcher, otherwise Claude keeps using the previously mirrored copy.
+— are never touched. The same command generates namespaced Codex custom agents under
+`codex/` and installs only those managed files into `$CODEX_HOME/agents` (normally
+`~/.codex/agents`) with a separate transactional manifest. Foreign Codex agents are
+never touched. Re-run the sync launcher after editing any canonical role or launcher,
+otherwise the selected provider keeps using its previous mirror.
 
 ## Quick start in a target project
 
@@ -133,8 +136,24 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
    queue format, or use `cc-queue <source or description>` (`queue_builder`) to
    turn a spec/backlog/description into deduplicated `T-NNN` entries, or
    `cc-thinker` to work out an idea interactively before it becomes tasks.
-3. `cc-processor` — starts `processor`, which processes `.work\Tasks_Queue.md` end
-   to end in parallel batches until no not-started tasks remain.
+3. Start one provider:
+   - `cc-processor` or `cc-processor claude` — legacy Claude root processor;
+   - `cc-processor codex` — fully Codex-native root processor and Codex custom-agent
+     roles, with no Claude process or fallback.
+
+The provider can instead be selected for every project in a new terminal:
+
+```powershell
+[Environment]::SetEnvironmentVariable('ORCHESTRA_PROVIDER', 'codex', 'User')
+```
+
+Allowed values are `claude` and `codex`; an explicit launcher argument wins over the
+environment. `cc-resume codex` resumes the exact Codex processor thread recorded in
+`.work/codex_processor_session.json`; if no valid addressed thread exists it performs
+the normal Phase-0 cold recovery. The Codex root defaults to `high` reasoning,
+`danger-full-access`, approval policy `never`, and six agent threads. Operator-owned
+overrides are `ORCHESTRA_CODEX_MODEL`, `ORCHESTRA_CODEX_REASONING`,
+`ORCHESTRA_CODEX_SANDBOX`, and `ORCHESTRA_CODEX_MAX_THREADS`.
 
 For a fully unattended machine, the operator can pre-grant all fresh Orchestra human
 approval gates once, for every target project:
@@ -158,7 +177,8 @@ setx CC_PROCESSKIT_PYTHON "C:\path\to\python.exe"
 ```
 
 Open a new terminal after `setx`; `cc-doctor` verifies the import. When configured,
-`cc-processor` and `cc-resume` run Claude through `python -m processkit run -- ...` and fail
+`cc-processor` and `cc-resume` run the selected Claude or Codex root through
+`python -m processkit run -- ...` and fail
 closed if that backend is broken. With or without ProcessKit, those launchers disable
 persistent MSBuild worker/server reuse in their child environment, and leaf build/test
 commands use Orchestra's per-command supervisor cleanup and process diagnostics. They also

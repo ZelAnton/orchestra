@@ -1,8 +1,33 @@
 @echo off
 chcp 65001 >nul
 setlocal
+set "LAUNCHER_DIR=%~dp0"
 set "MSBUILDDISABLENODEREUSE=1"
 set "DOTNET_CLI_USE_MSBUILD_SERVER=0"
+set "PROVIDER=%ORCHESTRA_PROVIDER%"
+if not defined PROVIDER set "PROVIDER=claude"
+if /I "%~1"=="claude" (
+  set "PROVIDER=claude"
+  shift
+)
+if /I "%~1"=="codex" (
+  set "PROVIDER=codex"
+  shift
+)
+if /I "%~1"=="--provider" (
+  if "%~2"=="" (
+    echo Флаг --provider без значения.
+    exit /b 2
+  )
+  set "PROVIDER=%~2"
+  shift
+  shift
+)
+if /I "%PROVIDER%"=="codex" goto :codex_resume
+if /I not "%PROVIDER%"=="claude" (
+  echo Недопустимый provider "%PROVIDER%". Разрешены: claude, codex.
+  exit /b 2
+)
 rem Keep long codex-runtime calls in the foreground so the existing allow-rule applies.
 rem Explicit user/system values override these per-session defaults.
 if not defined BASH_DEFAULT_TIMEOUT_MS set "BASH_DEFAULT_TIMEOUT_MS=1900000"
@@ -76,3 +101,21 @@ goto :done
 echo CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: "%CC_PROCESSKIT_PYTHON%"
 exit /b 10
 :done
+exit /b %ERRORLEVEL%
+
+:codex_resume
+set "CODEX_PROCESSOR_RUNTIME=%LAUNCHER_DIR%..\tools\codex-processor-runtime.ps1"
+if exist "%CODEX_PROCESSOR_RUNTIME%" goto :codex_runtime_found
+set "CODEX_PROCESSOR_RUNTIME=%LAUNCHER_DIR%codex-processor-runtime.ps1"
+if exist "%CODEX_PROCESSOR_RUNTIME%" goto :codex_runtime_found
+echo Codex processor runtime не найден. Запусти cc-sync из checkout Orchestra.
+exit /b 12
+:codex_runtime_found
+if not defined CC_PROCESSKIT_PYTHON goto :codex_resume_uncontained
+"%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
+if errorlevel 1 goto :containment_error
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%CD%" %*
+exit /b %ERRORLEVEL%
+:codex_resume_uncontained
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%CD%" %*
+exit /b %ERRORLEVEL%

@@ -17,6 +17,7 @@
       apply) and leaves the manifest untouched;
     - an empty-directory husk at a destination is healed into the mirrored file;
     - a journal left by a crashed run is recovered (rolled back) on the next run.
+    - manifest and recovery-journal paths cannot escape their managed root.
 
   Usage:
     pwsh -File tests/launchers/test-sync-runtime.ps1
@@ -58,6 +59,9 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'agents\coder.md') "coder-v1`n"
     Write-File (Join-Path $repo 'agents\reviewer.md') "reviewer-v1`n"
     Write-File (Join-Path $repo 'agents\processor.md') "processor-v1`n"
+    Write-File (Join-Path $repo 'codex\processor.md') "codex-processor-v1`n"
+    Write-File (Join-Path $repo 'codex\agents\orchestra_coder.toml') "name = 'orchestra_coder'`n"
+    Write-File (Join-Path $repo 'codex\agents\orchestra_reviewer.toml') "name = 'orchestra_reviewer'`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.cmd') "@echo off`n"
     Write-File (Join-Path $repo 'launchers\cc-doctor.cmd') "@echo off`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.sh') "#!/usr/bin/env bash`n"
@@ -120,6 +124,7 @@ Assert-FileText (Join-Path $dest 'scripts\cc-sync.cmd') "@echo off`n" 'clean: cc
 Assert-True (-not (Test-Path (Join-Path $dest 'scripts\cc-sync.sh'))) 'clean: .sh not mirrored when glob is *.cmd'
 Assert-FileText (Join-Path $dest 'scripts\config.example.md') "config-v1`n" 'clean: config.example.md mirrored'
 Assert-FileText (Join-Path $dest 'scripts\constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored'
+Assert-FileText (Join-Path $dest 'scripts\codex-processor.md') "codex-processor-v1`n" 'clean: Codex root processor prompt mirrored beside runtimes'
 Assert-FileText (Join-Path $dest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored next to the launchers (so cc-doctor runs from the mirror)'
 Assert-FileText (Join-Path $dest 'scripts\codex-runtime.ps1') "codex-rt-v1`n" 'clean: codex-runtime.ps1 mirrored next to the launchers (so coder_codex/reviewer_codex resolve it from the mirror - T-114)'
 # T-115: the WHOLE tools/*.ps1 folder is mirrored, not a curated allowlist, so the
@@ -128,6 +133,11 @@ Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'clean:
 Assert-FileText (Join-Path $dest 'scripts\queue-tx.ps1') "queue-tx-v1`n" 'clean: queue-tx.ps1 mirrored (whole tools/ folder - T-115)'
 # ...but cc-sync's own engine is the sole exclusion (dead weight in a mirror).
 Assert-True (-not (Test-Path (Join-Path $dest 'scripts\sync-runtime.ps1'))) 'clean: sync-runtime.ps1 NOT mirrored (cc-sync engine is the sole tools/*.ps1 exclusion)'
+$codexDest = Join-Path $dest '.codex'
+Assert-FileText (Join-Path $codexDest 'agents\orchestra_coder.toml') "name = 'orchestra_coder'`n" 'clean: generated Codex coder role installed under isolated CODEX_HOME'
+Assert-FileText (Join-Path $codexDest 'agents\orchestra_reviewer.toml') "name = 'orchestra_reviewer'`n" 'clean: generated Codex reviewer role installed under isolated CODEX_HOME'
+$codexManifest = Join-Path $codexDest '.orchestra-agent-sync-manifest.json'
+Assert-True (Test-Path -LiteralPath $codexManifest) 'clean: Codex role manifest written'
 $manifestPath = Join-Path $dest '.orchestra-sync-manifest.json'
 Assert-True (Test-Path -LiteralPath $manifestPath) 'clean: manifest written'
 if (Test-Path -LiteralPath $manifestPath) {
@@ -137,6 +147,7 @@ if (Test-Path -LiteralPath $manifestPath) {
     Assert-True (@($mf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: manifest lists scripts/doctor-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/codex-runtime.ps1') 'clean: manifest lists scripts/codex-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/state-tx.ps1') 'clean: manifest lists scripts/state-tx.ps1 (T-115)'
+    Assert-True (@($mf.managed) -contains 'scripts/codex-processor.md') 'clean: manifest lists Codex processor prompt'
     Assert-True (-not (@($mf.managed) -contains 'scripts/sync-runtime.ps1')) 'clean: manifest excludes cc-sync own engine'
     Assert-True (-not (@($mf.managed) -contains 'agents/coder.template.md')) 'clean: manifest excludes template'
 }
@@ -148,8 +159,10 @@ if (Test-Path -LiteralPath $manifestPath) {
 # and re-sync. The runner drop proves manifest-based pruning still removes a tools/*.ps1
 # that stopped existing in the source (T-115 criterion), exactly like a removed agent.
 Write-File (Join-Path $dest 'agents\custom_local.md') "mine`n"
+Write-File (Join-Path $codexDest 'agents\custom_local.toml') "name = 'mine'`n"
 Remove-Item -LiteralPath (Join-Path $repo 'agents\reviewer.md') -Force
 Remove-Item -LiteralPath (Join-Path $repo 'tools\queue-tx.ps1') -Force
+Remove-Item -LiteralPath (Join-Path $repo 'codex\agents\orchestra_reviewer.toml') -Force
 $r2 = Invoke-Sync -Repo $repo -Dest $dest
 Assert-True ($r2.ExitCode -eq 0) "prune sync exits 0 (got $($r2.ExitCode); err=$($r2.Err.Trim()))"
 Assert-True (-not (Test-Path (Join-Path $dest 'agents\reviewer.md'))) 'prune: removed source agent pruned from mirror'
@@ -157,6 +170,8 @@ Assert-True (-not (Test-Path (Join-Path $dest 'scripts\queue-tx.ps1'))) 'prune: 
 Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'prune: still-sourced runner kept'
 Assert-FileText (Join-Path $dest 'agents\custom_local.md') "mine`n" 'prune: foreign file untouched'
 Assert-FileText (Join-Path $dest 'agents\coder.md') "coder-v1`n" 'prune: still-sourced agent kept'
+Assert-True (-not (Test-Path (Join-Path $codexDest 'agents\orchestra_reviewer.toml'))) 'prune: removed generated Codex role pruned from its own manifest'
+Assert-FileText (Join-Path $codexDest 'agents\custom_local.toml') "name = 'mine'`n" 'prune: foreign Codex custom agent untouched'
 
 # =============================================================================
 # 3) Mid-publish failure rolls back to the exact prior state
@@ -216,11 +231,36 @@ Assert-True (-not (Test-Path $ghost)) 'recovery: journal-recorded partial file r
 Assert-True (-not (Test-Path $txDir)) 'recovery: leftover transaction workspace cleared'
 
 # =============================================================================
+# 6) Corrupted manifest/journal paths cannot escape the managed root
+# =============================================================================
+$repoS = New-SyntheticRepo
+$destS = New-Root
+$null = Invoke-Sync -Repo $repoS -Dest $destS
+$outside = Join-Path (Split-Path -Parent $destS) ('outside-' + [Guid]::NewGuid().ToString('N') + '.txt')
+Write-File $outside "must-survive`n"
+$manifestS = Join-Path $destS '.orchestra-sync-manifest.json'
+$mfS = [System.IO.File]::ReadAllText($manifestS) | ConvertFrom-Json
+$mfS.managed = @($mfS.managed) + ('../' + (Split-Path -Leaf $outside))
+[System.IO.File]::WriteAllText($manifestS, ($mfS | ConvertTo-Json -Depth 5), $script:Utf8)
+$r6 = Invoke-Sync -Repo $repoS -Dest $destS
+Assert-True ($r6.ExitCode -eq 0) "path guard: unsafe manifest entry is ignored without breaking safe sync (got $($r6.ExitCode))"
+Assert-FileText $outside "must-survive`n" 'path guard: manifest traversal cannot prune outside file'
+
+$txS = Join-Path $destS '.orchestra-sync-tx'
+New-Item -ItemType Directory -Force -Path $txS | Out-Null
+$unsafeEntry = @{ dest = $outside; undo = 'remove'; backup = $null } | ConvertTo-Json -Compress
+Set-Content -LiteralPath (Join-Path $txS 'journal.jsonl') -Value $unsafeEntry -Encoding utf8
+$r7 = Invoke-Sync -Repo $repoS -Dest $destS
+Assert-True ($r7.ExitCode -eq 0) "path guard: unsafe recovery entry is ignored without breaking safe sync (got $($r7.ExitCode))"
+Assert-FileText $outside "must-survive`n" 'path guard: journal traversal cannot remove outside file'
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
-foreach ($d in @($repo, $dest, $repoR, $destR, $repoH, $destH, $repoC, $destC)) {
+foreach ($d in @($repo, $dest, $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS)) {
     Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
 }
+Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
 
 if ($script:Failures.Count -gt 0) {
     Write-Host "test-sync-runtime: $($script:Failures.Count) failure(s):"
