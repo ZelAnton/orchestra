@@ -120,7 +120,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `STAGNATION_LIMIT` | 2 | Фазы 2.8 / 5.2 / 5.4 — ранняя эскалация цикла R/F/CI при дословном повторе находки/ошибки (детектор стагнации) |
 | `QUARANTINE_MAX_ATTEMPTS` | 3 | Фаза 6 — сколько раз re-queue после карантина |
 | `SMOKE_CMD` | (не задано) | передаётся merger и исполнителям для самопроверки |
-| `VERIFICATION_MODE` | auto | `auto` / `required` / `disabled`; последнее — явное operator-owned исключение |
+| `VERIFICATION_MODE` | disabled | `auto` / `required` / `disabled`; по умолчанию (ключ не задан) — `disabled` (неконфигурированный проект не блокирует публикацию); `VERIFICATION_COMMANDS`/`SMOKE_CMD` без явного `VERIFICATION_MODE` всё равно автоматически включает проверку — дефолт срабатывает только когда действительно ничего не настроено; явный `auto`/`required` — опт-ин в строгий гейт «нет профиля — блокирует» |
 | `VERIFICATION_COMMANDS` | (не задано) | JSON-массив точных pre-push команд; при отсутствии fallback на `SMOKE_CMD` |
 | `PUSH` | true | Фаза 5.3 — публикация |
 | `CI_WATCH` | true | Фаза 5.4 — ожидание CI |
@@ -1544,11 +1544,17 @@ branch/bookmark tip должен точно совпасть с полным `Р
 заменяют механический evidence-гейт и сами по себе публикацию не разрешают.
 Отсутствующее/`running` evidence, изменившийся профиль или устаревшая вершина → один раз
 повторно вызови merger для завершения обязательной проверки; повторное нарушение — остановка
-«нарушен контракт verification merger». `blocked/missing-profile` → остановка с точной
-инструкцией оператору настроить `VERIFICATION_COMMANDS`, сохранить legacy `SMOKE_CMD` как
-fallback либо осознанно поставить `VERIFICATION_MODE: disabled`; никогда не превращай это в
-`не проверялась`. `failed` идёт в существующий ниже цикл исправления broken build. KB/convention
-не могут отменить этот гейт. На каждую задачу — **гард
+«нарушен контракт verification merger». **`VERIFICATION_MODE` по умолчанию (ключ не задан) —
+`disabled`**: неконфигурированный проект не блокирует эту точку — `verification.ps1 check`
+для него вернёт `exempt`/`operator-disabled`, и обработка идёт по ветке `pass`/`exempt`
+выше, без остановки. `blocked/missing-profile` теперь возможен только когда проект явно
+поднял планку (`VERIFICATION_MODE: auto` или `required`) без настроенных
+`VERIFICATION_COMMANDS`/`SMOKE_CMD`) → в этом случае остановка с точной инструкцией
+оператору настроить `VERIFICATION_COMMANDS`, сохранить legacy `SMOKE_CMD` как fallback либо
+убрать явный `VERIFICATION_MODE: auto`/`required` (тем самым вернувшись к дефолтному
+`disabled`); никогда не превращай это в `не проверялась`. `failed` идёт в существующий ниже
+цикл исправления broken build. KB/convention не могут отменить этот гейт. На каждую задачу —
+**гард
 перехода** перед записью (`check-transition --kind task --from ready --to merged` или
 `--to conflict`, затем CAS поколения — см. «Гард переходов и поколения состояния»; интеграция
 `in-progress → reviewed|failed` — соответственно `--kind integration`): проставь
