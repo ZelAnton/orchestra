@@ -495,17 +495,29 @@ in-progress | failed`; `published → cleaned`; `failed → in-progress | cleane
 ### 13.5. SHA-bound verification перед публикацией
 
 Исполняемый код, тесты и build-конфигурация не переходят `reviewed → published` с
-`not-configured`/«не проверялась». Проект задаёт ordered JSON-массив точных команд
+`not-configured`/«не проверялась» **если verification включена** (см. ниже про
+`VERIFICATION_MODE`). Проект задаёт ordered JSON-массив точных команд
 `VERIFICATION_COMMANDS`; прежний непустой `SMOKE_CMD` остаётся одно-командным fallback.
 `tools/verification.ps1 run` выполняет команды только через `tools/supervisor.ps1` и
 атомарно пишет `.work/verification.json` с полным `verified_head`, fingerprint профиля,
-точными командами и verdict. Падение любой команды даёт `failed`; отсутствие профиля —
-`blocked/missing-profile`.
+точными командами и verdict. Падение любой команды даёт `failed`; отсутствие профиля при
+`VERIFICATION_MODE: auto`/`required` (явно заданном) — `blocked/missing-profile`.
+
+**`VERIFICATION_MODE` по умолчанию — `disabled`** (ключ не задан вовсе): неконфигурированный
+проект **не блокирует** публикацию — записывается в evidence как `exempt/operator-disabled`.
+Это не тождественно «молчаливому отключению»: явно заданный `VERIFICATION_COMMANDS`/
+`SMOKE_CMD` **без** `VERIFICATION_MODE` по-прежнему автоматически включает проверку
+(эквивалент `auto`) — дефолт `disabled` срабатывает только когда действительно ничего не
+настроено. Явный опт-ин в строгий гейт «нет профиля — блокирует» — `VERIFICATION_MODE: auto`
+или `required`.
 
 Допустимые исключения всегда явны в evidence: механически определённый по VCS diff
 `exempt/docs-only` либо operator-owned `VERIFICATION_MODE: disabled`
-(`exempt/operator-disabled`). На resume и непосредственно перед ff/push processor вызывает
-`verification.ps1 check`: `running` после crash, изменённый профиль и evidence от старой
+(`exempt/operator-disabled`) — последнее теперь и явный, и дефолтный исход; явный
+`VERIFICATION_MODE: disabled` безусловно приоритетнее docs-only, а дефолтный (ключ не задан)
+уступает приоритет более точной метке `exempt/docs-only`, когда diff действительно
+docs-only. На resume и непосредственно перед ff/push processor вызывает
+`verification.ps1 check`: `running` после crash, изменившийся профиль и evidence от старой
 вершины отклоняются, весь профиль запускается заново. `merge_report.md` сохраняет точные
 команды, проверенную вершину, verdict и путь к evidence; проза агента сама по себе гейт не
 удовлетворяет.
