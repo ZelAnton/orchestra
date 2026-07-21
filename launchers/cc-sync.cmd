@@ -14,11 +14,17 @@ rem fragility the old inline version had to work around.
 setlocal
 set "CC_SYNC_RT=%~dp0..\tools\sync-runtime.ps1"
 
-rem Checkout vs mirror: tools\sync-runtime.ps1 only exists in an actual repo checkout.
-rem Run from the launchers-only %USERPROFILE%\.claude\scripts mirror there is nothing
-rem to sync FROM, so report a deliberate no-op instead of pretending work happened.
+rem An installed cc-sync is normally resolved from %USERPROFILE%\.claude\scripts.
+rem When the operator runs that PATH command while cwd is the Orchestra checkout,
+rem recover the checkout runtime from cwd.  Without this fallback `cc-sync` looked
+rem successful but was a no-op, leaving agents and policy runtimes stale.
 if not exist "%CC_SYNC_RT%" (
-  echo Skipping sync - not running from a repository checkout ^(mirror detected^); run cc-sync from the repo checkout instead.
+  if exist "%CD%\agents\processor.md" if exist "%CD%\generate-codex-agents.ps1" if exist "%CD%\tools\sync-runtime.ps1" set "CC_SYNC_RT=%CD%\tools\sync-runtime.ps1"
+)
+
+rem Outside an Orchestra checkout a mirror invocation still has no source to sync.
+if not exist "%CC_SYNC_RT%" (
+  echo Skipping sync - no Orchestra checkout found beside the launcher or in the current directory; cd to the Orchestra checkout and run cc-sync again.
   exit /b 0
 )
 

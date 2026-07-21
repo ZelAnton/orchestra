@@ -42,6 +42,10 @@
       5. Behavioural proof (only when `bash` is on PATH; self-skips otherwise). A
          literal `~` at word start expands, while a `~` delivered via a shell variable
          does NOT - the exact OS semantics the fix relies on.
+      6. Checkout identity. Every agent role that documents tools/*.ps1 resolution,
+         plus the normative docs, requires all three Orchestra source-tree markers
+         before selecting a target-local tools/ path. A same-named stale/gitignored
+         target file must never shadow the cc-sync mirror.
 
     On any violation prints one line per finding as "<source> - <check> - <detail>"
     and exits 1. A structural problem (a required file or a rule string cannot be
@@ -64,8 +68,10 @@ $AgentsDir = Join-Path $RepoRoot 'agents'
 
 $CoderCodex = Join-Path $AgentsDir 'coder_codex.md'
 $ReviewerCodex = Join-Path $AgentsDir 'reviewer_codex.md'
+$Processor = Join-Path $AgentsDir 'processor.md'
 $KnowledgeFile = Join-Path $RepoRoot 'knowledge.md'
 $QueueContractFile = Join-Path $RepoRoot 'docs/queue_contract.md'
+$ContributingFile = Join-Path $RepoRoot 'docs/contributing.md'
 $ConfigFile = Join-Path $RepoRoot 'config.example.md'
 $CcConfigSh = Join-Path $RepoRoot 'launchers/cc-config.sh'
 $CcConfigCmd = Join-Path $RepoRoot 'launchers/cc-config.cmd'
@@ -73,8 +79,10 @@ $CcConfigCmd = Join-Path $RepoRoot 'launchers/cc-config.cmd'
 $required = [ordered]@{
     'agents/coder_codex.md'    = $CoderCodex
     'agents/reviewer_codex.md' = $ReviewerCodex
+    'agents/processor.md'      = $Processor
     'knowledge.md'             = $KnowledgeFile
     'docs/queue_contract.md'   = $QueueContractFile
+    'docs/contributing.md'     = $ContributingFile
     'config.example.md'        = $ConfigFile
     'launchers/cc-config.sh'   = $CcConfigSh
     'launchers/cc-config.cmd'  = $CcConfigCmd
@@ -203,9 +211,82 @@ else {
     Write-Host "NOTE - 'bash' not on PATH; skipped the behavioural tilde-expansion probe (static contract checks still apply)."
 }
 
+# --- 6. Checkout identity: a target-local tools/ directory is not proof --------
+$IdentityCanonical = 'наличие `tools/<script>.ps1` само по себе не доказывает checkout-раскладку'
+$IdentityCanonicalEnglish = 'existence of `tools/<name>.ps1` alone does not prove the checkout layout'
+$IdentityMarkers = @('agents/processor.md', 'generate-codex-agents.ps1', 'tools/sync-runtime.ps1')
+$identityDocs = [ordered]@{
+    'knowledge.md'           = $text['knowledge.md']
+    'docs/queue_contract.md' = $text['docs/queue_contract.md']
+    'docs/contributing.md'   = $text['docs/contributing.md']
+}
+
+# Guard every generated and canonical role that declares runner/runtime resolution. This makes
+# a newly added role fail CI unless it carries the same anti-shadowing identity rule.
+foreach ($f in (Get-ChildItem -LiteralPath $AgentsDir -File -Filter '*.md')) {
+    $body = (Get-Content -LiteralPath $f.FullName -Encoding utf8) -join "`n"
+    if ($body.Contains('Резолвинг раннера `tools/*.ps1`') -or $body.Contains('Резолвинг пути к runtime')) {
+        $identityDocs[('agents/' + $f.Name)] = $body
+    }
+}
+
+foreach ($ref in $identityDocs.Keys) {
+    $body = [string]$identityDocs[$ref]
+    $normalized = $body -replace '\s+', ' '
+    $hasIdentityRule = (
+        $normalized.IndexOf($IdentityCanonical, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $normalized.IndexOf($IdentityCanonicalEnglish, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+    )
+    if (-not $hasIdentityRule) {
+        Add-Finding -FileRef $ref -Check 'checkout-identity' `
+            -Detail "does not state that tools/<script>.ps1 existence alone is insufficient; stale target-local tools can shadow the cc-sync mirror"
+    }
+    if ($body -match 'без\s+своего\s+`tools/`') {
+        Add-Finding -FileRef $ref -Check 'checkout-identity-contradiction' `
+            -Detail "still selects the mirror only when the target has no tools/ directory; identity markers must decide even when target-local tools/ exists"
+    }
+    foreach ($marker in $IdentityMarkers) {
+        if (-not $body.Contains($marker)) {
+            Add-Finding -FileRef $ref -Check 'checkout-identity-marker' `
+                -Detail "does not require Orchestra source marker '$marker' before selecting checkout tools/"
+        }
+    }
+}
+
+# --- 7. Processor-owned layout handoff: adapters must not self-probe ---------
+$handoffDocs = [ordered]@{
+    'agents/processor.md'       = $text['agents/processor.md']
+    'agents/coder_codex.md'     = $text['agents/coder_codex.md']
+    'agents/reviewer_codex.md'  = $text['agents/reviewer_codex.md']
+    'knowledge.md'              = $text['knowledge.md']
+}
+foreach ($ref in $handoffDocs.Keys) {
+    $body = [string]$handoffDocs[$ref]
+    if (-not $body.Contains('RUNTIME_LAYOUT=checkout|mirror')) {
+        Add-Finding -FileRef $ref -Check 'runtime-layout-handoff' `
+            -Detail 'does not carry the processor-owned RUNTIME_LAYOUT=checkout|mirror contract'
+    }
+}
+foreach ($ref in @('agents/coder_codex.md', 'agents/reviewer_codex.md')) {
+    $body = [string]$handoffDocs[$ref]
+    if ($body -match 'определи\s+раскладку.*Glob.*/.*Read') {
+        Add-Finding -FileRef $ref -Check 'runtime-layout-self-probe' `
+            -Detail 'still asks the leaf adapter to rediscover the runtime layout with Glob/Read instead of trusting the processor handoff'
+    }
+    if (-not $body.Contains('Не повторяй') -or -not $body.Contains('filesystem-probe')) {
+        Add-Finding -FileRef $ref -Check 'runtime-layout-no-reprobe' `
+            -Detail 'does not explicitly forbid the false-negative filesystem self-probe'
+    }
+}
+$processorLayoutMentions = ([regex]::Matches([string]$handoffDocs['agents/processor.md'], 'RUNTIME_LAYOUT=<checkout\|mirror>')).Count
+if ($processorLayoutMentions -lt 5) {
+    Add-Finding -FileRef 'agents/processor.md' -Check 'runtime-layout-dispatch' `
+        -Detail "documents only $processorLayoutMentions concrete Codex dispatch handoff(s); implementation, fix, full/augment/re-review and CI-fix paths must all carry the layout"
+}
+
 # --- Report -------------------------------------------------------------------
 if ($findings.Count -eq 0) {
-    Write-Host "OK - codex-runtime path contract holds: checkout/mirror allow-rules agree across cc-config.{sh,cmd} and config.example.md, both adapters document the literal command each rule grants (no CODEX_RT=~ variable), and the tilde-expansion caveat is consistent across the four contract docs."
+    Write-Host "OK - runtime path contract holds: checkout/mirror allow-rules agree, adapters use literal granted commands, the tilde caveat is consistent, every runner caller requires Orchestra source identity markers, and Codex adapters consume the processor-owned layout without a false-negative self-probe."
     exit 0
 }
 

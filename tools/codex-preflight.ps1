@@ -29,7 +29,16 @@
     touches VCS. The adapters' fail-closed escalation (T-069) remains the sole
     authority for real calls; this probe only removes doomed calls before they start.
 
+    With no `--workspace`, this measures the host/process-wide class once per
+    session. With `--workspace <task-worktree>`, it measures the exact nested
+    worktree shape before a worktree-scoped coder dispatch; this second probe is
+    intentionally separate because a throwaway top-level probe cannot reproduce
+    the native Windows split-root failure.
+
     Decision (also encoded in the exit code, so a caller may branch on either):
+      * class == 'sandbox-init-worktree' -> decision 'downgrade-worktree', exit 3.
+        Route worktree-scoped coder calls to Claude for the rest of the session;
+        reviewer/read-only and main-tree CI-fix routing remain independent.
       * class == 'sandbox-init'  -> decision 'downgrade', exit 3. The host limit is
         live this session; the caller should route Codex work to Claude for the rest
         of the session and say so in the overview/journal.
@@ -38,15 +47,15 @@
         (this is the case on every host where the signature does not reproduce - the
         common case, e.g. codex-cli 0.144.1).
 
-    Only `sandbox-init` drives a downgrade: it is the one host/process-level,
-    task-independent class a no-op probe can fairly observe. network / tls-schannel /
-    vcs-write / profile-denied are scope- or config-dependent (a no-op touches no
-    network, git metadata or profile), so they are handled by the existing scope-keyed
-    T-065 KB path, not by this probe.
+    Only `sandbox-init` and the exact `sandbox-init-worktree` signature drive a
+    downgrade. network / tls-schannel / vcs-write / profile-denied are scope- or
+    config-dependent (a no-op touches no network, git metadata or profile), so they
+    are handled by the existing scope-keyed T-065 KB path, not by this probe.
 
 .EXAMPLE
     pwsh -File tools/codex-preflight.ps1
     pwsh -File tools/codex-preflight.ps1 --codex-cmd codex --timeout-sec 30
+    pwsh -File tools/codex-preflight.ps1 --workspace D:\repo\.work\worktrees\T-123
 #>
 
 Set-StrictMode -Version Latest
@@ -77,6 +86,7 @@ function PfOpt { param([string]$Name, $Default = $null) if ($pf.ContainsKey($Nam
 $CodexCmd = [string](PfOpt 'codex-cmd' 'codex')
 $TimeoutSec = [int]([string](PfOpt 'timeout-sec' '30'))
 $Workspace = [string](PfOpt 'workspace' '')
+$workspaceSupplied = -not [string]::IsNullOrWhiteSpace($Workspace)
 
 function Emit-Result {
     param($Object, [int]$ExitCode)
@@ -110,7 +120,22 @@ if (-not $Workspace) {
     $Workspace = Join-Path ([System.IO.Path]::GetTempPath()) ("codex-preflight-" + [System.Guid]::NewGuid().ToString('N').Substring(0, 12))
     New-Item -ItemType Directory -Force -Path $Workspace | Out-Null
     $createdWs = $true
+} elseif (-not (Test-Path -LiteralPath $Workspace -PathType Container)) {
+    Emit-Result ([pscustomobject]@{
+            probe         = 'codex-sandbox-workspace-write'
+            scope         = 'worktree'
+            workspace     = $Workspace
+            ran           = $false
+            codexResolved = $true
+            class         = 'sandbox-init-worktree'
+            envLimit      = $true
+            hostLimit     = $false
+            decision      = 'downgrade-worktree'
+            sentinel      = (Get-Sentinel -Kind 'failed' -Class 'sandbox-init-worktree' -Detail 'task worktree missing')
+            detail        = "task worktree does not exist for exact sandbox probe: $Workspace"
+        }) 3
 }
+$Workspace = [System.IO.Path]::GetFullPath($Workspace)
 
 # The no-op command codex runs INSIDE its sandbox: trivial, writes nothing.
 $noop = if ($onWindows) { @('cmd', '/c', 'exit', '0') } else { @('sh', '-c', 'exit 0') }
@@ -120,16 +145,15 @@ $noop = if ($onWindows) { @('cmd', '/c', 'exit', '0') } else { @('sh', '-c', 'ex
 $sandboxArgs = @('sandbox', '-c', 'sandbox_mode=workspace-write', '--') + $noop
 $spawnArgs = @($target.Prefix) + $sandboxArgs
 
-# Run with the throwaway dir as the working directory so codex uses it as the
-# writable root (codex sandbox's -C needs a permission profile; cwd does not).
-$prevCwd = [System.Environment]::CurrentDirectory
+# Run with the addressed directory as the child process working directory so Codex
+# and the Windows sandbox agree on one primary root. Invoke-Captured pins this
+# mechanically; changing only the parent PowerShell's managed CurrentDirectory was
+# insufficiently explicit and was the same shape that diverged in codex exec.
 $res = $null
 try {
-    try { [System.Environment]::CurrentDirectory = $Workspace } catch { }
-    $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText '' -TimeoutSec $TimeoutSec
+    $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText '' -TimeoutSec $TimeoutSec -WorkingDirectory $Workspace
 }
 finally {
-    try { [System.Environment]::CurrentDirectory = $prevCwd } catch { }
     if ($createdWs -and (Test-Path -LiteralPath $Workspace)) {
         Remove-Item -LiteralPath $Workspace -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -140,12 +164,34 @@ finally {
 $combined = "$($res.StdOut)`n$($res.StdErr)"
 $fc = Get-FailureClass -Text $combined -RC $res.ExitCode
 
+$worktreeLimit = ($fc.class -eq 'sandbox-init-worktree')
+if ($worktreeLimit) {
+    $sentinel = Get-Sentinel -Kind 'failed' -Class 'sandbox-init-worktree' -Detail 'live task-worktree preflight'
+    Emit-Result ([pscustomobject]@{
+            probe         = 'codex-sandbox-workspace-write'
+            scope         = if ($workspaceSupplied) { 'worktree' } else { 'host-probe' }
+            workspace     = $Workspace
+            ran           = $true
+            codexResolved = $true
+            exitCode      = $res.ExitCode
+            timedOut      = $res.TimedOut
+            class         = 'sandbox-init-worktree'
+            envLimit      = $true
+            hostLimit     = $false
+            decision      = 'downgrade-worktree'
+            sentinel      = $sentinel
+            detail        = 'native Windows sandbox rejected the split writable-root shape for this task worktree; route worktree-scoped Codex coder calls to Claude'
+        }) 3
+}
+
 $hostLimit = ($fc.class -eq 'sandbox-init')
 if ($hostLimit) {
     $firstSig = if ($fc.signature) { $fc.signature } else { 'CreateProcessAsUserW failed: 5' }
     $sentinel = Get-Sentinel -Kind 'failed' -Class 'sandbox-init' -Detail 'live host preflight'
     Emit-Result ([pscustomobject]@{
             probe        = 'codex-sandbox-workspace-write'
+            scope        = 'host'
+            workspace    = $Workspace
             ran          = $true
             codexResolved = $true
             exitCode     = $res.ExitCode
@@ -162,6 +208,8 @@ if ($hostLimit) {
 # Clean run (or any non-sandbox-init outcome) -> routing unchanged.
 Emit-Result ([pscustomobject]@{
         probe        = 'codex-sandbox-workspace-write'
+        scope        = if ($workspaceSupplied) { 'worktree' } else { 'host' }
+        workspace    = $Workspace
         ran          = $true
         codexResolved = $true
         exitCode     = $res.ExitCode

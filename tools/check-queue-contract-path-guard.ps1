@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Guards the "queue-contract path-resolution" contract across every agent prompt
-    that references the queue contracts (task T-122).
+    Guards the queue/roadmap contract path-resolution rules across every agent prompt
+    that references either contract family (tasks T-122, T-269).
 
 .DESCRIPTION
     Bare references to `docs/queue_contract.md` / `Tasks_Queue_Format.md` in an agent
@@ -29,19 +29,31 @@
     small set of distinctive whitespace-insensitive substrings) rather than a full-sentence
     match, so surrounding prose may be reworded freely while the substance stays enforced.
 
-    For each agents/*.md that mentions `queue_contract.md` or `Tasks_Queue_Format.md`, and
-    for the two normative docs (knowledge.md, docs/queue_contract.md), it requires all of:
+    For each agents/*.md that mentions `queue_contract.md` or `Tasks_Queue_Format.md`, it
+    requires both exact queue paths. For each agents/*.md that mentions
+    `roadmap_contract.md` or `.work/roadmap.md`, it requires both exact roadmap paths. Every
+    in-scope prompt must also carry the common anti-disk-walk block.
+
+    Queue paths:
 
       - `$ROOT/docs/queue_contract.md`            (exact queue-contract path -> resolving)
       - `$HOME/.claude/specs/Tasks_Queue_Format.md` (exact spec path        -> resolving)
+
+    Roadmap paths:
+
+      - `$ROOT/docs/roadmap_contract.md`          (exact roadmap-contract path -> resolving)
+      - `$ROOT/.work/roadmap.md`                  (exact project artifact path -> resolving)
+
+    Common anti-disk-walk block:
+
       - `find /`                                  (the base ban)
       - `find C:/`                                (the Windows drive-root ban)
       - `find / -maxdepth`                        (the extended ban: `-maxdepth N` from `/`
                                                    is explicitly insufficient - T-122 crux)
 
-    Files that mention neither contract path (e.g. executor.md, full_reviewer.md) are out
-    of scope and skipped. If NO agents file is in scope at all, the citation strings the
-    guard keys on must have changed, so the guard can no longer be trusted -> exit 2.
+    Files that mention neither contract family (e.g. executor.md, full_reviewer.md) are out
+    of scope and skipped. If no agents file is in scope for one of the two contract families,
+    the citation strings that family keys on must have changed -> exit 2.
 
     On any violation prints one line per finding as "<file> - <check> - <detail>" and exits
     1. A structural problem (a required file or the agents dir is missing, or nothing is in
@@ -53,15 +65,24 @@
 #>
 
 [CmdletBinding()]
-param()
+param(
+    # Test seam for hermetic fixture tests. Production callers omit it and validate the
+    # checkout containing this script.
+    [string]$RepositoryRoot
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
+    Split-Path -Parent $PSScriptRoot
+} else {
+    [System.IO.Path]::GetFullPath($RepositoryRoot)
+}
 $AgentsDir = Join-Path $RepoRoot 'agents'
 $KnowledgeFile = Join-Path $RepoRoot 'knowledge.md'
 $QueueContractFile = Join-Path $RepoRoot 'docs/queue_contract.md'
+$RoadmapContractFile = Join-Path $RepoRoot 'docs/roadmap_contract.md'
 
 function Fail-Structural {
     param([string]$Message)
@@ -72,22 +93,29 @@ function Fail-Structural {
 if (-not (Test-Path -LiteralPath $AgentsDir -PathType Container)) {
     Fail-Structural "Required directory not found: $AgentsDir"
 }
-foreach ($doc in @($KnowledgeFile, $QueueContractFile)) {
+foreach ($doc in @($KnowledgeFile, $QueueContractFile, $RoadmapContractFile)) {
     if (-not (Test-Path -LiteralPath $doc)) {
         Fail-Structural "Required normative doc not found: $doc"
     }
 }
 
-# A file is IN SCOPE if it cites either queue contract by name.
-$MentionTokens = @('queue_contract.md', 'Tasks_Queue_Format.md')
+# A file is in scope for a contract family if it cites either of that family's names.
+$QueueMentionTokens = @('queue_contract.md', 'Tasks_Queue_Format.md')
+$RoadmapMentionTokens = @('roadmap_contract.md', '.work/roadmap.md')
 
 # The canonical guard, as a set of distinctive whitespace-insensitive substrings. Every
 # in-scope file must carry ALL of them: two exact paths (resolving) + the full `find /`
 # ban including the `-maxdepth` extension that T-122 exists for. Kept token-based (not a
 # full-sentence match) so prose may be reworded while the substance stays enforced.
-$RequiredTokens = [ordered]@{
+$QueueRequiredTokens = [ordered]@{
     'resolve-queue-path' = '$ROOT/docs/queue_contract.md'
     'resolve-spec-path'  = '$HOME/.claude/specs/Tasks_Queue_Format.md'
+}
+$RoadmapRequiredTokens = [ordered]@{
+    'resolve-roadmap-contract-path' = '$ROOT/docs/roadmap_contract.md'
+    'resolve-roadmap-artifact-path' = '$ROOT/.work/roadmap.md'
+}
+$SharedRequiredTokens = [ordered]@{
     'ban-find-root'      = 'find /'
     'ban-find-drive'     = 'find C:/'
     'ban-find-maxdepth'  = 'find / -maxdepth'
@@ -114,45 +142,89 @@ function Add-Finding {
 function Test-GuardTokens {
     param(
         [Parameter(Mandatory)][string]$FileRef,
-        [Parameter(Mandatory)][string]$NormalizedText
+        [Parameter(Mandatory)][string]$NormalizedText,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$RequiredTokens,
+        [Parameter(Mandatory)][string]$ContractLabel
     )
     foreach ($check in $RequiredTokens.Keys) {
         if (-not $NormalizedText.Contains($RequiredTokens[$check])) {
             Add-Finding -FileRef $FileRef -Check $check `
-                -Detail "missing the canonical guard token '$($RequiredTokens[$check])' (a file that cites docs/queue_contract.md / Tasks_Queue_Format.md must carry the resolution+ban guard, incl. the 'find / -maxdepth N' extension - T-122)"
+                -Detail "missing the canonical guard token '$($RequiredTokens[$check])' (a file that cites the $ContractLabel contract must carry its exact resolution paths and the anti-disk-walk guard)"
         }
     }
 }
 
+function Test-MentionsAny {
+    param(
+        [Parameter(Mandatory)][string]$NormalizedText,
+        [Parameter(Mandatory)][string[]]$Tokens
+    )
+    foreach ($token in $Tokens) {
+        if ($NormalizedText.Contains($token)) { return $true }
+    }
+    return $false
+}
+
 # --- Agent prompts (incl. both *.template.md and the generated variants) -------------
-$agentFiles = Get-ChildItem -LiteralPath $AgentsDir -Filter '*.md' -File | Sort-Object Name
+$agentFiles = @(Get-ChildItem -LiteralPath $AgentsDir -Filter '*.md' -File | Sort-Object Name)
 if ($agentFiles.Count -eq 0) {
     Fail-Structural "No agents/*.md files found under $AgentsDir - the layout may have changed."
 }
 
-$inScope = 0
+$queueInScope = 0
+$roadmapInScope = 0
 foreach ($file in $agentFiles) {
     $norm = Get-Normalized -Path $file.FullName
-    $mentions = $false
-    foreach ($m in $MentionTokens) { if ($norm.Contains($m)) { $mentions = $true; break } }
-    if (-not $mentions) { continue }   # out of scope: cites neither contract
-    $inScope++
-    Test-GuardTokens -FileRef "agents/$($file.Name)" -NormalizedText $norm
+    $mentionsQueue = Test-MentionsAny -NormalizedText $norm -Tokens $QueueMentionTokens
+    $mentionsRoadmap = Test-MentionsAny -NormalizedText $norm -Tokens $RoadmapMentionTokens
+    if (-not $mentionsQueue -and -not $mentionsRoadmap) { continue }
+
+    $fileRef = "agents/$($file.Name)"
+    if ($mentionsQueue) {
+        $queueInScope++
+        Test-GuardTokens -FileRef $fileRef -NormalizedText $norm `
+            -RequiredTokens $QueueRequiredTokens -ContractLabel 'queue'
+    }
+    if ($mentionsRoadmap) {
+        $roadmapInScope++
+        Test-GuardTokens -FileRef $fileRef -NormalizedText $norm `
+            -RequiredTokens $RoadmapRequiredTokens -ContractLabel 'roadmap'
+    }
+    Test-GuardTokens -FileRef $fileRef -NormalizedText $norm `
+        -RequiredTokens $SharedRequiredTokens -ContractLabel 'queue/roadmap'
 }
 
-if ($inScope -eq 0) {
-    # Nothing cites the contracts -> the mention tokens this guard keys on must have
-    # changed, so it can no longer verify anything. Never pass that quietly.
-    Fail-Structural "No agents/*.md references '$($MentionTokens -join "' or '")' - the citation format may have changed and this guard can no longer be trusted."
+if ($queueInScope -eq 0) {
+    Fail-Structural "No agents/*.md references '$($QueueMentionTokens -join "' or '")' - the queue citation format may have changed and this guard can no longer be trusted."
+}
+if ($roadmapInScope -eq 0) {
+    Fail-Structural "No agents/*.md references '$($RoadmapMentionTokens -join "' or '")' - the roadmap citation format may have changed and this guard can no longer be trusted."
 }
 
-# --- Normative docs: the canonical resolution+ban must not regress there either -----
-Test-GuardTokens -FileRef 'knowledge.md' -NormalizedText (Get-Normalized -Path $KnowledgeFile)
-Test-GuardTokens -FileRef 'docs/queue_contract.md' -NormalizedText (Get-Normalized -Path $QueueContractFile)
+# --- Normative docs: exact paths and anti-disk-walk rules must not regress ----------
+$knowledgeNorm = Get-Normalized -Path $KnowledgeFile
+Test-GuardTokens -FileRef 'knowledge.md' -NormalizedText $knowledgeNorm `
+    -RequiredTokens $QueueRequiredTokens -ContractLabel 'queue'
+Test-GuardTokens -FileRef 'knowledge.md' -NormalizedText $knowledgeNorm `
+    -RequiredTokens $RoadmapRequiredTokens -ContractLabel 'roadmap'
+Test-GuardTokens -FileRef 'knowledge.md' -NormalizedText $knowledgeNorm `
+    -RequiredTokens $SharedRequiredTokens -ContractLabel 'queue/roadmap'
+
+$queueContractNorm = Get-Normalized -Path $QueueContractFile
+Test-GuardTokens -FileRef 'docs/queue_contract.md' -NormalizedText $queueContractNorm `
+    -RequiredTokens $QueueRequiredTokens -ContractLabel 'queue'
+Test-GuardTokens -FileRef 'docs/queue_contract.md' -NormalizedText $queueContractNorm `
+    -RequiredTokens $SharedRequiredTokens -ContractLabel 'queue'
+
+$roadmapContractNorm = Get-Normalized -Path $RoadmapContractFile
+Test-GuardTokens -FileRef 'docs/roadmap_contract.md' -NormalizedText $roadmapContractNorm `
+    -RequiredTokens $RoadmapRequiredTokens -ContractLabel 'roadmap'
+Test-GuardTokens -FileRef 'docs/roadmap_contract.md' -NormalizedText $roadmapContractNorm `
+    -RequiredTokens $SharedRequiredTokens -ContractLabel 'roadmap'
 
 # --- Report -------------------------------------------------------------------------
 if ($findings.Count -eq 0) {
-    Write-Host "OK - queue-contract path guard holds: all $inScope agent prompt(s) citing docs/queue_contract.md / Tasks_Queue_Format.md carry the resolution+ban guard (incl. the 'find / -maxdepth N' extension), and both normative docs (knowledge.md, docs/queue_contract.md) agree."
+    Write-Host "OK - queue/roadmap path guard holds: $queueInScope queue-citing and $roadmapInScope roadmap-citing agent prompt(s) carry exact resolution paths plus the anti-disk-walk guard; knowledge.md and both normative contracts agree."
     exit 0
 }
 

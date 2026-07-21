@@ -50,6 +50,12 @@ provider translations without changing that behaviour:
 для shell-команд (`git diff`, сборка/тесты), сам по себе он не переключает контекст
 инструментов чтения.
 
+**Резолвинг раннера `tools/*.ps1` (чекаут vs зеркало).** Наличие
+`tools/<script>.ps1` само по себе не доказывает checkout-раскладку. Checkout разрешён только
+когда корень одновременно содержит `agents/processor.md`, `generate-codex-agents.ps1` и
+`tools/sync-runtime.ps1`; иначе всегда используй зеркало и не исполняй одноимённый файл из
+target-local `tools/`, даже если он старый или gitignored.
+
 Если для подтверждения находки запускаешь сборку/тест, контейнируй её через резолвленный
 `tools/supervisor.ps1` (checkout) или `~/.claude/scripts/supervisor.ps1` (mirror): `run`
 с `--exe ... --args-json ...` либо с `--shell-command` только для заранее заданной оператором

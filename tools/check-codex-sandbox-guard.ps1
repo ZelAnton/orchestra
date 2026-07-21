@@ -49,8 +49,12 @@ $CoderCodex = Join-Path $AgentsDir 'coder_codex.md'
 $ReviewerCodex = Join-Path $AgentsDir 'reviewer_codex.md'
 $ConfigFile = Join-Path $RepoRoot 'config.example.md'
 $KnowledgeFile = Join-Path $RepoRoot 'knowledge.md'
+$RuntimeFile = Join-Path $RepoRoot 'tools/codex-runtime.ps1'
+$PreflightFile = Join-Path $RepoRoot 'tools/codex-preflight.ps1'
+$ProcessorFile = Join-Path $AgentsDir 'processor.md'
+$CuratorFile = Join-Path $AgentsDir 'knowledge_curator.md'
 
-foreach ($required in @($CoderCodex, $ReviewerCodex, $ConfigFile, $KnowledgeFile)) {
+foreach ($required in @($CoderCodex, $ReviewerCodex, $ConfigFile, $KnowledgeFile, $RuntimeFile, $PreflightFile, $ProcessorFile, $CuratorFile)) {
     if (-not (Test-Path -LiteralPath $required)) {
         Write-Error "Required file not found: $required"
         exit 2
@@ -170,6 +174,42 @@ foreach ($ref in $docs.Keys) {
     if ($text -notmatch 'CreateProcessAsUserW failed: 5') {
         Add-Finding -FileRef $ref -Check 'doc-sandbox-init' `
             -Detail "does not document the sandbox-init failure signature 'CreateProcessAsUserW failed: 5'"
+    }
+}
+
+# --- Worktree-specific Windows split-root regression --------------------------
+$worktreeSignature = 'cannot enforce split writable root sets directly'
+$runtimeText = Get-Content -LiteralPath $RuntimeFile -Raw -Encoding utf8
+$preflightText = Get-Content -LiteralPath $PreflightFile -Raw -Encoding utf8
+$processorText = Get-Content -LiteralPath $ProcessorFile -Raw -Encoding utf8
+$curatorText = Get-Content -LiteralPath $CuratorFile -Raw -Encoding utf8
+
+if ($runtimeText -notmatch 'sandbox-init-worktree' -or $runtimeText -notmatch [regex]::Escape($worktreeSignature)) {
+    Add-Finding -FileRef 'tools/codex-runtime.ps1' -Check 'worktree-sandbox-class' `
+        -Detail 'does not classify the exact unelevated split writable-root refusal separately'
+}
+if ($runtimeText -notmatch 'if \(\$Sandbox -eq ''read-only''\)[\s\S]{0,300}--add-dir') {
+    Add-Finding -FileRef 'tools/codex-runtime.ps1' -Check 'worktree-single-root' `
+        -Detail '--add-dir is not visibly restricted to read-only; workspace-write must remain a single writable root'
+}
+if ($runtimeText -notmatch 'WorkingDirectory') {
+    Add-Finding -FileRef 'tools/codex-runtime.ps1' -Check 'worktree-cwd' `
+        -Detail 'does not mechanically pin the Codex child working directory to the task worktree'
+}
+if ($preflightText -notmatch "PfOpt 'workspace'" -or $preflightText -notmatch 'downgrade-worktree' -or $preflightText -notmatch 'WorkingDirectory \$Workspace') {
+    Add-Finding -FileRef 'tools/codex-preflight.ps1' -Check 'exact-worktree-preflight' `
+        -Detail 'does not probe the exact task worktree and return the scoped downgrade decision'
+}
+foreach ($requiredText in @('--workspace', 'worktree_codex_route=canary', 'sandbox-init-worktree')) {
+    if ($processorText -notmatch [regex]::Escape($requiredText)) {
+        Add-Finding -FileRef 'agents/processor.md' -Check 'worktree-routing' `
+            -Detail "missing worktree-specific routing marker '$requiredText'"
+    }
+}
+foreach ($requiredText in @('INDEX — производный каталог', 'runtime:codex-worktree', 'два успешных canary')) {
+    if ($curatorText -notmatch [regex]::Escape($requiredText)) {
+        Add-Finding -FileRef 'agents/knowledge_curator.md' -Check 'worktree-pitfall-retention' `
+            -Detail "missing durable KB rule '$requiredText'"
     }
 }
 

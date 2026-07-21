@@ -13,30 +13,33 @@
   codes. Run from a target project's root.
 
   What it reports, in order:
-    1. Codex preflight        - codex binary presence/version, ~/.codex/auth.json,
+    1. Runtime resolution     - proves an Orchestra source checkout by three markers;
+                                otherwise selects the cc-sync mirror and warns about
+                                target-local same-named tools that must be ignored.
+    2. Codex preflight        - codex binary presence/version, ~/.codex/auth.json,
                                 and the auto-mode allow-rule for the runtime wrapper,
                                 in EITHER of its two layout forms (task T-114) -
                                 `pwsh -File tools/codex-runtime.ps1` (repo checkout) or
                                 `pwsh -File ~/.claude/scripts/codex-runtime.ps1` (cc-sync
                                 mirror) - (session grant OR permissions.allow), gated on
                                 whether Codex routing is on.
-    2. Effective CODEX_*      - the resolved CODEX_* values (.work/config.md, with the
+    3. Effective CODEX_*      - the resolved CODEX_* values (.work/config.md, with the
                                 documented config-then-env fallback for CODEX_CODER/
                                 CODEX_REVIEWER).
-    3. Codex key validation   - fail-closed classification of the six value-constrained
+    4. Codex key validation   - fail-closed classification of the six value-constrained
                                 Codex keys against their allowed sets ($codexAllowed).
-    4. KB status              - the resolved KB mode (.work/config.md, with the same
+    5. KB status              - the resolved KB mode (.work/config.md, with the same
                                 documented config-then-env fallback, default `on`) and
                                 per-shard entry counts.
-    5. Windows sandbox        - Windows-only: the [windows] sandbox profile + approval
+    6. Windows sandbox        - Windows-only: the [windows] sandbox profile + approval
                                 policy from ~/.codex/config.toml vs this process's
                                 elevation. N/A on POSIX (the concept does not exist there).
-    6. Task queue & config    - Tasks_Queue.md header format + T-NNN uniqueness, and
+    7. Task queue & config    - Tasks_Queue.md header format + T-NNN uniqueness, and
                                 .work/config.md unknown/mistyped keys ($known) + SMOKE_CMD.
-    7. Lock & worktrees       - structured orchestrator lease liveness (via the
+    8. Lock & worktrees       - structured orchestrator lease liveness (via the
                                 checkout/mirror state-tx.ps1), legacy lock heuristic,
                                 and orphaned worktrees.
-    8. Main branch & mirror   - main-branch determinability (jj-then-git) and, from an
+    9. Main branch & mirror   - main-branch determinability (jj-then-git) and, from an
                                 actual checkout, ~/.claude/agents mirror freshness.
 
   Intentionally ASCII-only source: this file is invoked via pwsh first and Windows
@@ -103,6 +106,36 @@ $script:EmDash     = [char]0x2014
 
 $script:WorkDir    = Join-Path $ProjectRoot '.work'
 $script:ConfigFile = Join-Path $script:WorkDir 'config.md'
+
+# A target project's tools/ directory is not an Orchestra checkout identity. Old cc-config
+# versions could leave gitignored copies there, and project-native tools may use the same generic
+# directory name. Only the complete source-tree marker set authorizes relative tools/*.ps1.
+function Test-OrchestraSourceCheckout {
+    param([string]$Root)
+    if ([string]::IsNullOrWhiteSpace($Root)) { return $false }
+    return (
+        (Test-Path -LiteralPath (Join-Path $Root 'agents/processor.md') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $Root 'generate-codex-agents.ps1') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $Root 'tools/sync-runtime.ps1') -PathType Leaf)
+    )
+}
+
+Write-Host '== Orchestra runtime resolution =='
+if (Test-OrchestraSourceCheckout $ProjectRoot) {
+    Write-Host 'OK   target is the Orchestra source checkout (all identity markers present); relative tools/*.ps1 is authoritative'
+} else {
+    $shadowNames = @('policy.ps1', 'policy-schema.ps1', 'queue-tx.ps1', 'state-tx.ps1',
+        'outbox.ps1', 'redaction.ps1', 'supervisor.ps1', 'codex-runtime.ps1')
+    $shadowed = @($shadowNames | Where-Object {
+        Test-Path -LiteralPath (Join-Path (Join-Path $ProjectRoot 'tools') $_) -PathType Leaf
+    })
+    if ($shadowed.Count -gt 0) {
+        Write-Host ('WARN target-local tools/ contains Orchestra-named runner(s) that are ignored because this is not the Orchestra source checkout: ' + ($shadowed -join ', '))
+        Write-Host '  agents must use ~/.claude/scripts/<script>.ps1; run cc-sync from the Orchestra checkout to refresh that mirror'
+    } else {
+        Write-Host 'OK   target is not the Orchestra source checkout; use the cc-sync mirror ~/.claude/scripts/<script>.ps1'
+    }
+}
 
 # state-tx.ps1 is shipped in both runtime layouts: tools/ in an Orchestra checkout,
 # or ~/.claude/scripts beside this doctor after cc-sync. Resolve those canonical
@@ -409,15 +442,11 @@ if (-not $script:OnWindows) {
         }
     }
     if (-not $sandboxVal) {
-        Write-Host 'WARN windows sandbox profile: [windows] sandbox not set, or config.toml missing/unreadable at ~/.codex/config.toml -> cannot verify Windows sandbox isolation; set sandbox = unelevated there to confirm restricted-token isolation applies (elevated additionally requires this launcher process itself to be elevated - not how Orchestra normally runs)'
+        Write-Host 'WARN windows sandbox profile: [windows] sandbox not set, or config.toml missing/unreadable at ~/.codex/config.toml -> Codex chooses its platform default. Current Codex guidance prefers sandbox = elevated after the one-time administrator-approved setup; use unelevated only as fallback. Orchestra still pins approval_policy=never and probes the exact task worktree fail-closed.'
     } elseif ($sandboxVal -eq 'unelevated') {
-        Write-Host 'OK   windows sandbox profile: unelevated - matches this (unelevated) launcher process; confirmed to isolate, writes outside the workspace are rejected'
+        Write-Host 'WARN windows sandbox profile: unelevated - supported fallback, but this restricted-token implementation can reject nested task-worktree split writable roots. Orchestra pins coder cwd/-C to one root, avoids redundant workspace-write --add-dir, probes the exact task worktree, and routes only affected coder work to Claude on ENV_LIMIT/sandbox-init-worktree. Current Codex guidance prefers sandbox = elevated after its one-time administrator-approved setup.'
     } elseif ($sandboxVal -eq 'elevated') {
-        if ($isElevated) {
-            Write-Host 'WARN windows sandbox profile: elevated, and this process is currently elevated - the elevated spawn may succeed here, but Orchestra launchers normally run unelevated and this cannot be fully confirmed by this check; prefer sandbox = unelevated, confirmed to isolate regardless of elevation'
-        } else {
-            Write-Host 'FAIL windows sandbox profile: elevated, but this launcher process is NOT elevated -> the elevated sandbox spawn fails (CreateProcessAsUserW: Access is denied, Windows error 5). Raw codex exec (or codex run outside Orchestra) under a default approval_policy would then silently rerun the command WITHOUT any sandbox: full network and filesystem access, no isolation (confirmed, not a one-off). Orchestra itself does NOT run unsandboxed here: its coder_codex/reviewer_codex adapters pin -c approval_policy=never on every call, so codex returns the sandbox-init failure instead of running the command, the adapter raises CODEX_FAILED - ENV_LIMIT/sandbox-init before making any edits (coder_codex leaves the worktree unchanged, reviewer_codex leaves review.md untouched), and the processor falls back to the equivalent Claude executor. So the pipeline stays safe, but codex sandbox isolation is not in effect and every such call detours to Claude. Restore real isolation in ~/.codex/config.toml (pick one): set sandbox = unelevated (confirmed to isolate, so codex runs sandboxed instead of escalating to Claude); or set approval_policy = never (matches what the adapters already pin per call, and also closes the silent-unsandboxed fallback for raw codex exec outside Orchestra). Do not try to fix this by running the launcher elevated.'
-        }
+        Write-Host ('OK   windows sandbox profile: elevated - current preferred native Windows implementation is configured (launcher elevated=' + $isElevated.ToString().ToLowerInvariant() + '); actual setup/spawn remains verified by Codex and Orchestra preflight, with approval_policy=never fail-closed fallback')
     } else {
         Write-Host ('WARN windows sandbox profile: unrecognized [windows] sandbox value (' + $sandboxVal + ') in ~/.codex/config.toml -> cannot verify isolation; expected unelevated or elevated')
     }
@@ -468,18 +497,33 @@ if (Test-Path -LiteralPath $qf) {
     Write-Host 'OK   .work/Tasks_Queue.md not found (nothing to validate)'
 }
 
-$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'SMOKE_CMD', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC', 'REVIEWER_TIERING', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
+$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC', 'REVIEWER_TIERING', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
 if (Test-Path -LiteralPath $script:ConfigFile) {
     $hasSmoke = $false
+    $verificationMode = 'auto'
+    $verificationCommands = $null
+    $verificationCommandsValid = $true
     $unknown = New-Object System.Collections.ArrayList
     foreach ($line in (Get-ConfigLines)) {
         $t = $line.Trim()
         if (-not $t -or $t.StartsWith('#')) { continue }
         if ($t -match '^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') {
             $k = $Matches[1]; $v = $Matches[2]
-            if ($v) { $v = ($v -replace '#.*$', '').Trim() }
+            if ($v) {
+                $v = $v.Trim()
+                if (-not $v.StartsWith('[')) { $v = ($v -replace '#.*$', '').Trim() }
+            }
             if ($known -notcontains $k) { [void]$unknown.Add($k) }
             if ($k -eq 'SMOKE_CMD' -and $v) { $hasSmoke = $true }
+            if ($k -eq 'VERIFICATION_MODE' -and $v) { $verificationMode = $v }
+            if ($k -eq 'VERIFICATION_COMMANDS' -and $v) {
+                try {
+                    $decoded = $v | ConvertFrom-Json
+                    if ($decoded -isnot [array]) { $decoded = @($decoded) }
+                    $verificationCommands = @($decoded)
+                    if ($verificationCommands.Count -eq 0 -or @($verificationCommands | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) { $verificationCommandsValid = $false }
+                } catch { $verificationCommandsValid = $false }
+            }
         }
     }
     if ($unknown.Count -eq 0) {
@@ -487,13 +531,21 @@ if (Test-Path -LiteralPath $script:ConfigFile) {
     } else {
         Write-Host ('FAIL .work/config.md: unknown/possibly mistyped key(s): ' + ($unknown -join ', '))
     }
-    if ($hasSmoke) {
-        Write-Host 'OK   SMOKE_CMD is configured'
+    if ($verificationMode -eq 'disabled') {
+        Write-Host 'OK   verification profile is explicitly disabled by operator (VERIFICATION_MODE=disabled)'
+    } elseif (-not $verificationCommandsValid) {
+        Write-Host 'FAIL VERIFICATION_COMMANDS must be a non-empty JSON array of non-empty command strings'
+    } elseif ($null -ne $verificationCommands -and $verificationCommands.Count -gt 0) {
+        Write-Host ("OK   verification profile is configured: {0} command(s)" -f $verificationCommands.Count)
+    } elseif ($hasSmoke) {
+        Write-Host 'OK   verification profile uses backward-compatible SMOKE_CMD fallback (1 command)'
+    } elseif ($verificationMode -eq 'required') {
+        Write-Host 'FAIL verification profile is required but neither VERIFICATION_COMMANDS nor SMOKE_CMD is configured'
     } else {
-        Write-Host 'WARN SMOKE_CMD is not set - coder/merger self-checks will skip build/test verification'
+        Write-Host 'WARN verification profile is missing - executable changes will be blocked before push; configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or explicitly set VERIFICATION_MODE: disabled'
     }
 } else {
-    Write-Host 'WARN .work/config.md not found - defaults apply; SMOKE_CMD is not configured (self-checks skip build/test verification)'
+    Write-Host 'WARN .work/config.md not found - verification profile is missing; executable changes will be blocked before push'
 }
 
 # =============================================================================

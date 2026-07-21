@@ -17,11 +17,20 @@ set -u
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 RT="$SCRIPT_DIR/../tools/sync-runtime.ps1"
 
-# Checkout vs mirror: tools/sync-runtime.ps1 only exists in an actual repo checkout.
-# Run from the launchers-only ~/.claude/scripts mirror there is nothing to sync FROM,
-# so report a deliberate no-op instead of pretending work happened.
+# An installed cc-sync is normally resolved from ~/.claude/scripts.  When that PATH
+# command is run with cwd at the Orchestra checkout, recover the checkout runtime
+# from cwd.  The three identity markers prevent a target project's stale tools/
+# directory from masquerading as Orchestra.
+if [ ! -f "$RT" ] &&
+   [ -f "$PWD/agents/processor.md" ] &&
+   [ -f "$PWD/generate-codex-agents.ps1" ] &&
+   [ -f "$PWD/tools/sync-runtime.ps1" ]; then
+  RT="$PWD/tools/sync-runtime.ps1"
+fi
+
+# Outside an Orchestra checkout a mirror invocation still has no source to sync.
 if [ ! -f "$RT" ]; then
-  echo "Skipping sync - not running from a repository checkout (mirror detected); run cc-sync from the repo checkout instead."
+  echo "Skipping sync - no Orchestra checkout found beside the launcher or in the current directory; cd to the Orchestra checkout and run cc-sync again."
   exit 0
 fi
 

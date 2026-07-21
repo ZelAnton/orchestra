@@ -43,6 +43,7 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 $script:Runtime = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\codex-runtime.ps1')).Path
+$script:Preflight = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\codex-preflight.ps1')).Path
 $script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
@@ -67,6 +68,7 @@ function New-TempDir {
 function Invoke-Runtime {
     param(
         [Parameter(Mandatory)][string[]]$RuntimeArgs,
+        [string]$ScriptPath = $script:Runtime,
         [string]$StdinText = $null,
         [hashtable]$EnvVars = @{},
         # A watchdog (ms): 0 = wait indefinitely (default, unchanged for existing callers).
@@ -85,7 +87,7 @@ function Invoke-Runtime {
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
     $psi.StandardInputEncoding = $script:Utf8
-    foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Runtime) + $RuntimeArgs)) {
+    foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $RuntimeArgs)) {
         $psi.ArgumentList.Add($a)
     }
     foreach ($k in $EnvVars.Keys) { $psi.EnvironmentVariables[$k] = [string]$EnvVars[$k] }
@@ -130,6 +132,16 @@ if ($argsFile) {
 $stdin = [Console]::In.ReadToEnd()
 if ($env:FAKE_CODEX_STDIN_FILE) {
     [System.IO.File]::WriteAllText($env:FAKE_CODEX_STDIN_FILE, $stdin, (New-Object System.Text.UTF8Encoding($false)))
+}
+if ($env:FAKE_CODEX_ENV_FILE) {
+    $cacheEnv = [ordered]@{}
+    foreach ($name in @('TEMP','TMP','UV_CACHE_DIR','PIP_CACHE_DIR','NPM_CONFIG_CACHE','XDG_CACHE_HOME','PYTHONPYCACHEPREFIX')) {
+        $cacheEnv[$name] = [Environment]::GetEnvironmentVariable($name)
+    }
+    [System.IO.File]::WriteAllText($env:FAKE_CODEX_ENV_FILE, ($cacheEnv | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
+}
+if ($env:FAKE_CODEX_CWD_FILE) {
+    [System.IO.File]::WriteAllText($env:FAKE_CODEX_CWD_FILE, ([Environment]::CurrentDirectory), (New-Object System.Text.UTF8Encoding($false)))
 }
 $oIdx = [array]::IndexOf($args, '-o')
 if ($oIdx -ge 0 -and ($oIdx + 1) -lt $args.Count -and $env:FAKE_CODEX_OUT_CONTENT) {
@@ -177,6 +189,8 @@ function Get-ArgsCaptured {
     $promptFile = New-TempFile
     $argsCap = New-TempFile
     $stdinCap = New-TempFile
+    $envCap = New-TempFile
+    $cwdCap = New-TempFile
     [System.IO.File]::WriteAllText($promptFile, "Implement the thing.`nDo it well.", $script:Utf8)
 
     $r = Invoke-Runtime -RuntimeArgs @(
@@ -185,7 +199,7 @@ function Get-ArgsCaptured {
         '--out-file', $outFile, '--stderr-file', $errFile, '--result-file', $resultFile,
         '--prompt-file', $promptFile
     ) -EnvVars @{
-        FAKE_CODEX_ARGS_FILE = $argsCap; FAKE_CODEX_STDIN_FILE = $stdinCap
+        FAKE_CODEX_ARGS_FILE = $argsCap; FAKE_CODEX_STDIN_FILE = $stdinCap; FAKE_CODEX_ENV_FILE = $envCap; FAKE_CODEX_CWD_FILE = $cwdCap
         FAKE_CODEX_OUT_CONTENT = 'Changed foo.'; FAKE_CODEX_STDOUT = 'progress...'; FAKE_CODEX_EXIT = '0'
     }
 
@@ -201,12 +215,21 @@ function Get-ArgsCaptured {
     Assert-True ($cap.Count -ge 2 -and $cap[0] -eq 'exec') 'success: codex invoked as `exec ...`'
     Assert-True ($cap -contains '--sandbox') 'success: argv has --sandbox'
     Assert-True ($cap -contains 'workspace-write') 'success: argv has sandbox value'
+    $cacheRoot = Join-Path $wt '.work/codex-cache'
+    $addDirIndex = [array]::IndexOf($cap, '--add-dir')
+    Assert-Equal -1 $addDirIndex 'success: workspace-write does not add a redundant nested writable root'
     Assert-True ($cap -contains 'approval_policy=never') 'success: argv pins fail-closed approval policy'
     Assert-True ($cap -contains 'sandbox_workspace_write.network_access=true') 'success: network=on adds the network override'
     Assert-True ($cap -contains 'model_reasoning_effort=medium') 'success: argv carries reasoning effort'
     Assert-True ($cap[$cap.Count - 1] -eq '-') 'success: prompt marker `-` is the final argv element'
     $stdinSeen = if (Test-Path -LiteralPath $stdinCap) { [System.IO.File]::ReadAllText($stdinCap) } else { '' }
     Assert-True ($stdinSeen -like '*Implement the thing.*Do it well.*') 'success: prompt delivered to codex on stdin'
+    $cacheEnv = (Get-Content -LiteralPath $envCap -Raw -Encoding utf8) | ConvertFrom-Json
+    Assert-Equal (Join-Path $cacheRoot 'uv') $cacheEnv.UV_CACHE_DIR 'success: uv cache redirected inside ignored worktree .work'
+    Assert-Equal (Join-Path $cacheRoot 'tmp') $cacheEnv.TEMP 'success: temp redirected inside ignored worktree .work'
+    Assert-True (Test-Path -LiteralPath $cacheEnv.UV_CACHE_DIR -PathType Container) 'success: redirected cache is created before codex starts'
+    $cwdSeen = Get-Content -LiteralPath $cwdCap -Raw -Encoding utf8
+    Assert-Equal ([IO.Path]::GetFullPath($wt).TrimEnd('\','/')) ([IO.Path]::GetFullPath($cwdSeen).TrimEnd('\','/')) 'success: runtime process cwd is pinned to the assigned worktree'
     $outSeen = Get-Content -LiteralPath $outFile -Raw -Encoding utf8 -ErrorAction SilentlyContinue
     Assert-True ($outSeen -like '*Changed foo.*') 'success: codex -o out-file captured'
 }.Invoke()
@@ -216,7 +239,8 @@ function Get-ArgsCaptured {
 # =============================================================================
 {
     $fake = New-FakeCodex
-    $hostile = '/tmp/we ird; rm -rf / && echo pwned'
+    $hostile = Join-Path (New-TempDir) 'we ird; rm -rf && echo pwned'
+    New-Item -ItemType Directory -Path $hostile | Out-Null
     $argsCap = New-TempFile
     $r = Invoke-Runtime -RuntimeArgs @(
         'run', '--codex-cmd', $fake, '--worktree', $hostile, '--sandbox', 'read-only',
@@ -228,6 +252,9 @@ function Get-ArgsCaptured {
     if ($cIdx -ge 0 -and ($cIdx + 1) -lt $cap.Count) {
         Assert-Equal $hostile $cap[$cIdx + 1] 'injection: hostile worktree preserved as exactly one argv element'
     }
+    $cacheRoot = Join-Path $hostile '.work/codex-cache'
+    $addDirIndex = [array]::IndexOf($cap, '--add-dir')
+    Assert-True ($addDirIndex -ge 0 -and $cap[$addDirIndex + 1] -eq $cacheRoot) 'read-only: grants only the narrow worktree-local cache exception'
 }.Invoke()
 
 # =============================================================================
@@ -316,6 +343,42 @@ function Get-ArgsCaptured {
     $r3 = Invoke-Runtime -RuntimeArgs @('classify', '--rc', '1', '--text', 'fatal: Unable to create /repo/.git/index.lock: Permission denied')
     Assert-Equal 'vcs-write' $r3.Json.class 'classify: index.lock permission denied -> vcs-write'
     Assert-Equal $false $r3.Json.broker 'classify: vcs-write is not broker-eligible'
+
+    $r4 = Invoke-Runtime -RuntimeArgs @('classify', '--rc', '1', '--text', 'windows unelevated restricted-token sandbox cannot enforce split writable root sets directly')
+    Assert-Equal 'sandbox-init-worktree' $r4.Json.class 'classify: split writable-root refusal has a worktree-specific class'
+    Assert-Equal $true $r4.Json.envLimit 'classify: worktree-specific sandbox-init is an env limit'
+}.Invoke()
+
+# =============================================================================
+# 7a. Exact worktree preflight: cwd fidelity and split-root routing class
+# =============================================================================
+{
+    $fake = New-FakeCodex
+    $wt = New-TempDir
+    $cwdCap = New-TempFile
+    $r = Invoke-Runtime -ScriptPath $script:Preflight -RuntimeArgs @(
+        '--codex-cmd', $fake, '--workspace', $wt, '--timeout-sec', '10'
+    ) -EnvVars @{
+        FAKE_CODEX_CWD_FILE = $cwdCap
+        FAKE_CODEX_STDERR = 'windows unelevated restricted-token sandbox cannot enforce split writable root sets directly'
+        FAKE_CODEX_EXIT = '1'
+    }
+    Assert-Equal 3 $r.ExitCode 'worktree preflight: split-root refusal returns routing exit 3'
+    Assert-True ($null -ne $r.Json) 'worktree preflight: emits JSON'
+    if ($r.Json) {
+        Assert-Equal 'sandbox-init-worktree' $r.Json.class 'worktree preflight: preserves specific failure class'
+        Assert-Equal 'downgrade-worktree' $r.Json.decision 'worktree preflight: downgrades only worktree-scoped Codex coder routing'
+        Assert-Equal 'worktree' $r.Json.scope 'worktree preflight: records worktree scope'
+        Assert-Equal $false $r.Json.hostLimit 'worktree preflight: does not poison reviewer/main-tree routing'
+    }
+    $cwdSeen = Get-Content -LiteralPath $cwdCap -Raw -Encoding utf8
+    Assert-Equal ([IO.Path]::GetFullPath($wt).TrimEnd('\','/')) ([IO.Path]::GetFullPath($cwdSeen).TrimEnd('\','/')) 'worktree preflight: sandbox child cwd is the exact task worktree'
+
+    $clean = Invoke-Runtime -ScriptPath $script:Preflight -RuntimeArgs @(
+        '--codex-cmd', $fake, '--workspace', $wt, '--timeout-sec', '10'
+    ) -EnvVars @{ FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $clean.ExitCode 'worktree preflight: clean exact-root probe keeps routing'
+    Assert-Equal 'unchanged' $clean.Json.decision 'worktree preflight: clean probe decision unchanged'
 }.Invoke()
 
 # =============================================================================

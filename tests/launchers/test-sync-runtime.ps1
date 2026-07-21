@@ -75,6 +75,7 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'tools\codex-runtime.ps1') "codex-rt-v1`n"
     Write-File (Join-Path $repo 'tools\state-tx.ps1') "state-tx-v1`n"
     Write-File (Join-Path $repo 'tools\queue-tx.ps1') "queue-tx-v1`n"
+    Write-File (Join-Path $repo 'tools\verification.ps1') "verification-v1`n"
     Write-File (Join-Path $repo 'tools\sync-runtime.ps1') "sync-rt-SELF`n"
     Write-File (Join-Path $repo 'config.example.md') "config-v1`n"
     Write-File (Join-Path $repo 'constraints.example.md') "constraints-v1`n"
@@ -131,6 +132,7 @@ Assert-FileText (Join-Path $dest 'scripts\codex-runtime.ps1') "codex-rt-v1`n" 'c
 # transactional/orchestration runners the agents call directly travel with the mirror too.
 Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'clean: state-tx.ps1 mirrored (whole tools/ folder - T-115)'
 Assert-FileText (Join-Path $dest 'scripts\queue-tx.ps1') "queue-tx-v1`n" 'clean: queue-tx.ps1 mirrored (whole tools/ folder - T-115)'
+Assert-FileText (Join-Path $dest 'scripts\verification.ps1') "verification-v1`n" 'clean: verification.ps1 mirrored for SHA-bound pre-push gates (T-270)'
 # ...but cc-sync's own engine is the sole exclusion (dead weight in a mirror).
 Assert-True (-not (Test-Path (Join-Path $dest 'scripts\sync-runtime.ps1'))) 'clean: sync-runtime.ps1 NOT mirrored (cc-sync engine is the sole tools/*.ps1 exclusion)'
 $codexDest = Join-Path $dest '.codex'
@@ -147,6 +149,7 @@ if (Test-Path -LiteralPath $manifestPath) {
     Assert-True (@($mf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: manifest lists scripts/doctor-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/codex-runtime.ps1') 'clean: manifest lists scripts/codex-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/state-tx.ps1') 'clean: manifest lists scripts/state-tx.ps1 (T-115)'
+    Assert-True (@($mf.managed) -contains 'scripts/verification.ps1') 'clean: manifest lists scripts/verification.ps1 (T-270)'
     Assert-True (@($mf.managed) -contains 'scripts/codex-processor.md') 'clean: manifest lists Codex processor prompt'
     Assert-True (-not (@($mf.managed) -contains 'scripts/sync-runtime.ps1')) 'clean: manifest excludes cc-sync own engine'
     Assert-True (-not (@($mf.managed) -contains 'agents/coder.template.md')) 'clean: manifest excludes template'

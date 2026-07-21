@@ -173,6 +173,8 @@ jobs:
           }
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "./tests/test-queue-contract-path-guard.ps1"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check reviewer_codex clean-pass / SUMMARY-R gate contract
         # tests/test-reviewer-codex-gate.ps1 (T-074): a reference implementation of the
@@ -326,6 +328,20 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $p = "./tests/test-supervisor.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Check SHA-bound pre-publication verification profiles
+        # tests/test-verification.ps1 (T-270): real supervisor-backed commands plus
+        # missing/disabled/docs-only and stale-head crash-recovery decisions.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-verification.ps1"
           if (-not (Test-Path $p)) {
             Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
             exit 1

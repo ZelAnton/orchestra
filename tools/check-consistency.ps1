@@ -125,8 +125,8 @@ if ($defaultKeys.Count -eq 0) {
 # session-grant signal (CC_CODEX_EXEC_GRANT, exported by cc-processor/cc-resume and read by
 # the Phase 1.1 gate / cc-doctor as an environment variable, not a .work/config.md key -
 # task T-071), the coder_codex/reviewer_codex local shell variable holding the resolved
-# runtime-wrapper path (CODEX_RT, set by the adapter itself from its own dual-layout
-# resolution - checkout vs cc-sync mirror - task T-114; not a .work/config.md key), plan/doc
+# runtime-wrapper path (CODEX_RT) and processor-owned layout handoff (RUNTIME_LAYOUT;
+# checkout vs cc-sync mirror; neither is a .work/config.md key), plan/doc
 # filenames referenced in caps, git-config-via-environment variable names and a Windows
 # schannel error code quoted verbatim inside the codex adapter's network-override snippet,
 # and the naming-convention term itself. `NEED_IMAGE_VIEW` (T-222) is the codex->adapter
@@ -141,7 +141,7 @@ $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CC_CODEX_EXEC_GRANT', 'CODEX_FAILED', 'CODEX_RT', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
         'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NEED_IMAGE_VIEW', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
-        'ORCHESTRA_AUTO_APPROVE',
+        'ORCHESTRA_AUTO_APPROVE', 'RUNTIME_LAYOUT',
         'OTHER_FAILURE', 'PROMPT_RESUME', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
         'THREAD_ID', 'UPPER_SNAKE_CASE'
     ), [StringComparer]::Ordinal)
@@ -490,6 +490,31 @@ foreach ($name in @('cc-processor.cmd', 'cc-resume.cmd', 'cc-processor.sh', 'cc-
             Add-Finding -FileRef "launchers/$name" -Check 'codex-foreground' `
                 -Detail "missing $key; Claude may auto-background a long runtime call and re-prompt"
         }
+    }
+}
+
+# =============================================================================
+# Class 7 — committed-base task claims + reviewed-tip merge guard
+# =============================================================================
+
+foreach ($name in @('planner.md', 'queue_builder.md', 'thinker.md')) {
+    $text = Get-Content -LiteralPath (Join-Path $AgentsDir $name) -Raw -Encoding utf8
+    $normalized = $text -replace '\s+', ' '
+    foreach ($marker in @('committed', 'git show <BASE>:<path>', 'jj file show -r <BASE> <path>')) {
+        if ($normalized.IndexOf($marker, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            Add-Finding -FileRef "agents/$name" -Check 'committed-base-evidence' `
+                -Detail "missing committed-base task-claim marker '$marker'; live WIP can be mistaken for code available to future worktrees"
+        }
+    }
+}
+foreach ($marker in @('guard-revision', 'Ревью-SHA', '--require-nonempty')) {
+    if ($mergerText.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
+        Add-Finding -FileRef 'agents/merger.md' -Check 'reviewed-tip-guard' `
+            -Detail "missing mechanical pre-merge marker '$marker'"
+    }
+    if ($processorText.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
+        Add-Finding -FileRef 'agents/processor.md' -Check 'reviewed-tip-guard' `
+            -Detail "processor does not require merger's reviewed-tip marker '$marker'"
     }
 }
 

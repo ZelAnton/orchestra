@@ -35,6 +35,11 @@
                          directory, and checks the task/batch id shape and (optionally) the
                          VCS relationship. Exit 6 on rejection.
 
+      guard-revision   - resolve a task branch/bookmark to exactly one full commit id and
+                         require it to equal the reviewed tip recorded in task.md. Optional
+                         --require-nonempty also rejects an empty task diff from --base.
+                         Exit 6 on ambiguity, drift, or an empty claimed implementation.
+
       check-paths      - reconcile the ACTUAL changed paths (e.g. `git diff --name-only`)
                          against the denylist AFTER an executor returns and before commit /
                          merge / publication. Exit 7 with the offending path(s) if any hit
@@ -102,6 +107,7 @@
     pwsh -File tools/policy.ps1 validate-config --file .work/config.md
     pwsh -File tools/policy.ps1 migrate --file .work/config.md --out .work/config.migrated.md
     pwsh -File tools/policy.ps1 guard-path --root /abs --work /abs/.work --object worktree --task T-045 --path /abs/.work/worktrees/T-045
+    pwsh -File tools/policy.ps1 guard-revision --root /abs --vcs jj --ref task/T-045 --expected <full-commit-id> --base main --require-nonempty
     pwsh -File tools/policy.ps1 check-paths --root /abs --work /abs/.work --paths-from changed.txt
     pwsh -File tools/policy.ps1 check-publish --work /abs/.work --branch main --remote origin
     pwsh -File tools/policy.ps1 check-gate --work /abs/.work --sha <fullsha> --checks-from runs.jsonl --elapsed-sec 120 --json
@@ -124,7 +130,7 @@ $script:ErrPrefix = 'PLCERR'  # coded-error tag decoded by the catch dispatcher
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...  (repeatable keys collect)
 # --------------------------------------------------------------------------
-$parsed = Parse-CliArgs $args -BoolFlags @('json', 'quiet') -RepeatKeys @('path')
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'quiet', 'require-nonempty') -RepeatKeys @('path')
 $Command = $parsed.Command
 $opts = $parsed.Opts
 
@@ -472,6 +478,55 @@ function Split-RenamePath {
         if ($parts.Count -eq 2) { return , @($parts[0].Trim(), $parts[1].Trim()) }
     }
     return , @($Line)
+}
+
+function Cmd-GuardRevision {
+    $root = Require-Opt 'root'
+    $vcs = (Require-Opt 'vcs').ToLowerInvariant()
+    $ref = Require-Opt 'ref'
+    $expected = (Require-Opt 'expected').Trim().ToLowerInvariant()
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { Fail 2 "--root '$root' is not an existing directory" }
+    $root = (Resolve-Path -LiteralPath $root).Path
+    if ($vcs -notin @('git', 'jj')) { Fail 2 "invalid --vcs '$vcs' (allowed: git | jj)" }
+    if ($expected -notmatch '^[0-9a-f]{40,64}$') { Fail 2 "--expected must be a full 40-64 digit hexadecimal commit id" }
+
+    $raw = @()
+    if ($vcs -eq 'jj') {
+        if (-not (Get-Command jj -ErrorAction SilentlyContinue)) { Fail 6 'jj is not available' }
+        $raw = @(& jj -R $root --no-pager log -r $ref --no-graph -T 'commit_id ++ "\n"' 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail 6 "jj ref '$ref' is missing or ambiguous" }
+    } else {
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail 6 'git is not available' }
+        $raw = @(& git -C $root rev-parse --verify "$ref^{commit}" 2>$null)
+        if ($LASTEXITCODE -ne 0) { Fail 6 "git ref '$ref' is missing or ambiguous" }
+    }
+    $ids = @($raw | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
+        Where-Object { $_ -match '^[0-9a-f]{40,64}$' } | Sort-Object -Unique)
+    if ($ids.Count -ne 1) { Fail 6 "ref '$ref' resolved to $($ids.Count) commit ids; expected exactly one" }
+    $actual = $ids[0]
+    if (-not [string]::Equals($actual, $expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+        Fail 6 "reviewed-tip mismatch for '$ref': task.md records '$expected', current ref resolves to '$actual'"
+    }
+
+    $nonempty = $null
+    if ([bool](Opt 'require-nonempty' $false)) {
+        $base = Require-Opt 'base'
+        if ($vcs -eq 'jj') {
+            $changed = @(& jj -R $root --no-pager diff --from $base --to $actual --name-only 2>$null)
+            if ($LASTEXITCODE -ne 0) { Fail 6 "cannot compare jj base '$base' to '$actual'" }
+            $nonempty = (@($changed | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
+        } else {
+            & git -C $root diff --quiet $base $actual -- 2>$null
+            $diffRc = $LASTEXITCODE
+            if ($diffRc -notin @(0, 1)) { Fail 6 "cannot compare git base '$base' to '$actual'" }
+            $nonempty = ($diffRc -eq 1)
+        }
+        if (-not $nonempty) { Fail 6 "ref '$ref' has an empty diff from base '$base'; refusing to merge a claimed implementation" }
+    }
+
+    $result = [pscustomobject]@{ ok = $true; vcs = $vcs; ref = $ref; commit_id = $actual; reviewed_tip = $expected; nonempty = $nonempty }
+    if ([bool](Opt 'json' $false)) { Write-Output ($result | ConvertTo-Json -Compress) }
+    else { Say "OK   reviewed tip '$ref' = $actual" }
 }
 
 function Cmd-CheckPaths {
@@ -1050,6 +1105,7 @@ try {
         'validate-policy'  { Cmd-ValidatePolicy }
         'migrate'          { Cmd-Migrate }
         'guard-path'       { Cmd-GuardPath }
+        'guard-revision'   { Cmd-GuardRevision }
         'check-paths'      { Cmd-CheckPaths }
         'check-publish'    { Cmd-CheckPublish }
         'check-gate'       { Cmd-CheckGate }
@@ -1058,7 +1114,7 @@ try {
         'approval-reject'  { Cmd-ApprovalDecide 'reject' }
         'approval-status'  { Cmd-ApprovalStatus }
         default {
-            Fail 2 "unknown command '$Command'. Valid: schema, validate-config, validate-policy, migrate, guard-path, check-paths, check-publish, check-gate, approval-request, approval-approve, approval-reject, approval-status"
+            Fail 2 "unknown command '$Command'. Valid: schema, validate-config, validate-policy, migrate, guard-path, guard-revision, check-paths, check-publish, check-gate, approval-request, approval-approve, approval-reject, approval-status"
         }
     }
 } catch {

@@ -229,10 +229,13 @@ append-only-каталог `.work/queue_inbox/rejected/` парой файлов
 которым в этом документе вызываются раннеры (`tools/queue-tx.ps1` здесь, `tools/state-tx.ps1`
 §17, `tools/outbox.ps1` §19, `tools/policy.ps1`/`tools/redaction.ps1` §18 и т.д.), существует
 в **двух** раскладках, и каждая роль резолвит его по единому правилу: (1) **чекаут orchestra**
-— файл существует относительно корня чекаута → используй **буквально** относительный путь
+— наличие `tools/<script>.ps1` само по себе не доказывает checkout-раскладку: корень обязан одновременно содержать
+`agents/processor.md`, `generate-codex-agents.ps1` и `tools/sync-runtime.ps1` → только тогда
+используй **буквально** относительный путь
 `tools/<script>.ps1` (совпадает с предвыданным Bash-грантом launcher'ов/`cc-config`, не
-переписывай в абсолютный); (2) **зеркало `cc-sync`** (проект без своего `tools/` — mirror-only
-целевой проект) → `tools/sync-runtime.ps1` зеркалирует всю папку `tools/*.ps1` в
+переписывай в абсолютный); (2) **зеркало `cc-sync`** (любой проект без этих трёх identity-
+маркеров, даже если в нём есть собственная/старая/gitignored папка `tools/`) → target-local
+одноимённые файлы не исполняй; `tools/sync-runtime.ps1` зеркалирует всю папку `tools/*.ps1` в
 `~/.claude/scripts` (T-115), поэтому раннер лежит в `~/.claude/scripts/<script>.ps1` — используй
 **буквально** этот путь с тильдой прямо в тексте команды: **тильда раскрывается shell только
 как литерал в начале слова текста команды, не через переменную или подстановку** (`~` из
@@ -488,6 +491,24 @@ in-progress | failed`; `published → cleaned`; `failed → in-progress | cleane
 4. `cohort=closed` ⟹ новый приём не ведётся; `integration≠none` ⟹ приём уже `closed`.
 5. Аренда владельца (`.work/orchestrator.lock`, §14) валидна и принадлежит текущему
    владельцу — иначе мутировать состояние опасно (возможен второй управляющий цикл).
+
+### 13.5. SHA-bound verification перед публикацией
+
+Исполняемый код, тесты и build-конфигурация не переходят `reviewed → published` с
+`not-configured`/«не проверялась». Проект задаёт ordered JSON-массив точных команд
+`VERIFICATION_COMMANDS`; прежний непустой `SMOKE_CMD` остаётся одно-командным fallback.
+`tools/verification.ps1 run` выполняет команды только через `tools/supervisor.ps1` и
+атомарно пишет `.work/verification.json` с полным `verified_head`, fingerprint профиля,
+точными командами и verdict. Падение любой команды даёт `failed`; отсутствие профиля —
+`blocked/missing-profile`.
+
+Допустимые исключения всегда явны в evidence: механически определённый по VCS diff
+`exempt/docs-only` либо operator-owned `VERIFICATION_MODE: disabled`
+(`exempt/operator-disabled`). На resume и непосредственно перед ff/push processor вызывает
+`verification.ps1 check`: `running` после crash, изменённый профиль и evidence от старой
+вершины отклоняются, весь профиль запускается заново. `merge_report.md` сохраняет точные
+команды, проверенную вершину, verdict и путь к evidence; проза агента сама по себе гейт не
+удовлетворяет.
 
 ## 14. Аренда владельца (`.work/orchestrator.lock`)
 

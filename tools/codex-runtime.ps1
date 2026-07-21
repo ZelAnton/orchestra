@@ -208,6 +208,7 @@ $ApprovalPolicyOverride = 'approval_policy=never'
 # (recoverable, an absolute-path retry works), never sandbox-init/tool-missing.
 # --------------------------------------------------------------------------
 $FailureClasses = @(
+    [pscustomobject]@{ Class = 'sandbox-init-worktree'; EnvLimit = $true; Broker = $false; Signatures = @('cannot enforce split writable root sets directly') }
     [pscustomobject]@{ Class = 'sandbox-init';   EnvLimit = $true; Broker = $false; Signatures = @('CreateProcessAsUserW failed: 5') }
     [pscustomobject]@{ Class = 'tls-schannel';   EnvLimit = $true; Broker = $true;  Signatures = @('SEC_E_NO_CREDENTIALS', 'schannel: AcquireCredentialsHandle failed') }
     [pscustomobject]@{ Class = 'vcs-write';      EnvLimit = $true; Broker = $false; Signatures = @('index.lock: Permission denied', 'Unable to create') }
@@ -272,6 +273,14 @@ function Build-CodexArgv {
     [void]$argv.Add('codex'); [void]$argv.Add('exec')
     [void]$argv.Add('-C');    [void]$argv.Add($Worktree)
     [void]$argv.Add('--sandbox'); [void]$argv.Add($Sandbox)
+    # Keep tool caches inside the task worktree's ignored .work/ subtree. workspace-write
+    # already makes that nested path writable, so adding it again as an extra writable root
+    # is both redundant and harmful on the native Windows unelevated sandbox (it can turn a
+    # single-root worktree into the split-root shape rejected by that implementation).
+    # read-only still needs the narrow internal exception for disposable caches.
+    if ($Sandbox -eq 'read-only') {
+        [void]$argv.Add('--add-dir'); [void]$argv.Add((Join-Path $Worktree '.work/codex-cache'))
+    }
     # Fail-closed approval policy (T-069): pinned literal on EVERY call.
     [void]$argv.Add('-c'); [void]$argv.Add($ApprovalPolicyOverride)
     if ($SkipGit) { [void]$argv.Add('--skip-git-repo-check') }
@@ -352,7 +361,9 @@ function Invoke-Captured {
         [Parameter(Mandatory)][string]$FilePath,
         [string[]]$Arguments = @(),
         [string]$StdinText = '',
-        [int]$TimeoutSec = 0
+        [int]$TimeoutSec = 0,
+        [hashtable]$EnvironmentOverride = @{},
+        [string]$WorkingDirectory = ''
     )
     # Non-Windows: launch the captured child through `setsid` (when present) so it leads its
     # OWN fresh process group (pgid == its pid). A helper the child later leaks inherits that
@@ -380,15 +391,18 @@ function Invoke-Captured {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
     # Codex may invoke dotnet/MSBuild inside its own sandbox. Reusable build workers are
     # outside the lifetime contract of one autonomous call and were observed lingering
     # after agents completed, so pin the short-lived policy here as well as in launchers.
     if ($psi | Get-Member -Name 'Environment' -MemberType Property -ErrorAction SilentlyContinue) {
         $psi.Environment['MSBUILDDISABLENODEREUSE'] = '1'
         $psi.Environment['DOTNET_CLI_USE_MSBUILD_SERVER'] = '0'
+        foreach ($key in $EnvironmentOverride.Keys) { $psi.Environment[[string]$key] = [string]$EnvironmentOverride[$key] }
     } else {
         $psi.EnvironmentVariables['MSBUILDDISABLENODEREUSE'] = '1'
         $psi.EnvironmentVariables['DOTNET_CLI_USE_MSBUILD_SERVER'] = '0'
+        foreach ($key in $EnvironmentOverride.Keys) { $psi.EnvironmentVariables[[string]$key] = [string]$EnvironmentOverride[$key] }
     }
 
     # UTF-8 on every captured stream where the host exposes the property (.NET
@@ -462,6 +476,36 @@ function Invoke-Captured {
     $proc.Dispose()
 
     return [pscustomobject]@{ StdOut = $stdout; StdErr = $stderr; ExitCode = $rc; TimedOut = $timedOut }
+}
+
+# Tooling invoked by Codex must not write caches under the user profile: that path is
+# intentionally outside workspace-write/read-only sandboxes and repeatedly produced
+# ENV_LIMIT/profile-denied (notably uv under %LOCALAPPDATA%). Redirect only disposable
+# caches/temp into .work/, which is required to be ignored by Orchestra projects and is
+# excluded by working-copy-status/cleanup. Do not redirect package homes such as
+# CARGO_HOME/NUGET_PACKAGES: doing so would hide already-installed dependencies.
+function Get-CodexChildEnvironment {
+    param([Parameter(Mandatory)][string]$Worktree)
+    $root = Join-Path $Worktree '.work/codex-cache'
+    $dirs = @(
+        $root,
+        (Join-Path $root 'tmp'),
+        (Join-Path $root 'uv'),
+        (Join-Path $root 'pip'),
+        (Join-Path $root 'npm'),
+        (Join-Path $root 'xdg'),
+        (Join-Path $root 'pycache')
+    )
+    foreach ($dir in $dirs) { [void](New-Item -ItemType Directory -Force -Path $dir) }
+    return @{
+        TEMP                = (Join-Path $root 'tmp')
+        TMP                 = (Join-Path $root 'tmp')
+        UV_CACHE_DIR        = (Join-Path $root 'uv')
+        PIP_CACHE_DIR       = (Join-Path $root 'pip')
+        NPM_CONFIG_CACHE    = (Join-Path $root 'npm')
+        XDG_CACHE_HOME      = (Join-Path $root 'xdg')
+        PYTHONPYCACHEPREFIX = (Join-Path $root 'pycache')
+    }
 }
 
 # --------------------------------------------------------------------------
@@ -930,8 +974,11 @@ function Cmd-Run {
         exit 3
     }
     $emitJson = [bool](Opt 'emit-json' $false)
+    $worktree = Require-Opt 'worktree'
+    if (-not (Test-Path -LiteralPath $worktree -PathType Container)) { Fail 2 "--worktree '$worktree' does not exist" }
+    $worktree = (Resolve-Path -LiteralPath $worktree).Path
     $argv = Build-CodexArgv `
-        -Worktree (Require-Opt 'worktree') `
+        -Worktree $worktree `
         -Sandbox (Require-Opt 'sandbox') `
         -Reasoning (Require-Opt 'reasoning') `
         -Model ([string](Opt 'model' '')) `
@@ -949,7 +996,8 @@ function Cmd-Run {
     # the resolved target (real binary, or interpreter+script for a wrapper) and
     # append everything after argv[0] as the process arguments.
     $spawnArgs = @($target.Prefix) + @($argv[1..($argv.Count - 1)])
-    $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText $prompt -TimeoutSec $timeout
+    $childEnv = Get-CodexChildEnvironment -Worktree $worktree
+    $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText $prompt -TimeoutSec $timeout -EnvironmentOverride $childEnv -WorkingDirectory $worktree
 
     $stdoutFile = [string](Opt 'stdout-file' '')
     $stderrFile = [string](Opt 'stderr-file' '')
@@ -1075,7 +1123,8 @@ function Cmd-ResumeImage {
 
     $timeout = [int]([string](Opt 'timeout-sec' '0'))
     $spawnArgs = @($target.Prefix) + @($argv[1..($argv.Count - 1)])
-    $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText $prompt -TimeoutSec $timeout
+    $childEnv = Get-CodexChildEnvironment -Worktree $wtFull
+    $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText $prompt -TimeoutSec $timeout -EnvironmentOverride $childEnv -WorkingDirectory $wtFull
 
     $stdoutFile = [string](Opt 'stdout-file' '')
     $stderrFile = [string](Opt 'stderr-file' '')

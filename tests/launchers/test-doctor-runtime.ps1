@@ -126,6 +126,15 @@ function Assert-NotContains { param([string]$Hay, [string]$Needle, [string]$Msg)
 function Set-Config { param([pscustomobject]$Case, [string]$Text) Write-File (Join-Path $Case.Proj '.work/config.md') $Text }
 function Set-Settings { param([pscustomobject]$Case, [string]$Json) Write-File (Join-Path $Case.Proj '.claude/settings.local.json') $Json }
 
+# Runtime identity: a generic target-local tools/ directory must not masquerade as the
+# Orchestra source checkout or shadow the cc-sync mirror.
+$runtimeIdentity = New-Case
+Write-File (Join-Path $runtimeIdentity.Proj 'tools/policy.ps1') '# stale target-local copy'
+$runtimeIdentityResult = Invoke-Doctor -Case $runtimeIdentity
+Assert-Contains $runtimeIdentityResult.Out 'WARN target-local tools/ contains Orchestra-named runner(s) that are ignored because this is not the Orchestra source checkout: policy.ps1' 'runtime identity: stale target-local runner is diagnosed as ignored'
+Assert-Contains $runtimeIdentityResult.Out 'agents must use ~/.claude/scripts/<script>.ps1' 'runtime identity: diagnostic points agents at the cc-sync mirror'
+Remove-Case $runtimeIdentity
+
 # =============================================================================
 # 1) exec permission: routing off + no grant -> OK (not WARN)
 # =============================================================================
@@ -326,7 +335,7 @@ Assert-NotContains $r.Out 'KB = off (env)' 'KB: config value is not labelled as 
 Remove-Case $c
 
 # =============================================================================
-# 13) queue/config audit: valid Cyrillic header OK; unknown key FAIL; SMOKE OK
+# 13) queue/config audit: queue validity plus configured/disabled/missing verification
 # =============================================================================
 $c = New-Case
 $hdr = "# Q`n`n### [T-001] Title " + $script:EmDash + " " + $script:StatusWord + ": " + $script:NeNachata + "`n"
@@ -335,7 +344,25 @@ Set-Config $c (@('SMOKE_CMD: pwsh -File tools/check-consistency.ps1', 'BOGUS_KEY
 $r = Invoke-Doctor -Case $c
 Assert-Contains $r.Out 'OK   Tasks_Queue.md: 1 task header(s), format valid, IDs unique' 'queue: valid Cyrillic header recognized'
 Assert-Contains $r.Out 'unknown/possibly mistyped key(s): BOGUS_KEY' 'config: unknown key flagged'
-Assert-Contains $r.Out 'OK   SMOKE_CMD is configured' 'config: SMOKE_CMD detected'
+Assert-Contains $r.Out 'OK   verification profile uses backward-compatible SMOKE_CMD fallback (1 command)' 'config: SMOKE_CMD detected as verification fallback'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'VERIFICATION_COMMANDS: ["git status --short", "echo #tag"]'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   verification profile is configured: 2 command(s)' 'config: multiple verification commands detected'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'VERIFICATION_MODE: disabled'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   verification profile is explicitly disabled by operator' 'config: explicit verification disable distinguished'
+Remove-Case $c
+
+$c = New-Case
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'verification profile is missing' 'config: dangerous missing verification profile distinguished'
+Assert-Contains $r.Out 'executable changes will be blocked before push' 'config: missing profile explains publication impact'
 Remove-Case $c
 
 # =============================================================================
@@ -400,11 +427,13 @@ if (-not $script:OnWindows) {
     Assert-NotContains $r.Out 'FAIL windows sandbox' 'posix: no Windows sandbox FAIL'
     Remove-Case $c
 } else {
-    # Windows: safe profile (unelevated + approval never) classifies OK.
+    # Windows: unelevated remains supported but warns about the exact nested-worktree
+    # limitation and names Orchestra's scoped fallback.
     $c = New-Case
     Write-File (Join-Path $c.Home '.codex/config.toml') (@('approval_policy = "never"', '[windows]', 'sandbox = "unelevated"') -join "`n")
     $r = Invoke-Doctor -Case $c
-    Assert-Contains $r.Out 'OK   windows sandbox profile: unelevated' 'windows: unelevated profile OK'
+    Assert-Contains $r.Out 'WARN windows sandbox profile: unelevated' 'windows: unelevated profile warns as fallback'
+    Assert-Contains $r.Out 'ENV_LIMIT/sandbox-init-worktree' 'windows: unelevated warning names the scoped worktree class'
     Assert-Contains $r.Out 'OK   approval_policy: never' 'windows: approval_policy never OK'
     Assert-NotContains $r.Out 'FAIL windows sandbox' 'windows: safe profile does not FAIL'
     Remove-Case $c
@@ -416,19 +445,13 @@ if (-not $script:OnWindows) {
     Assert-Contains $r.Out 'WARN approval_policy: not set' 'windows: missing config approval WARNs'
     Remove-Case $c
 
-    # Windows: elevated profile with an unelevated launcher process is the dangerous
-    # combination (this test process is normally unelevated); if it happens to be
-    # elevated the runtime WARNs instead. Assert whichever branch applies.
+    # Windows: current Codex guidance prefers the configured elevated implementation;
+    # setup/spawn is verified by Codex/preflight rather than guessed from this process token.
     $c = New-Case
     Write-File (Join-Path $c.Home '.codex/config.toml') (@('[windows]', 'sandbox = "elevated"') -join "`n")
     $r = Invoke-Doctor -Case $c
-    $wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-    if ($wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Assert-Contains $r.Out 'WARN windows sandbox profile: elevated, and this process is currently elevated' 'windows: elevated+elevated WARNs'
-    } else {
-        Assert-Contains $r.Out 'FAIL windows sandbox profile: elevated, but this launcher process is NOT elevated' 'windows: elevated+unelevated FAILs'
-        Assert-Contains $r.Out 'ENV_LIMIT/sandbox-init' 'windows: names the sandbox-init escalation'
-    }
+    Assert-Contains $r.Out 'OK   windows sandbox profile: elevated' 'windows: elevated is the preferred configured implementation'
+    Assert-Contains $r.Out 'approval_policy=never fail-closed fallback' 'windows: elevated profile retains fail-closed runtime verification'
     Remove-Case $c
 }
 

@@ -54,7 +54,7 @@ $script:PolicySchemaVersion = 'orchestra/policy-schema@1'
 
 # One config-key descriptor.
 #   name        - the .work/config.md key (UPPER_SNAKE_CASE).
-#   type        - 'int' | 'bool' | 'enum' | 'string'.
+#   type        - 'int' | 'bool' | 'enum' | 'string' | 'json-string-array'.
 #   default     - human default string (matches config.example.md's defaults table prose).
 #   enum        - allowed value set for 'enum' (else $null).
 #   min         - inclusive lower bound for 'int' (else $null); ints have no explicit max.
@@ -93,6 +93,8 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'CALL_OUTPUT_MAX_BYTES'   'int'    '1048576'                          -Min 1)
         (New-ConfigKey 'COHORT_BUDGET_SEC'       'int'    '0'                                -Min 0  -Sensitivity 'medium')
         (New-ConfigKey 'SMOKE_CMD'               'string' 'unset'                            -Sensitivity 'medium')
+        (New-ConfigKey 'VERIFICATION_MODE'       'enum'   'auto'    -Enum @('auto', 'required', 'disabled') -Sensitivity 'high')
+        (New-ConfigKey 'VERIFICATION_COMMANDS'   'json-string-array' 'unset'                  -Sensitivity 'high')
         (New-ConfigKey 'PUSH'                    'bool'   'true'                             -Sensitivity 'high')
         (New-ConfigKey 'CI_WATCH'                'bool'   'true'                             -Sensitivity 'medium')
         (New-ConfigKey 'PUBLISH_CI_DEADLINE_SEC' 'int'    '1800'                             -Min 1  -Sensitivity 'high')
@@ -183,6 +185,22 @@ function Test-ConfigValue {
             }
             return [pscustomobject]@{ Ok = $true; Reason = '' }
         }
+        'json-string-array' {
+            try { $decoded = $v | ConvertFrom-Json } catch {
+                return [pscustomobject]@{ Ok = $false; Reason = "'$v' is not valid JSON" }
+            }
+            if ($decoded -isnot [array]) { $decoded = @($decoded) }
+            $items = @($decoded)
+            if ($items.Count -eq 0) {
+                return [pscustomobject]@{ Ok = $false; Reason = 'must contain at least one command' }
+            }
+            foreach ($item in $items) {
+                if ($item -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$item)) {
+                    return [pscustomobject]@{ Ok = $false; Reason = 'must be a JSON array of non-empty strings' }
+                }
+            }
+            return [pscustomobject]@{ Ok = $true; Reason = '' }
+        }
         default { return [pscustomobject]@{ Ok = $true; Reason = '' } }   # free string
     }
 }
@@ -212,8 +230,13 @@ function ConvertFrom-ConfigText {
             $key = $m.Groups[1].Value
             $rest = $m.Groups[2].Value
             $comment = ''
-            $hIdx = $rest.IndexOf('#')
-            if ($hIdx -ge 0) { $comment = $rest.Substring($hIdx); $rest = $rest.Substring(0, $hIdx) }
+            # VERIFICATION_COMMANDS is a JSON array and a shell command may legitimately
+            # contain '#'. Keep JSON values intact; unlike scalar values they do not support
+            # a trailing Markdown comment on the same line.
+            if (-not $rest.TrimStart().StartsWith('[')) {
+                $hIdx = $rest.IndexOf('#')
+                if ($hIdx -ge 0) { $comment = $rest.Substring($hIdx); $rest = $rest.Substring(0, $hIdx) }
+            }
             $out.Add([pscustomobject]@{ Kind = 'key'; Key = $key; Value = $rest.Trim(); Comment = $comment; Raw = $raw; Line = $i + 1 })
             continue
         }

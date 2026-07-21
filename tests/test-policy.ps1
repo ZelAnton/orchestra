@@ -137,13 +137,16 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 33 $schema.config.Count 'schema has 33 config keys'
+    Assert-Equal 35 $schema.config.Count 'schema has 35 config keys'
 
     # T-095: the publish-gate tuning keys and the CI-required-checks policy section exist.
     foreach ($k in @('PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC')) {
         Assert-True ([bool]($schema.config | Where-Object { $_.name -eq $k })) "schema has publish-gate key $k"
     }
     Assert-True ([bool]($schema.policy | Where-Object { $_.id -eq 'publish-ci' })) 'schema has the publish-ci policy section'
+    foreach ($k in @('VERIFICATION_MODE', 'VERIFICATION_COMMANDS')) {
+        Assert-True ([bool]($schema.config | Where-Object { $_.name -eq $k })) "schema has verification key $k"
+    }
 }.Invoke()
 
 # =============================================================================
@@ -155,6 +158,15 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Write-Utf8 $cfg "# demo`nMAX_PARALLEL: 8`nPUSH: false`nCODEX_REASONING: high`nSMOKE_CMD:`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
     Assert-Exit $r 0 'validate-config accepts a valid file (empty SMOKE_CMD = unset)'
+
+    Write-Utf8 $cfg "VERIFICATION_MODE: required`nVERIFICATION_COMMANDS: [`"git status --short`", `"echo #tag`"]`n"
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 0 'validate-config accepts a multi-command verification profile'
+
+    Write-Utf8 $cfg "VERIFICATION_COMMANDS: not-json`n"
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 3 'validate-config rejects malformed verification command JSON'
+    Assert-OutMatch $r 'not valid JSON' 'validate-config reports malformed verification command JSON'
 
     Write-Utf8 $cfg "MAX_PARALLEL: 0`nCODEX_REASONING: turbo`nFOO_BAR: 1`nPUSH: maybe`nMAX_PARALLEL: 5`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
@@ -332,6 +344,59 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         Assert-OutMatch $r '(ancestor \.git capture|not the addressed worktree)' 'guard-path(vcs): rejection explains ancestor git capture'
     } else {
         Write-Host 'SKIP - jj/git not on PATH - pure-jj ancestor-capture case skipped'
+    }
+}.Invoke()
+
+# =============================================================================
+# 6c. guard-revision: reviewed tip identity and non-empty implementation
+# =============================================================================
+{
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $root = New-TempDir
+        & git -C $root init -q 2>&1 | Out-Null
+        & git -C $root config user.email t@t
+        & git -C $root config user.name Test
+        Write-Utf8 (Join-Path $root 'tracked.txt') "base`n"
+        & git -C $root add tracked.txt
+        & git -C $root commit -q -m base
+        $base = (& git -C $root rev-parse HEAD).Trim()
+        & git -C $root checkout -q -b task/T-045
+        Write-Utf8 (Join-Path $root 'tracked.txt') "changed`n"
+        & git -C $root add tracked.txt
+        & git -C $root commit -q -m task
+        $tip = (& git -C $root rev-parse HEAD).Trim()
+
+        $r = Invoke-Policy @('guard-revision', '--root', $root, '--vcs', 'git', '--ref', 'task/T-045', '--expected', $tip, '--base', $base, '--require-nonempty', '--json')
+        Assert-Exit $r 0 'guard-revision(git): exact reviewed non-empty tip passes'
+        Assert-Equal $tip (($r.Out.Trim() | ConvertFrom-Json).commit_id) 'guard-revision(git): emits the resolved full commit id'
+
+        $r = Invoke-Policy @('guard-revision', '--root', $root, '--vcs', 'git', '--ref', 'task/T-045', '--expected', $base)
+        Assert-Exit $r 6 'guard-revision(git): bookmark/branch drift from reviewed tip is rejected'
+
+        & git -C $root checkout -q -b task/T-empty $base
+        & git -C $root commit -q --allow-empty -m empty
+        $emptyTip = (& git -C $root rev-parse HEAD).Trim()
+        $r = Invoke-Policy @('guard-revision', '--root', $root, '--vcs', 'git', '--ref', 'task/T-empty', '--expected', $emptyTip, '--base', $base, '--require-nonempty')
+        Assert-Exit $r 6 'guard-revision(git): empty claimed implementation is rejected'
+    }
+
+    if ((Get-Command jj -ErrorAction SilentlyContinue) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        $root = New-TempDir
+        Write-Utf8 (Join-Path $root '.gitignore') ".work/`n"
+        & jj git init --colocate $root 2>&1 | Out-Null
+        Write-Utf8 (Join-Path $root 'tracked.txt') "base`n"
+        & jj -R $root describe -m base 2>&1 | Out-Null
+        $base = ([string](& jj -R $root --no-pager log -r '@' --no-graph -T 'commit_id')).Trim()
+        & jj -R $root new 2>&1 | Out-Null
+        Write-Utf8 (Join-Path $root 'tracked.txt') "changed`n"
+        & jj -R $root describe -m task 2>&1 | Out-Null
+        & jj -R $root bookmark set task/T-045 -r '@' 2>&1 | Out-Null
+        $tip = ([string](& jj -R $root --no-pager log -r 'task/T-045' --no-graph -T 'commit_id')).Trim()
+
+        $r = Invoke-Policy @('guard-revision', '--root', $root, '--vcs', 'jj', '--ref', 'task/T-045', '--expected', $tip, '--base', $base, '--require-nonempty', '--json')
+        Assert-Exit $r 0 'guard-revision(jj): exact reviewed non-empty bookmark passes'
+        $r = Invoke-Policy @('guard-revision', '--root', $root, '--vcs', 'jj', '--ref', 'task/T-045', '--expected', $base)
+        Assert-Exit $r 6 'guard-revision(jj): bookmark drift from reviewed tip is rejected'
     }
 }.Invoke()
 

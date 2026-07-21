@@ -163,6 +163,60 @@ run_with_mock_codex_processor() {
     pass "$name"
 }
 
+test_installed_sync_from_checkout_cwd() {
+    local name="cc-sync.sh (installed PATH launcher from checkout cwd)"
+    local mirror_dir="$RUN_DIR/mirror"
+    local launcher_path="$mirror_dir/cc-sync.sh"
+    local expected_runtime="$REPO_ROOT/tools/sync-runtime.ps1"
+    local rc
+
+    mkdir -p "$mirror_dir"
+    cp "$REPO_ROOT/launchers/cc-sync.sh" "$launcher_path"
+    chmod +x "$launcher_path"
+    : > "$PWSH_ARGS_FILE"
+    (
+        cd "$REPO_ROOT" || exit 99
+        PATH="$MOCK_DIR:/usr/bin:/bin" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" \
+            "$BASH" "$launcher_path" -Quiet
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "launcher exited $rc"
+        return
+    fi
+    if ! grep -Fxq "$expected_runtime" "$PWSH_ARGS_FILE"; then
+        fail "$name" "cwd runtime '$expected_runtime' was not passed to pwsh"
+        return
+    fi
+    if ! grep -Fxq -- '-Quiet' "$PWSH_ARGS_FILE"; then
+        fail "$name" "launcher arguments were not forwarded"
+        return
+    fi
+
+    # A target-local tools/sync-runtime.ps1 without the complete Orchestra
+    # identity must not be selected by the installed launcher.
+    local target_dir="$RUN_DIR/target-with-stale-tools"
+    local output
+    mkdir -p "$target_dir/tools"
+    printf '%s\n' '# stale target-local fixture' > "$target_dir/tools/sync-runtime.ps1"
+    : > "$PWSH_ARGS_FILE"
+    output=$(
+        cd "$target_dir" || exit 99
+        PATH="$MOCK_DIR:/usr/bin:/bin" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" \
+            "$BASH" "$launcher_path"
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ -s "$PWSH_ARGS_FILE" ]; then
+        fail "$name" "launcher executed a target-local runtime without full Orchestra identity"
+        return
+    fi
+    if ! printf '%s\n' "$output" | grep -Fq 'no Orchestra checkout found'; then
+        fail "$name" "launcher did not report its no-op outside Orchestra"
+        return
+    fi
+    pass "$name"
+}
+
 test_launcher cc-audit.sh code_auditor
 test_launcher cc-enhance.sh enhancement_scout
 test_launcher cc-github.sh github_sync
@@ -172,10 +226,11 @@ test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
 run_with_mock_codex_processor cc-processor.sh start
 run_with_mock_codex_processor cc-resume.sh resume
+test_installed_sync_from_checkout_cwd
 
 if [ "$FAILURES" -ne 0 ]; then
     printf 'POSIX launcher tests failed: %s scenario(s) failed.\n' "$FAILURES"
     exit 1
 fi
 
-printf 'POSIX launcher tests passed: all 23 scenarios succeeded.\n'
+printf 'POSIX launcher tests passed: all 24 scenarios succeeded.\n'

@@ -155,7 +155,7 @@ Invoke-Test -Name 'cc-resume.cmd' -Body {
 $args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
 exit 0
 '@ | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
-        $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -LauncherArgs @('codex') -EnvVars @{
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -LauncherArgs @('codex', '-Model', 'gpt-test') -EnvVars @{
             FAKE_ARGS_FILE = $claudeCapture
             FAKE_CODEX_PROCESSOR_ARGS = $runtimeCapture
             FAKE_EXIT_CODE = '0'
@@ -170,6 +170,8 @@ exit 0
         Assert-True ($rootIndex -ge 0 -and ($rootIndex + 1) -lt $captured.Count) '[codex resume] project root argument is explicit'
         $capturedRoot = $captured[$rootIndex + 1]
         Assert-True (Test-Path -LiteralPath (Join-Path $capturedRoot $rootMarkerName) -PathType Leaf) '[codex resume] project root addresses the project directory'
+        Assert-True (-not ($captured -contains 'codex')) '[codex resume] consumed provider token is not forwarded after SHIFT'
+        Assert-True ($captured -contains '-Model' -and $captured -contains 'gpt-test') '[codex resume] remaining runtime arguments are preserved'
     }
     finally {
         Remove-Sandbox $paths

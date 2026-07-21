@@ -26,7 +26,7 @@ if /I "%~1"=="--provider" (
   shift
   shift
 )
-if /I "%PROVIDER%"=="codex" goto :codex_resume
+if /I "%PROVIDER%"=="codex" goto :collect_codex_args
 if /I not "%PROVIDER%"=="claude" (
   echo Недопустимый provider "%PROVIDER%". Разрешены: claude, codex.
   exit /b 2
@@ -106,6 +106,17 @@ exit /b 10
 :done
 exit /b %ERRORLEVEL%
 
+:collect_codex_args
+rem SHIFT updates %%1..%%9 but never rewrites %%*. Rebuild the remaining argv explicitly;
+rem otherwise `cc-resume codex` forwards the consumed provider token to the PowerShell
+rem runtime, where it becomes an extra positional argument to `codex exec resume`.
+set CODEX_EXTRA_ARGS=
+:collect_codex_args_loop
+if "%~1"=="" goto :codex_resume
+set CODEX_EXTRA_ARGS=%CODEX_EXTRA_ARGS% %1
+shift
+goto :collect_codex_args_loop
+
 :codex_resume
 set "CODEX_PROCESSOR_RUNTIME=%LAUNCHER_DIR%..\tools\codex-processor-runtime.ps1"
 if exist "%CODEX_PROCESSOR_RUNTIME%" goto :codex_runtime_found
@@ -117,8 +128,8 @@ exit /b 12
 if not defined CC_PROCESSKIT_PYTHON goto :codex_resume_uncontained
 "%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
 if errorlevel 1 goto :containment_error
-"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %*
+"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :codex_resume_uncontained
-pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %*
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%
 exit /b %ERRORLEVEL%

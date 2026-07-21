@@ -54,25 +54,14 @@ parallel task): `Get-ExpectedPermissionMode` extracts whatever value is
 currently in a launcher's own source and asserts that the launcher actually
 forwards it, rather than asserting a fixed string.
 
-## `cc-sync.cmd` is intentionally not covered
+## `cc-sync` launcher and runtime coverage
 
-`cc-sync.cmd` regenerates `coder.md`/`coder_fast.md`/`coder_deep.md` from
-`coder.template.md` (`generate-coders.cmd`/`.ps1`, including a `git diff`
-call) and then mirrors agent definitions and launcher scripts via `robocopy`
-into `%USERPROFILE%\.claude\agents` and `%USERPROFILE%\.claude\scripts`.
-Exercising it faithfully in a sandbox would mean either running it against
-the real repository checkout and the real `%USERPROFILE%\.claude\*` mirror
-(unacceptable side effects for a test run) or copying the entire relevant
-slice of the repository (template, generator, generated variants, `.git`)
-into a throwaway tree and separately redirecting `%USERPROFILE%` for the
-robocopy step - at that point the "test" is mostly re-implementing
-`cc-sync.cmd`'s own orchestration rather than exercising it as a black box,
-for a launcher with no argument parsing to speak of (it takes none) and no
-`claude`/`codex` invocation. Given the cost/value tradeoff, and that this
-launcher is a thin, low-risk wrapper around already-standard tools (`git`,
-`robocopy`, the existing `generate-coders` scripts) rather than the kind of
-bespoke argument-parsing logic (`--force-lock`, `--model`, `EXTRA_ARGS`,
-quote handling) this suite targets, it is excluded here.
+`test-sync-launcher.ps1` covers the Windows PATH-mirror wrapper itself: a copied
+installed `cc-sync.cmd` must recover the Orchestra checkout runtime from cwd using
+the complete three-marker identity, forward its arguments, and refuse a target-local
+stale `tools/sync-runtime.ps1` without that identity. `test-posix-launchers.sh`
+covers the equivalent `cc-sync.sh` behaviour. Both use fake `pwsh` executables and
+throwaway trees, so neither touches the real user mirror.
 
 Since task T-090, `cc-sync.cmd`/`cc-sync.sh` are thin wrappers over one
 cross-platform engine, `tools/sync-runtime.ps1`. The valuable, mutation-bearing
