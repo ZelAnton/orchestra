@@ -16,8 +16,9 @@
 //! keystroke: `p` pause (create `.work/PAUSE`, mirroring `cc-pause.sh`), `u` resume (remove it,
 //! mirroring `cc-unpause.sh`), `s` lease-status (read `.work/orchestrator.lock` via the engine
 //! crate's owner-checked `tools/state-tx.ps1 status` path), and `x` force-lock — the one
-//! destructive command, gated behind an explicit confirmation modal (`y` to confirm) and mirroring
-//! `cc-processor.sh --force-lock` (remove `.work/orchestrator.lock`). On the Decision Inbox,
+//! destructive command, gated behind an explicit confirmation modal (`y` to confirm), routing
+//! through the single transactional `tools/state-tx.ps1 release --force` path (the same path
+//! `cc-processor.sh --force-lock` now uses). On the Decision Inbox,
 //! `a`/`d` arm approve/reject for the selected pending request; Rust never writes approval JSON —
 //! it delegates that transaction to `tools/policy.ps1`. The TUI never touches the queue / task
 //! descriptors / code and never calls `processor` or a launcher. Both approval actions
@@ -252,16 +253,9 @@ fn handle_modal_key(app: &mut AppState, work_dir: &Path, k: KeyEvent) {
         Modal::ConfirmForceLock => match k.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 if app.take_force_lock_confirmation() {
-                    app.notice = Some(match commands::force_lock(work_dir) {
-                        Ok(true) => {
-                            "force-lock: .work/orchestrator.lock удалён (замок снят)".to_string()
-                        }
-                        Ok(false) => {
-                            "force-lock: замка не было — .work/orchestrator.lock отсутствует"
-                                .to_string()
-                        }
-                        Err(e) => format!("force-lock не удался: {e}"),
-                    });
+                    // force-lock routes through the single transactional `state-tx release --force`
+                    // path; the structured outcome carries its own footer summary.
+                    app.notice = Some(commands::force_lock(work_dir).summary());
                 }
             }
             _ => app.dismiss_modal(),

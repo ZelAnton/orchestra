@@ -229,6 +229,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0capture-args.ps1" %*
     Set-Content -LiteralPath (Join-Path $Paths.Bin 'codex.cmd') -Value $stub -Encoding ascii
 }
 
+# Drops a fake tools/state-tx.ps1 into the sandbox scripts\ dir (the flat cc-sync mirror layout
+# next to the launcher), so a launcher's `--force-lock` resolves it as the mirror runner and runs
+# it via pwsh. The fake records the argv it was invoked with to $env:FAKE_STATE_TX_ARGS (one per
+# line, like the fake claude) and, like the real `state-tx release --force`, removes
+# .work\orchestrator.lock relative to the launcher's current directory. Lets a launcher test assert
+# the force-takeover takes the single transactional `state-tx release --force` path instead of a
+# raw directory removal.
+$script:FakeStateTxScript = @'
+$dest = $env:FAKE_STATE_TX_ARGS
+if ($dest) {
+    if ($args.Count -gt 0) {
+        $args | Set-Content -LiteralPath $dest -Encoding utf8
+    } else {
+        Set-Content -LiteralPath $dest -Value @() -Encoding utf8
+    }
+}
+Remove-Item -LiteralPath '.work\orchestrator.lock' -Recurse -Force -ErrorAction SilentlyContinue
+Write-Output 'released'
+exit 0
+'@
+
+function Install-FakeStateTx {
+    param([Parameter(Mandatory)] $Paths)
+    Set-Content -LiteralPath (Join-Path $Paths.Scripts 'state-tx.ps1') -Value $script:FakeStateTxScript -Encoding utf8
+}
+
 function Get-CapturedArgs {
     param([Parameter(Mandatory)] [string] $CaptureFile)
     if (-not (Test-Path -LiteralPath $CaptureFile)) {

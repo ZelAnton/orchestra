@@ -16,13 +16,18 @@
 //!   (`orchestra_engine::lease`, task T-107) which delegates to `tools/state-tx.ps1 status
 //!   --json` and *nothing else* (KB K-003). We reuse its argv builder + supervised spawn rather
 //!   than shelling out to a separate `engine` binary or re-implementing any `lease.json` reading.
-//! * **force-lock** — remove the whole `.work/orchestrator.lock` directory, mirroring exactly what
-//!   `launchers/cc-processor.sh --force-lock` does (`rm -rf .work/orchestrator.lock`) — no other
-//!   side effect. This is the one destructive command; the caller (see `main.rs` / `app::Modal`)
-//!   guards it behind an explicit confirmation. We deliberately do **not** route force-lock through
-//!   the `engine lease` API: that path is owner-checked and never force-removes a lease (K-003), so
-//!   the operator-only "processor is definitely dead, take the lock by hand" action must mirror the
-//!   launcher directly.
+//! * **force-lock** — the operator-only "processor is definitely dead, take the lock by hand"
+//!   action, routed through the **single transactional path** `state-tx.ps1 release --force`
+//!   (uniform legacy-lock / corrupt-lease / foreign-owner diagnostics, `docs/queue_contract.md`
+//!   §14–§17) via the crate's existing supervised spawn (`lease::run_state_tx` + the
+//!   checkout-vs-mirror `resolve_tool_script`, the same mechanism lease-status uses) — **not** a
+//!   raw `fs::remove_dir_all`. `launchers/cc-processor.sh --force-lock` now takes the very same
+//!   `state-tx release --force` path, so both operator front-ends share one audited mechanism
+//!   instead of two independent raw removals. This is the one destructive command; the caller (see
+//!   `main.rs` / `app::Modal`) guards it behind an explicit confirmation. We reuse the crate's
+//!   supervised state-tx spawn but with the `release --force` verb the engine's own owner-checked
+//!   `lease` helpers deliberately never emit — forcing over a live/legacy/corrupt lease is an
+//!   operator decision, not something the engine does on its own (K-003).
 //! * **approval-approve / approval-reject** — consume a pending human-gate request strictly via
 //!   `tools/policy.ps1`, resolved through the same checkout-vs-cc-sync rule and launched through
 //!   the same engine supervisor as `state-tx status`. Rust never writes `.work/approvals/`
@@ -30,11 +35,11 @@
 //!   that another operator already consumed, an expired request, and an execution failure.
 //!
 //! **Testable core.** As with [`crate::app`], the decision/format/parse logic here is pure and
-//! unit-tested without a terminal; the only impure pieces are the three thin filesystem writes
-//! (`pause` / `resume` / `force_lock`) and the supervised PowerShell spawns in
-//! [`query_lease_status`] / [`decide_approval`]. Callers never issue any command implicitly — a
-//! keystroke in `main.rs` is what triggers one, and every destructive decision additionally
-//! requires the confirmation gate.
+//! unit-tested without a terminal; the only impure pieces are the two thin filesystem writes
+//! (`pause` / `resume`) and the supervised PowerShell spawns in [`query_lease_status`] /
+//! [`force_lock`] / [`decide_approval`]. Callers never issue any command implicitly — a keystroke
+//! in `main.rs` is what triggers one, and every destructive decision additionally requires the
+//! confirmation gate.
 
 use std::fs;
 use std::io;
@@ -45,8 +50,6 @@ use orchestra_engine::{lease, time::epoch_to_iso};
 
 /// The pause kill switch, relative to the `.work/` directory.
 const PAUSE_FILE: &str = "PAUSE";
-/// The owner-lease directory, relative to the `.work/` directory.
-const LOCK_DIR: &str = "orchestrator.lock";
 /// A policy decision is a tiny local PowerShell transaction; keep the same bounded supervision
 /// window as the state-tx command channel.
 const POLICY_DEADLINE: Duration = Duration::from_secs(120);
@@ -85,21 +88,116 @@ pub fn resume(work_dir: &Path) -> io::Result<bool> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// force-lock — mirror of `cc-processor.sh --force-lock` (rm -rf .work/orchestrator.lock)
+// force-lock — the operator force-takeover, via the single transactional `state-tx release
+// --force` path (the same supervised spawn as lease-status), not a raw directory removal.
 // ---------------------------------------------------------------------------------------------
 
-/// **force-lock**: remove the whole `<work>/orchestrator.lock` directory (lease record included),
-/// mirroring exactly `launchers/cc-processor.sh --force-lock` (`rm -rf .work/orchestrator.lock`) —
-/// no other side effect. Tolerant of an already-absent directory. Returns `true` if a lock
-/// directory was actually removed. **Destructive**: the caller must have obtained explicit operator
-/// confirmation first (see `app::Modal` / `main.rs`); this function does not itself gate on that —
-/// the confirmation is a UI concern kept separate so the removal stays a small, testable unit.
-pub fn force_lock(work_dir: &Path) -> io::Result<bool> {
-    let path = work_dir.join(LOCK_DIR);
-    match fs::remove_dir_all(&path) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+/// The outcome of the operator-only force-lock, run through the single transactional path
+/// `state-tx.ps1 release --force`. It mirrors the shapes `state-tx release --force` emits so the
+/// diagnostics (a removed lock, an already-free lock, or a failure) are identical whether
+/// force-lock is invoked from the TUI or from `launchers/cc-processor.sh --force-lock`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForceLockOutcome {
+    /// The lock was force-released (`state-tx` printed `released`): the directory — a live/stale
+    /// lease, a legacy `mkdir` lock, or a corrupt record — is now gone.
+    Removed,
+    /// There was no lock to remove (`state-tx` printed `not-held`) — idempotent absence.
+    Absent,
+    /// `state-tx.ps1` could not be run at all (no PowerShell host / script not found / spawn or
+    /// timeout failure). The lock was **not** touched.
+    Unavailable(String),
+    /// `state-tx` ran but reported a failure (e.g. its serialization lock was busy). Detail verbatim.
+    Failed(String),
+}
+
+impl ForceLockOutcome {
+    /// A one-line human summary for the footer.
+    pub fn summary(&self) -> String {
+        match self {
+            ForceLockOutcome::Removed => {
+                "force-lock: .work/orchestrator.lock снят (state-tx release --force)".to_string()
+            }
+            ForceLockOutcome::Absent => {
+                "force-lock: замка не было — .work/orchestrator.lock отсутствует (state-tx: not-held)"
+                    .to_string()
+            }
+            ForceLockOutcome::Unavailable(why) => format!("force-lock недоступен: {why}"),
+            ForceLockOutcome::Failed(detail) => format!("force-lock не удался: {detail}"),
+        }
+    }
+}
+
+/// Build the arguments after `state-tx.ps1` for the operator force-release: `release --work <dir>
+/// --force`. `--force` is what lets this single transactional path tear down a live/stale/legacy/
+/// corrupt or foreign lease (an operator decision); with `--force`, `state-tx release` needs no
+/// `--owner` (see `tools/state-tx.ps1` `Cmd-Release`).
+pub fn force_release_argv(work_dir: &Path) -> Vec<String> {
+    vec![
+        "release".to_string(),
+        "--work".to_string(),
+        work_dir.to_string_lossy().into_owned(),
+        "--force".to_string(),
+    ]
+}
+
+/// Pure classification of a `state-tx.ps1 release --force` invocation into a [`ForceLockOutcome`].
+/// On success (`exit 0`) `state-tx` prints `not-held` when there was nothing to remove and
+/// `released` otherwise; a missing exit code (supervision could not complete) or a non-zero exit is
+/// surfaced with its detail rather than silently reported as a removal.
+pub fn classify_force_lock(
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    supervision_reason: &str,
+) -> ForceLockOutcome {
+    if exit_code.is_none() {
+        return ForceLockOutcome::Unavailable(format!(
+            "state-tx не завершился: {supervision_reason}"
+        ));
+    }
+    if exit_code == Some(0) {
+        if stdout.lines().any(|l| l.trim() == "not-held") {
+            return ForceLockOutcome::Absent;
+        }
+        // `released` — the only other exit-0 output of `release --force`.
+        return ForceLockOutcome::Removed;
+    }
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .or_else(|| stdout.lines().map(str::trim).find(|l| !l.is_empty()))
+        .unwrap_or(supervision_reason)
+        .to_string();
+    ForceLockOutcome::Failed(if detail.is_empty() {
+        format!("state-tx завершился с кодом {exit_code:?}")
+    } else {
+        detail
+    })
+}
+
+/// **force-lock** (impure): the operator's force-takeover of `<work>/orchestrator.lock`, run
+/// through the single transactional path `state-tx.ps1 release --force` via the crate's existing
+/// supervised spawn ([`lease::run_state_tx`]) and the checkout-vs-mirror script resolver — the same
+/// mechanism as [`query_lease_status`], not a raw `fs::remove_dir_all`. So the TUI and
+/// `launchers/cc-processor.sh --force-lock` share one audited, diagnosable path. **Destructive**:
+/// the caller must have obtained explicit operator confirmation first (see `app::Modal` /
+/// `main.rs`); this function does not itself gate on that. Any inability to run the transaction is
+/// returned as [`ForceLockOutcome::Unavailable`] (the lock is left untouched), never a panic.
+pub fn force_lock(work_dir: &Path) -> ForceLockOutcome {
+    let script = match resolve_state_tx_script(work_dir) {
+        Some(s) => s,
+        None => {
+            return ForceLockOutcome::Unavailable(
+                "state-tx.ps1 не найден (ни в <root>/tools, ни в зеркале ~/.claude/scripts)"
+                    .to_string(),
+            )
+        }
+    };
+    let argv = force_release_argv(work_dir);
+    match lease::run_state_tx(&script.to_string_lossy(), &argv, lease::STATE_TX_DEADLINE) {
+        Err(e) => ForceLockOutcome::Unavailable(e),
+        Ok(v) => classify_force_lock(v.exit_code, &v.stdout, &v.stderr, &v.outcome_reason),
     }
 }
 
@@ -558,20 +656,51 @@ mod tests {
     }
 
     #[test]
-    fn force_lock_removes_the_whole_lock_dir_and_tolerates_absence() {
-        let w = TmpWork::new();
-        // Absent lock -> Ok(false), not an error.
-        assert!(!force_lock(&w.dir).unwrap(), "no lock to remove yet");
-        // Build a lock dir with a lease.json inside, like the real orchestrator.lock.
-        let lock = w.dir.join("orchestrator.lock");
-        fs::create_dir_all(&lock).unwrap();
-        fs::write(lock.join("lease.json"), "{\"role\":\"processor\"}").unwrap();
-        assert!(lock.exists());
-        // force-lock removes the directory whole (rm -rf), like cc-processor.sh --force-lock.
-        assert!(force_lock(&w.dir).unwrap(), "existing lock dir removed");
-        assert!(!lock.exists());
-        // And only the lock: nothing else in .work/ is touched.
-        assert!(w.dir.exists());
+    fn force_release_argv_is_release_force_no_owner() {
+        // force-lock now routes through `state-tx.ps1 release --force`, not a raw removal.
+        let argv = force_release_argv(Path::new("/repo/.work"));
+        assert_eq!(argv[0], "release");
+        assert!(argv.windows(2).any(|w| w == ["--work", "/repo/.work"]));
+        // `--force` is what makes this the operator-only single transactional path.
+        assert!(argv.iter().any(|s| s == "--force"));
+        // With `--force`, `state-tx release` needs no `--owner` (it can tear down a foreign lease).
+        assert!(!argv.iter().any(|s| s == "--owner"));
+    }
+
+    #[test]
+    fn classify_force_lock_maps_released_absent_and_failure() {
+        // exit 0 + "released" -> the lock (live/legacy/corrupt/foreign) was removed.
+        assert_eq!(
+            classify_force_lock(Some(0), "released\n", "", "ok"),
+            ForceLockOutcome::Removed
+        );
+        // exit 0 + "not-held" -> nothing to remove (idempotent absence).
+        assert_eq!(
+            classify_force_lock(Some(0), "not-held\n", "", "ok"),
+            ForceLockOutcome::Absent
+        );
+        // A non-zero exit (e.g. state-tx.lock busy) surfaces the detail, not a false "removed".
+        match classify_force_lock(Some(7), "", "state-tx: lock busy", "error") {
+            ForceLockOutcome::Failed(d) => assert!(d.contains("lock busy")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // No exit code (supervision could not complete) -> Unavailable, lock left untouched.
+        match classify_force_lock(None, "", "", "supervisor deadline exceeded") {
+            ForceLockOutcome::Unavailable(d) => assert!(d.contains("deadline")),
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn force_lock_summaries_are_human_readable() {
+        assert!(ForceLockOutcome::Removed.summary().contains("снят"));
+        assert!(ForceLockOutcome::Absent.summary().contains("отсутствует"));
+        assert!(ForceLockOutcome::Unavailable("pwsh?".into())
+            .summary()
+            .contains("недоступен"));
+        assert!(ForceLockOutcome::Failed("busy".into())
+            .summary()
+            .contains("не удался"));
     }
 
     #[test]

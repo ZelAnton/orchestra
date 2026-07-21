@@ -70,10 +70,7 @@ if /I "%~1"=="--provider" (
   goto :parse
 )
 if /I "%~1"=="--force-lock" (
-  if exist ".work\orchestrator.lock" (
-    echo Удаляю .work\orchestrator.lock — используй только если уверен, что предыдущий processor не работает.
-    rd /s /q ".work\orchestrator.lock"
-  )
+  call :force_unlock
   shift
   goto :parse
 )
@@ -172,3 +169,26 @@ exit /b %ERRORLEVEL%
 :run_codex_uncontained_model
 pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
+
+rem --force-lock: route the operator force-takeover through the single transactional path
+rem `state-tx.ps1 release --force` - the same owner/legacy/corrupt-lock diagnostics the TUI's
+rem force-lock uses - resolving the runner by the checkout-vs-mirror rule (checkout tools\ first,
+rem then the flat cc-sync mirror next to this launcher). Fall back to a raw `rd /s /q` only when
+rem pwsh (PowerShell 7) is unavailable in PATH or the runner cannot be resolved.
+:force_unlock
+set "STATE_TX=%LAUNCHER_DIR%..\tools\state-tx.ps1"
+if exist "%STATE_TX%" goto :force_unlock_run
+set "STATE_TX=%LAUNCHER_DIR%state-tx.ps1"
+if exist "%STATE_TX%" goto :force_unlock_run
+goto :force_unlock_fallback
+:force_unlock_run
+where pwsh >nul 2>&1
+if errorlevel 1 goto :force_unlock_fallback
+echo Force-releasing .work\orchestrator.lock via state-tx release --force - use only if you are sure the previous processor is not running.
+pwsh -NoProfile -File "%STATE_TX%" release --force --work ".work"
+goto :eof
+:force_unlock_fallback
+if not exist ".work\orchestrator.lock" goto :eof
+echo Removing .work\orchestrator.lock - pwsh unavailable, using raw fallback - use only if you are sure the previous processor is not running.
+rd /s /q ".work\orchestrator.lock"
+goto :eof
