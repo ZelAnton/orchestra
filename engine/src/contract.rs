@@ -18,6 +18,8 @@
 //! AND there is no open (`статус: новая`) `R-` finding. Both halves are computed here as
 //! pure functions over the review text — no model judgment involved.
 
+use std::cmp::Ordering;
+
 /// A finding's lifecycle status (the four words the contract uses, plus a catch-all).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Status {
@@ -78,12 +80,22 @@ pub struct ReviewParse {
 }
 
 impl ReviewParse {
-    /// The freshest SUMMARY-R finding (latest ISO-8601 timestamp; ISO-8601 sorts lexically).
+    /// The freshest SUMMARY-R finding (the latest by true chronological order, via
+    /// [`iso_chrono_cmp`]). NOT a raw string compare: the id's timestamp carries an OPTIONAL
+    /// fractional-seconds tail (`is_utc_timestamp` accepts `.d{1,3}`), for which "ISO-8601 sorts
+    /// lexically" is FALSE — `…:00.5Z` would sort before the same second's `…:00Z` (`.` < `Z`)
+    /// though it is 500 ms later, so a lexical `max_by` could pick the earlier of two same-second
+    /// summaries.
     pub fn latest_summary(&self) -> Option<&Finding> {
         self.findings
             .iter()
             .filter(|f| f.is_summary())
-            .max_by(|a, b| a.summary_timestamp().cmp(&b.summary_timestamp()))
+            .max_by(|a, b| {
+                iso_chrono_cmp(
+                    a.summary_timestamp().unwrap_or_default(),
+                    b.summary_timestamp().unwrap_or_default(),
+                )
+            })
     }
     /// Open review findings = `R-` entries with status `новая`.
     pub fn open_review_findings(&self) -> Vec<&Finding> {
@@ -98,19 +110,24 @@ impl ReviewParse {
         let fresh_summary = self
             .latest_summary()
             .and_then(|f| f.summary_timestamp())
-            .map(|ts| ts > since)
+            .map(|ts| iso_chrono_cmp(ts, since) == Ordering::Greater)
             .unwrap_or(false);
         fresh_summary && self.open_review_findings().is_empty()
     }
 
-    /// The freshest `SUMMARY-F` (integration-review clean-pass summary; ISO-8601 sorts lexically).
+    /// The freshest `SUMMARY-F` (integration-review clean-pass summary), the latest by true
+    /// chronological order via [`iso_chrono_cmp`] — the batch-level twin of [`latest_summary`]
+    /// (`Self::latest_summary`) and, like it, NOT a raw lexical compare: the optional
+    /// fractional-seconds tail makes "ISO-8601 sorts lexically" false for same-second marks.
     pub fn latest_integration_summary(&self) -> Option<&Finding> {
         self.findings
             .iter()
             .filter(|f| f.is_integration_summary())
             .max_by(|a, b| {
-                a.integration_summary_timestamp()
-                    .cmp(&b.integration_summary_timestamp())
+                iso_chrono_cmp(
+                    a.integration_summary_timestamp().unwrap_or_default(),
+                    b.integration_summary_timestamp().unwrap_or_default(),
+                )
             })
     }
     /// Open integration findings = `F-` entries with status `новая`.
@@ -127,10 +144,50 @@ impl ReviewParse {
         let fresh_summary = self
             .latest_integration_summary()
             .and_then(|f| f.integration_summary_timestamp())
-            .map(|ts| ts > since)
+            .map(|ts| iso_chrono_cmp(ts, since) == Ordering::Greater)
             .unwrap_or(false);
         fresh_summary && self.open_integration_findings().is_empty()
     }
+}
+
+/// Chronologically compare two UTC ISO-8601 timestamps of the fixed-width
+/// `YYYY-MM-DDTHH:MM:SS[.d{1,3}]Z` shape [`is_utc_timestamp`] accepts (both `SUMMARY-*` ids and the
+/// `since` freshness cutoff take this form).
+///
+/// The whole-seconds prefix (`YYYY-MM-DDTHH:MM:SS`, the first 19 bytes) is most-significant-first,
+/// fixed-width and zero-padded, so comparing it lexically is already chronological. The hazard this
+/// closes is the OPTIONAL fractional-seconds tail: `.` (0x2E) sorts before `Z` (0x5A), so a raw
+/// whole-string compare reads `…:00.5Z` as EARLIER than the same second's `…:00Z` even though it is
+/// 500 ms later (and `since`, at second precision from `epoch_to_iso`, has no tail at all). We
+/// therefore compare the second-prefix lexically and break same-second ties on the fractional part
+/// normalized to milliseconds — the freshness gate's true ordering, replacing the whole-string
+/// lexical compare it used to do.
+fn iso_chrono_cmp(a: &str, b: &str) -> Ordering {
+    match (a.get(..19), b.get(..19)) {
+        (Some(pa), Some(pb)) => pa
+            .cmp(pb)
+            .then_with(|| iso_frac_millis(a).cmp(&iso_frac_millis(b))),
+        // Defensive: a string shorter than the validated fixed-width shape should never reach the
+        // gate; fall back to a whole-string lexical compare rather than panic on the slice.
+        _ => a.cmp(b),
+    }
+}
+
+/// The fractional-seconds tail of an ISO-8601 timestamp normalized to milliseconds, 0 when absent:
+/// `…:00Z`→0, `…:00.5Z`→500, `…:00.05Z`→50, `…:00.005Z`→5. Right-padding the 1..3-digit tail to a
+/// constant 3 digits is what lets same-second marks compare chronologically. A tail that is not the
+/// `.d{1,3}` form [`is_utc_timestamp`] already vetted yields 0 (only reachable defensively).
+fn iso_frac_millis(ts: &str) -> u16 {
+    let Some(frac) = ts.get(19..).and_then(|rest| rest.strip_prefix('.')) else {
+        return 0;
+    };
+    let digits = frac.strip_suffix('Z').unwrap_or(frac);
+    if digits.is_empty() || digits.len() > 3 || !digits.bytes().all(|c| c.is_ascii_digit()) {
+        return 0; // not the `.d{1,3}` form `is_utc_timestamp` vets; treat as no fraction
+    }
+    // `.5`==500ms, `.05`==50ms, `.005`==5ms: scale the parsed value to a 3-digit-milliseconds base.
+    let value: u16 = digits.parse().unwrap_or(0);
+    value * 10u16.pow(3 - digits.len() as u32)
 }
 
 /// One task's line in `merge_report.md` (`agents/merger.md`, "Формат `merge_report.md`"): a task
@@ -508,6 +565,74 @@ mod tests {
         assert_eq!(p.open_integration_findings().len(), 1);
         assert_eq!(p.open_integration_findings()[0].id, "F-9");
         assert!(!p.is_clean_integration_pass("2026-07-12T17:00:00Z"));
+    }
+
+    #[test]
+    fn summary_timestamps_compare_chronologically_not_lexically() {
+        // `is_utc_timestamp` accepts an optional `.d{1,3}` fractional tail, so a SUMMARY id can be
+        // `…:00.5Z`. Lexically `.` (0x2E) < `Z` (0x5A), so a raw string compare misranks a
+        // fractional mark as EARLIER than the same second's whole-second mark — though it is
+        // 500 ms later. This test pins the true chronological order; on the old lexical `ts > since`
+        // / `max_by(cmp)` it fails.
+        const SINCE: &str = "2026-07-10T18:00:00Z"; // second precision, as epoch_to_iso writes
+
+        // (1) Freshness: a fresh SUMMARY-R with fractional seconds in the SAME second as `since`
+        // must clear the gate — `…:00.5Z` is 500 ms after `…:00Z`. (Lexically it read as stale.)
+        let frac = "### [SUMMARY-R-2026-07-10T18:00:00.5Z] Итог — статус: готово к слиянию\n";
+        let p = parse_review(frac);
+        assert!(
+            p.latest_summary().is_some(),
+            "fractional SUMMARY-R still a valid marker"
+        );
+        assert!(
+            p.is_clean_pass(SINCE),
+            "a .5s summary in the `since` second is fresher than `since`, not stale"
+        );
+
+        // (2) Max selection: between two same-second summaries, the fractional one is the later.
+        // Order them so a lexical `max_by` would wrongly pick the whole-second `…:00Z`.
+        let two = "\
+### [SUMMARY-R-2026-07-10T18:00:00.5Z] Итог — статус: готово к слиянию\n\
+### [SUMMARY-R-2026-07-10T18:00:00Z] Итог — статус: готово к слиянию\n";
+        let p = parse_review(two);
+        assert_eq!(
+            p.latest_summary().unwrap().summary_timestamp(),
+            Some("2026-07-10T18:00:00.5Z"),
+            "the .5s mark is chronologically the latest of the two"
+        );
+
+        // (3) The batch-level SUMMARY-F twin behaves identically (both gate pairs share the fix).
+        const SINCE_F: &str = "2026-07-12T18:00:00Z";
+        let frac_f = "### [SUMMARY-F-2026-07-12T18:00:00.5Z] Итог — статус: готово к слиянию\n";
+        let pf = parse_review(frac_f);
+        assert!(pf.latest_integration_summary().is_some());
+        assert!(
+            pf.is_clean_integration_pass(SINCE_F),
+            "a .5s SUMMARY-F in the `since` second is fresh, not stale"
+        );
+        let two_f = "\
+### [SUMMARY-F-2026-07-12T18:00:00.5Z] Итог — статус: готово к слиянию\n\
+### [SUMMARY-F-2026-07-12T18:00:00Z] Итог — статус: готово к слиянию\n";
+        let pf = parse_review(two_f);
+        assert_eq!(
+            pf.latest_integration_summary()
+                .unwrap()
+                .integration_summary_timestamp(),
+            Some("2026-07-12T18:00:00.5Z"),
+            "the .5s SUMMARY-F is chronologically the latest of the two"
+        );
+
+        // Mixed sub-second widths normalize by decimal position, not digit count: `.05Z` (50 ms)
+        // is EARLIER than `.5Z` (500 ms) even though it is lexically longer.
+        let widths = "\
+### [SUMMARY-R-2026-07-10T18:00:00.5Z] Итог — статус: готово к слиянию\n\
+### [SUMMARY-R-2026-07-10T18:00:00.05Z] Итог — статус: готово к слиянию\n";
+        let p = parse_review(widths);
+        assert_eq!(
+            p.latest_summary().unwrap().summary_timestamp(),
+            Some("2026-07-10T18:00:00.5Z"),
+            ".5s (500 ms) is later than .05s (50 ms) in the same second"
+        );
     }
 
     #[test]
