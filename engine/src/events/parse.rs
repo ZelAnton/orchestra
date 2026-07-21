@@ -70,9 +70,10 @@ pub fn parse_line(line: &str) -> Result<Event, ParseError> {
         ));
     }
 
-    // occurred_at: required, ISO-8601 UTC ending in Z.
+    // occurred_at: required, ISO-8601 UTC ending in Z. Validated by the crate's single strict
+    // matcher (`crate::time::is_iso_utc`), shared with the freshness gate in `contract.rs`.
     let occurred_at = require_str(obj.get("occurred_at"), "occurred_at")?;
-    if !is_iso_utc(occurred_at) {
+    if !crate::time::is_iso_utc(occurred_at) {
         return Err(ParseError::new(format!(
             "occurred_at '{occurred_at}' is not ISO-8601 UTC (…Z)"
         )));
@@ -202,54 +203,6 @@ fn is_task_id(s: &str) -> bool {
         None => return false,
     };
     rest.chars().next().is_some_and(|c| c.is_ascii_digit())
-}
-
-/// Validate `occurred_at` against `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$`
-/// (a hand-rolled matcher — no `regex` dependency). ISO-8601 UTC, must end in `Z`.
-fn is_iso_utc(s: &str) -> bool {
-    let b = s.as_bytes();
-    // Minimum: "YYYY-MM-DDTHH:MM:SSZ" = 20 chars.
-    if b.len() < 20 {
-        return false;
-    }
-    let digit = |i: usize| b.get(i).is_some_and(|c| c.is_ascii_digit());
-    let lit = |i: usize, c: u8| b.get(i) == Some(&c);
-    // date
-    if !(digit(0) && digit(1) && digit(2) && digit(3) && lit(4, b'-')) {
-        return false;
-    }
-    if !(digit(5) && digit(6) && lit(7, b'-')) {
-        return false;
-    }
-    if !(digit(8) && digit(9) && lit(10, b'T')) {
-        return false;
-    }
-    // time
-    if !(digit(11) && digit(12) && lit(13, b':')) {
-        return false;
-    }
-    if !(digit(14) && digit(15) && lit(16, b':')) {
-        return false;
-    }
-    if !(digit(17) && digit(18)) {
-        return false;
-    }
-    // optional fractional seconds ".d{1,3}" then mandatory trailing 'Z'
-    let mut i = 19;
-    if lit(i, b'.') {
-        let frac_start = i + 1;
-        let mut j = frac_start;
-        while j < b.len() && b[j].is_ascii_digit() {
-            j += 1;
-        }
-        let frac_len = j - frac_start;
-        if !(1..=3).contains(&frac_len) {
-            return false;
-        }
-        i = j;
-    }
-    // exactly a trailing 'Z' and nothing after it
-    b.get(i) == Some(&b'Z') && i + 1 == b.len()
 }
 
 #[cfg(test)]
@@ -401,17 +354,7 @@ mod tests {
         assert_eq!(ev, reparsed);
     }
 
-    // ---- occurred_at matcher unit coverage -------------------------------------------
-
-    #[test]
-    fn iso_utc_matcher() {
-        assert!(is_iso_utc("2026-07-08T12:24:10Z"));
-        assert!(is_iso_utc("2026-07-08T12:24:10.123Z"));
-        assert!(is_iso_utc("2026-07-08T12:24:10.1Z"));
-        assert!(!is_iso_utc("2026-07-08T12:24:10")); // no Z
-        assert!(!is_iso_utc("2026-07-08T12:24:10.1234Z")); // >3 frac digits
-        assert!(!is_iso_utc("2026-07-08T12:24:10Z ")); // trailing space
-        assert!(!is_iso_utc("2026-7-8T12:24:10Z")); // unpadded
-        assert!(!is_iso_utc(""));
-    }
+    // The `occurred_at` matcher's per-format unit coverage now lives beside its implementation in
+    // `crate::time::is_iso_utc` (`time.rs::tests::is_iso_utc_accepts_and_rejects_per_format`); the
+    // parser's use of it stays covered here by `rejects_non_z_timestamp`.
 }

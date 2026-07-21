@@ -84,6 +84,7 @@ use orchestra_engine::resolvers::{
 use orchestra_engine::run::{self, RunConfig};
 use orchestra_engine::state::{completed_ids, now_epoch_secs, DeliveryTarget, Snapshot, TaskState};
 use orchestra_engine::supervise::{self, SpawnSpec};
+use orchestra_engine::time::days_from_civil;
 use orchestra_engine::toolscript;
 
 fn main() {
@@ -729,7 +730,14 @@ fn render_plan(
 
 /// Parse a `YYYY-MM-DDTHH:MM:SS` UTC timestamp (as `cohort_state.md` `Начало когорты:` writes;
 /// any trailing zone suffix `Z`/`+00:00` is ignored and treated as UTC) into epoch seconds.
-/// `None` for a malformed timestamp. Uses Howard Hinnant's `days_from_civil` — no dependency.
+/// `None` for a malformed timestamp.
+///
+/// This is deliberately MORE LENIENT than the engine's strict `orchestra_engine::time::is_iso_utc`
+/// / `iso_to_epoch` pair: the date/time separator may be `T` or a space, no trailing `Z` is
+/// required, and fractional seconds are not supported — the historical shape `cohort_state.md`
+/// emits. So it keeps its own lenient field scan here and reuses only the shared calendar core
+/// `orchestra_engine::time::days_from_civil` (previously duplicated inline), which is the actual
+/// arithmetic this task consolidates.
 fn parse_iso_utc(s: &str) -> Option<u64> {
     let b = s.as_bytes();
     let year: i64 = s.get(0..4)?.parse().ok()?;
@@ -748,14 +756,8 @@ fn parse_iso_utc(s: &str) -> Option<u64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    // days_from_civil: days since 1970-01-01 for a civil (proleptic Gregorian) date.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let mp = if month > 2 { month - 3 } else { month + 9 }; // [0, 11]
-    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    let days = era * 146097 + doe - 719468;
+    // Shared calendar core: days since 1970-01-01 for this civil (proleptic Gregorian) date.
+    let days = days_from_civil(year, month, day);
     let secs = days * 86400 + hour * 3600 + min * 60 + sec;
     u64::try_from(secs).ok()
 }
@@ -1522,5 +1524,45 @@ mod live_prompt_tests {
     fn unrecognized_flag_before_prompt_is_rejected() {
         let err = parse_live_prompt(&s(&["--live", "--bogus", "do the thing"])).unwrap_err();
         assert!(matches!(err, LivePromptError::Bad(_)));
+    }
+}
+
+#[cfg(test)]
+mod parse_iso_utc_tests {
+    use super::parse_iso_utc;
+
+    /// The lenient `cohort_state.md` timestamp parser must keep its distinctive contract after
+    /// moving the calendar arithmetic into `orchestra_engine::time::days_from_civil`: it accepts a
+    /// `T` OR a space separator, needs no trailing `Z`, and computes the same epoch either way.
+    #[test]
+    fn accepts_both_t_and_space_separators() {
+        // 2021-01-01T00:00:00Z == 1_609_459_200 epoch seconds.
+        assert_eq!(parse_iso_utc("2021-01-01T00:00:00"), Some(1_609_459_200));
+        assert_eq!(parse_iso_utc("2021-01-01 00:00:00"), Some(1_609_459_200));
+        assert_eq!(parse_iso_utc("1970-01-01T00:00:00"), Some(0));
+    }
+
+    /// A trailing zone suffix (`Z`, `+00:00`, …) past the seconds is ignored, and within-day
+    /// components land on the right second.
+    #[test]
+    fn ignores_trailing_zone_suffix_and_reads_time_of_day() {
+        assert_eq!(parse_iso_utc("2021-01-01T00:00:00Z"), Some(1_609_459_200));
+        assert_eq!(
+            parse_iso_utc("2021-01-01T01:01:01+00:00"),
+            Some(1_609_462_861)
+        );
+        // A leap-day instant confirms the shared calendar core: 2020-02-29T12:00:00 == 1_582_977_600.
+        assert_eq!(parse_iso_utc("2020-02-29 12:00:00"), Some(1_582_977_600));
+    }
+
+    /// Malformed timestamps and out-of-range calendar fields are rejected (None), unchanged.
+    #[test]
+    fn rejects_malformed_and_out_of_range() {
+        assert_eq!(parse_iso_utc(""), None);
+        assert_eq!(parse_iso_utc("2021/01/01T00:00:00"), None); // wrong date separators
+        assert_eq!(parse_iso_utc("2021-01-01X00:00:00"), None); // bad date/time separator
+        assert_eq!(parse_iso_utc("2021-13-01T00:00:00"), None); // month out of range
+        assert_eq!(parse_iso_utc("2021-01-32T00:00:00"), None); // day out of range
+        assert_eq!(parse_iso_utc("2021-01-01T0a:00:00"), None); // non-digit time field
     }
 }
