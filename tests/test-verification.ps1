@@ -60,3 +60,4 @@ try {
 finally { foreach($d in $Dirs){if(Test-Path $d){Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}} }
 if($Failures.Count){Write-Host "FAILED - $($Failures.Count) assertion(s):"; $Failures|ForEach-Object{Write-Host "  $_"}; exit 1}
 Write-Host 'OK - verification profiles cover missing, multiple, failed, docs-only, disabled, and crash-recovery cases.'
+exit 0
