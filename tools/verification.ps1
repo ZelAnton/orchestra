@@ -7,9 +7,12 @@
     as a backward-compatible one-command profile. `run` executes every configured command
     through tools/supervisor.ps1 and atomically records an exact-command, exact-head verdict.
     `check` is the crash-recovery gate: only a terminal pass/exempt verdict for the current
-    profile fingerprint and requested VCS head is reusable. A missing profile blocks
-    executable changes; an operator-owned `VERIFICATION_MODE: disabled` or a mechanically
-    detected docs-only diff is recorded as an explicit exemption, never as "not checked".
+    profile fingerprint and requested VCS head is reusable. VERIFICATION_MODE defaults to
+    `disabled` when unset (unconfigured projects are exempt as `operator-disabled`, not
+    silently skipped and not blocked); set `VERIFICATION_MODE: auto` or `required` to opt
+    into the stricter "missing profile blocks executable changes" behavior. A mechanically
+    detected docs-only diff is always recorded as an explicit `exempt/docs-only`, never as
+    "not checked".
 
 .EXAMPLE
     pwsh -File tools/verification.ps1 profile --work .work --json
@@ -61,7 +64,15 @@ function Read-Config {
 function Get-Profile {
     param([string]$Work)
     $cfg = Read-Config $Work
-    $mode = if ($cfg.ContainsKey('VERIFICATION_MODE') -and $cfg['VERIFICATION_MODE']) { [string]$cfg['VERIFICATION_MODE'] } else { 'auto' }
+    # VERIFICATION_MODE is unset for the overwhelming majority of projects that never
+    # opted into this gate. Track whether it was written explicitly: an explicit
+    # `auto`/`required` still enforces the strict "missing profile blocks" behavior
+    # below, but when the key is absent entirely we fall back to 'auto' for the
+    # purpose of still honoring a configured VERIFICATION_COMMANDS/SMOKE_CMD (that is
+    # an unambiguous signal of intent to verify), and only turn a resulting "nothing
+    # configured" state into a disabled/exempt default a few lines down.
+    $modeExplicit = $cfg.ContainsKey('VERIFICATION_MODE') -and $cfg['VERIFICATION_MODE']
+    $mode = if ($modeExplicit) { [string]$cfg['VERIFICATION_MODE'] } else { 'auto' }
     if ($mode -notin @('auto', 'required', 'disabled')) { Fail 2 "VERIFICATION_MODE must be auto|required|disabled (got '$mode')" }
     $commands = @()
     $source = 'none'
@@ -77,9 +88,23 @@ function Get-Profile {
     }
     $state = if ($mode -eq 'disabled') { 'disabled' } elseif ($commands.Count -gt 0) { 'configured' } else { 'missing' }
     if ($mode -eq 'required' -and $commands.Count -eq 0) { $state = 'missing' }
+    # An explicit `VERIFICATION_MODE: disabled` is a deliberate operator override and
+    # always wins as exempt/operator-disabled, even over a mechanically detected
+    # docs-only diff (the caller checks this flag before deciding exemption order).
+    $explicitDisabled = ($state -eq 'disabled' -and $modeExplicit)
+    if ($state -eq 'missing' -and -not $modeExplicit) {
+        # Nothing at all is configured (no VERIFICATION_MODE, no VERIFICATION_COMMANDS,
+        # no SMOKE_CMD): default to disabled/exempt rather than blocking publication.
+        # Writing `VERIFICATION_MODE: auto` or `required` explicitly opts back into the
+        # strict "missing profile blocks executable changes" behavior. Unlike an
+        # explicit disable, this implicit default yields priority to a mechanically
+        # detected docs-only diff (see $explicitDisabled above).
+        $state = 'disabled'
+        $mode = 'disabled'
+    }
     $canonical = [ordered]@{ mode = $mode; source = $source; commands = @($commands) }
     $fingerprint = Get-Sha256Text ($canonical | ConvertTo-Json -Compress -Depth 5)
-    return [pscustomobject]@{ mode = $mode; state = $state; source = $source; commands = @($commands); fingerprint = $fingerprint }
+    return [pscustomobject]@{ mode = $mode; state = $state; source = $source; commands = @($commands); fingerprint = $fingerprint; explicitDisabled = $explicitDisabled }
 }
 function Get-CurrentHead {
     param([string]$Root, [string]$Vcs)
@@ -131,11 +156,18 @@ function Invoke-RunCommand {
     $verificationProfile = Get-Profile $work
     $paths = @(Get-ChangedPathList $root $vcs $base $head)
     $docsOnly = Test-DocsOnly $paths
-    if ($verificationProfile.state -eq 'disabled') {
+    # An explicit `VERIFICATION_MODE: disabled` is a deliberate operator override and
+    # always wins, unconditionally, over a mechanically detected docs-only diff. The
+    # implicit "nothing configured at all" default (see Get-Profile) instead yields
+    # priority to the more specific docs-only exemption when both apply.
+    if ($verificationProfile.state -eq 'disabled' -and $verificationProfile.explicitDisabled) {
         $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'operator-disabled' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
     }
     if ($docsOnly) {
         $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'docs-only' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
+    }
+    if ($verificationProfile.state -eq 'disabled') {
+        $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'operator-disabled' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
     }
     if ($verificationProfile.state -ne 'configured') {
         $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'blocked' 'missing-profile' @(); Write-JsonAtomic $resultFile $record; Emit $record; exit 4
