@@ -209,15 +209,94 @@ fn cmd_argv(args: &[String]) {
     }
 }
 
-fn cmd_claude(args: &[String]) {
-    if !args.iter().any(|a| a == "--live") {
-        eprintln!(
-            "refusing to spawn a real model call without --live (this consumes tokens and needs auth).\n\
-             Use `argv claude` to see the argv offline, or `selfcheck` for the hermetic demo."
-        );
-        exit(2);
+/// Failure modes of [`parse_live_prompt`]: kept distinct so each `cmd_claude`/`cmd_codex`
+/// caller can print its own `--live`-specific refusal (they already had different wording)
+/// while sharing the actual parsing/validation logic.
+#[derive(Debug)]
+enum LivePromptError {
+    /// The required `--live` opt-in flag was never given.
+    MissingLive,
+    /// `--live` was present, but the prompt itself is missing, duplicated, or ambiguous.
+    Bad(String),
+}
+
+/// Parse the arguments to `claude --live <prompt>` / `codex --live <prompt>` (T-272).
+///
+/// The prompt is deliberately NOT `args.last()`: with that, a bare `--live` (no prompt)
+/// spawns a REAL, paid model call using the literal string `--live` as the prompt, and any
+/// flag placed after (or instead of) the prompt silently steals its slot. Instead the prompt
+/// must be given as a single explicit positional argument — which must be the FINAL token;
+/// nothing, flag or otherwise, may follow it — or via `--prompt <value>`. Any other `--flag`,
+/// a second positional, or a flag trailing the prompt is a hard parse error, never a silent
+/// prompt substitution.
+///
+/// `rest` is the subcommand's own arguments, i.e. everything after `claude`/`codex`.
+fn parse_live_prompt(rest: &[String]) -> Result<String, LivePromptError> {
+    let mut live = false;
+    let mut prompt: Option<String> = None;
+    let n = rest.len();
+    let mut i = 0;
+    while i < n {
+        let a = rest[i].as_str();
+        match a {
+            "--live" => live = true,
+            "--prompt" => {
+                i += 1;
+                let value = rest
+                    .get(i)
+                    .ok_or_else(|| LivePromptError::Bad("--prompt requires a value".into()))?;
+                if prompt.is_some() {
+                    return Err(LivePromptError::Bad("prompt given more than once".into()));
+                }
+                prompt = Some(value.clone());
+            }
+            _ if a.starts_with("--") => {
+                return Err(LivePromptError::Bad(format!("unrecognized flag: {a}")));
+            }
+            _ => {
+                if prompt.is_some() {
+                    return Err(LivePromptError::Bad("prompt given more than once".into()));
+                }
+                if i != n - 1 {
+                    return Err(LivePromptError::Bad(format!(
+                        "unexpected argument after the prompt: {}",
+                        rest[i + 1]
+                    )));
+                }
+                prompt = Some(a.to_string());
+            }
+        }
+        i += 1;
     }
-    let prompt = args.last().cloned().unwrap_or_default();
+    if !live {
+        return Err(LivePromptError::MissingLive);
+    }
+    match prompt {
+        Some(p) if !p.is_empty() => Ok(p),
+        _ => Err(LivePromptError::Bad(
+            "missing prompt: pass it as a positional argument, or as --prompt <value>".into(),
+        )),
+    }
+}
+
+fn cmd_claude(args: &[String]) {
+    let prompt = match parse_live_prompt(&args[2..]) {
+        Ok(p) => p,
+        Err(LivePromptError::MissingLive) => {
+            eprintln!(
+                "refusing to spawn a real model call without --live (this consumes tokens and needs auth).\n\
+                 Use `argv claude` to see the argv offline, or `selfcheck` for the hermetic demo."
+            );
+            exit(2);
+        }
+        Err(LivePromptError::Bad(msg)) => {
+            eprintln!(
+                "usage: claude --live <prompt>  (the prompt must be a single positional \
+                 argument, or --prompt <value>, with nothing after it): {msg}"
+            );
+            exit(2);
+        }
+    };
     let mut call = ClaudeCall::new(prompt);
     call.model = Some("sonnet".into());
     call.max_turns = Some(40);
@@ -238,11 +317,20 @@ fn cmd_claude(args: &[String]) {
 }
 
 fn cmd_codex(args: &[String]) {
-    if !args.iter().any(|a| a == "--live") {
-        eprintln!("refusing to spawn a real codex call without --live.");
-        exit(2);
-    }
-    let prompt = args.last().cloned().unwrap_or_default();
+    let prompt = match parse_live_prompt(&args[2..]) {
+        Ok(p) => p,
+        Err(LivePromptError::MissingLive) => {
+            eprintln!("refusing to spawn a real codex call without --live.");
+            exit(2);
+        }
+        Err(LivePromptError::Bad(msg)) => {
+            eprintln!(
+                "usage: codex --live <prompt>  (the prompt must be a single positional \
+                 argument, or --prompt <value>, with nothing after it): {msg}"
+            );
+            exit(2);
+        }
+    };
     let call = CodexCall::new(
         env::current_dir()
             .map(|p| p.display().to_string())
@@ -1377,4 +1465,62 @@ fn join_argv(argv: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod live_prompt_tests {
+    use super::{parse_live_prompt, LivePromptError};
+
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// T-272: `claude --live` / `codex --live` with no prompt at all must refuse (not spawn
+    /// with `--live` itself as the prompt).
+    #[test]
+    fn missing_prompt_is_rejected() {
+        let err = parse_live_prompt(&s(&["--live"])).unwrap_err();
+        assert!(matches!(err, LivePromptError::Bad(_)));
+    }
+
+    /// T-272: a flag placed after the prompt must never silently steal the prompt slot —
+    /// the whole call is rejected instead.
+    #[test]
+    fn flag_after_prompt_is_rejected() {
+        let err = parse_live_prompt(&s(&["--live", "do the thing", "--live"])).unwrap_err();
+        assert!(matches!(err, LivePromptError::Bad(_)));
+
+        let err = parse_live_prompt(&s(&["--live", "do the thing", "--bogus"])).unwrap_err();
+        assert!(matches!(err, LivePromptError::Bad(_)));
+    }
+
+    /// The plain, valid call must keep working exactly as before.
+    #[test]
+    fn normal_prompt_without_trailing_flags_is_accepted() {
+        let prompt = parse_live_prompt(&s(&["--live", "do the thing"])).expect("valid call");
+        assert_eq!(prompt, "do the thing");
+    }
+
+    /// `--live` missing entirely is its own distinct, more specific error so callers can
+    /// print the "needs --live" refusal rather than a generic usage error.
+    #[test]
+    fn missing_live_flag_is_reported_distinctly() {
+        let err = parse_live_prompt(&s(&["do the thing"])).unwrap_err();
+        assert!(matches!(err, LivePromptError::MissingLive));
+    }
+
+    /// `--prompt <value>` is accepted as an explicit alternative to a bare positional.
+    #[test]
+    fn prompt_flag_form_is_accepted() {
+        let prompt =
+            parse_live_prompt(&s(&["--live", "--prompt", "do the thing"])).expect("valid call");
+        assert_eq!(prompt, "do the thing");
+    }
+
+    /// A stray unrecognized flag before the prompt must also be rejected, not ignored.
+    #[test]
+    fn unrecognized_flag_before_prompt_is_rejected() {
+        let err = parse_live_prompt(&s(&["--live", "--bogus", "do the thing"])).unwrap_err();
+        assert!(matches!(err, LivePromptError::Bad(_)));
+    }
 }
