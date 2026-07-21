@@ -187,7 +187,11 @@ pub struct Candidate {
     pub id: String,
     /// Whether all its prerequisites are complete (resolve with [`is_ready`]).
     pub ready: bool,
-    /// Its conflict-domain (an empty [`Domain`] = unknown/none — conflicts with nothing).
+    /// Its conflict-domain. A known-empty [`Domain`] (`Domain::parse("")`, `is_empty()` true)
+    /// conflicts with nothing. An unknown domain (`Domain::unknown()`, `is_unknown()` true —
+    /// built by `run.rs::descriptor_domain` when a descriptor has no usable `Конфликт-домен:`)
+    /// is a distinct, fail-closed state: it intersects every domain, so it conflicts with
+    /// everything.
     pub domain: Domain,
     /// Its delivery lane (`docs/queue_contract.md` §11.1). Only `current` competes for the
     /// ordinary execution capacity; `next_major` is parked out of ordinary admission the same
