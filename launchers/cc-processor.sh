@@ -32,6 +32,36 @@ export DOTNET_CLI_USE_MSBUILD_SERVER=0
 export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
 export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
 
+# Resolve tools/state-tx.ps1 by the checkout-vs-mirror rule (same shape as cc-doctor.sh): prefer
+# the checkout copy (launchers/../tools/state-tx.ps1); otherwise the flat cc-sync mirror copy next
+# to this launcher in ~/.claude/scripts. Echoes the resolved path, or nothing if neither exists.
+resolve_state_tx() {
+  local script_dir
+  script_dir="$(CDPATH='' cd -- "${0%/*}" && pwd)"
+  if [ -f "$script_dir/../tools/state-tx.ps1" ]; then
+    printf '%s\n' "$script_dir/../tools/state-tx.ps1"
+  elif [ -f "$script_dir/state-tx.ps1" ]; then
+    printf '%s\n' "$script_dir/state-tx.ps1"
+  fi
+}
+
+# --force-lock: route the operator's force-takeover of .work/orchestrator.lock through the single
+# transactional path `state-tx.ps1 release --force` - the same owner/legacy/corrupt/foreign-lock
+# diagnostics the TUI's force-lock uses, so the two operator front-ends share one audited path
+# instead of two independent raw removals. Fall back to a bare `rm -rf` only when pwsh (PowerShell
+# 7) is unavailable in PATH (or the runner cannot be resolved).
+force_unlock() {
+  local state_tx
+  state_tx="$(resolve_state_tx)"
+  if command -v pwsh >/dev/null 2>&1 && [ -n "$state_tx" ]; then
+    echo "Force-releasing .work/orchestrator.lock via state-tx release --force - use only if you are sure the previous processor is not running."
+    pwsh -NoProfile -File "$state_tx" release --force --work ".work"
+  elif [ -d ".work/orchestrator.lock" ]; then
+    echo "Removing .work/orchestrator.lock (pwsh unavailable; raw fallback) - use only if you are sure the previous processor is not running."
+    rm -rf ".work/orchestrator.lock"
+  fi
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     claude|codex)
@@ -47,10 +77,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --force-lock)
-      if [ -d ".work/orchestrator.lock" ]; then
-        echo "Removing .work/orchestrator.lock - use only if you are sure the previous processor is not running."
-        rm -rf ".work/orchestrator.lock"
-      fi
+      force_unlock
       shift
       ;;
     --model)

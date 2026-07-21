@@ -217,6 +217,95 @@ test_installed_sync_from_checkout_cwd() {
     pass "$name"
 }
 
+# cc-processor.sh --force-lock routes the operator force-takeover through the single transactional
+# path `state-tx.ps1 release --force` when pwsh is available: the mock pwsh records the argv it was
+# invoked with, so we assert the launcher no longer does its own raw removal.
+run_force_lock_via_state_tx() {
+    local name="cc-processor.sh (--force-lock via state-tx release --force)"
+    local launcher_path="$REPO_ROOT/launchers/cc-processor.sh"
+    local lock_dir="$RUN_DIR/.work/orchestrator.lock"
+    local rc
+
+    mkdir -p "$lock_dir"
+    printf 'stale\n' > "$lock_dir/lease.json"
+    : > "$ARGS_FILE"
+    : > "$RC_FILE"
+    : > "$PWSH_ARGS_FILE"
+    (
+        cd "$RUN_DIR" || exit 99
+        PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
+            PWSH_ARGS_FILE="$PWSH_ARGS_FILE" CLAUDE_EXIT_CODE=0 \
+            "$BASH" "$launcher_path" --force-lock
+    )
+    rc=$?
+    rm -rf "$RUN_DIR/.work"
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "launcher exited $rc while the mock pwsh/claude exited 0"
+        return
+    fi
+    if ! grep -Eq 'state-tx\.ps1$' "$PWSH_ARGS_FILE"; then
+        fail "$name" "state-tx.ps1 was not the 'pwsh -File' target"
+        return
+    fi
+    if ! grep -Fxq 'release' "$PWSH_ARGS_FILE" || ! grep -Fxq -- '--force' "$PWSH_ARGS_FILE"; then
+        fail "$name" "state-tx was not invoked as 'release --force'"
+        return
+    fi
+    if ! contains_argument_pair --agent processor; then
+        fail "$name" "claude was not launched after the force-release"
+        return
+    fi
+    pass "$name"
+}
+
+# When pwsh (PowerShell 7) is not on PATH the same --force-lock must fall back to the raw removal so
+# the operator escape hatch still works without PowerShell 7. Uses an isolated PATH (claude + rm,
+# but deliberately no pwsh) so the test is independent of whether the host has pwsh installed.
+run_force_lock_raw_fallback_without_pwsh() {
+    local name="cc-processor.sh (--force-lock raw fallback when pwsh is absent)"
+    local launcher_path="$REPO_ROOT/launchers/cc-processor.sh"
+    local lock_dir="$RUN_DIR/.work/orchestrator.lock"
+    local nopwsh_dir="$MOCK_DIR/nopwsh-bin"
+    local rc
+
+    rm -rf "$nopwsh_dir"
+    mkdir -p "$nopwsh_dir"
+    cp "$MOCK_DIR/claude" "$nopwsh_dir/claude"
+    chmod +x "$nopwsh_dir/claude"
+    # Provide `rm` as a thin wrapper that execs the real rm by absolute path (rather than copying
+    # the binary, which would strip a dynamically-linked rm from its libs). This keeps the isolated
+    # PATH free of pwsh while the fallback's `rm -rf` still works on any host.
+    printf '#!/bin/sh\nexec %s "$@"\n' "$(command -v rm)" > "$nopwsh_dir/rm"
+    chmod +x "$nopwsh_dir/rm"
+
+    mkdir -p "$lock_dir"
+    printf 'stale\n' > "$lock_dir/lease.json"
+    : > "$ARGS_FILE"
+    : > "$RC_FILE"
+    (
+        cd "$RUN_DIR" || exit 99
+        PATH="$nopwsh_dir" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
+            CLAUDE_EXIT_CODE=0 "$BASH" "$launcher_path" --force-lock
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        rm -rf "$RUN_DIR/.work" "$nopwsh_dir"
+        fail "$name" "launcher exited $rc while the mock claude exited 0"
+        return
+    fi
+    if [ -d "$lock_dir" ]; then
+        rm -rf "$RUN_DIR/.work" "$nopwsh_dir"
+        fail "$name" "raw fallback did not remove the lock directory when pwsh was absent"
+        return
+    fi
+    rm -rf "$RUN_DIR/.work" "$nopwsh_dir"
+    if ! contains_argument_pair --agent processor; then
+        fail "$name" "claude was not launched after the raw fallback"
+        return
+    fi
+    pass "$name"
+}
+
 test_launcher cc-audit.sh code_auditor
 test_launcher cc-enhance.sh enhancement_scout
 test_launcher cc-github.sh github_sync
@@ -226,6 +315,8 @@ test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
 run_with_mock_codex_processor cc-processor.sh start
 run_with_mock_codex_processor cc-resume.sh resume
+run_force_lock_via_state_tx
+run_force_lock_raw_fallback_without_pwsh
 test_installed_sync_from_checkout_cwd
 
 if [ "$FAILURES" -ne 0 ]; then
@@ -233,4 +324,4 @@ if [ "$FAILURES" -ne 0 ]; then
     exit 1
 fi
 
-printf 'POSIX launcher tests passed: all 24 scenarios succeeded.\n'
+printf 'POSIX launcher tests passed: all 26 scenarios succeeded.\n'

@@ -51,7 +51,9 @@ pub fn usage() -> String {
     s.push_str(
         "The TUI observes read-only by default — it tails <WORK_DIR>/events.jsonl and reads \
 <WORK_DIR>/status.md —\nbut can also send a small, named command subset downward, each mirroring \
-an existing launcher/tool. Pause/force-lock touch only their established control files; approval\ndecisions run tools/policy.ps1 under supervision and never write approvals JSON from Rust. The TUI\nnever touches the queue, task descriptors, or code, and never runs the processor itself.\n\n",
+an existing launcher/tool. Pause touches only its established control file; force-lock runs \
+tools/state-tx.ps1 release --force and approval decisions run tools/policy.ps1, both under \
+supervision (approval never writes approvals JSON from Rust). The TUI\nnever touches the queue, task descriptors, or code, and never runs the processor itself.\n\n",
     );
     s.push_str("KEYS:\n");
     s.push_str(
@@ -66,7 +68,7 @@ an existing launcher/tool. Pause/force-lock touch only their established control
         "    s        lease      — show orchestrator.lock owner / liveness (tools/state-tx.ps1 status)\n",
     );
     s.push_str(
-        "    x        force-lock — remove <WORK_DIR>/orchestrator.lock; DESTRUCTIVE, asks to confirm (y)\n",
+        "    x        force-lock — release <WORK_DIR>/orchestrator.lock via tools/state-tx.ps1 release --force; DESTRUCTIVE, asks to confirm (y)\n",
     );
     s.push_str(
         "    a        approve selected pending approval (Decision Inbox only; asks to confirm)\n",

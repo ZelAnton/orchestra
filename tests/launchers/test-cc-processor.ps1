@@ -1,6 +1,6 @@
-﻿# Verifies launchers/cc-processor.cmd argument parsing: --force-lock removal,
-# --model with/without a value, EXTRA_ARGS passthrough (and ordering relative
-# to --permission-mode), and exit-code propagation.
+﻿# Verifies launchers/cc-processor.cmd argument parsing: --force-lock routed through the single
+# transactional `state-tx release --force` path (not a raw rd), --model with/without a value,
+# EXTRA_ARGS passthrough (and ordering relative to --permission-mode), and exit-code propagation.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -105,22 +105,37 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         Remove-Sandbox $paths
     }
 
-    # --- Scenario 5: --force-lock removes an existing lock directory --------
+    # --- Scenario 5: --force-lock releases an existing lock via state-tx release --force ----
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
         Install-FakeClaude -Paths $paths
+        Install-FakeStateTx -Paths $paths
         $captureFile = Join-Path $paths.Root 'claude-args.txt'
+        $stateTxArgs = Join-Path $paths.Root 'state-tx-args.txt'
         $lockDir = Join-Path $paths.Project '.work\orchestrator.lock'
         New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
-        Set-Content -LiteralPath (Join-Path $lockDir 'holder.txt') -Value 'stale' -Encoding utf8
+        Set-Content -LiteralPath (Join-Path $lockDir 'lease.json') -Value '{"role":"processor"}' -Encoding utf8
 
         $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -LauncherArgs @('--force-lock') -EnvVars @{
             FAKE_ARGS_FILE = $captureFile
+            FAKE_STATE_TX_ARGS = $stateTxArgs
             FAKE_EXIT_CODE = '0'
         }
         Assert-Equal 0 $result.ExitCode '[--force-lock] exit code'
-        Assert-NoFileExists $lockDir '[--force-lock] lock directory must be removed before launching claude'
+        # The lock is released by the transactional path (the fake state-tx removes it), proving
+        # the launcher no longer does its own raw rd - it delegates to `state-tx release --force`.
+        Assert-NoFileExists $lockDir '[--force-lock] lock directory must be released before launching claude'
+
+        # When pwsh (PowerShell 7) is present the launcher takes the transactional path; assert the
+        # exact verbs state-tx was invoked with. (Absent pwsh, the raw-rd fallback still removed the
+        # lock above, so the removal assertion holds either way.)
+        if (Get-Command pwsh -ErrorAction SilentlyContinue) {
+            $txArgs = Get-CapturedArgs $stateTxArgs
+            Assert-True ($txArgs -contains 'release') '[--force-lock] state-tx invoked with the release verb, not raw rd'
+            Assert-True ($txArgs -contains '--force') '[--force-lock] state-tx release must carry --force'
+            Assert-True ($txArgs -contains '--work') '[--force-lock] state-tx release must target --work'
+        }
 
         $expected = @(
             '--agent', 'processor',
@@ -134,19 +149,29 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         Remove-Sandbox $paths
     }
 
-    # --- Scenario 6: --force-lock with no existing lock does not error ------
+    # --- Scenario 6: --force-lock with no existing lock still runs state-tx (idempotent) ----
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
         Install-FakeClaude -Paths $paths
+        Install-FakeStateTx -Paths $paths
         $captureFile = Join-Path $paths.Root 'claude-args.txt'
+        $stateTxArgs = Join-Path $paths.Root 'state-tx-args.txt'
 
         $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -LauncherArgs @('--force-lock') -EnvVars @{
             FAKE_ARGS_FILE = $captureFile
+            FAKE_STATE_TX_ARGS = $stateTxArgs
             FAKE_EXIT_CODE = '0'
         }
         Assert-Equal 0 $result.ExitCode '[--force-lock, no lock present] exit code'
         Assert-True ((Get-CapturedArgs $captureFile).Count -gt 0) '[--force-lock, no lock present] claude must still be invoked'
+        # The transactional path is idempotent: it still runs (state-tx would print not-held) and
+        # the launcher does not error on a missing lock.
+        if (Get-Command pwsh -ErrorAction SilentlyContinue) {
+            $txArgs = Get-CapturedArgs $stateTxArgs
+            Assert-True ($txArgs -contains 'release') '[--force-lock, no lock present] state-tx still invoked with release'
+            Assert-True ($txArgs -contains '--force') '[--force-lock, no lock present] state-tx release carries --force'
+        }
     }
     finally {
         Remove-Sandbox $paths
