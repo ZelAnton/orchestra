@@ -140,8 +140,7 @@ fn read_string(chars: &[char], start: usize) -> Option<(String, usize)> {
                                 let hex2: String = chars[i + 3..i + 7].iter().collect();
                                 if let Ok(low) = u32::from_str_radix(&hex2, 16) {
                                     if (0xDC00..=0xDFFF).contains(&low) {
-                                        let cp2 =
-                                            0x10000 + (cp - 0xD800) * 0x400 + (low - 0xDC00);
+                                        let cp2 = 0x10000 + (cp - 0xD800) * 0x400 + (low - 0xDC00);
                                         if let Some(c) = char::from_u32(cp2) {
                                             combined = Some(c);
                                             i += 6;
