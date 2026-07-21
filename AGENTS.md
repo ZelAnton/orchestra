@@ -8,6 +8,10 @@ This repository defines a Claude/Codex agent orchestra. Agent definitions (YAML 
 
 Read `knowledge.md` before exploring or changing the repository. Use its map of ownership, control flow, runtime artifacts, and pitfalls to target source checks. Update it alongside changes to locations, responsibilities, phases, configuration, launchers, or invariants. It documents Orchestra itself; generated `.work/knowledge/` describes a consuming project.
 
+## Hard Workspace Boundary
+
+When Orchestra is the target of the task, `D:\GitHub\Personal\orchestra` is the only writable repository. Other projects may be inspected read-only to reproduce an Orchestra-generated pitfall or collect evidence, but never edit, format, commit, push, rebase, archive queue tasks, change leases, or mutate `.work/` in those projects. Their source code and task queues are diagnostic inputs, not an implementation backlog. Fix the originating behavior in Orchestra; if the cause cannot be fixed here, report the external requirement without applying it. Do not continue or complete tasks found in another project's queue unless the user starts a separate request that explicitly changes the target repository.
+
 ## Build, Test, and Development Commands
 
 - `powershell -NoProfile -ExecutionPolicy Bypass -File .\generate-coders.ps1` regenerates all Claude coder and reviewer variants under `agents/` after editing either template.
