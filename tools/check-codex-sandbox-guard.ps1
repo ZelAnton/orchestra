@@ -192,6 +192,15 @@ if ($runtimeText -notmatch 'if \(\$Sandbox -eq ''read-only''\)[\s\S]{0,300}--add
     Add-Finding -FileRef 'tools/codex-runtime.ps1' -Check 'worktree-single-root' `
         -Detail '--add-dir is not visibly restricted to read-only; workspace-write must remain a single writable root'
 }
+# T-279 root-cause fix: on native Windows the workspace-write argv must exclude codex's OWN
+# default extra writable roots (/tmp and $TMPDIR), collapsing `[workdir, /tmp, $TMPDIR]` to the
+# single `[workdir]` root the unelevated restricted-token sandbox can enforce - the direct
+# antidote to the `cannot enforce split writable root sets directly` refusal.
+if ($runtimeText -notmatch 'sandbox_workspace_write\.exclude_slash_tmp=true' -or
+    $runtimeText -notmatch 'sandbox_workspace_write\.exclude_tmpdir_env_var=true') {
+    Add-Finding -FileRef 'tools/codex-runtime.ps1' -Check 'worktree-single-root-collapse' `
+        -Detail 'workspace-write does not exclude codex''s own /tmp and $TMPDIR writable roots; the Windows split writable-root set is not collapsed to the single workdir root'
+}
 if ($runtimeText -notmatch 'WorkingDirectory') {
     Add-Finding -FileRef 'tools/codex-runtime.ps1' -Check 'worktree-cwd' `
         -Detail 'does not mechanically pin the Codex child working directory to the task worktree'

@@ -200,6 +200,14 @@ $AllowedNetwork = @('on', 'off')
 # the command unsandboxed. Pinned as a literal here - never lowered.
 $ApprovalPolicyOverride = 'approval_policy=never'
 
+# OS detection correct on both Windows PowerShell 5.1 and pwsh 7 ($IsWindows does not exist
+# under 5.1); the RuntimeInformation probe works everywhere. Set once at load so it is present
+# for both direct `-File` invocation and the dot-sourced path (tools/codex-preflight.ps1).
+# Used to scope the native-Windows workspace-write single-root collapse in Build-CodexArgv
+# (T-279) - the split writable-root refusal is a Windows unelevated restricted-token limit only.
+$script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Windows)
+
 # --------------------------------------------------------------------------
 # Failure classification table (T-062 / T-067), extensible. Order matters:
 # the more specific / definitive signatures are checked before the generic
@@ -280,6 +288,29 @@ function Build-CodexArgv {
     # read-only still needs the narrow internal exception for disposable caches.
     if ($Sandbox -eq 'read-only') {
         [void]$argv.Add('--add-dir'); [void]$argv.Add((Join-Path $Worktree '.work/codex-cache'))
+    }
+    elseif ($Sandbox -eq 'workspace-write' -and $script:OnWindows) {
+        # ROOT-CAUSE FIX for ENV_LIMIT/sandbox-init-worktree (T-279). Codex's DEFAULT
+        # workspace-write policy grants a writable-root SET, not a single root: it reports
+        # `workspace-write [workdir, /tmp, $TMPDIR]` (three disjoint roots). The native Windows
+        # unelevated restricted-token sandbox cannot enforce a *split* (multi-root) writable set
+        # and refuses to start with `cannot enforce split writable root sets directly` - the
+        # exact `sandbox-init-worktree` signature. Not `-C`, not nesting, not the shared jj/git
+        # store outside the worktree: it is codex adding its OWN extra `/tmp` and `$TMPDIR`
+        # roots. Excluding just those two leaves exactly `[workdir]` - a single root the backend
+        # CAN enforce - collapsing the split at codex's own config surface (verified against
+        # codex-cli 0.144.6: `--strict-config` accepts both keys and the sandbox line becomes
+        # `workspace-write [workdir]`). Safe because this runtime already redirects TEMP/TMP
+        # into `<worktree>/.work/codex-cache` (nested INSIDE workdir, so still writable), so no
+        # legitimate Windows temp write escapes the sole workdir root. Windows-scoped on
+        # purpose: on POSIX codex's landlock/seccomp backend enforces the split fine and
+        # `/tmp`/`$TMPDIR` stay legitimately writable for tooling, so it is left untouched.
+        # Passed WITHOUT `--strict-config` (which this runtime never sets), so a codex old
+        # enough to predate these keys silently ignores them (graceful no-op) rather than
+        # erroring - forward/backward safe. Complements, does not replace, the preflight/canary/
+        # Claude-fallback harness, which stays as defense-in-depth for other versions/hosts.
+        [void]$argv.Add('-c'); [void]$argv.Add('sandbox_workspace_write.exclude_slash_tmp=true')
+        [void]$argv.Add('-c'); [void]$argv.Add('sandbox_workspace_write.exclude_tmpdir_env_var=true')
     }
     # Fail-closed approval policy (T-069): pinned literal on EVERY call.
     [void]$argv.Add('-c'); [void]$argv.Add($ApprovalPolicyOverride)

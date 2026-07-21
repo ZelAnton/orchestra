@@ -142,7 +142,19 @@ $noop = if ($onWindows) { @('cmd', '/c', 'exit', '0') } else { @('sh', '-c', 'ex
 
 # codex sandbox <flags> -- <no-op>. Forcing sandbox_mode=workspace-write makes codex
 # set up (and, on a broken host, fail to set up) the split writable root.
-$sandboxArgs = @('sandbox', '-c', 'sandbox_mode=workspace-write', '--') + $noop
+$sandboxArgs = @('sandbox', '-c', 'sandbox_mode=workspace-write')
+if ($onWindows) {
+    # Mirror the runtime's native-Windows single-root collapse (T-279) so this probe measures
+    # the SAME sandbox shape the real `codex exec --sandbox workspace-write` call will use:
+    # exclude codex's own extra /tmp and $TMPDIR writable roots, leaving `[workdir]` as the
+    # single enforceable root (tools/codex-runtime.ps1 Build-CodexArgv does the same). Without
+    # this the probe would test the pre-fix split-root shape and could return
+    # `downgrade-worktree` even though the real single-root call would now start cleanly - a
+    # false negative that would needlessly route the whole worktree lane to Claude.
+    $sandboxArgs += @('-c', 'sandbox_workspace_write.exclude_slash_tmp=true',
+        '-c', 'sandbox_workspace_write.exclude_tmpdir_env_var=true')
+}
+$sandboxArgs += @('--') + $noop
 $spawnArgs = @($target.Prefix) + $sandboxArgs
 
 # Run with the addressed directory as the child process working directory so Codex

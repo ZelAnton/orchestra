@@ -374,11 +374,26 @@ function Get-ArgsCaptured {
     $cwdSeen = Get-Content -LiteralPath $cwdCap -Raw -Encoding utf8
     Assert-Equal ([IO.Path]::GetFullPath($wt).TrimEnd('\','/')) ([IO.Path]::GetFullPath($cwdSeen).TrimEnd('\','/')) 'worktree preflight: sandbox child cwd is the exact task worktree'
 
+    $argsCap = New-TempFile
     $clean = Invoke-Runtime -ScriptPath $script:Preflight -RuntimeArgs @(
         '--codex-cmd', $fake, '--workspace', $wt, '--timeout-sec', '10'
-    ) -EnvVars @{ FAKE_CODEX_EXIT = '0' }
+    ) -EnvVars @{ FAKE_CODEX_EXIT = '0'; FAKE_CODEX_ARGS_FILE = $argsCap }
     Assert-Equal 0 $clean.ExitCode 'worktree preflight: clean exact-root probe keeps routing'
     Assert-Equal 'unchanged' $clean.Json.decision 'worktree preflight: clean probe decision unchanged'
+    # T-279: the exact-worktree probe must measure the SAME sandbox shape the real workspace-write
+    # call uses. On native Windows that is the single-root collapse (exclude codex's /tmp+$TMPDIR),
+    # so the probe carries those keys; on POSIX it does not (the split is enforceable there).
+    $pcap = Get-ArgsCaptured $argsCap
+    $onWin = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    $probeHasExcl = ($pcap -contains 'sandbox_workspace_write.exclude_slash_tmp=true') -and
+                    ($pcap -contains 'sandbox_workspace_write.exclude_tmpdir_env_var=true')
+    if ($onWin) {
+        Assert-True $probeHasExcl 'worktree preflight: Windows probe mirrors the runtime single-root collapse (excludes codex /tmp+$TMPDIR)'
+    }
+    else {
+        Assert-True (-not $probeHasExcl) 'worktree preflight: POSIX probe keeps codex /tmp+$TMPDIR roots'
+    }
 }.Invoke()
 
 # =============================================================================
@@ -453,6 +468,42 @@ function Get-ArgsCaptured {
     $r4 = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', 'x', '--sandbox', 'read-only', '--reasoning', 'xhigh')
     Assert-Equal 0 $r4.ExitCode 'build-argv: xhigh reasoning accepted'
     Assert-True ($r4.Json.argv -contains 'model_reasoning_effort=xhigh') 'build-argv: argv carries xhigh reasoning effort'
+}.Invoke()
+
+# =============================================================================
+# 10a. T-279 - native-Windows workspace-write collapses codex's default split
+#      writable-root set (`[workdir, /tmp, $TMPDIR]`) to the single `[workdir]` root
+#      that the unelevated restricted-token sandbox CAN enforce, by excluding codex's
+#      own extra /tmp and $TMPDIR roots. This is the root-cause fix for the
+#      ENV_LIMIT/sandbox-init-worktree `cannot enforce split writable root sets` refusal.
+#      Windows-scoped: on POSIX the split is enforceable and those roots stay writable.
+# =============================================================================
+{
+    $onWin = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    $slashTmp = 'sandbox_workspace_write.exclude_slash_tmp=true'
+    $tmpEnv = 'sandbox_workspace_write.exclude_tmpdir_env_var=true'
+
+    $ww = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', 'x', '--sandbox', 'workspace-write', '--reasoning', 'medium')
+    Assert-Equal 0 $ww.ExitCode 'build-argv: workspace-write valid values accepted'
+    $wwHasSlash = $ww.Json.argv -contains $slashTmp
+    $wwHasTmp = $ww.Json.argv -contains $tmpEnv
+    if ($onWin) {
+        Assert-True ($wwHasSlash -and $wwHasTmp) 'build-argv: Windows workspace-write collapses the writable-root set to the single workdir root (excludes codex /tmp and $TMPDIR)'
+    }
+    else {
+        Assert-True ((-not $wwHasSlash) -and (-not $wwHasTmp)) 'build-argv: POSIX workspace-write keeps codex /tmp+$TMPDIR roots (no split-root limit there)'
+    }
+    # The single-root collapse must never widen the sandbox: no --add-dir on workspace-write,
+    # and the fail-closed approval policy is still pinned.
+    Assert-True (-not ($ww.Json.argv -contains '--add-dir')) 'build-argv: workspace-write stays add-dir-free (single writable root)'
+    Assert-True ($ww.Json.argv -contains 'approval_policy=never') 'build-argv: workspace-write still pins fail-closed approval policy'
+
+    # read-only never carries the workspace-write exclusion keys (they are meaningless there
+    # and the narrow cache --add-dir exception is unchanged).
+    $ro = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', 'x', '--sandbox', 'read-only', '--reasoning', 'medium')
+    Assert-True (-not ($ro.Json.argv -contains $slashTmp) -and -not ($ro.Json.argv -contains $tmpEnv)) 'build-argv: read-only carries no workspace-write root-exclusion keys'
+    Assert-True ($ro.Json.argv -contains '--add-dir') 'build-argv: read-only keeps its narrow cache --add-dir exception'
 }.Invoke()
 
 # =============================================================================

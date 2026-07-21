@@ -453,6 +453,35 @@ workspace, коммитит результаты листовых агентов
   последовательного canary; успех включает последующие волны, повтор класса сразу ведёт
   остаток на Claude. Сам runtime устраняет известную причину: cwd и `-C` совпадают с WT,
   `workspace-write` не получает redundant nested `--add-dir`.
+- **Первопричина split writable-root и её устранение в runtime (T-279).** Предметно
+  установлено, что «split writable root» codex видит **не** из-за `-C`, **не** из-за
+  вложенности task worktree в основной чекаут и **не** из-за того, что общий jj-стор лежит вне
+  worktree (`.work/worktrees/<T-ID>/.jj/repo` — файл-указатель `../../../../.jj/repo`; op-log/
+  view/backing store физически в корне основного чекаута, а первый `.git` при подъёме вверх —
+  тоже корень основного чекаута, 4 уровня выше): codex jj-неосведомлён и в `.jj/repo` сам не
+  пишет. Причина — **дефолт самого codex для `workspace-write`**: он выдаёт не один корень, а
+  **набор** — эмпирически `sandbox: workspace-write [workdir, /tmp, $TMPDIR]` (три
+  разъединённых корня). Windows unelevated restricted-token backend не умеет форсить *split*
+  (мульти-корневой) writable-набор и отказывает ровно этой сигнатурой; POSIX-backend
+  (landlock/seccomp) такой набор форсит штатно — отсюда Windows-only характер класса и то, что
+  reviewer (`read-only`) и main-tree CI-fix (workdir=корень репо) не задеты. Runtime закрывает
+  причину у источника: на native Windows для `workspace-write` он добавляет
+  `-c sandbox_workspace_write.exclude_slash_tmp=true` и
+  `-c sandbox_workspace_write.exclude_tmpdir_env_var=true`, убирая **собственные** лишние корни
+  codex `/tmp` и `$TMPDIR`; остаётся ровно `[workdir]` — единственный корень, который backend
+  форсить умеет (проверено на codex-cli 0.144.6: под `--strict-config` оба ключа приняты,
+  строка песочницы становится `workspace-write [workdir]`). Безопасно: runtime и так
+  перенаправляет TEMP/TMP внутрь `<WT>/.work/codex-cache` (вложено в workdir, остаётся
+  writable), поэтому ни одна легитимная временная запись Windows не покидает единственный
+  корень. Ключи идут **без** `--strict-config` (runtime его не ставит): старый codex, не
+  знающий их, молча игнорирует (graceful no-op), новый — применяет. Preflight/exact-worktree
+  probe/canary/фолбэк на Claude сохранены как defense-in-depth для иных версий/хостов; на POSIX
+  `/tmp`/`$TMPDIR` остаются writable для инструментов. Дополняет K-038 (нельзя доверять прозе
+  эскалации codex про `ENV_LIMIT/sandbox-init` — всегда сверяйся с живым worktree): сигнатура
+  не только ненадёжна в самоотчёте, но и недетерминирована у источника, а её контролируемая
+  из orchestra часть теперь закрыта. Покрытие: `tests/test-codex-runtime.ps1` (секция 10a,
+  argv-уровень, платформо-зависимо) и статический guard `tools/check-codex-sandbox-guard.ps1`
+  (`worktree-single-root-collapse`).
 - **Сетевой брокер зависимостей `coder_codex` (T-063).** Единственное **исключение** из
   инварианта «код правит только codex»: адаптер `coder_codex` **сам** (не codex) выполняет
   строго ограниченный **allowlist** канонических lock/fetch-команд по экосистемам
