@@ -216,10 +216,12 @@ fn json_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
 }
 
 /// Resolve the `state-tx.ps1` runner for the observed project, following the single "checkout vs
-/// mirror" rule (see `knowledge.md`, "Резолвинг раннеров `tools/*.ps1`"): prefer the project's own
-/// `<root>/tools/state-tx.ps1` (root = the `.work/` parent), else fall back to the cc-sync mirror
-/// at `~/.claude/scripts/state-tx.ps1`. `None` if neither exists — the caller surfaces that as
-/// [`LeaseStatus::Unavailable`] instead of guessing.
+/// mirror" rule (see `resolve_tool_script` / `knowledge.md`, "Резолвинг раннеров `tools/*.ps1`"):
+/// the project's own `<root>/tools/state-tx.ps1` (root = the `.work/` parent) is trusted ONLY when
+/// `root` carries all three checkout identity markers; otherwise the resolver uses the cc-sync
+/// mirror at `~/.claude/scripts/state-tx.ps1`. `None` if neither a trusted checkout copy nor a
+/// mirror copy exists — the caller surfaces that as [`LeaseStatus::Unavailable`] instead of
+/// guessing (or executing a foreign target-local file).
 pub fn resolve_state_tx_script(work_dir: &Path) -> Option<PathBuf> {
     resolve_tool_script(work_dir, "state-tx.ps1")
 }
@@ -339,22 +341,18 @@ pub fn resolve_policy_script(work_dir: &Path) -> Option<PathBuf> {
     resolve_tool_script(work_dir, "policy.ps1")
 }
 
+/// Resolve a `tools/<name>.ps1` runner for the observed project, delegating to the SINGLE shared
+/// checkout-vs-mirror resolver ([`orchestra_engine::toolscript::resolve_tool_script`]) so the
+/// identity-marker rule (`docs/queue_contract.md` §9, `knowledge.md` "Резолвинг раннеров
+/// `tools/*.ps1`") is enforced in one place across the TUI and the engine's `lease` command. The
+/// project root is the `.work/` parent: a checkout-local `<root>/tools/<name>` is trusted ONLY when
+/// `root` carries all three checkout identity markers; otherwise the resolver goes straight to the
+/// cc-sync mirror `~/.claude/scripts/<name>`, never executing a foreign/stale target-local file.
 fn resolve_tool_script(work_dir: &Path, name: &str) -> Option<PathBuf> {
-    if let Some(root) = work_dir.parent() {
-        let checkout = root.join("tools").join(name);
-        if checkout.exists() {
-            return Some(checkout);
-        }
-    }
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)?;
-    let mirror = home.join(".claude").join("scripts").join(name);
-    if mirror.exists() {
-        Some(mirror)
-    } else {
-        None
-    }
+    // `.work/` always has a parent in practice; if it somehow doesn't, pass the dir itself — it
+    // won't satisfy the checkout markers, so resolution falls to the mirror exactly as before.
+    let root = work_dir.parent().unwrap_or(work_dir);
+    orchestra_engine::toolscript::resolve_tool_script(root, name)
 }
 
 /// Build the arguments after `policy.ps1`. Values stay distinct argv elements, including an
@@ -731,5 +729,42 @@ mod tests {
         assert!(s.ends_with('Z'));
         assert_eq!(&s[4..5], "-");
         assert_eq!(&s[10..11], "T");
+    }
+
+    #[test]
+    fn resolve_tool_script_honours_checkout_identity_markers() {
+        // Build <root>/.work and a target-local <root>/tools/state-tx.ps1. Without the three
+        // checkout identity markers, the resolver must NOT hand back that target-local path — it
+        // may fall to the cc-sync mirror or None, but never the untrusted local file (the security
+        // property from `docs/queue_contract.md` §9). Once all three markers are present, it
+        // returns the target-local path as before (no regression for a real orchestra checkout).
+        // The shared decision itself lives in and is exhaustively unit-tested by
+        // `orchestra_engine::toolscript`; this test locks the TUI's use of it end to end.
+        let root = TmpWork::new();
+        let work = root.dir.join(".work");
+        fs::create_dir_all(&work).unwrap();
+        let tools = root.dir.join("tools");
+        fs::create_dir_all(&tools).unwrap();
+        let target_local = tools.join("state-tx.ps1");
+        fs::write(&target_local, "exit 0\n").unwrap();
+
+        // No identity markers -> the target-local script is untrusted and never returned.
+        assert_ne!(
+            resolve_state_tx_script(&work),
+            Some(target_local.clone()),
+            "target-local tools/state-tx.ps1 must not be trusted without checkout markers"
+        );
+
+        // Add all three checkout identity markers -> proven checkout, target-local path returned.
+        fs::create_dir_all(root.dir.join("agents")).unwrap();
+        fs::write(root.dir.join("agents").join("processor.md"), "x").unwrap();
+        fs::write(root.dir.join("generate-codex-agents.ps1"), "x").unwrap();
+        fs::write(tools.join("sync-runtime.ps1"), "x").unwrap();
+
+        assert_eq!(
+            resolve_state_tx_script(&work),
+            Some(target_local),
+            "a proven orchestra checkout still resolves its own tools/state-tx.ps1"
+        );
     }
 }

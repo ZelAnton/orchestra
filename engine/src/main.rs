@@ -84,6 +84,7 @@ use orchestra_engine::resolvers::{
 use orchestra_engine::run::{self, RunConfig};
 use orchestra_engine::state::{completed_ids, now_epoch_secs, DeliveryTarget, Snapshot, TaskState};
 use orchestra_engine::supervise::{self, SpawnSpec};
+use orchestra_engine::toolscript;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -725,9 +726,9 @@ fn cmd_lease(args: &[String]) {
     };
 
     // Resolve --work (default `.work`), --root (default the work dir's parent), and the
-    // `state-tx.ps1` script (default `<root>/tools/state-tx.ps1`). All are absolutised so the
-    // child tool gets stable paths regardless of the engine's own cwd; `--script` lets a test
-    // point at the real tool while using a throwaway `.work`.
+    // `state-tx.ps1` script. All are absolutised so the child tool gets stable paths regardless of
+    // the engine's own cwd; `--script` lets a test point at the real tool while using a throwaway
+    // `.work`.
     let work = abs_path(&opt(args, "--work").unwrap_or_else(|| ".work".to_string()));
     let root = match opt(args, "--root") {
         Some(r) => abs_path(&r),
@@ -736,17 +737,37 @@ fn cmd_lease(args: &[String]) {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| work.clone()),
     };
+    // An explicit `--script` is used as-is (existence-checked — this is the path the lease tests
+    // use). The DEFAULT follows the shared checkout-vs-mirror identity rule (see
+    // `toolscript::resolve_tool_script`, `docs/queue_contract.md` §9): `<root>/tools/state-tx.ps1`
+    // ONLY when `root` is a proven Orchestra checkout (all three identity markers), else the
+    // cc-sync mirror `~/.claude/scripts/state-tx.ps1`, else a clean "not found" — never a silent
+    // run of a foreign/stale target-local `tools/state-tx.ps1`.
     let script = match opt(args, "--script") {
-        Some(s) => abs_path(&s),
-        None => root.join("tools").join("state-tx.ps1"),
+        Some(s) => {
+            let p = abs_path(&s);
+            if !p.exists() {
+                eprintln!(
+                    "lease: state-tx.ps1 not found at {} (pass --script <path> or --root <project root>)",
+                    p.display()
+                );
+                exit(lease_exit::FAILED);
+            }
+            p
+        }
+        None => match toolscript::resolve_tool_script(&root, "state-tx.ps1") {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "lease: state-tx.ps1 not found (no Orchestra checkout identity markers under {} \
+                     and no cc-sync mirror at ~/.claude/scripts/state-tx.ps1; pass --script <path> \
+                     or --root <project root>)",
+                    root.display()
+                );
+                exit(lease_exit::FAILED);
+            }
+        },
     };
-    if !script.exists() {
-        eprintln!(
-            "lease: state-tx.ps1 not found at {} (pass --script <path> or --root <project root>)",
-            script.display()
-        );
-        exit(lease_exit::FAILED);
-    }
 
     let work_s = work.to_string_lossy().into_owned();
     let root_s = root.to_string_lossy().into_owned();
