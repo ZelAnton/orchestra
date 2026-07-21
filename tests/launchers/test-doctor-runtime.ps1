@@ -361,8 +361,20 @@ Remove-Case $c
 
 $c = New-Case
 $r = Invoke-Doctor -Case $c
-Assert-Contains $r.Out 'verification profile is missing' 'config: dangerous missing verification profile distinguished'
-Assert-Contains $r.Out 'executable changes will be blocked before push' 'config: missing profile explains publication impact'
+Assert-Contains $r.Out 'OK   .work/config.md not found - verification is disabled by default' 'config: missing config.md defaults verification to disabled, not blocked'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'MAX_PARALLEL: 3'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   verification profile is disabled by default (VERIFICATION_MODE not set' 'config: unset VERIFICATION_MODE with a present config.md still defaults to disabled, not blocked'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'VERIFICATION_MODE: auto'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'verification profile is missing' 'config: explicit VERIFICATION_MODE=auto with no commands is still the dangerous missing-profile case'
+Assert-Contains $r.Out 'executable changes will be blocked before push' 'config: explicit auto missing-profile explains publication impact'
 Remove-Case $c
 
 # =============================================================================
