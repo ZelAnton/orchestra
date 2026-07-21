@@ -501,6 +501,7 @@ $known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES',
 if (Test-Path -LiteralPath $script:ConfigFile) {
     $hasSmoke = $false
     $verificationMode = 'auto'
+    $verificationModeExplicit = $false
     $verificationCommands = $null
     $verificationCommandsValid = $true
     $unknown = New-Object System.Collections.ArrayList
@@ -515,7 +516,7 @@ if (Test-Path -LiteralPath $script:ConfigFile) {
             }
             if ($known -notcontains $k) { [void]$unknown.Add($k) }
             if ($k -eq 'SMOKE_CMD' -and $v) { $hasSmoke = $true }
-            if ($k -eq 'VERIFICATION_MODE' -and $v) { $verificationMode = $v }
+            if ($k -eq 'VERIFICATION_MODE' -and $v) { $verificationMode = $v; $verificationModeExplicit = $true }
             if ($k -eq 'VERIFICATION_COMMANDS' -and $v) {
                 try {
                     $decoded = $v | ConvertFrom-Json
@@ -541,11 +542,13 @@ if (Test-Path -LiteralPath $script:ConfigFile) {
         Write-Host 'OK   verification profile uses backward-compatible SMOKE_CMD fallback (1 command)'
     } elseif ($verificationMode -eq 'required') {
         Write-Host 'FAIL verification profile is required but neither VERIFICATION_COMMANDS nor SMOKE_CMD is configured'
+    } elseif ($verificationModeExplicit) {
+        Write-Host 'WARN verification profile is missing - executable changes will be blocked before push (VERIFICATION_MODE=auto with no commands configured); configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or drop VERIFICATION_MODE to use the disabled-by-default behavior'
     } else {
-        Write-Host 'WARN verification profile is missing - executable changes will be blocked before push; configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or explicitly set VERIFICATION_MODE: disabled'
+        Write-Host 'OK   verification profile is disabled by default (VERIFICATION_MODE not set - defaults to disabled); configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or set VERIFICATION_MODE: auto|required to enable pre-publish checks'
     }
 } else {
-    Write-Host 'WARN .work/config.md not found - verification profile is missing; executable changes will be blocked before push'
+    Write-Host 'OK   .work/config.md not found - verification is disabled by default (VERIFICATION_MODE not set - defaults to disabled); configure VERIFICATION_COMMANDS, SMOKE_CMD, or VERIFICATION_MODE: auto|required to enable pre-publish checks'
 }
 
 # =============================================================================

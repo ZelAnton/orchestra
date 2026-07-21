@@ -5,7 +5,6 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::canonical::TaskState;
 use super::snapshot::Snapshot;
 
 /// Current wall clock as seconds since the Unix epoch (0 if the clock is before the epoch).
@@ -17,8 +16,14 @@ pub fn now_epoch_secs() -> u64 {
 }
 
 /// The set of completed task ids for readiness: every `### [T-NNN]` record header in
-/// `Tasks_Done.md` plus any descriptor already `done`/`published`.
-pub fn completed_ids(work: &Path, snap: &Snapshot) -> BTreeSet<String> {
+/// `Tasks_Done.md` — i.e. a task counts as a satisfied prerequisite only once it is published
+/// AND archived. This mirrors `queue_contract.md` §12 / `tools/queue-tx.ps1 ready`'s
+/// `Get-DoneIds` exactly: a `published`-but-not-yet-archived descriptor (`Статус: опубликована`)
+/// does NOT satisfy a dependent's prerequisite here, closing the readiness-criterion mismatch
+/// between the two resolvers in the "published, not yet archived" window (T-273). `snap` is kept
+/// as a parameter for call-site/API stability even though this function no longer reads
+/// descriptor state.
+pub fn completed_ids(work: &Path, _snap: &Snapshot) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     if let Ok(text) = fs::read_to_string(work.join("Tasks_Done.md")) {
         set.extend(
@@ -26,11 +31,6 @@ pub fn completed_ids(work: &Path, snap: &Snapshot) -> BTreeSet<String> {
                 .filter_map(archive_header_task_id)
                 .map(str::to_owned),
         );
-    }
-    for d in &snap.descriptors {
-        if matches!(d.state, Some(TaskState::Done) | Some(TaskState::Published)) {
-            set.insert(d.id.clone());
-        }
     }
     set
 }
@@ -114,6 +114,37 @@ mod tests {
         assert!(completed.contains("T-100"));
         assert!(!completed.contains("T-101"));
         assert!(!completed.contains("T-102"));
+    }
+
+    /// T-273: a descriptor that is `Статус: опубликована` (ff-merged into main but not yet
+    /// archived into `Tasks_Done.md`) must NOT count as a completed prerequisite here — this is
+    /// the exact strict `queue_contract.md` §12 / `tools/queue-tx.ps1 ready` (`Get-DoneIds`)
+    /// criterion, and the two resolvers must agree in this window.
+    #[test]
+    fn completed_ids_excludes_published_but_not_yet_archived_descriptor() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let work = std::env::temp_dir().join(format!(
+            "orchestra-completed-ids-published-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(work.join("tasks/T-200")).expect("create test work directory");
+        fs::write(
+            work.join("tasks/T-200/task.md"),
+            "# Активная задача T-200\n\nСтатус: опубликована\n",
+        )
+        .expect("write published descriptor fixture");
+
+        let snapshot = Snapshot::load(&work);
+        let completed = completed_ids(&work, &snapshot);
+        fs::remove_dir_all(&work).expect("remove test work directory");
+
+        assert!(
+            !completed.contains("T-200"),
+            "a published-but-not-archived descriptor must not satisfy a dependent's prerequisite"
+        );
     }
 
     #[test]

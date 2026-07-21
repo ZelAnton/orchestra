@@ -72,8 +72,10 @@ QUARANTINE_MAX_ATTEMPTS: 3
 # CALL_OUTPUT_MAX_BYTES: 1048576 # предел объёма захватываемого вывода вызова (байт)
 # COHORT_BUDGET_SEC: 0           # общий бюджет стенных часов когорты (сек); 0 = без лимита
 # SMOKE_CMD: npm test   # пример; по умолчанию smoke не запускается
-# VERIFICATION_MODE: auto        # auto | required | disabled; disabled — явное
-                                 #   operator-owned исключение из pre-push verification
+# VERIFICATION_MODE: disabled    # auto | required | disabled; по умолчанию (ключ не
+                                 #   задан) — disabled: неконфигурированный проект не
+                                 #   блокирует публикацию. auto/required — явный опт-ин
+                                 #   в строгий гейт «нет профиля — blocked»
 # VERIFICATION_COMMANDS: ["cargo fmt --check", "cargo clippy --workspace --all-targets -- -D warnings"]
                                  # JSON-массив точных команд; выполняются по порядку через
                                  #   supervisor. Если не задан, SMOKE_CMD остаётся fallback
@@ -128,7 +130,7 @@ REVIEWER_TIERING: true
 | `CALL_OUTPUT_MAX_BYTES` | 1048576 |
 | `COHORT_BUDGET_SEC` | 0 (без лимита) |
 | `SMOKE_CMD` | не задано (smoke не запускается) |
-| `VERIFICATION_MODE` | auto |
+| `VERIFICATION_MODE` | disabled |
 | `VERIFICATION_COMMANDS` | не задано (`SMOKE_CMD` используется как fallback) |
 | `PUSH` | true |
 | `CI_WATCH` | true |
@@ -227,12 +229,21 @@ REVIEWER_TIERING: true
   fingerprint, проверенную commit/change id и verdict. Падение любой команды блокирует
   публикацию; `check` при resume отвергает незавершённый результат, старую вершину или
   изменившийся профиль.
-- `VERIFICATION_MODE` — `auto` (обычный режим: JSON-профиль либо fallback на `SMOKE_CMD`),
-  `required` (команды обязаны быть заданы уже на preflight) или `disabled`. `disabled` —
-  единственное конфигурационное operator-owned исключение для исполняемых изменений и
-  сохраняется в evidence как `exempt/operator-disabled`; отсутствие профиля при `auto` —
-  опасная конфигурация, а не молчаливое отключение. Строго docs-only diff распознаётся
-  самим verification-runner по VCS diff и записывается как `exempt/docs-only`.
+- `VERIFICATION_MODE` — `auto` (JSON-профиль либо fallback на `SMOKE_CMD`; если ни то, ни
+  другое не задано — блокирует исполняемые изменения), `required` (команды обязаны быть
+  заданы уже на preflight, иначе тоже блокирует) или `disabled` (безусловное
+  operator-owned исключение — verification не выполняется вовсе, даже если
+  `VERIFICATION_COMMANDS`/`SMOKE_CMD` заданы). **По умолчанию, если ключ вовсе не задан —
+  `disabled`**: неконфигурированный проект не блокирует публикацию — сохраняется в evidence
+  как `exempt/operator-disabled`. Это не «молчаливое отключение»: явно заданный
+  `VERIFICATION_COMMANDS`/`SMOKE_CMD` **без** `VERIFICATION_MODE` по-прежнему автоматически
+  включает проверку (эквивалент `auto`) — дефолт `disabled` срабатывает только когда
+  действительно ничего не настроено (ни `VERIFICATION_MODE`, ни команды). Явный опт-ин в
+  строгий гейт «нет профиля — блокирует» — `VERIFICATION_MODE: auto` или `required`. Строго
+  docs-only diff распознаётся самим verification-runner по VCS diff и записывается как
+  `exempt/docs-only` (при явном `disabled` эта метка не используется — операторское
+  исключение безусловно приоритетнее; при дефолтном `disabled` docs-only распознавание
+  сохраняет приоритет как более точная причина).
 - `PUSH` — `false` отключает push и ожидание CI на джойн-барьере (например, для
   локального прогона без remote), но processor всё равно делает ff-merge в основную
   ветку и на этом останавливается — слитый код остаётся в main, просто не

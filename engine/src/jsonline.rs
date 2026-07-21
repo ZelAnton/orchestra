@@ -126,8 +126,35 @@ fn read_string(chars: &[char], start: usize) -> Option<(String, usize)> {
                         }
                         let hex: String = chars[i + 1..i + 5].iter().collect();
                         let cp = u32::from_str_radix(&hex, 16).ok()?;
-                        out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                         i += 4;
+                        if (0xD800..=0xDBFF).contains(&cp) {
+                            // Possible UTF-16 high surrogate: try to combine with an
+                            // immediately following `\uXXXX` low surrogate into one
+                            // non-BMP code point (e.g. an emoji). If the next escape is
+                            // not a valid low surrogate, this is a lone (unpaired) high
+                            // surrogate and decodes to U+FFFD, leaving the scanner
+                            // position at the end of just this escape (so the following
+                            // `\uXXXX`, if any, is still parsed on its own).
+                            let mut combined: Option<char> = None;
+                            if i + 6 < n && chars[i + 1] == '\\' && chars[i + 2] == 'u' {
+                                let hex2: String = chars[i + 3..i + 7].iter().collect();
+                                if let Ok(low) = u32::from_str_radix(&hex2, 16) {
+                                    if (0xDC00..=0xDFFF).contains(&low) {
+                                        let cp2 = 0x10000 + (cp - 0xD800) * 0x400 + (low - 0xDC00);
+                                        if let Some(c) = char::from_u32(cp2) {
+                                            combined = Some(c);
+                                            i += 6;
+                                        }
+                                    }
+                                }
+                            }
+                            out.push(combined.unwrap_or('\u{FFFD}'));
+                        } else {
+                            // Not a high surrogate: a lone low surrogate (0xDC00-0xDFFF)
+                            // is not a valid scalar value and falls through to U+FFFD via
+                            // `char::from_u32`; a regular BMP code point decodes as before.
+                            out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                        }
                     }
                     other => out.push(other),
                 }
@@ -285,5 +312,43 @@ mod tests {
         // A real \uXXXX escape: AB decodes to "AB".
         let uline = "{\"result\":\"\\u0041\\u0042\"}";
         assert_eq!(top_level(uline, "result").unwrap().as_str(), Some("AB"));
+    }
+
+    #[test]
+    fn surrogate_pair_joins_into_one_non_bmp_char() {
+        // U+1F389 PARTY POPPER (🎉) as a UTF-16 surrogate pair: D83C DF89.
+        let line = "{\"result\":\"party \\uD83C\\uDF89 time\"}";
+        assert_eq!(
+            top_level(line, "result").unwrap().as_str(),
+            Some("party 🎉 time")
+        );
+    }
+
+    #[test]
+    fn unpaired_surrogates_become_replacement_char_without_losing_position() {
+        // Lone high surrogate not followed by a \u escape at all.
+        let line = "{\"result\":\"a\\uD800b\",\"is_error\":true}";
+        assert_eq!(
+            top_level(line, "result").unwrap().as_str(),
+            Some("a\u{FFFD}b")
+        );
+        // Scanner position must not have drifted: the next key is still readable.
+        assert_eq!(top_level(line, "is_error").unwrap().as_bool(), Some(true));
+
+        // High surrogate followed by a \u escape that is NOT a low surrogate.
+        let line2 = "{\"result\":\"a\\uD800\\u0041b\",\"is_error\":true}";
+        assert_eq!(
+            top_level(line2, "result").unwrap().as_str(),
+            Some("a\u{FFFD}Ab")
+        );
+        assert_eq!(top_level(line2, "is_error").unwrap().as_bool(), Some(true));
+
+        // Lone low surrogate, not preceded by a high surrogate.
+        let line3 = "{\"result\":\"a\\uDC00b\",\"is_error\":true}";
+        assert_eq!(
+            top_level(line3, "result").unwrap().as_str(),
+            Some("a\u{FFFD}b")
+        );
+        assert_eq!(top_level(line3, "is_error").unwrap().as_bool(), Some(true));
     }
 }

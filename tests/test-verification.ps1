@@ -23,12 +23,23 @@ function Commit-Code { param([string]$Root,[string]$Text) Write-Utf8 (Join-Path 
 function Commit-Docs { param([string]$Root) Write-Utf8 (Join-Path $Root 'docs/guide.md') "docs`n"; & git -C $Root add docs/guide.md; & git -C $Root commit -q -m docs; return (Head $Root) }
 
 try {
-    # Missing profile blocks an executable change.
+    # VERIFICATION_MODE defaults to disabled: an unconfigured project is exempt by
+    # default, never blocked, when the key is absent entirely.
     $r=New-Repo; $base=Head $r; $head=Commit-Code $r "code`n"
     $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head,'--json')
-    Assert-Eq 4 $x.Exit 'missing profile blocks executable diff'; Assert-Contains $x.Out '"verdict":"blocked"' 'missing profile writes blocked verdict'
+    Assert-Eq 0 $x.Exit 'unconfigured profile defaults to disabled, not blocked'; Assert-Contains $x.Out '"verdict":"exempt"' 'default-disabled profile writes exempt verdict'
+    Assert-Contains $x.Out '"exemption":"operator-disabled"' 'default-disabled profile reuses the operator-disabled exemption label'
 
-    # Multiple commands are preserved and all succeed; check reuses the exact-head evidence.
+    # Explicitly opting into VERIFICATION_MODE: auto restores the strict "missing
+    # profile blocks executable changes" behavior for projects that want it.
+    Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_MODE: auto'
+    $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head,'--json')
+    Assert-Eq 4 $x.Exit 'explicit auto with no commands still blocks executable diff'; Assert-Contains $x.Out '"verdict":"blocked"' 'explicit auto missing profile writes blocked verdict'
+
+    # Multiple commands are preserved and all succeed; check reuses the exact-head
+    # evidence. VERIFICATION_MODE is unset here (Write-Utf8 replaces the whole file),
+    # which regression-guards that configuring commands alone still auto-opts a
+    # project in even though VERIFICATION_MODE itself defaults to disabled.
     Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_COMMANDS: ["git --version", "git status --short"]'
     $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head,'--json')
     Assert-Eq 0 $x.Exit 'multiple successful commands pass'; Assert-Contains $x.Out '"verdict":"pass"' 'multiple-command run emits pass'
