@@ -321,6 +321,51 @@ function Get-StillPresentCandidates {
     if ($null -eq $Candidates) { return @() }
     return @($Candidates | Where-Object { $present.ContainsKey("$($_.pid)|$($_.started_at)") })
 }
+function Stop-ObservedProcessIdentities {
+    param([object[]]$Candidates = @(), [int]$WaitMs = 5000)
+
+    # Kill(true) waits for the captured root, not for every descendant it asked the
+    # kernel to terminate.  Keep the pre-cleanup identities and wait for those exact
+    # processes to disappear before taking the survivor snapshot.  The start-time
+    # comparison is mandatory: a recycled PID must never let cleanup target an
+    # unrelated process.
+    $ordered = [object[]]@($Candidates)
+    [array]::Reverse($ordered)
+    foreach ($candidate in $ordered) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidate.started_at)) { continue }
+        $process = $null
+        try {
+            $process = Get-Process -Id ([int]$candidate.pid) -ErrorAction Stop
+            $actualStart = $process.StartTime.ToUniversalTime().ToString('o')
+            if ($actualStart -ne [string]$candidate.started_at) { continue }
+            if (-not $process.HasExited) {
+                try { $process.Kill($true) } catch { try { $process.Kill() } catch { } }
+                try { [void]$process.WaitForExit($WaitMs) } catch { }
+            }
+        } catch { }
+        finally { if ($null -ne $process) { try { $process.Dispose() } catch { } } }
+    }
+
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($timer.ElapsedMilliseconds -lt $WaitMs) {
+        $alive = $false
+        foreach ($candidate in $ordered) {
+            if ([string]::IsNullOrWhiteSpace([string]$candidate.started_at)) { continue }
+            $process = $null
+            try {
+                $process = Get-Process -Id ([int]$candidate.pid) -ErrorAction Stop
+                if (-not $process.HasExited -and $process.StartTime.ToUniversalTime().ToString('o') -eq [string]$candidate.started_at) {
+                    $alive = $true
+                    break
+                }
+            } catch { }
+            finally { if ($null -ne $process) { try { $process.Dispose() } catch { } } }
+        }
+        if (-not $alive) { break }
+        Start-Sleep -Milliseconds 50
+    }
+    $timer.Stop()
+}
 function Test-ProcessDiagnosticsEnabled {
     if ([bool](Opt 'process-diagnostics' $false)) { return $true }
     return [bool]([string](Opt 'process-log-file' ''))
@@ -476,10 +521,14 @@ function Invoke-SupervisedCall {
     $procId = $null
     try { $procId = $proc.Id } catch { $procId = $null }
     [object[]]$globalAtExit = @()
+    [object[]]$observedDescendants = @()
     [object[]]$descendantsBefore = @()
     if ($diagEnabled) { $globalAtExit = [object[]]@(Get-AllProcessRows) }
-    if ($diagEnabled -and $null -ne $procId) {
-        $descendantsBefore = [object[]]@(Get-ProcessDescendants -RootPid $procId -Rows $globalAtExit)
+    if ($null -ne $procId) {
+        if ($diagEnabled) {
+            $observedDescendants = [object[]]@(Get-ProcessDescendants -RootPid $procId -Rows $globalAtExit)
+            $descendantsBefore = [object[]]@($observedDescendants)
+        }
     }
     # A Windows worker can retain the PPID of an intermediate process that has already
     # disappeared, severing the live lineage back to our root. The global before/after diff
@@ -493,6 +542,7 @@ function Invoke-SupervisedCall {
     # build may deliberately leave reusable workers behind; they still belong to this
     # isolated invocation and must not survive it.
     Stop-ProcessTree $proc -PosixProcessGroupId $posixPgid
+    Stop-ObservedProcessIdentities -Candidates $observedDescendants
     [object[]]$globalAfterCleanup = @()
     [object[]]$descendantsAfter = @()
     [object[]]$temporalAfter = @()
