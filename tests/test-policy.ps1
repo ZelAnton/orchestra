@@ -137,11 +137,18 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 35 $schema.config.Count 'schema has 35 config keys'
+    Assert-Equal 36 $schema.config.Count 'schema has 36 config keys'
 
     # T-095: the publish-gate tuning keys and the CI-required-checks policy section exist.
     foreach ($k in @('PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC')) {
         Assert-True ([bool]($schema.config | Where-Object { $_.name -eq $k })) "schema has publish-gate key $k"
+    }
+    # T-282: the opt-in linear-history publish key is a fail-closed-default bool.
+    $lin = $schema.config | Where-Object { $_.name -eq 'PUBLISH_LINEAR_HISTORY' } | Select-Object -First 1
+    Assert-True ([bool]$lin) 'schema has PUBLISH_LINEAR_HISTORY'
+    if ($lin) {
+        Assert-Equal 'bool' $lin.type 'PUBLISH_LINEAR_HISTORY is a bool'
+        Assert-Equal 'false' $lin.default 'PUBLISH_LINEAR_HISTORY defaults to false (opt-in)'
     }
     Assert-True ([bool]($schema.policy | Where-Object { $_.id -eq 'publish-ci' })) 'schema has the publish-ci policy section'
     foreach ($k in @('VERIFICATION_MODE', 'VERIFICATION_COMMANDS')) {

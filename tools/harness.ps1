@@ -87,6 +87,7 @@ $script:QueueTx = Join-Path $script:ToolsDir 'queue-tx.ps1'
 $script:StateTx = Join-Path $script:ToolsDir 'state-tx.ps1'
 $script:Outbox = Join-Path $script:ToolsDir 'outbox.ps1'
 $script:Policy = Join-Path $script:ToolsDir 'policy.ps1'
+$script:Linearize = Join-Path $script:ToolsDir 'linearize.ps1'
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
 $script:PsHost = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
@@ -299,6 +300,44 @@ function Vcs-Publish {
     } else {
         Invoke-Jj $Fx @('bookmark', 'set', 'main', '-r', $integ) | Out-Null
     }
+}
+
+# Resolve a ref/revset to a full commit id (git rev-parse / jj commit_id).
+function Vcs-ResolveRev {
+    param($Fx, [string]$Rev)
+    if ($Fx.Vcs -eq 'git') { return (Invoke-Bin 'git' @('-C', $Fx.Repo, 'rev-parse', $Rev)).Out.Trim() }
+    return (Invoke-Jj $Fx @('log', '-r', $Rev, '--no-graph', '-T', 'commit_id')).Out.Trim()
+}
+
+# Count the merge commits (>=2 parents) in $Base..$Tip - the topology signal linearization
+# removes. jj uses the merges() revset; git uses rev-list --min-parents=2.
+function Vcs-MergeCount {
+    param($Fx, [string]$Base, [string]$Tip)
+    if ($Fx.Vcs -eq 'git') {
+        $o = (Invoke-Bin 'git' @('-C', $Fx.Repo, 'rev-list', '--min-parents=2', "$Base..$Tip")).Out
+    } else {
+        $o = (Invoke-Jj $Fx @('log', '-r', "($Base..$Tip) & merges()", '--no-graph', '-T', 'commit_id ++ "\n"')).Out
+    }
+    return @($o -split "`n" | Where-Object { $_.Trim() }).Count
+}
+
+# Full content of the trunk file at a rev - to prove the published tree is byte-identical to
+# the reviewed integration tip (both resolve the same tracked file).
+function Vcs-FileAt {
+    param($Fx, [string]$Rev)
+    if ($Fx.Vcs -eq 'git') { return (Invoke-Bin 'git' @('-C', $Fx.Repo, 'show', "${Rev}:$($script:TrunkFile)")).Out }
+    return (Invoke-Jj $Fx @('file', 'show', '-r', $Rev, $script:TrunkFile)).Out
+}
+
+# Drive the REAL publish-time linearizer (tools/linearize.ps1) over the fixture and re-point the
+# integration ref to the linearized tip. Returns the parsed JSON verdict.
+function Vcs-Linearize {
+    param($Fx, [string]$Base, [string]$Head, [string[]]$TaskRefs, [string]$Ref)
+    $a = @('linearize', '--root', $Fx.Repo, '--vcs', $Fx.Vcs, '--base', $Base, '--head', $Head,
+        '--task-refs', ($TaskRefs -join ','), '--ref', $Ref, '--json')
+    $r = Invoke-Tool $script:Linearize $a
+    if ($r.ExitCode -ne 0) { Fail 4 "linearize $($Fx.Vcs) failed (exit $($r.ExitCode)): $([string]$r.Err)$([string]$r.Out)" }
+    try { return ($r.Out.Trim() | ConvertFrom-Json) } catch { Fail 4 "linearize produced unparseable JSON: $([string]$r.Out)" }
 }
 
 # An OUT-OF-BAND writer advances the trunk (main) directly - modelling an operator or another
@@ -674,7 +713,7 @@ function Seed-Task {
 # ==========================================================================
 $script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
     'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout',
-    'approval-stale', 'review-cycle')
+    'approval-stale', 'review-cycle', 'linear-publish')
 
 function Scenario-Clean {
     param($Fx)
@@ -702,6 +741,69 @@ function Scenario-Clean {
 
 function Scenario-Publish { param($Fx) return (Scenario-Clean $Fx) }
 function Scenario-Resume  { param($Fx) return (Scenario-Clean $Fx) }
+
+function Scenario-LinearPublish {
+    param($Fx)
+    # T-282: opt-in publish-time linearization (config key PUBLISH_LINEAR_HISTORY). `merger` still
+    # builds the integration with MERGE commits (this scenario asserts the integration tip is
+    # genuinely non-linear - the same topology Phase 4.3's per-task rollback relies on); at publish
+    # the REAL runner tools/linearize.ps1 re-expresses the REVIEWED tip as a merge-free linear chain
+    # whose tree is BYTE-IDENTICAL to the reviewed tip, which is then ff-published. So the trunk
+    # carries the batch's work with NO merge commit, no lost work, and a tree identical to what was
+    # reviewed - and re-verification runs against the ACTUAL published (linearized) tip.
+    #
+    # DEFAULT-OFF IS UNCHANGED: this scenario neither modifies Vcs-Integrate/Vcs-Publish nor the
+    # existing scenarios; every other scenario keeps publishing the merge topology (clean/conflict/
+    # quarantine still exercise merger's --no-ff integration and the per-task quarantine rollback),
+    # so their unchanged green runs are the proof that the feature-off path is byte-for-byte as before.
+    #
+    # git exercises the real multi-commit per-task chain (merger's --no-ff chain of N merges); jj's
+    # Vcs-Integrate builds a single (octopus) integration commit, so the jj case exercises the
+    # single-spine path. Both assert byte-identity + linearity + no-loss.
+    $t1 = 'T-101'; $t2 = 'T-102'
+    Seed-Task $Fx $t1 'linear one'
+    Seed-Task $Fx $t2 'linear two'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1, $t2)
+    Vcs-TaskCommit $Fx $t1 2 'A'
+    Vcs-TaskCommit $Fx $t2 4 'B'
+    Lifecycle-Task $Fx $t1
+    Lifecycle-Task $Fx $t2
+    $integ = Vcs-Integrate $Fx @($t1, $t2) $Fx.BatchId
+    if (-not $integ.Clean) { Fail 4 'linear-publish scenario unexpectedly conflicted' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{}')
+
+    $base = Vcs-ResolveRev $Fx 'main'
+    $reviewedTip = Vcs-ResolveRev $Fx "integration/$($Fx.BatchId)"
+    $reviewedContent = Vcs-FileAt $Fx $reviewedTip
+    # the reviewed integration tip is non-linear BY DESIGN (>=1 merge commit).
+    if ((Vcs-MergeCount $Fx $base $reviewedTip) -lt 1) { Fail 4 'linear-publish: the reviewed integration tip must contain merge commit(s) (topology premise broken)' }
+
+    # PUBLISH_LINEAR_HISTORY on: linearize the reviewed tip and re-point the integration ref to it.
+    $lin = Vcs-Linearize $Fx $base $reviewedTip @("task/$t1", "task/$t2") "integration/$($Fx.BatchId)"
+    if (-not $lin.tree_identical) { Fail 4 'linear-publish: linearizer did not certify a byte-identical tree' }
+    if (-not $lin.linear) { Fail 4 'linear-publish: linearizer did not certify a linear history' }
+
+    # re-verification runs against the ACTUAL published (linearized) tip, not the pre-reform one.
+    $chk = Invoke-Bin $script:PsHost @('-NoProfile', '-Command', 'exit 0')
+    if ($chk.ExitCode -ne 0) { Fail 4 'linear-publish: re-verification against the linearized tip failed' }
+
+    Vcs-Publish $Fx $Fx.BatchId
+    # THE POINT: the published trunk has NO merge commit of the batch.
+    if ((Vcs-MergeCount $Fx $base 'main') -ne 0) { Fail 4 'linear-publish: the published trunk still contains a batch merge commit (linearization did not take)' }
+    # BYTE-IDENTICAL + NO LOSS: the published trunk content equals the reviewed integration tip.
+    if ((Vcs-FileAt $Fx 'main') -ne $reviewedContent) { Fail 4 'linear-publish: the published tree is not byte-identical to the reviewed integration tip' }
+    if ((Vcs-TrunkLine $Fx 2) -ne 'l2-A') { Fail 4 'linear-publish: T-101 work missing on the trunk (line 2)' }
+    if ((Vcs-TrunkLine $Fx 4) -ne 'l4-B') { Fail 4 'linear-publish: T-102 work missing on the trunk (line 4)' }
+
+    Step-PublishTask $Fx $t1
+    Step-PublishTask $Fx $t2
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":false,"linearized":true}')
+    Step-Archive $Fx $t1
+    Step-Archive $Fx $t2
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":2,"quarantined":0,"escalated":0}')
+    return [pscustomobject]@{ Outcome = 'published'; Notes = 'PUBLISH_LINEAR_HISTORY: merge-topology integration linearized to a byte-identical merge-free trunk, then published' }
+}
 
 function Scenario-Checks {
     param($Fx)
@@ -1296,6 +1398,7 @@ function Invoke-Scenario {
         'approval-timeout' { return (Scenario-ApprovalTimeout $Fx) }
         'approval-stale'   { return (Scenario-ApprovalStale $Fx) }
         'review-cycle'     { return (Scenario-ReviewCycle $Fx) }
+        'linear-publish'   { return (Scenario-LinearPublish $Fx) }
         default            { Fail 2 "unknown scenario '$Name' (valid: $($script:Scenarios -join ', '))" }
     }
 }

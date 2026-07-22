@@ -96,7 +96,7 @@ Write-Host 'harness fast matrix: this spawns many child transaction-tool process
     $ls = Invoke-Harness @('list-scenarios')
     Assert-Exit $ls 0 'list-scenarios rc=0'
     foreach ($s in @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-            'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale')) {
+            'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale', 'linear-publish')) {
         Assert-Contains $ls.Out $s "list-scenarios includes '$s'"
     }
     $lf = Invoke-Harness @('list-faults')
@@ -165,6 +165,26 @@ if (-not $hasGit) {
         }
     }
 
+    # ---- opt-in linear-history publish (T-282): PUBLISH_LINEAR_HISTORY -------------------
+    # merger still integrates with MERGE commits (the scenario asserts the reviewed tip is
+    # non-linear); at publish the REAL tools/linearize.ps1 re-expresses it as a merge-free chain
+    # with a BYTE-IDENTICAL tree, ff-published so the trunk carries the batch with NO merge commit
+    # and no lost work (the scenario's own internal assertions enforce those invariants; a
+    # violation exits != 0). Default-off is proven unchanged by the untouched clean/conflict/
+    # quarantine scenarios above, which keep publishing the merge topology.
+    $linear = Run-Scenario 'git' 'linear-publish'
+    if ($linear) {
+        Assert-Equal 'published' $linear.outcome 'linear-publish git -> published (merge topology linearized to a byte-identical merge-free trunk)'
+        Assert-Contains $linear.archive 'T-101' 'linear-publish git archived T-101'
+        Assert-Contains $linear.archive 'T-102' 'linear-publish git archived T-102'
+        # crash-recovery equivalence: a fault during linear-publish still converges.
+        $linFaulted = Run-Scenario 'git' 'linear-publish' 'integrate:before-write'
+        if ($linFaulted) {
+            Assert-True ([bool]$linFaulted.fault_fired) 'linear-publish injected fault fired'
+            Assert-Equal $linear.fingerprint $linFaulted.fingerprint 'linear-publish faulted-then-recovered run converges to the SAME fingerprint as the clean run'
+        }
+    }
+
     # ---- crash-recovery equivalence spot check (policy is the cheapest scenario) --------
     if ($policy) {
         $faulted = Run-Scenario 'git' 'policy' 'capture:before-rename'
@@ -224,6 +244,12 @@ if (-not $hasJj) {
     if ($cleanJj) {
         Assert-Equal 'published' $cleanJj.outcome 'clean jj -> published'
         Assert-Contains $cleanJj.archive 'T-101' 'clean jj archived T-101'
+    }
+    # T-282: linear-history publish also works on jj (the runner drives the jj workspace directly).
+    $linearJj = Run-Scenario 'jj' 'linear-publish'
+    if ($linearJj) {
+        Assert-Equal 'published' $linearJj.outcome 'linear-publish jj -> published (byte-identical merge-free trunk)'
+        Assert-Contains $linearJj.archive 'T-101' 'linear-publish jj archived T-101'
     }
 }
 

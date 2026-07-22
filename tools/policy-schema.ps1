@@ -99,6 +99,7 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'CI_WATCH'                'bool'   'true'                             -Sensitivity 'medium')
         (New-ConfigKey 'PUBLISH_CI_DEADLINE_SEC' 'int'    '1800'                             -Min 1  -Sensitivity 'high')
         (New-ConfigKey 'PUBLISH_CI_BACKOFF_SEC'  'int'    '30'                               -Min 1  -Sensitivity 'medium')
+        (New-ConfigKey 'PUBLISH_LINEAR_HISTORY'  'bool'   'false'                            -Sensitivity 'high')
         (New-ConfigKey 'APPROVAL_DEADLINE_SEC'   'int'    '86400'                            -Min 1  -Sensitivity 'high')
         (New-ConfigKey 'REVIEWER_TIERING'        'bool'   'true')
         (New-ConfigKey 'MAIN_BRANCH'             'string' 'autodetect'                       -Sensitivity 'high')
