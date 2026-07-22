@@ -713,7 +713,7 @@ function Seed-Task {
 # ==========================================================================
 $script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
     'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout',
-    'approval-stale', 'review-cycle', 'linear-publish')
+    'approval-stale', 'review-cycle', 'linear-publish', 'linear-diverge')
 
 function Scenario-Clean {
     param($Fx)
@@ -803,6 +803,89 @@ function Scenario-LinearPublish {
     Step-Archive $Fx $t2
     Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":2,"quarantined":0,"escalated":0}')
     return [pscustomobject]@{ Outcome = 'published'; Notes = 'PUBLISH_LINEAR_HISTORY: merge-topology integration linearized to a byte-identical merge-free trunk, then published' }
+}
+
+function Scenario-LinearDiverge {
+    param($Fx)
+    # F-12: PUBLISH_LINEAR_HISTORY composed with a main/BASE DIVERGENCE. T-282 runs the publish-time
+    # linearizer ONCE (Phase 5.3, before the ff-loop). But the adjacent "main diverged" auto-resolution
+    # RE-ANCHORS the integration onto the moved main tip and re-runs Phase 4.2 - so `merger` rebuilds a
+    # fresh MERGE topology (non-linear tip) - then re-verifies and retries the ff/push. If that re-anchor
+    # does NOT also re-run the linearization, the pipeline would ff a fresh NON-LINEAR merge tip into
+    # main and the push to a linear-history-protected trunk would be rejected (the feature's headline
+    # invariant silently broken on that path). This scenario models exactly that composition and asserts
+    # the FIXED behaviour: after the re-anchor rebuilds the merge topology, the tip is RE-LINEARIZED
+    # (identical runner, same fail-closed self-checks) before the retried ff, so the published trunk is
+    # merge-free, byte-identical to the re-anchored reviewed tip, and loses neither the out-of-band commit
+    # nor the batch's work. Without the re-anchor-loop re-linearization the merge-free assertion below
+    # fails - that is the F-12 regression this scenario pins.
+    $t1 = 'T-101'; $t2 = 'T-102'
+    Seed-Task $Fx $t1 'linear-diverge one'
+    Seed-Task $Fx $t2 'linear-diverge two'
+    Step-Lease $Fx
+    Step-CohortOpen $Fx @($t1, $t2)
+    # tasks and the out-of-band commit touch pairwise NON-ADJACENT lines (1, 3, 5) so no 3-way merge
+    # ever conflicts textually - the hazard this scenario models is a non-ff / a re-published merge tip,
+    # not a content conflict (adjacent lines would spuriously conflict, as the proven-clean scenarios
+    # avoid by spacing their edits).
+    Vcs-TaskCommit $Fx $t1 1 'A'
+    Vcs-TaskCommit $Fx $t2 3 'B'
+    Lifecycle-Task $Fx $t1
+    Lifecycle-Task $Fx $t2
+
+    # first integration off BASE (== current main). The ONE-TIME Phase 5.3 linearization would run here,
+    # but the divergence below strands it: the re-anchor rebuilds the tip from scratch.
+    $integ1 = Vcs-Integrate $Fx @($t1, $t2) $Fx.BatchId
+    if (-not $integ1.Clean) { Fail 4 'linear-diverge: first integration unexpectedly conflicted' }
+
+    # an out-of-band writer advances main on a DIFFERENT line (5) than either task (1, 3): no textual
+    # conflict; the hazard is a non-ff / a merge tip re-published onto a linear-history trunk.
+    Vcs-CommitOnMain $Fx 5 'X'
+    if (Vcs-IsFfPossible $Fx $Fx.BatchId) { Fail 4 'linear-diverge: stale integration should NOT be ff after main moved (divergence undetected)' }
+
+    # SAFE AUTO-RESOLUTION: re-anchor the integration onto the NEW main tip (a second integrate off the
+    # moved main). Phase 4.2 rebuilds a MERGE topology -> the re-anchored tip is non-linear again.
+    $integ2 = Vcs-Integrate $Fx @($t1, $t2) $Fx.BatchId
+    if (-not $integ2.Clean) { Fail 4 'linear-diverge: re-anchored integration unexpectedly conflicted' }
+    $newBase = Vcs-ResolveRev $Fx 'main'
+    $reanchoredTip = Vcs-ResolveRev $Fx "integration/$($Fx.BatchId)"
+    $reanchoredContent = Vcs-FileAt $Fx $reanchoredTip
+    # PREMISE (the whole point of F-12): the re-anchored tip is non-linear BY DESIGN. Publishing it as-is
+    # would push a merge commit onto a linear-history trunk - which is exactly what the re-anchor-loop
+    # re-linearization must prevent.
+    if ((Vcs-MergeCount $Fx $newBase $reanchoredTip) -lt 1) { Fail 4 'linear-diverge: the re-anchored tip must contain merge commit(s) (topology premise broken)' }
+
+    # THE F-12 FIX: re-run the Phase 5.3 linearization inside the re-anchor loop, against the RE-ANCHORED
+    # base/head (identical runner, same fail-closed self-checks), before the retried ff.
+    $lin = Vcs-Linearize $Fx $newBase $reanchoredTip @("task/$t1", "task/$t2") "integration/$($Fx.BatchId)"
+    if (-not $lin.tree_identical) { Fail 4 'linear-diverge: re-anchor re-linearizer did not certify a byte-identical tree' }
+    if (-not $lin.linear) { Fail 4 'linear-diverge: re-anchor re-linearizer did not certify a linear history' }
+
+    # re-verification runs against the ACTUAL published (re-linearized) tip, and the retried ff is now a
+    # genuine fast-forward by construction.
+    $chk = Invoke-Bin $script:PsHost @('-NoProfile', '-Command', 'exit 0')
+    if ($chk.ExitCode -ne 0) { Fail 4 'linear-diverge: re-verification against the re-linearized tip failed' }
+    if (-not (Vcs-IsFfPossible $Fx $Fx.BatchId)) { Fail 4 'linear-diverge: re-linearized integration must be a clean ff of the moved main' }
+    Emit-Event $Fx 'integrate' @('--type', 'cohort.join_started', '--batch-id', $Fx.BatchId, '--payload', '{"reanchored":true,"linearized":true}')
+
+    Vcs-Publish $Fx $Fx.BatchId
+    # THE POINT: the published trunk has NO merge commit of the batch (would FAIL if the re-anchor loop
+    # skipped re-linearization and shipped the merge topology - the F-12 regression).
+    if ((Vcs-MergeCount $Fx $newBase 'main') -ne 0) { Fail 4 'linear-diverge: the published trunk still contains a batch merge commit (re-anchor loop did not re-linearize)' }
+    # BYTE-IDENTICAL: the published trunk equals the re-anchored reviewed tip.
+    if ((Vcs-FileAt $Fx 'main') -ne $reanchoredContent) { Fail 4 'linear-diverge: the published tree is not byte-identical to the re-anchored reviewed tip' }
+    # NO LOSS: both the batch work AND the out-of-band commit survive on the linearized trunk.
+    if ((Vcs-TrunkLine $Fx 1) -ne 'l1-A') { Fail 4 'linear-diverge: T-101 work missing on the trunk (line 1)' }
+    if ((Vcs-TrunkLine $Fx 3) -ne 'l3-B') { Fail 4 'linear-diverge: T-102 work missing on the trunk (line 3)' }
+    if ((Vcs-TrunkLine $Fx 5) -ne 'l5-X') { Fail 4 'linear-diverge: the out-of-band main commit was lost on publish (line 5)' }
+
+    Step-PublishTask $Fx $t1
+    Step-PublishTask $Fx $t2
+    Emit-Event $Fx $null @('--type', 'cohort.published', '--batch-id', $Fx.BatchId, '--payload', '{"pushed":false,"reanchored":true,"linearized":true}')
+    Step-Archive $Fx $t1
+    Step-Archive $Fx $t2
+    Emit-Event $Fx $null @('--type', 'cohort.closed', '--batch-id', $Fx.BatchId, '--payload', '{"merged":2,"quarantined":0,"escalated":0}')
+    return [pscustomobject]@{ Outcome = 'published'; Notes = 'PUBLISH_LINEAR_HISTORY + main divergence: re-anchored merge topology re-linearized inside the re-anchor loop, then published merge-free (no force, no loss)' }
 }
 
 function Scenario-Checks {
@@ -1399,6 +1482,7 @@ function Invoke-Scenario {
         'approval-stale'   { return (Scenario-ApprovalStale $Fx) }
         'review-cycle'     { return (Scenario-ReviewCycle $Fx) }
         'linear-publish'   { return (Scenario-LinearPublish $Fx) }
+        'linear-diverge'   { return (Scenario-LinearDiverge $Fx) }
         default            { Fail 2 "unknown scenario '$Name' (valid: $($script:Scenarios -join ', '))" }
     }
 }

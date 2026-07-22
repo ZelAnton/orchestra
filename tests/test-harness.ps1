@@ -96,7 +96,7 @@ Write-Host 'harness fast matrix: this spawns many child transaction-tool process
     $ls = Invoke-Harness @('list-scenarios')
     Assert-Exit $ls 0 'list-scenarios rc=0'
     foreach ($s in @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-            'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale', 'linear-publish')) {
+            'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale', 'linear-publish', 'linear-diverge')) {
         Assert-Contains $ls.Out $s "list-scenarios includes '$s'"
     }
     $lf = Invoke-Harness @('list-faults')
@@ -185,6 +185,27 @@ if (-not $hasGit) {
         }
     }
 
+    # ---- F-12: PUBLISH_LINEAR_HISTORY composed with a main/BASE DIVERGENCE ---------------
+    # the adjacent "main diverged" auto-resolution re-anchors the integration onto the moved main
+    # (Phase 4.2 rebuilds a MERGE topology) and retries the ff. If the re-anchor loop skipped the
+    # Phase 5.3 re-linearization, a fresh NON-LINEAR merge tip would be ff'd into main and the push to
+    # a linear-history-protected trunk would be rejected. This scenario pins the FIXED behaviour: the
+    # re-anchored tip is re-linearized (identical runner, same fail-closed self-checks) before the
+    # retried ff, so the published trunk is merge-free, byte-identical, and loses neither the batch's
+    # work nor the out-of-band commit (the scenario's own internal assertions enforce all of that).
+    $linDiv = Run-Scenario 'git' 'linear-diverge'
+    if ($linDiv) {
+        Assert-Equal 'published' $linDiv.outcome 'linear-diverge git -> published (re-anchored merge topology re-linearized inside the re-anchor loop, then published merge-free)'
+        Assert-Contains $linDiv.archive 'T-101' 'linear-diverge git archived T-101'
+        Assert-Contains $linDiv.archive 'T-102' 'linear-diverge git archived T-102'
+        # crash-recovery equivalence: a fault during the re-anchor+re-linearize path still converges.
+        $linDivFaulted = Run-Scenario 'git' 'linear-diverge' 'integrate:before-write'
+        if ($linDivFaulted) {
+            Assert-True ([bool]$linDivFaulted.fault_fired) 'linear-diverge injected fault fired'
+            Assert-Equal $linDiv.fingerprint $linDivFaulted.fingerprint 'linear-diverge faulted-then-recovered run converges to the SAME fingerprint as the clean run'
+        }
+    }
+
     # ---- crash-recovery equivalence spot check (policy is the cheapest scenario) --------
     if ($policy) {
         $faulted = Run-Scenario 'git' 'policy' 'capture:before-rename'
@@ -250,6 +271,13 @@ if (-not $hasJj) {
     if ($linearJj) {
         Assert-Equal 'published' $linearJj.outcome 'linear-publish jj -> published (byte-identical merge-free trunk)'
         Assert-Contains $linearJj.archive 'T-101' 'linear-publish jj archived T-101'
+    }
+    # F-12: the re-anchor + re-linearization composition also holds on jj.
+    $linDivJj = Run-Scenario 'jj' 'linear-diverge'
+    if ($linDivJj) {
+        Assert-Equal 'published' $linDivJj.outcome 'linear-diverge jj -> published (re-anchored merge topology re-linearized, merge-free trunk)'
+        Assert-Contains $linDivJj.archive 'T-101' 'linear-diverge jj archived T-101'
+        Assert-Contains $linDivJj.archive 'T-102' 'linear-diverge jj archived T-102'
     }
 }
 
