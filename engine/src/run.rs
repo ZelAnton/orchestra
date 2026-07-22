@@ -343,6 +343,11 @@ fn plan_coder_executor(
             // check would abort, so skip it — the fail-closed `--sandbox`/`approval_policy=never`
             // contract still holds either way (T-069).
             c.skip_git_repo_check = true;
+            // Propagate the resolved network posture onto the argv (T-063/T-283): the same
+            // `codex_network` gate that `route_coder` consulted above also flips codex's
+            // outbound-network + openssl git-TLS overrides, keeping the engine argv in parity
+            // with tools/codex-runtime.ps1 `-Network on`.
+            c.network = codex_network;
             ("codex", c.to_argv(), prompt.to_string(), Executor::Codex)
         }
         CoderRoute::Claude(_) => {
@@ -2476,6 +2481,22 @@ mod tests {
             argv.windows(2)
                 .any(|w| w[0] == "--sandbox" && w[1] == "workspace-write"),
             "an explicit sandbox is on argv: {argv:?}"
+        );
+        // With the network gate OFF the codex argv carries no outbound-network override (T-283).
+        assert!(
+            !argv
+                .iter()
+                .any(|s| s == "sandbox_workspace_write.network_access=true"),
+            "codex_network=false must not open the sandbox network: {argv:?}"
+        );
+
+        // The resolved `codex_network` posture is propagated onto the codex argv (T-063/T-283).
+        let (_prog, argv, _stdin, _ex) =
+            plan_coder_executor(CodexCoder::FastStd, true, Level::Coder, "implement T-1", wt);
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "-c" && w[1] == "sandbox_workspace_write.network_access=true"),
+            "codex_network=true must open the sandbox network on argv: {argv:?}"
         );
 
         // `coder_deep` is always Claude even under an opted-in flag (the resolver's stage-1 rule).
