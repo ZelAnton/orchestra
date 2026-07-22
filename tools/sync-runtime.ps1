@@ -349,7 +349,7 @@ function Get-ManagedPairs {
     # The root Codex processor prompt is consumed by codex-processor-runtime.ps1.
     # It travels beside the launcher runtimes so the mirror-only layout needs no
     # Orchestra checkout at execution time.
-    $codexPrompt = Join-Path $Repo 'codex\processor.md'
+    $codexPrompt = Join-Path (Join-Path $Repo 'codex') 'processor.md'
     if (Test-Path -LiteralPath $codexPrompt -PathType Leaf) {
         $pairs.Add([ordered]@{ Source = $codexPrompt; Dest = (Join-Path $scriptsDst 'codex-processor.md'); Kind = 'codex_prompt' })
     }
@@ -386,7 +386,7 @@ function Get-ManagedPairs {
 function Get-CodexManagedPairs {
     param([string]$Repo, [string]$Dest)
     $pairs = [System.Collections.Generic.List[object]]::new()
-    $src = Join-Path $Repo 'codex\agents'
+    $src = Join-Path (Join-Path $Repo 'codex') 'agents'
     $dst = Join-Path $Dest 'agents'
     if (Test-Path -LiteralPath $src) {
         foreach ($f in (Get-ChildItem -LiteralPath $src -File -Filter 'orchestra_*.toml' -ErrorAction SilentlyContinue | Sort-Object Name)) {

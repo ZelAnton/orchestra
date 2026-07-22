@@ -84,6 +84,11 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 # Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher,
 # crash-safe IO, CreateNew lock, UTC helpers; T-240). Dot-sourced like tools/policy-schema.ps1.
 . (Join-Path $PSScriptRoot 'common.ps1')
+# Shared consumer-side projection layer over events.jsonl (Has-Prop/Get-Prop, the read+dedup
+# stream reader and the usage extractor; T-286). MUST load AFTER common.ps1 (Read-EventStream
+# reports read failure through common.ps1's Fail). The `metrics` command reads and projects
+# through this; the transactional reader Read-Outbox below stays outbox-local by design.
+. (Join-Path $PSScriptRoot 'events-common.ps1')
 $script:ErrPrefix = 'OBXERR'        # coded-error tag decoded by the catch dispatcher
 $script:FaultEnv  = 'OUTBOX_FAULT'  # crash-injection hook read by Maybe-Fault
 $script:LockName  = 'outbox'        # label in the Acquire-Lock failure message
@@ -95,12 +100,9 @@ $parsed = Parse-CliArgs $args -BoolFlags @('json', 'stdin')
 $Command = $parsed.Command
 $opts = $parsed.Opts
 
-# NB: indexed lookup ($Obj.PSObject.Properties[$Name]), NOT `.Properties.Name -contains`
-# - under Set-StrictMode -Version Latest, `.Properties.Name` throws "The property 'Name'
-# cannot be found on this object" when $Obj has ZERO properties (e.g. an empty --payload
-# '{}'); the indexer form has no such quirk and returns $null cleanly either way (T-261).
-function Has-Prop { param($Obj, [string]$Name) return ($null -ne $Obj -and $null -ne $Obj.PSObject.Properties[$Name]) }
-function Get-Prop { param($Obj, [string]$Name) if (Has-Prop $Obj $Name) { return $Obj.$Name } else { return $null } }
+# Has-Prop / Get-Prop are the single canonical copy in tools/events-common.ps1 (K-048's safe
+# indexer form `$Obj.PSObject.Properties[$Name]`, NOT `.Properties.Name -contains`, which
+# throws under Set-StrictMode on a zero-property object such as an empty --payload '{}').
 
 # --------------------------------------------------------------------------
 # Parsed --payload, shared by Get-CanonicalName's coordinate fallback (below) and
@@ -513,18 +515,10 @@ function Read-Outbox {
     }
 }
 
-# Deduplicate a record list by event_id (first occurrence wins). Only valid records.
-function Get-DedupedEvents {
-    param($Records)
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
-    $out = New-Object System.Collections.Generic.List[object]
-    foreach ($r in $Records) {
-        if (-not $r.Valid) { continue }
-        $id = [string]$r.Obj.event_id
-        if ($seen.Add($id)) { [void]$out.Add($r.Obj) }
-    }
-    return ,$out
-}
+# NB: the `metrics` command projects over the deduplicated CONSUMER stream via the shared
+# Read-EventStream (tools/events-common.ps1), not over Read-Outbox's transactional record
+# model, so the old outbox-local Get-DedupedEvents is gone (both events.jsonl projections now
+# dedup in one place). Read-Outbox above stays for the writer-side paths (verify/read/append).
 
 # --------------------------------------------------------------------------
 # Owner (single-writer) check against the orchestrator.lock lease.
@@ -761,14 +755,13 @@ function Cmd-Read {
 # usage.recorded token projection (T-248). All figures are timestamps / integer durations /
 # integer token counts only - no sensitive payload data. ACTUAL and ESTIMATED usage are
 # reported in separate buckets and never summed together (OBSERVABILITY_PLATFORM_PLAN §8).
+# The stream read+dedup and the per-event usage figure both come from the shared consumer
+# layer (tools/events-common.ps1), the same one metrics.ps1 aggregate uses (T-286).
 # ==========================================================================
-# Read a usage.recorded payload count field as a non-negative int (absent / non-integer -> 0).
-function Get-UsageInt { param($Pl, [string]$Name) if ((Has-Prop $Pl $Name) -and ([string]$Pl.$Name -match '^\d+$')) { return [int]$Pl.$Name } else { return 0 } }
-
 function Cmd-Metrics {
     $paths = Resolve-Paths
-    $ob = Read-Outbox $paths.Events 'read'
-    $events = Get-DedupedEvents $ob.Records
+    $stream = Read-EventStream $paths.Events
+    $events = $stream.Events
 
     $typeCounts = [ordered]@{}
     foreach ($t in $script:KnownTypes) { $typeCounts[$t] = 0 }
@@ -814,26 +807,25 @@ function Cmd-Metrics {
                 if ($t -and $to -eq 'выполнена') { $taskDone[$t] = $e.occurred_at }
             }
             'usage.recorded' {
-                $isEst = ((Has-Prop $pl 'estimated') -and ($pl.estimated -eq $true))
-                $inTok = Get-UsageInt $pl 'input_tokens'
-                $outTok = Get-UsageInt $pl 'output_tokens'
-                $cRead = Get-UsageInt $pl 'cache_read_input_tokens'
-                $cCreate = Get-UsageInt $pl 'cache_creation_input_tokens'
-                # total: an explicit total_tokens wins; otherwise the sum of known components.
-                $tot = if ((Has-Prop $pl 'total_tokens') -and ([string]$pl.total_tokens -match '^\d+$')) { [int]$pl.total_tokens } else { $inTok + $outTok + $cRead + $cCreate }
-                $src = if (Has-Prop $pl 'source') { [string]$pl.source } else { 'unknown' }
+                # Single shared usage interpretation (tools/events-common.ps1 Get-EventUsage):
+                # the total-tokens rule and the estimated/actual split, identical to metrics.ps1.
+                # Cast to [int] to keep this projection's integer token contract (an outbox
+                # usage.recorded token field is a validated non-negative integer on write).
+                $u = Get-EventUsage $e
+                $tot = if ($null -ne $u.Total) { [int]$u.Total } else { 0 }
+                $src = $u.Source
                 if (-not $usageBySource.ContainsKey($src)) { $usageBySource[$src] = [ordered]@{ actual_total_tokens = 0; estimated_total_tokens = 0; n = 0 } }
                 $usageBySource[$src].n = $usageBySource[$src].n + 1
-                if ($isEst) {
+                if ($u.Estimated) {
                     $usageEstimated.n = $usageEstimated.n + 1
                     $usageEstimated.total_tokens = $usageEstimated.total_tokens + $tot
                     $usageBySource[$src].estimated_total_tokens = $usageBySource[$src].estimated_total_tokens + $tot
                 } else {
                     $usageActual.n = $usageActual.n + 1
-                    $usageActual.input_tokens = $usageActual.input_tokens + $inTok
-                    $usageActual.output_tokens = $usageActual.output_tokens + $outTok
-                    $usageActual.cache_read_input_tokens = $usageActual.cache_read_input_tokens + $cRead
-                    $usageActual.cache_creation_input_tokens = $usageActual.cache_creation_input_tokens + $cCreate
+                    $usageActual.input_tokens = $usageActual.input_tokens + [int]$u.InputTokens
+                    $usageActual.output_tokens = $usageActual.output_tokens + [int]$u.OutputTokens
+                    $usageActual.cache_read_input_tokens = $usageActual.cache_read_input_tokens + [int]$u.CacheReadTokens
+                    $usageActual.cache_creation_input_tokens = $usageActual.cache_creation_input_tokens + [int]$u.CacheCreationTokens
                     $usageActual.total_tokens = $usageActual.total_tokens + $tot
                     $usageBySource[$src].actual_total_tokens = $usageBySource[$src].actual_total_tokens + $tot
                 }

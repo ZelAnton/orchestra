@@ -258,6 +258,90 @@ Assert-True ($r7.ExitCode -eq 0) "path guard: unsafe recovery entry is ignored w
 Assert-FileText $outside "must-survive`n" 'path guard: journal traversal cannot remove outside file'
 
 # =============================================================================
+# 7) Get-ManagedPairs/Get-CodexManagedPairs never join a literal backslash into
+#    a Join-Path string argument (regression: `Join-Path $Repo 'codex\processor.md'`
+#    is only a valid separator on Windows; under pwsh on POSIX - this file is
+#    tagged ci:posix and run-all.ps1 runs it there too in CI - the backslash is
+#    just a literal filename character, so Test-Path silently fails to find the
+#    REAL codex/processor.md and codex/agents/*.toml on disk, giving a silent
+#    "Synced 0 ..." with no Codex prompt/agent mirrored - the class of bug the
+#    existing scenarios above never caught).
+# =============================================================================
+# 7a) Static check on the ACTUAL script text (T-284 KB pitfall K-041: assert
+#     against the real functions, not a hand-rolled reimplementation), and
+#     deterministic on ANY host OS since it never depends on which directory
+#     separator the test process itself happens to run under.
+$runtimeText = Get-Content -LiteralPath $script:Runtime -Raw
+$mppMatch = [regex]::Match($runtimeText, '(?s)function Get-ManagedPairs\b.*?\n\}\r?\n')
+$cmppMatch = [regex]::Match($runtimeText, '(?s)function Get-CodexManagedPairs\b.*?\n\}\r?\n')
+Assert-True $mppMatch.Success 'posix-path: Get-ManagedPairs function body located for inspection'
+Assert-True $cmppMatch.Success 'posix-path: Get-CodexManagedPairs function body located for inspection'
+$literalBackslashInJoin = "(?m)Join-Path\s+[^\r\n]*'[^']*\\[^']*'"
+if ($mppMatch.Success) {
+    Assert-True (-not [regex]::IsMatch($mppMatch.Value, $literalBackslashInJoin)) 'posix-path: Get-ManagedPairs builds no Join-Path with a literal backslash inside a string argument (codex\processor.md regression)'
+}
+if ($cmppMatch.Success) {
+    Assert-True (-not [regex]::IsMatch($cmppMatch.Value, $literalBackslashInJoin)) 'posix-path: Get-CodexManagedPairs builds no Join-Path with a literal backslash inside a string argument (codex\agents regression)'
+}
+
+# 7b) Dynamic check: dot-source ONLY the real function definitions (everything
+#     before the "# Main" execution block, which calls exit and would otherwise
+#     terminate this test process) and drive Get-ManagedPairs/Get-CodexManagedPairs
+#     directly against a synthetic $Repo, verifying - via a DirectorySeparatorChar-
+#     agnostic Split-Path decomposition, not a literal-backslash string scan - that
+#     the Codex prompt/agent pairs resolve to the correct leaf/parent names.
+#     NOTE (R-01, verified empirically against a real pwsh 7.4.6 on Linux): this
+#     dynamic check alone does NOT distinguish old vs. new Get-ManagedPairs /
+#     Get-CodexManagedPairs behavior on POSIX, because pwsh's Join-Path cmdlet
+#     normalizes an embedded literal backslash in a ChildPath string argument to
+#     '/' on that platform - so the pre-fix `Join-Path $Repo 'codex\processor.md'`
+#     already resolved correctly there too, and this assertion block passes
+#     unchanged on both the old and the new code. It is kept because it still
+#     documents and guards the expected resolved Source paths going forward, but
+#     the actual behavioral regression guard for this bug class is the static
+#     text-pattern check 7a above (which does fail against the pre-fix source).
+#     If a POSIX host/pwsh build exists where Join-Path does NOT normalize the
+#     backslash, this block would also fail there pre-fix; none such was found
+#     during T-284 verification.
+$repoP = New-SyntheticRepo
+try {
+    $lines = Get-Content -LiteralPath $script:Runtime
+    $mainLineIdx = (($lines | Select-String -Pattern '^# Main$' | Select-Object -First 1).LineNumber)
+    Assert-True ($null -ne $mainLineIdx) 'posix-path: located "# Main" marker to isolate function definitions'
+    if ($null -ne $mainLineIdx) {
+        # Drop the "# ====" banner line(s) immediately preceding "# Main" too.
+        $cut = $mainLineIdx - 1
+        while ($cut -gt 0 -and $lines[$cut - 1] -match '^#\s*=+\s*$') { $cut-- }
+        $funcOnlyText = ($lines[0..($cut - 1)] -join "`n") + "`n"
+        $tmpFuncScript = Join-Path ([System.IO.Path]::GetTempPath()) ("orc-sync-funcs-" + [Guid]::NewGuid().ToString('N') + '.ps1')
+        [System.IO.File]::WriteAllText($tmpFuncScript, $funcOnlyText, $script:Utf8)
+        try {
+            . $tmpFuncScript
+            $destP = Join-Path $repoP 'dest-unused'
+            $pairs = Get-ManagedPairs -Repo $repoP -Dest $destP -Glob '*.cmd'
+            $codexPromptPair = @($pairs | Where-Object { $_.Kind -eq 'codex_prompt' })
+            Assert-True ($codexPromptPair.Count -eq 1) 'posix-path: Get-ManagedPairs finds exactly one codex_prompt pair'
+            if ($codexPromptPair.Count -eq 1) {
+                $src = $codexPromptPair[0].Source
+                Assert-True ((Split-Path -Leaf $src) -eq 'processor.md') "posix-path: codex prompt Source leaf is processor.md (got $src)"
+                Assert-True ((Split-Path -Leaf (Split-Path -Parent $src)) -eq 'codex') "posix-path: codex prompt Source parent leaf is codex (got $src)"
+                Assert-True (Test-Path -LiteralPath $src -PathType Leaf) "posix-path: codex prompt Source resolves to the real file on this host ($src)"
+            }
+            $codexPairs = @(Get-CodexManagedPairs -Repo $repoP -Dest (Join-Path $destP '.codex'))
+            Assert-True ($codexPairs.Count -eq 2) 'posix-path: Get-CodexManagedPairs finds both synthetic Codex custom agents'
+            foreach ($cp in $codexPairs) {
+                Assert-True ((Split-Path -Leaf (Split-Path -Parent $cp.Source)) -eq 'agents') "posix-path: codex agent Source parent leaf is agents (got $($cp.Source))"
+                Assert-True (Test-Path -LiteralPath $cp.Source -PathType Leaf) "posix-path: codex agent Source resolves to the real file on this host ($($cp.Source))"
+            }
+        } finally {
+            Remove-Item -LiteralPath $tmpFuncScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+} finally {
+    Remove-Item -LiteralPath $repoP -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in @($repo, $dest, $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS)) {

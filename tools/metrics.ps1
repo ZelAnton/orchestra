@@ -15,41 +15,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+# Shared consumer-side projection layer over events.jsonl (T-286): the single canonical
+# Has-Prop/Get-Prop/Get-FirstProp, the numeric/time coercions (To-Number/To-Time), the stream
+# reader+dedup (Read-EventStream) and the usage extractor (Get-EventUsage) - the same layer
+# outbox.ps1's `metrics` command uses. MUST load AFTER common.ps1 (Read-EventStream reports
+# read failure through common.ps1's Fail).
+. (Join-Path $PSScriptRoot 'events-common.ps1')
 $script:ErrPrefix = 'METRICSERR'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
-function Has-Prop {
-    param($Object, [string]$Name)
-    if ($null -eq $Object) { return $false }
-    return ($null -ne $Object.PSObject.Properties[$Name])
-}
-function Get-Prop { param($Object, [string]$Name) if (Has-Prop $Object $Name) { return $Object.$Name }; return $null }
-function Get-FirstProp {
-    param($Object, [string[]]$Names)
-    foreach ($name in $Names) {
-        if (Has-Prop $Object $name) {
-            $value = $Object.$name
-            if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) { return $value }
-        }
-    }
-    return $null
-}
-function To-Number {
-    param($Value)
-    if ($null -eq $Value) { return $null }
-    $number = 0.0
-    if ([double]::TryParse([string]$Value, [Globalization.NumberStyles]::Float,
-            [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -and $number -ge 0) { return $number }
-    return $null
-}
-function To-Time {
-    param($Value)
-    if ($null -eq $Value) { return $null }
-    $parsed = [DateTimeOffset]::MinValue
-    if ([DateTimeOffset]::TryParse([string]$Value, [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) { return $parsed.ToUniversalTime() }
-    return $null
-}
 function Set-Earlier { param($Object, [string]$Name, $Value) if ($null -ne $Value -and ($null -eq $Object.$Name -or $Value -lt $Object.$Name)) { $Object.$Name = $Value } }
 function Set-Later { param($Object, [string]$Name, $Value) if ($null -ne $Value -and ($null -eq $Object.$Name -or $Value -gt $Object.$Name)) { $Object.$Name = $Value } }
 
@@ -77,42 +51,8 @@ function Get-Task {
     return $Batch.Tasks[$TaskId]
 }
 
-function Read-EventStream {
-    param([string]$Path)
-    $events = New-Object Collections.Generic.List[object]
-    $invalid = 0
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Events=$events; Invalid=0; Present=$false } }
-    try {
-        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-        $lineBytes = New-Object Collections.Generic.List[byte]
-        $decoder = New-Object Text.UTF8Encoding($false, $true)
-        $buffer = New-Object 'byte[]' 65536
-        try {
-            while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                for ($offset = 0; $offset -lt $read; $offset++) {
-                    $byte = $buffer[$offset]
-                    if ($byte -ne 10) { $lineBytes.Add($byte); continue }
-                    try { $line = $decoder.GetString($lineBytes.ToArray()).TrimEnd("`r") } catch { $invalid++; $lineBytes.Clear(); continue }
-                    $lineBytes.Clear()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    try { $event = $line | ConvertFrom-Json } catch { $invalid++; continue }
-                    if ($null -eq $event -or -not (Has-Prop $event 'type') -or $null -eq (To-Time (Get-Prop $event 'occurred_at'))) { $invalid++; continue }
-                    [void]$events.Add($event)
-                }
-            }
-            # Like the engine tail reader, never consume an unterminated final record.
-            if ($lineBytes.Count -gt 0) { $invalid++ }
-        } finally { $stream.Dispose() }
-    } catch { Fail 3 "cannot read $Path ($($_.Exception.Message))" }
-    $seen = New-Object 'Collections.Generic.HashSet[string]'
-    $deduped = New-Object Collections.Generic.List[object]
-    foreach ($event in $events) {
-        $id = [string](Get-Prop $event 'event_id')
-        if ($id -and -not $seen.Add($id)) { continue }
-        [void]$deduped.Add($event)
-    }
-    return [pscustomobject]@{ Events=$deduped; Invalid=$invalid; Present=$true }
-}
+# Read-EventStream (the stream reader + event_id dedup) now lives in tools/events-common.ps1,
+# shared with outbox.ps1's `metrics` command (T-286).
 
 function Get-EventNumber {
     param($Event, [string[]]$Names)
@@ -137,30 +77,17 @@ function Get-AttemptNumber {
 function Add-Usage {
     param($Batch, $Event)
     if ($null -eq $Batch) { return }
-    $payload = Get-Prop $Event 'payload'
-    $usage = Get-FirstProp $payload @('token_usage','usage')
-    $total = Get-EventNumber $Event @('total_tokens','tokens','token_count')
-    if ($null -eq $total -and $null -ne $usage -and $usage -isnot [string]) {
-        $total = To-Number (Get-FirstProp $usage @('total_tokens','tokens','total'))
-        if ($null -eq $total) {
-            $sum = 0.0; $found = $false
-            foreach ($name in @('input_tokens','output_tokens','cache_creation_input_tokens','cache_read_input_tokens')) {
-                $number = To-Number (Get-Prop $usage $name)
-                if ($null -ne $number) { $sum += $number; $found = $true }
-            }
-            if ($found) { $total = $sum }
-        }
+    # Single shared usage interpretation (tools/events-common.ps1 Get-EventUsage): the
+    # total-tokens rule (explicit total wins, else nested token_usage/usage object, else the
+    # flat component sum) plus the cost lookup - identical to outbox.ps1's `metrics` command.
+    # T-248: an estimate is a heuristic, never a provider-exact figure, so it is routed to a
+    # SEPARATE bucket and never summed into the actual-token total (OBSERVABILITY_PLATFORM_PLAN §8).
+    $usage = Get-EventUsage $Event
+    if ($null -ne $usage.Total) {
+        if ($usage.Estimated) { $Batch.EstimatedTokens += $usage.Total; $Batch.EstimatedTokenObserved = $true }
+        else { $Batch.Tokens += $usage.Total; $Batch.TokenObserved = $true }
     }
-    # T-248: a usage.recorded (or any) event may mark its counts `estimated`. An estimate is a
-    # heuristic, never a provider-exact figure, so it is routed to a SEPARATE bucket and never
-    # summed into the actual-token total (plans/OBSERVABILITY_PLATFORM_PLAN.md §8).
-    $isEstimated = ((Get-Prop $payload 'estimated') -eq $true)
-    if ($null -ne $total) {
-        if ($isEstimated) { $Batch.EstimatedTokens += $total; $Batch.EstimatedTokenObserved = $true }
-        else { $Batch.Tokens += $total; $Batch.TokenObserved = $true }
-    }
-    $cost = Get-EventNumber $Event @('cost_usd','usd_cost','total_cost_usd')
-    if ($null -ne $cost) { $Batch.CostUsd += $cost; $Batch.CostObserved = $true }
+    if ($null -ne $usage.Cost) { $Batch.CostUsd += $usage.Cost; $Batch.CostObserved = $true }
 }
 
 function Apply-Events {
