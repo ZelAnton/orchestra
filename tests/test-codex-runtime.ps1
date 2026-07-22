@@ -329,6 +329,68 @@ function Get-ArgsCaptured {
 }.Invoke()
 
 # =============================================================================
+# 6a. T-288: success-aware ENV_LIMIT gate - a coincidental network/vcs-write
+#     substring in a clean, successful run's out-file+stdout+stderr blob must
+#     NOT force ENV_LIMIT; a genuinely failed run with the very same substring
+#     still classifies ENV_LIMIT exactly as before.
+# =============================================================================
+{
+    # (a) False positive: RC==0 AND a non-empty, valid -o result - the network
+    # substring appears only incidentally (e.g. quoted from the reviewed diff) -
+    # must NOT be classified as ENV_LIMIT.
+    $fake = New-FakeCodex
+    $r = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{
+        FAKE_CODEX_OUT_CONTENT = "Reviewed the retry helper; it already handles 'Failed to connect' and 'Connection refused' gracefully. No changes needed."
+        FAKE_CODEX_STDOUT      = 'progress...'
+        FAKE_CODEX_EXIT        = '0'
+    }
+    Assert-True ($null -ne $r.Json) 'success-gate: false-positive case JSON result present'
+    if ($r.Json) {
+        Assert-Equal 'none' $r.Json.failureClass 'success-gate: RC0 + valid out-file suppresses coincidental network substring'
+        Assert-Equal $false $r.Json.envLimit 'success-gate: RC0 + valid out-file is not an env limit'
+        Assert-True ($null -eq $r.Json.sentinel) 'success-gate: no sentinel on the suppressed false positive'
+    }
+
+    # (b) True positive, non-zero RC: the run actually failed (RC!=0) with the
+    # same substring in the out-file/stdout/stderr blob - must classify ENV_LIMIT
+    # exactly as before the gate was introduced.
+    $fake2 = New-FakeCodex
+    $r2 = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake2, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{
+        FAKE_CODEX_OUT_CONTENT = "Reviewed the retry helper; it already handles 'Failed to connect' and 'Connection refused' gracefully. No changes needed."
+        FAKE_CODEX_STDERR      = 'error sending request for url: dns error: Could not resolve host'
+        FAKE_CODEX_EXIT        = '1'
+    }
+    Assert-True ($null -ne $r2.Json) 'success-gate: true-positive (nonzero RC) JSON result present'
+    if ($r2.Json) {
+        Assert-Equal 'network' $r2.Json.failureClass 'success-gate: nonzero RC + network substring still classifies network'
+        Assert-Equal $true $r2.Json.envLimit 'success-gate: nonzero RC + network substring is still an env limit'
+        Assert-True ($r2.Json.sentinel -like '*ENV_LIMIT/network*') 'success-gate: nonzero RC still escalates ENV_LIMIT/network'
+    }
+
+    # (c) True positive, empty/absent -o result: RC==0 but no --out-file is passed
+    # (so no valid -o result exists), and the substring surfaces only via stdout -
+    # must still classify ENV_LIMIT, since the success gate requires BOTH RC==0
+    # AND a valid out-file.
+    $fake3 = New-FakeCodex
+    $r3 = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake3, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--prompt-file', (New-TempFile)
+    ) -EnvVars @{ FAKE_CODEX_STDOUT = 'warning: dns error: Could not resolve host, retrying...'; FAKE_CODEX_EXIT = '0' }
+    Assert-True ($null -ne $r3.Json) 'success-gate: true-positive (no out-file) JSON result present'
+    if ($r3.Json) {
+        Assert-Equal 'network' $r3.Json.failureClass 'success-gate: RC0 without a valid out-file still classifies network'
+        Assert-Equal $true $r3.Json.envLimit 'success-gate: RC0 without a valid out-file is still an env limit'
+        Assert-True ($r3.Json.sentinel -like '*ENV_LIMIT/network*') 'success-gate: RC0 without a valid out-file still escalates'
+    }
+}.Invoke()
+
+# =============================================================================
 # 7. Classification edge cases (pure) - error 2 is recoverable, tls before network
 # =============================================================================
 {
