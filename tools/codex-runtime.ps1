@@ -226,7 +226,21 @@ $FailureClasses = @(
 )
 
 function Get-FailureClass {
-    param([string]$Text, [int]$RC)
+    # T-288: success-aware gate. `-OutFileOk` is computed by the CALLER (Cmd-Run /
+    # Cmd-ResumeImage), never derived in here, and means "the -o out-file is present
+    # and a non-empty, non-whitespace result" - the minimal, role-agnostic definition
+    # of "not missing/empty/truncated" this generic runtime can judge on its own. When
+    # RC==0 AND that holds, the run is unconditionally a clean success: no signature in
+    # $FailureClasses is consulted, so a network/vcs-write/etc. substring that merely
+    # happens to appear anywhere in the concatenated out-file+stdout+stderr blob (e.g.
+    # quoted in the reviewed diff, or in an incidental log line) can no longer force an
+    # ENV_LIMIT class and throw away a genuinely successful codex run. A real failure -
+    # RC!=0, or no usable out-file - always falls through to the signature table below,
+    # unchanged from before.
+    param([string]$Text, [int]$RC, [bool]$OutFileOk = $false)
+    if ($RC -eq 0 -and $OutFileOk) {
+        return [pscustomobject]@{ class = 'none'; envLimit = $false; broker = $false; recoverable = $false; signature = $null }
+    }
     $t = if ($null -eq $Text) { '' } else { [string]$Text }
     foreach ($fc in $FailureClasses) {
         foreach ($sig in $fc.Signatures) {
@@ -1037,8 +1051,12 @@ function Cmd-Run {
 
     # Classify against the -o out-file (codex's final message) plus captured
     # stdout/stderr - the same surface the adapter used to eyeball.
-    $classifyText = (Read-TextOrEmpty ([string](Opt 'out-file' ''))) + "`n" + $res.StdOut + "`n" + $res.StdErr
-    $fc = Get-FailureClass -Text $classifyText -RC $res.ExitCode
+    $outFileText = Read-TextOrEmpty ([string](Opt 'out-file' ''))
+    $classifyText = $outFileText + "`n" + $res.StdOut + "`n" + $res.StdErr
+    # T-288: gate ENV_LIMIT signature matching on RC==0 + a non-empty out-file - see
+    # Get-FailureClass for why.
+    $outFileOk = -not [string]::IsNullOrWhiteSpace($outFileText)
+    $fc = Get-FailureClass -Text $classifyText -RC $res.ExitCode -OutFileOk $outFileOk
 
     # T-222: with --emit-json, stdout is the `codex exec --json` JSONL event stream;
     # pull the session/thread id off its FIRST `thread.started` event. This is the ONLY
@@ -1162,8 +1180,11 @@ function Cmd-ResumeImage {
     if ($stdoutFile) { Write-TextNoBom $stdoutFile $res.StdOut }
     if ($stderrFile) { Write-TextNoBom $stderrFile $res.StdErr }
 
-    $classifyText = (Read-TextOrEmpty $outFile) + "`n" + $res.StdOut + "`n" + $res.StdErr
-    $fc = Get-FailureClass -Text $classifyText -RC $res.ExitCode
+    $outFileText = Read-TextOrEmpty $outFile
+    $classifyText = $outFileText + "`n" + $res.StdOut + "`n" + $res.StdErr
+    # T-288: same success-aware gate as Cmd-Run - see Get-FailureClass.
+    $outFileOk = -not [string]::IsNullOrWhiteSpace($outFileText)
+    $fc = Get-FailureClass -Text $classifyText -RC $res.ExitCode -OutFileOk $outFileOk
 
     $sentinel = $null
     if ($res.TimedOut) {
