@@ -16,6 +16,8 @@
 #   - crash (fault injection) between every critical write leaves state intact
 #   - corrupt lease halts with a precise error instead of silent overwrite
 #   - transition validation (task/cohort/integration): legal / illegal / unknown
+#   - root comparison (verify + takeover) is normalized (slash direction, trailing
+#     separator) yet still detects a genuinely different root as a mismatch
 #
 # The tool is invoked with pwsh (PowerShell 7) when available AND, in a dedicated
 # cross-host scenario, with the current powershell.exe (Windows PowerShell 5.1),
@@ -384,5 +386,35 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
         $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT)
         Assert-Equal 0 $r.ExitCode '[legacy] an EMPTY lock dir is a recoverable artifact, not a legacy lock'
         Assert-Equal 1 ([int](Read-Lease $W).generation) '[legacy] recovered acquire produced generation 1'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 16: root comparison is normalized, not a raw string compare ----
+    # Same root spelled with forward slashes, or with a trailing separator, must
+    # verify/adopt as a MATCH (T-285); a genuinely different root must still mismatch
+    # in both directions (positive AND negative), on both call sites (verify + takeover).
+    $altSlashRoot = $ROOT -replace '\\', '/'         # 'C:\proj\demo' -> 'C:/proj/demo'
+    $altTrailingRoot = "$ROOT\"                       # 'C:\proj\demo' -> 'C:\proj\demo\'
+    $otherRoot = 'C:\proj\other'
+
+    $W = New-Work
+    try {
+        $owner = Get-Owner (Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--ttl', '600'))
+        $r = Run-Tool @('verify', '--work', $W, '--require-root', $altSlashRoot, '--require-role', 'processor', '--owner', $owner)
+        Assert-Equal 0 $r.ExitCode '[root-norm] verify matches despite forward-slash separators (0)'
+        $r = Run-Tool @('verify', '--work', $W, '--require-root', $altTrailingRoot, '--require-role', 'processor', '--owner', $owner)
+        Assert-Equal 0 $r.ExitCode '[root-norm] verify matches despite a trailing separator (0)'
+        $r = Run-Tool @('verify', '--work', $W, '--require-root', $otherRoot)
+        Assert-Equal 15 $r.ExitCode '[root-norm] verify still root-mismatches a genuinely different root (15)'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    $W = New-Work
+    try {
+        Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--ttl', '600') | Out-Null
+        $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $altSlashRoot, '--force')
+        Assert-Equal 0 $r.ExitCode '[root-norm] takeover require-root matches despite forward-slash separators (0)'
+        $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $altTrailingRoot, '--force')
+        Assert-Equal 0 $r.ExitCode '[root-norm] takeover require-root matches despite a trailing separator (0)'
+        $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $otherRoot, '--force')
+        Assert-Equal 15 $r.ExitCode '[root-norm] takeover still root-mismatches a genuinely different require-root (15)'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }
