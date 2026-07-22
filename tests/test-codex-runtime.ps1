@@ -1136,6 +1136,111 @@ function Stop-GcIfAlive {
 }.Invoke()
 
 # =============================================================================
+# 17. T-289: jj working-copy view warm-up before a read-only reviewer pass.
+# A colocated jj `workspace add` worktree auto-snapshots `@` on nearly every jj
+# command; once another process (processor's between-pass commit on the MAIN
+# workspace) has advanced the shared operation log, the NEXT jj command in the
+# review workspace must reconcile by writing `.jj/working_copy/checkout` under the
+# exclusive `working_copy.lock` - a write the fully read-only codex sandbox denies,
+# so the SECOND reviewer_codex pass escalated ENV_LIMIT/vcs-write. The runtime now
+# refreshes that view OUTSIDE the sandbox (a plain `jj -R <wt> log -r @`) right
+# before `codex exec`, so codex's own in-sandbox jj queries find the working copy
+# synced and take no lock.
+# These assert the warm-up's INVOCATION CONTRACT against a fake `jj` on PATH (args
+# recorded to a file) - a real jj binary is intentionally NOT required, because the
+# reproduced fault is the presence/shape/gating of the out-of-sandbox jj call, not
+# an OS-level lock (the mechanism itself was verified separately on a real jj repo,
+# see the code comment in tools/codex-runtime.ps1::Invoke-JjViewWarmup).
+# =============================================================================
+$script:FakeJjWarmupBody = @'
+if ($env:FAKE_JJ_ARGS_FILE) { Set-Content -LiteralPath $env:FAKE_JJ_ARGS_FILE -Value $args -Encoding utf8 }
+exit 0
+'@
+function New-FakeJjBin {
+    # A directory holding a `jj.ps1` stub; prepended to the child PATH so the runtime's
+    # bare `& jj` resolves it (PowerShell finds a `.ps1` on PATH on both Windows and POSIX,
+    # so this needs no real jj and runs on the CI matrix where jj is absent).
+    $bin = New-TempDir
+    [System.IO.File]::WriteAllText((Join-Path $bin 'jj.ps1'), $script:FakeJjWarmupBody, $script:Utf8)
+    return $bin
+}
+
+# (a) jj worktree + read-only: the warm-up fires, scoped to THIS worktree, read-only,
+#     and WITHOUT widening the sandbox (still exactly the one narrow cache --add-dir).
+{
+    $fakeBin = New-FakeJjBin
+    $fakeCodex = New-FakeCodex
+    $wt = New-TempDir
+    New-Item -ItemType Directory -Force -Path (Join-Path $wt '.jj') | Out-Null   # colocated jj worktree marker
+    $jjArgs = New-TempFile
+    $r = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fakeCodex, '--worktree', $wt, '--sandbox', 'read-only',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{
+        PATH = $fakeBin + [System.IO.Path]::PathSeparator + $env:PATH
+        FAKE_JJ_ARGS_FILE = $jjArgs; FAKE_CODEX_OUT_CONTENT = 'review verdict'; FAKE_CODEX_EXIT = '0'
+    }
+    Assert-Equal 0 $r.ExitCode 'warmup(jj,read-only): runtime still exits 0 (codex ran normally after the warm-up)'
+    Assert-True (Test-Path -LiteralPath $jjArgs) 'warmup(jj,read-only): a jj view warm-up ran out-of-sandbox before codex'
+    $cap = Get-ArgsCaptured $jjArgs
+    $rIdx = [array]::IndexOf($cap, '-R')
+    Assert-True ($rIdx -ge 0 -and ($rIdx + 1) -lt $cap.Count -and $cap[$rIdx + 1] -eq $wt) 'warmup(jj,read-only): warm-up carries -R <worktree> (K-025 - never the runner cwd workspace)'
+    Assert-True (($cap -contains 'log') -and ($cap -contains '-r') -and ($cap -contains '@')) 'warmup(jj,read-only): warm-up is a `log -r @` view refresh'
+    foreach ($verb in @('describe', 'new', 'bookmark', 'commit', 'restore', 'abandon')) {
+        Assert-True ($cap -notcontains $verb) "warmup(jj,read-only): warm-up is content-read-only (no mutating '$verb')"
+    }
+    $codexArgv = @($r.Json.codexArgv)
+    Assert-True ($codexArgv -contains 'read-only') 'warmup(jj,read-only): codex is still invoked with --sandbox read-only'
+    $addDirCount = @($codexArgv | Where-Object { $_ -eq '--add-dir' }).Count
+    Assert-Equal 1 $addDirCount 'warmup(jj,read-only): the fix does NOT widen the read-only sandbox (still exactly one narrow --add-dir)'
+    $addDirIdx = [array]::IndexOf($codexArgv, '--add-dir')
+    Assert-True ($addDirIdx -ge 0 -and ([string]$codexArgv[$addDirIdx + 1]).Replace('\', '/').EndsWith('.work/codex-cache')) 'warmup(jj,read-only): the sole --add-dir is still the worktree-local codex-cache (no .jj exception added)'
+}.Invoke()
+
+# (b) git-only worktree (no `.jj/`): CONTRAST - the warm-up must NOT fire, so a git-only
+#     review is byte-identical to before (no out-of-sandbox jj call at all).
+{
+    $fakeBin = New-FakeJjBin
+    $fakeCodex = New-FakeCodex
+    $wt = New-TempDir   # deliberately NO .jj/ subdir -> git-only worktree
+    $jjArgs = New-TempFile
+    $r = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fakeCodex, '--worktree', $wt, '--sandbox', 'read-only',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{
+        PATH = $fakeBin + [System.IO.Path]::PathSeparator + $env:PATH
+        FAKE_JJ_ARGS_FILE = $jjArgs; FAKE_CODEX_OUT_CONTENT = 'review verdict'; FAKE_CODEX_EXIT = '0'
+    }
+    Assert-Equal 0 $r.ExitCode 'warmup(git-only): runtime exits 0'
+    Assert-True (-not (Test-Path -LiteralPath $jjArgs)) 'warmup(git-only): NO jj warm-up fires without a `.jj/` (git-only behaviour byte-identical)'
+    $codexArgv = @($r.Json.codexArgv)
+    Assert-True ($codexArgv -contains 'read-only') 'warmup(git-only): codex still invoked --sandbox read-only'
+    Assert-True ($codexArgv -contains '--add-dir') 'warmup(git-only): read-only still keeps its narrow cache --add-dir'
+}.Invoke()
+
+# (c) jj worktree + workspace-write (coder): the warm-up is gated to the read-only
+#     reviewer sandbox, so a coder run does NOT fire it - the coder path is untouched.
+{
+    $fakeBin = New-FakeJjBin
+    $fakeCodex = New-FakeCodex
+    $wt = New-TempDir
+    New-Item -ItemType Directory -Force -Path (Join-Path $wt '.jj') | Out-Null
+    $jjArgs = New-TempFile
+    $r = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fakeCodex, '--worktree', $wt, '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{
+        PATH = $fakeBin + [System.IO.Path]::PathSeparator + $env:PATH
+        FAKE_JJ_ARGS_FILE = $jjArgs; FAKE_CODEX_OUT_CONTENT = 'done'; FAKE_CODEX_EXIT = '0'
+    }
+    Assert-Equal 0 $r.ExitCode 'warmup(jj,workspace-write): runtime exits 0'
+    Assert-True (-not (Test-Path -LiteralPath $jjArgs)) 'warmup(jj,workspace-write): NO warm-up on a coder run (gated to read-only; coder path untouched)'
+    $codexArgv = @($r.Json.codexArgv)
+    Assert-True ($codexArgv -contains 'workspace-write') 'warmup(jj,workspace-write): codex still invoked --sandbox workspace-write'
+    Assert-True ($codexArgv -notcontains '--add-dir') 'warmup(jj,workspace-write): workspace-write stays add-dir-free (single writable root)'
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($item in $script:TempItems) {

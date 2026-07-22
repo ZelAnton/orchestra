@@ -718,6 +718,47 @@ function Get-JjDivergent {
     } catch { return $null }
 }
 
+# jj working-copy view warm-up (T-289) - reconcile a colocated review worktree's jj
+# view OUTSIDE the codex sandbox, immediately before `codex exec`, so a repeat
+# read-only reviewer pass no longer escalates ENV_LIMIT/vcs-write on the jj
+# working-copy lock.
+#
+# Empirically confirmed mechanism (jj 0.42, colocated `jj workspace add` worktree):
+#   * jj auto-snapshots `@` on nearly every command (incl. read-only `jj log`), but on
+#     an ALREADY-SYNCED working copy that snapshot writes NOTHING under `.jj/` (no new
+#     operation, `.jj/working_copy/*` untouched) - which is why the FIRST reviewer_codex
+#     pass ran fine inside the fully read-only sandbox.
+#   * when ANOTHER process (processor's between-pass commit on the MAIN workspace)
+#     advances the shared operation log, the NEXT jj command in the review workspace must
+#     reconcile: it REWRITES `.jj/working_copy/checkout` to re-point this workspace at the
+#     new operation, taking the exclusive `.jj/working_copy/working_copy.lock`. The
+#     read-only sandbox denies that write ("Failed to open lock file ... access is denied
+#     (os error 5)"), so the SECOND (post-commit) pass escalated ENV_LIMIT/vcs-write.
+#   * that reconcile touches ONLY `.jj/working_copy/` (verified: no new op, `@`'s stable
+#     change_id unchanged (K-005), no bookmark moved); once it has happened, subsequent
+#     read-only jj commands are write-free again.
+# So running ONE cheap read-only `jj log -r @` here performs that reconcile where writing
+# `.jj/` IS allowed; codex's own in-sandbox jj queries then find the working copy synced
+# and take no lock - the same already-synced precondition under which the first pass passed.
+#
+# This is a plain child process, NOT routed through Build-CodexArgv/codex. It carries
+# `-R $Worktree` so it can only ever address THIS workspace, never the runner's cwd
+# workspace (K-025), and is content-read-only w.r.t. the review: an empty `-T ''` template
+# emits nothing, and `jj log` creates/moves no named commit and no bookmark. Best-effort:
+# any failure (no `jj` on PATH, an older jj, a transient error) is swallowed - the warm-up
+# is a pure optimization, never a gate on the review run. It fires ONLY for a colocated jj
+# worktree (a `.jj/` directory present); a git-only worktree returns immediately, so its
+# argv/behaviour stays byte-identical. Callers gate it to the read-only sandbox: a
+# workspace-write (coder) run can already take the lock itself and is left untouched.
+function Invoke-JjViewWarmup {
+    param([Parameter(Mandatory)][string]$Worktree)
+    if (-not (Test-Path -LiteralPath (Join-Path $Worktree '.jj') -PathType Container)) { return $false }
+    try {
+        & jj -R $Worktree --no-pager log -r '@' --no-graph -T '' 2>$null | Out-Null
+        return $true
+    } catch { return $false }
+}
+
 # The adapter's single source of truth for whether the active workspace has changes.
 # In a colocated jj+git repository Git can report a clean index/worktree after jj has
 # snapshotted the working-copy revision even though `jj diff -r @` is substantive.
@@ -1022,9 +1063,10 @@ function Cmd-Run {
     $worktree = Require-Opt 'worktree'
     if (-not (Test-Path -LiteralPath $worktree -PathType Container)) { Fail 2 "--worktree '$worktree' does not exist" }
     $worktree = (Resolve-Path -LiteralPath $worktree).Path
+    $sandbox = Require-Opt 'sandbox'
     $argv = Build-CodexArgv `
         -Worktree $worktree `
-        -Sandbox (Require-Opt 'sandbox') `
+        -Sandbox $sandbox `
         -Reasoning (Require-Opt 'reasoning') `
         -Model ([string](Opt 'model' '')) `
         -Network ([string](Opt 'network' 'off')) `
@@ -1042,6 +1084,13 @@ function Cmd-Run {
     # append everything after argv[0] as the process arguments.
     $spawnArgs = @($target.Prefix) + @($argv[1..($argv.Count - 1)])
     $childEnv = Get-CodexChildEnvironment -Worktree $worktree
+    # T-289: on a read-only reviewer pass, reconcile a colocated jj worktree's view HERE
+    # (outside the sandbox, right before spawning codex) so codex's own in-sandbox jj
+    # queries no longer need the write lock on `.jj/working_copy/working_copy.lock`. Only
+    # the read-only sandbox needs this: a workspace-write (coder) run can take the lock
+    # itself. No-op for a git-only worktree (see Invoke-JjViewWarmup), so that path is
+    # byte-identical. Best-effort/never fatal - its result is intentionally discarded.
+    if ($sandbox -eq 'read-only') { [void](Invoke-JjViewWarmup -Worktree $worktree) }
     $res = Invoke-Captured -FilePath $target.File -Arguments $spawnArgs -StdinText $prompt -TimeoutSec $timeout -EnvironmentOverride $childEnv -WorkingDirectory $worktree
 
     $stdoutFile = [string](Opt 'stdout-file' '')
