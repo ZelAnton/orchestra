@@ -1130,9 +1130,31 @@ fn cmd_run(args: &[String]) {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| work.clone()),
     };
+    // An explicit `--tools <dir>` (harness/tests/fixtures) is used as-is — the current contract for
+    // fixtures is unchanged. The DEFAULT follows the SAME checkout-vs-mirror identity rule
+    // `cmd_lease` already uses for its `--script` (`toolscript::resolve_tool_script`,
+    // `docs/queue_contract.md` §9, K-052): resolve `state-tx.ps1` (present in both a proven
+    // checkout's `tools/` and the cc-sync mirror) and take its containing directory as `tools`.
+    // This must NEVER silently fall back to a bare `root.join("tools")`: a non-checkout `root` may
+    // itself carry a foreign/stale `tools/` directory, and trusting it unconditionally would let
+    // `run` execute an unproven script tree from a caller-controlled `--root` — the exact
+    // trust-boundary bug this resolver exists to close.
     let tools = match opt(args, "--tools") {
         Some(t) => abs_path(&t),
-        None => root.join("tools"),
+        None => match toolscript::resolve_tool_script(&root, "state-tx.ps1") {
+            Some(p) => p
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.join("tools")),
+            None => {
+                eprintln!(
+                    "run: tools directory not found (no Orchestra checkout identity markers under {} \
+                     and no cc-sync mirror at ~/.claude/scripts; pass --tools <dir> or --root <project root>)",
+                    root.display()
+                );
+                exit(run::exit::USAGE);
+            }
+        },
     };
     let batch_id = opt(args, "--batch")
         .filter(|s| !s.is_empty())
