@@ -84,6 +84,9 @@ $ErrorActionPreference = 'Stop'
 # Shared infrastructure primitives (arg-parse, Fail/Opt/Require-Opt + catch dispatcher,
 # crash-safe IO, CreateNew lock, UTC helpers; T-240). Dot-sourced like tools/policy-schema.ps1.
 . (Join-Path $PSScriptRoot 'common.ps1')
+# Get-PathComparer (K-033): the one platform path comparer (case-insensitive on Windows,
+# case-sensitive elsewhere), reused below so root comparison stays normalized in one place.
+. (Join-Path $PSScriptRoot 'policy-schema.ps1')
 $script:ErrPrefix = 'STXERR'          # coded-error tag decoded by the catch dispatcher
 $script:FaultEnv  = 'STATE_TX_FAULT'  # crash-injection hook read by Maybe-Fault
 $script:LockName  = 'state-tx'        # label in the Acquire-Lock failure message
@@ -114,6 +117,20 @@ function Resolve-Paths {
 # lock (Acquire-Lock / Release-Lock) and the UTC helpers (Format-Utc / Parse-Utc) come from
 # tools/common.ps1 (T-240): Maybe-Fault reads $script:FaultEnv (STATE_TX_FAULT set above).
 function Get-HostName { return [System.Net.Dns]::GetHostName() }
+
+# Is $A the same project root as $B? Raw string compare would false-positive-mismatch
+# on '/' vs '\' or a trailing separator (same root, different spelling) while still
+# needing to catch a genuinely different root. Normalize both sides (resolve '..'/
+# relative segments via GetFullPath, trim a trailing separator) then compare with the
+# one platform path comparer (Get-PathComparer, K-033: case-insensitive on Windows,
+# case-sensitive elsewhere) so the two verify/takeover call sites share one rule.
+function Test-SameRoot {
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B) { return $A -eq $B }
+    $an = ([System.IO.Path]::GetFullPath($A)).TrimEnd('\', '/')
+    $bn = ([System.IO.Path]::GetFullPath($B)).TrimEnd('\', '/')
+    return [string]::Equals($an, $bn, (Get-PathComparer))
+}
 
 # --------------------------------------------------------------------------
 # Local liveness proof: a recorded pid is authoritative *on its own host* only.
@@ -303,7 +320,7 @@ function Invoke-Acquire {
                 # --force: overwrite the corrupt record.
             } else {
                 $L = $existing.Lease
-                if ($opts.ContainsKey('require-root') -and $L.root -ne (Require-Opt 'require-root')) {
+                if ($opts.ContainsKey('require-root') -and -not (Test-SameRoot $L.root (Require-Opt 'require-root'))) {
                     Fail 15 "lease belongs to a different project root '$($L.root)' (required '$([string](Opt 'require-root'))'); not adopting it"
                 }
                 if ($opts.ContainsKey('require-role') -and $L.role -ne [string](Opt 'require-role')) {
@@ -420,7 +437,7 @@ function Cmd-Verify {
     if ($existing.Legacy) { Write-Output "legacy-lock ($($existing.Error))"; exit 19 }
     if (-not $existing.Valid) { Write-Output "corrupt-lease ($($existing.Error))"; exit 18 }
     $L = $existing.Lease
-    if ($opts.ContainsKey('require-root') -and $L.root -ne [string](Opt 'require-root')) {
+    if ($opts.ContainsKey('require-root') -and -not (Test-SameRoot $L.root ([string](Opt 'require-root')))) {
         Write-Output "root-mismatch lease-root=$($L.root)"; exit 15
     }
     if ($opts.ContainsKey('require-role') -and $L.role -ne [string](Opt 'require-role')) {
