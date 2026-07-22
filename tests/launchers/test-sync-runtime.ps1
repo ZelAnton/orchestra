@@ -289,9 +289,20 @@ if ($cmppMatch.Success) {
 #     terminate this test process) and drive Get-ManagedPairs/Get-CodexManagedPairs
 #     directly against a synthetic $Repo, verifying - via a DirectorySeparatorChar-
 #     agnostic Split-Path decomposition, not a literal-backslash string scan - that
-#     the Codex prompt/agent pairs resolve to the correct leaf/parent names. Under
-#     pwsh on POSIX (this file's ci:posix tag), this reproduces the original bug
-#     end to end.
+#     the Codex prompt/agent pairs resolve to the correct leaf/parent names.
+#     NOTE (R-01, verified empirically against a real pwsh 7.4.6 on Linux): this
+#     dynamic check alone does NOT distinguish old vs. new Get-ManagedPairs /
+#     Get-CodexManagedPairs behavior on POSIX, because pwsh's Join-Path cmdlet
+#     normalizes an embedded literal backslash in a ChildPath string argument to
+#     '/' on that platform - so the pre-fix `Join-Path $Repo 'codex\processor.md'`
+#     already resolved correctly there too, and this assertion block passes
+#     unchanged on both the old and the new code. It is kept because it still
+#     documents and guards the expected resolved Source paths going forward, but
+#     the actual behavioral regression guard for this bug class is the static
+#     text-pattern check 7a above (which does fail against the pre-fix source).
+#     If a POSIX host/pwsh build exists where Join-Path does NOT normalize the
+#     backslash, this block would also fail there pre-fix; none such was found
+#     during T-284 verification.
 $repoP = New-SyntheticRepo
 try {
     $lines = Get-Content -LiteralPath $script:Runtime
