@@ -179,9 +179,12 @@ setx CC_PROCESSKIT_CLI "C:\Tools\processkit-cli.exe"
 An explicit user/machine `CC_PROCESSKIT_CLI` is re-read by the runtime and works even from an
 already-open Windows terminal. A `PATH`-only installation still needs a new terminal.
 `cc-doctor` verifies the versioned probe contract.
-`cc-processor` and `cc-resume` run the selected Claude or Codex root through
-`processkit-cli run`, persist lifecycle JSONL under `.work/processes/_processor`, and fail
-closed if an explicit backend is broken. Set `CC_PROCESSKIT_CLI=off` to disable standalone
+`cc-processor` and `cc-resume` use `processkit-cli run` for noninteractive roots and persist
+lifecycle JSONL under `.work/processes/_processor`. Interactive Claude roots require the
+probe surface `run:--inherit-stdio`; older CLI releases automatically use a direct
+console-attached fallback so the Claude TUI cannot disappear behind redirected stdio.
+Supervised leaf commands remain ProcessKit-contained. Explicitly broken backends fail
+closed. Set `CC_PROCESSKIT_CLI=off` to disable standalone
 discovery. `CC_PROCESSKIT_PYTHON` remains a deprecated compatibility fallback when no CLI is
 selected. With or without ProcessKit, those launchers disable
 persistent MSBuild worker/server reuse in their child environment, and leaf build/test

@@ -103,7 +103,7 @@ if defined USE_PROCESSKIT_RUNTIME goto :resume_contained
 claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 goto :done
 :resume_contained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 goto :done
 :coldstart
 echo No addressed processor lease (.work\orchestrator.lock\lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session.
@@ -111,7 +111,7 @@ if defined USE_PROCESSKIT_RUNTIME goto :coldstart_contained
 claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 goto :done
 :coldstart_contained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 goto :done
 :done
 exit /b %ERRORLEVEL%

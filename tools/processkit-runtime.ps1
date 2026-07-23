@@ -193,6 +193,8 @@ function Resolve-OrchestraProcessKitBackend {
                 Path = [string]$cli.Source
                 Version = [string]$contract.version
                 SchemaVersion = [int]$contract.schema_version
+                Surfaces = @($contract.surface)
+                SupportsInheritedStdio = @($contract.surface) -contains 'run:--inherit-stdio'
                 Explicit = $cliExplicit
             }
         }
@@ -202,7 +204,7 @@ function Resolve-OrchestraProcessKitBackend {
     $pythonBackend = Resolve-OrchestraProcessKitPythonBackend
     if ($null -ne $pythonBackend) { return $pythonBackend }
 
-    return [pscustomobject]@{ Kind = 'none'; Path = ''; Version = ''; SchemaVersion = 0; Explicit = $false }
+    return [pscustomobject]@{ Kind = 'none'; Path = ''; Version = ''; SchemaVersion = 0; Surfaces = @(); SupportsInheritedStdio = $false; Explicit = $false }
 }
 
 function New-OrchestraProcessKitEventPath {
@@ -219,6 +221,7 @@ function Invoke-OrchestraRootProcess {
     param(
         [Parameter(Mandatory)][string]$Work,
         [string]$Label = 'processor',
+        [switch]$Interactive,
         [Parameter(Mandatory)][string[]]$TargetArgv
     )
     if ($TargetArgv.Count -eq 0 -or [string]::IsNullOrWhiteSpace($TargetArgv[0])) {
@@ -228,14 +231,19 @@ function Invoke-OrchestraRootProcess {
     $target = [string]$TargetArgv[0]
     $targetArgs = if ($TargetArgv.Count -gt 1) { @($TargetArgv[1..($TargetArgv.Count - 1)]) } else { @() }
 
-    if ($backend.Kind -eq 'cli') {
+    if ($backend.Kind -eq 'cli' -and (-not $Interactive -or [bool]$backend.SupportsInheritedStdio)) {
         $events = New-OrchestraProcessKitEventPath -Work $Work -Label $Label
         $runId = 'orchestra-' + (($Label -replace '[^A-Za-z0-9_.-]', '_').Trim('.-_')) + '-' + [guid]::NewGuid().ToString('N')
         $cliArgs = @('run', '--run-id', $runId, '--cwd', [System.IO.Path]::GetFullPath((Get-Location).Path),
-            '--jsonl', $events, '--create-no-window', '--', $target) + @($targetArgs)
+            '--jsonl', $events)
+        if ($Interactive) { $cliArgs += '--inherit-stdio' } else { $cliArgs += '--create-no-window' }
+        $cliArgs += @('--', $target) + @($targetArgs)
         return Invoke-ProcessKitInherited -FilePath $backend.Path -ArgumentList $cliArgs
     }
-    if ($backend.Kind -eq 'python') {
+    if ($Interactive -and $backend.Kind -eq 'cli') {
+        [Console]::Error.WriteLine('processkit-runtime: processkit-cli lacks run:--inherit-stdio; starting the interactive root directly (supervised leaf commands remain contained)')
+    }
+    if ($backend.Kind -eq 'python' -and -not $Interactive) {
         return Invoke-ProcessKitInherited -FilePath $backend.Path -ArgumentList (@('-m', 'processkit', 'run', '--', $target) + @($targetArgs))
     }
 
@@ -260,15 +268,17 @@ function Invoke-ProcessKitRuntimeCli {
     }
     $work = ''
     $label = 'processor'
+    $interactive = $false
     for ($i = 1; $i -lt $separator; $i++) {
         switch ([string]$Argv[$i]) {
             '--work' { $i++; if ($i -lt $separator) { $work = [string]$Argv[$i] } }
             '--label' { $i++; if ($i -lt $separator) { $label = [string]$Argv[$i] } }
+            '--interactive' { $interactive = $true }
             default { throw "unknown run-root option '$($Argv[$i])'" }
         }
     }
     if ([string]::IsNullOrWhiteSpace($work)) { throw 'run-root requires --work <directory>' }
-    $script:ProcessKitRuntimeExitCode = Invoke-OrchestraRootProcess -Work $work -Label $label -TargetArgv @($Argv[($separator + 1)..($Argv.Count - 1)])
+    $script:ProcessKitRuntimeExitCode = Invoke-OrchestraRootProcess -Work $work -Label $label -Interactive:$interactive -TargetArgv @($Argv[($separator + 1)..($Argv.Count - 1)])
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

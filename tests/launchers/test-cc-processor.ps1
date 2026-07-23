@@ -319,6 +319,7 @@ exit 0
         Assert-NoFileExists $claudeCapture '[standalone containment] launcher does not bypass the runtime'
         $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
         Assert-True ($captured[0] -eq 'run-root') '[standalone containment] runtime action is run-root'
+        Assert-True ($captured -contains '--interactive') '[standalone containment] Claude root requires inherited interactive stdio capability'
         Assert-True ($captured -contains '--work' -and $captured -contains '--label') '[standalone containment] durable work/label coordinates are passed'
         $separator = [Array]::IndexOf($captured, '--')
         Assert-True ($separator -ge 0 -and $captured[$separator + 1] -eq 'claude') '[standalone containment] exact Claude target follows separator'

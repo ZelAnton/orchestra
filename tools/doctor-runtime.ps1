@@ -270,8 +270,13 @@ if (-not (Test-Path -LiteralPath $processkitRuntime -PathType Leaf)) {
         $pkBackend = Resolve-OrchestraProcessKitBackend
         switch ([string]$pkBackend.Kind) {
             'cli' {
-                Write-Host ('OK   root containment: standalone processkit-cli ' + $pkBackend.Version + ' verified at ' + $pkBackend.Path)
-                Write-Host 'OK   lifecycle diagnostics: schema 1 JSONL + inspect/cancel/kill/list/prune surfaces verified; root events persist under .work/processes/_processor'
+                Write-Host ('OK   process containment: standalone processkit-cli ' + $pkBackend.Version + ' verified at ' + $pkBackend.Path)
+                Write-Host 'OK   supervised commands: schema 1 JSONL + inspect/cancel/kill/list/prune surfaces verified'
+                if ([bool]$pkBackend.SupportsInheritedStdio) {
+                    Write-Host 'OK   interactive root containment: run:--inherit-stdio available; root events persist under .work/processes/_processor'
+                } else {
+                    Write-Host 'WARN interactive root containment: run:--inherit-stdio unavailable; Claude root starts directly so its TUI remains attached, while supervised leaf commands stay contained'
+                }
             }
             'python' {
                 Write-Host ('WARN root containment: using legacy Python ProcessKit fallback via ' + $pkBackend.Path + '; install processkit-cli or set CC_PROCESSKIT_CLI')

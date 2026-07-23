@@ -102,6 +102,16 @@ if (-not [string]::IsNullOrWhiteSpace($realCli)) {
         Assert-Equal 'child_exit' $terminal.source 'released CLI distinguishes the child result'
         Assert-Equal 7 ([int]$terminal.child_code) 'released CLI lifecycle preserves child code'
     }
+
+    $interactiveWork = New-TempDir
+    $interactiveMarker = Join-Path $interactiveWork 'marker.txt'
+    $interactive = Invoke-Runtime @('run-root', '--interactive', '--work', $interactiveWork,
+        '--label', 'interactive-root', '--', $script:Pwsh, '-NoProfile', '-NonInteractive',
+        '-File', $worker, $interactiveMarker, '7') -Environment @{ CC_PROCESSKIT_CLI = $realCli }
+    Assert-Equal 7 $interactive.ExitCode 'CLI without inherited-stdio surface preserves direct interactive fallback child code'
+    Assert-True (Test-Path -LiteralPath $interactiveMarker -PathType Leaf) 'interactive fallback runs the target directly'
+    Assert-True ($interactive.Err -match 'lacks run:--inherit-stdio') 'interactive fallback explains why root containment is degraded'
+    Assert-Equal 0 (@(Get-ChildItem -LiteralPath $interactiveWork -Recurse -Filter '*.processkit.jsonl').Count) 'interactive fallback does not create a fake contained lifecycle'
 }
 
 foreach ($dir in $script:TempDirs) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }

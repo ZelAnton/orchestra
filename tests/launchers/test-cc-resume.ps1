@@ -196,6 +196,7 @@ exit 0
         Assert-NoFileExists $claudeCapture '[standalone resume containment] launcher does not bypass the runtime'
         $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
         Assert-True ($captured[0] -eq 'run-root') '[standalone resume containment] runtime action is run-root'
+        Assert-True ($captured -contains '--interactive') '[standalone resume containment] Claude root requires inherited interactive stdio capability'
         Assert-True ($captured -contains 'processor-resume-claude') '[standalone resume containment] addressed resume label is preserved'
         Assert-True ($captured -contains '--continue') '[standalone resume containment] addressed Claude continuation is preserved'
     }

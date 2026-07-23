@@ -389,7 +389,10 @@ PID/PPID/имя потомков до очистки,
 `processkit-cli` в `PATH`, `off` отключает CLI, другое значение задаёт обязательный точный
 executable/path. Перед запуском `tools/processkit-runtime.ps1` выполняет fail-closed
 `probe` (schema 1, reserved exit band 100–119 и поверхности run/inspect/cancel/kill/list/prune),
-а затем оборачивает всю Claude/Codex-сессию в `processkit-cli run`. Неверный явный backend
+а затем использует `processkit-cli run` для неинтерактивных root-сессий. Интерактивный Claude
+root требует probe surface `run:--inherit-stdio`; без него launcher явно запускает root
+напрямую с унаследованной консолью, чтобы TUI не зависал за null stdin/pipe stdout, но все
+supervisor leaf-команды остаются в ProcessKit container. Неверный явный backend
 останавливает launcher с exit 10. На Windows resolver читает process, затем User/Machine
 scope, поэтому полный путь, записанный в системную `CC_PROCESSKIT_CLI`, виден сразу даже из
 уже открытого терминала. Только обновлённый `PATH` по-прежнему требует нового терминала.
@@ -411,9 +414,10 @@ container. Supervisor читает terminal JSONL, поэтому runner `spawn_
 В `processkit-cli 0.2.0` нет mediated stdin. Поэтому вызов supervisor с непустым
 `--stdin-text`/`--stdin-file` не теряет ввод: при настроенном Python fallback он использует
 его inherited stdin, иначе явно деградирует на прежний PID/PGID backend и ставит
-`containment_degraded_reason=processkit-cli-no-mediated-stdin`. Корневой CLI-run
-тоже не предоставляет интерактивный stdin/TTY; текущий launcher рассчитан на автономный
-prompt-run. Запрос на `--inherit-stdin`/`--stdin-file` вынесен владельцам CLI.
+`containment_degraded_reason=processkit-cli-no-mediated-stdin`. CLI 0.2.0 также не
+предоставляет полный inherited stdio/TTY для Claude root: root автоматически деградирует на
+direct console-attached запуск. Запрос на `--inherit-stdio`/`--stdin-file` вынесен владельцам
+CLI; после появления probe token root containment включится автоматически.
 
 Матрица устойчивости этого пути — `tools/harness.ps1` (полный жизненный цикл когорты для
 git и jj с fault injection после каждого критического перехода): быстрый срез
