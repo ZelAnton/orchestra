@@ -328,7 +328,14 @@ function Build-CodexArgv {
     }
     # Fail-closed approval policy (T-069): pinned literal on EVERY call.
     [void]$argv.Add('-c'); [void]$argv.Add($ApprovalPolicyOverride)
-    if ($SkipGit) { [void]$argv.Add('--skip-git-repo-check') }
+    # T-290: codex CLI is git-centric and probes for a `.git` entry (file, for a
+    # git-worktree-linked checkout, or directory, for an ordinary git repo). A pure jj
+    # workspace (`jj workspace add` off a colocated repo) has neither, so auto-detect that
+    # shape and force the skip unconditionally - independent of the explicit `--skip-git`
+    # opt, which still forces the flag on an ordinary git worktree too (logical OR, not a
+    # replacement of one condition by the other).
+    $noGit = -not (Test-Path -LiteralPath (Join-Path $Worktree '.git'))
+    if ($SkipGit -or $noGit) { [void]$argv.Add('--skip-git-repo-check') }
     if ($Model) { [void]$argv.Add('-m'); [void]$argv.Add($Model) }
     if ($Network -eq 'on') {
         # T-063 network overrides: open outbound network in the workspace-write
@@ -1209,7 +1216,11 @@ function Cmd-ResumeImage {
     [void]$argv.Add('codex'); [void]$argv.Add('exec'); [void]$argv.Add('resume'); [void]$argv.Add($threadId)
     # Fail-closed approval policy re-pinned on this call too (T-069 invariant, unchanged).
     [void]$argv.Add('-c'); [void]$argv.Add($ApprovalPolicyOverride)
-    if ($skipGit) { [void]$argv.Add('--skip-git-repo-check') }
+    # T-290: same auto-detect as Build-CodexArgv - a pure jj workspace has no `.git` entry
+    # under the worktree, so force the skip unconditionally there too (logical OR with the
+    # explicit opt, not a replacement of it).
+    $noGit = -not (Test-Path -LiteralPath (Join-Path $wtFull '.git'))
+    if ($skipGit -or $noGit) { [void]$argv.Add('--skip-git-repo-check') }
     if ($model) { [void]$argv.Add('-m'); [void]$argv.Add($model) }
     [void]$argv.Add('-i'); [void]$argv.Add($imageFull)
     if ($outFile) { [void]$argv.Add('-o'); [void]$argv.Add($outFile) }

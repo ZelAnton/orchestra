@@ -1241,6 +1241,101 @@ function New-FakeJjBin {
 }.Invoke()
 
 # =============================================================================
+# 18. T-290: --skip-git-repo-check auto-detect for .git-less worktrees (a pure jj
+# workspace, created via `jj workspace add` off a colocated repo, has no `.git` entry
+# at all - codex CLI is git-centric and must never be allowed to probe/require one
+# there). Covers all THREE independent argv-assembly sites - build-argv/run (both go
+# through Build-CodexArgv) and resume-image (its own, separate argv build) - plus the
+# explicit --skip-git opt still forcing the flag on an ordinary git worktree (logical
+# OR with the auto-detect, not a replacement of the opt).
+# =============================================================================
+{
+    $flag = '--skip-git-repo-check'
+
+    # (a) build-argv: worktree with NO .git entry at all (pure jj workspace shape) ->
+    # flag is always present, even without the explicit --skip-git opt.
+    $wtNoGit = New-TempDir
+    $rNoGit = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', $wtNoGit, '--sandbox', 'read-only', '--reasoning', 'medium')
+    Assert-Equal 0 $rNoGit.ExitCode 'skip-git auto: build-argv (.git-less) exits 0'
+    Assert-True ($rNoGit.Json.argv -contains $flag) 'skip-git auto: build-argv auto-adds --skip-git-repo-check for a .git-less worktree'
+
+    # (b) build-argv: worktree with .git as a FILE (git-worktree-linked checkout) -> flag
+    # absent without an explicit opt.
+    $wtGitFile = New-TempDir
+    [System.IO.File]::WriteAllText((Join-Path $wtGitFile '.git'), 'gitdir: /somewhere/.git/worktrees/x', $script:Utf8)
+    $rGitFile = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', $wtGitFile, '--sandbox', 'read-only', '--reasoning', 'medium')
+    Assert-Equal 0 $rGitFile.ExitCode 'skip-git auto: build-argv (.git file) exits 0'
+    Assert-True (-not ($rGitFile.Json.argv -contains $flag)) 'skip-git auto: build-argv leaves --skip-git-repo-check off for a git-worktree-linked checkout (.git file)'
+
+    # (c) build-argv: worktree with .git as a DIRECTORY (ordinary git repo) -> flag absent.
+    $wtGitDir = New-TempDir
+    New-Item -ItemType Directory -Force -Path (Join-Path $wtGitDir '.git') | Out-Null
+    $rGitDir = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', $wtGitDir, '--sandbox', 'read-only', '--reasoning', 'medium')
+    Assert-Equal 0 $rGitDir.ExitCode 'skip-git auto: build-argv (.git dir) exits 0'
+    Assert-True (-not ($rGitDir.Json.argv -contains $flag)) 'skip-git auto: build-argv leaves --skip-git-repo-check off for an ordinary git repo (.git directory)'
+
+    # (d) build-argv: explicit --skip-git STILL forces the flag on an ordinary git worktree
+    # (logical OR with the auto-detect, not a replacement of the opt).
+    $rGitDirForced = Invoke-Runtime -RuntimeArgs @('build-argv', '--worktree', $wtGitDir, '--sandbox', 'read-only', '--reasoning', 'medium', '--skip-git')
+    Assert-Equal 0 $rGitDirForced.ExitCode 'skip-git auto: build-argv (.git dir, explicit --skip-git) exits 0'
+    Assert-True ($rGitDirForced.Json.argv -contains $flag) 'skip-git auto: explicit --skip-git still forces the flag on an ordinary git worktree'
+
+    # (e) run: same auto-detect through the real spawn path (fake codex), .git-less worktree.
+    $fake = New-FakeCodex
+    $argsCapNoGit = New-TempFile
+    $rRunNoGit = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake, '--worktree', $wtNoGit, '--sandbox', 'read-only',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{ FAKE_CODEX_ARGS_FILE = $argsCapNoGit; FAKE_CODEX_OUT_CONTENT = 'ok'; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $rRunNoGit.ExitCode 'skip-git auto: run (.git-less) exits 0'
+    Assert-True ((Get-ArgsCaptured $argsCapNoGit) -contains $flag) 'skip-git auto: run auto-adds --skip-git-repo-check for a .git-less worktree'
+
+    # (f) run: same, ordinary git worktree (.git directory) -> flag absent without opt.
+    $argsCapGitDir = New-TempFile
+    $rRunGitDir = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake, '--worktree', $wtGitDir, '--sandbox', 'read-only',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{ FAKE_CODEX_ARGS_FILE = $argsCapGitDir; FAKE_CODEX_OUT_CONTENT = 'ok'; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $rRunGitDir.ExitCode 'skip-git auto: run (.git dir) exits 0'
+    Assert-True ((Get-ArgsCaptured $argsCapGitDir) -notcontains $flag) 'skip-git auto: run leaves --skip-git-repo-check off for an ordinary git repo'
+
+    # (g) resume-image: same auto-detect in its OWN, separate argv assembly (not routed
+    # through Build-CodexArgv) - .git-less worktree.
+    $imgNoGit = Join-Path $wtNoGit 'shot.png'
+    [System.IO.File]::WriteAllText($imgNoGit, 'fake-png-bytes', $script:Utf8)
+    $argsCapResumeNoGit = New-TempFile
+    $rResumeNoGit = Invoke-Runtime -RuntimeArgs @(
+        'resume-image', '--codex-cmd', $fake, '--worktree', $wtNoGit,
+        '--thread-id', '019f573e-04f2-71e2-8f32-b70d71adc6d8', '--image', $imgNoGit,
+        '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{ FAKE_CODEX_ARGS_FILE = $argsCapResumeNoGit; FAKE_CODEX_OUT_CONTENT = 'ok'; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $rResumeNoGit.ExitCode 'skip-git auto: resume-image (.git-less) exits 0'
+    Assert-True ((Get-ArgsCaptured $argsCapResumeNoGit) -contains $flag) 'skip-git auto: resume-image auto-adds --skip-git-repo-check for a .git-less worktree'
+
+    # (h) resume-image: ordinary git worktree (.git directory) -> flag absent without opt,
+    # but explicit --skip-git still forces it (same logical-OR contract as build-argv/run).
+    $imgGitDir = Join-Path $wtGitDir 'shot.png'
+    [System.IO.File]::WriteAllText($imgGitDir, 'fake-png-bytes', $script:Utf8)
+    $argsCapResumeGitDir = New-TempFile
+    $rResumeGitDir = Invoke-Runtime -RuntimeArgs @(
+        'resume-image', '--codex-cmd', $fake, '--worktree', $wtGitDir,
+        '--thread-id', '019f573e-04f2-71e2-8f32-b70d71adc6d8', '--image', $imgGitDir,
+        '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
+    ) -EnvVars @{ FAKE_CODEX_ARGS_FILE = $argsCapResumeGitDir; FAKE_CODEX_OUT_CONTENT = 'ok'; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $rResumeGitDir.ExitCode 'skip-git auto: resume-image (.git dir) exits 0'
+    Assert-True ((Get-ArgsCaptured $argsCapResumeGitDir) -notcontains $flag) 'skip-git auto: resume-image leaves --skip-git-repo-check off for an ordinary git repo'
+
+    $argsCapResumeGitDirForced = New-TempFile
+    $rResumeGitDirForced = Invoke-Runtime -RuntimeArgs @(
+        'resume-image', '--codex-cmd', $fake, '--worktree', $wtGitDir,
+        '--thread-id', '019f573e-04f2-71e2-8f32-b70d71adc6d8', '--image', $imgGitDir,
+        '--out-file', (New-TempFile), '--prompt-file', (New-TempFile), '--skip-git'
+    ) -EnvVars @{ FAKE_CODEX_ARGS_FILE = $argsCapResumeGitDirForced; FAKE_CODEX_OUT_CONTENT = 'ok'; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $rResumeGitDirForced.ExitCode 'skip-git auto: resume-image (.git dir, explicit --skip-git) exits 0'
+    Assert-True ((Get-ArgsCaptured $argsCapResumeGitDirForced) -contains $flag) 'skip-git auto: explicit --skip-git still forces the flag on resume-image against an ordinary git worktree'
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($item in $script:TempItems) {
