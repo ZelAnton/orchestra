@@ -176,7 +176,9 @@ new terminal sees an updated system `PATH`), set a user/system environment varia
 setx CC_PROCESSKIT_CLI "C:\Tools\processkit-cli.exe"
 ```
 
-Open a new terminal after `setx`; `cc-doctor` verifies the versioned probe contract.
+An explicit user/machine `CC_PROCESSKIT_CLI` is re-read by the runtime and works even from an
+already-open Windows terminal. A `PATH`-only installation still needs a new terminal.
+`cc-doctor` verifies the versioned probe contract.
 `cc-processor` and `cc-resume` run the selected Claude or Codex root through
 `processkit-cli run`, persist lifecycle JSONL under `.work/processes/_processor`, and fail
 closed if an explicit backend is broken. Set `CC_PROCESSKIT_CLI=off` to disable standalone

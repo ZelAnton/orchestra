@@ -51,11 +51,10 @@ function Remove-Sandbox {
 }
 
 # Copies launcher(s) from the real launchers/ directory into the sandbox
-# scripts\ dir, normalizing LF-only line endings to CRLF along the way.
+# scripts\ dir while preserving their source line endings.
 #
-# This is a test-harness-local workaround, not a change to the real files:
-# the launchers in this repository are committed with LF-only line endings,
-# and cmd.exe's "chcp 65001" UTF-8 batch-file reader has a genuine,
+# The launchers are committed as UTF-8 without BOM with CRLF line endings.
+# cmd.exe's "chcp 65001" UTF-8 batch-file reader has a genuine,
 # reproducible bug on this platform where LF-only line endings combined with
 # enough non-ASCII (Cyrillic comment) bytes cause its internal read-ahead
 # buffer to drift out of alignment - this silently corrupts and can even
@@ -68,8 +67,9 @@ function Remove-Sandbox {
 # make cmd.exe's reader keep its byte accounting in sync and eliminate the
 # corruption entirely (verified directly against these launchers); the
 # content and semantics of every line are unchanged; only the CR bytes are
-# added. The corruption is invisible in normal interactive terminal use,
-# which is presumably why it has gone unnoticed so far.
+# added. The harness deliberately does not normalize the copy: doing that
+# would mask a broken release artifact. test-launcher-line-endings.ps1 and
+# cc-sync both enforce the byte-level source contract before publication.
 # cc-status.cmd embeds a Cyrillic parenthetical message mid-line inside each of its two
 # "else { Write-Host '(...)' }" branches (shown when status.md / journal.md is absent).
 # Unlike the drift the CRLF normalization above fixes (which resyncs at every line
@@ -135,10 +135,8 @@ function Install-Launcher {
                 $text = [regex]::Replace($text, $pair[0], [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $pair[1] })
             }
         }
-        $normalized = $text -replace "`r`n", "`n"
-        $normalized = $normalized -replace "`n", "`r`n"
         $dest = Join-Path $Paths.Scripts $n
-        [System.IO.File]::WriteAllText($dest, $normalized, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($dest, $text, (New-Object System.Text.UTF8Encoding($false)))
 
         # cc-processor/cc-resume resolve the ProcessKit adapter from either the checkout
         # tools/ directory or the flat cc-sync mirror. Launcher fixtures model the latter,

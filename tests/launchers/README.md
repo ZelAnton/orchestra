@@ -33,15 +33,15 @@ matrix runs this file on both `windows-latest` and `ubuntu-latest`.
 One test file per `launchers\cc-*.cmd`, except `cc-sync.cmd` and `cc-doctor.cmd`
 (see below - both are thin wrappers covered via their engines). `common.ps1` holds
 the shared harness (sandbox setup, fake `claude`/`codex`, launcher invocation,
-assertions) - see the comments there for how it works and for two
-environment-specific workarounds it applies only to sandboxed *copies* of the
-launchers (never to the real files):
+assertions) - see the comments there for how it works and for the byte-level
+release invariant plus one environment-specific cosmetic workaround applied
+only to sandboxed *copies* of the launchers:
 
-- CRLF normalization, needed because these launchers ship with LF-only line
-  endings and `chcp 65001`, which triggers a real cmd.exe multi-byte
-  read-ahead corruption bug under any non-interactive/redirected invocation
-  (exactly what an automated test, or a CI runner, does) - normalizing to
-  CRLF in the sandbox copy eliminates it.
+- Windows launchers ship as UTF-8 without BOM with CRLF. Bare LF combined with
+  `chcp 65001` can trigger a real cmd.exe multi-byte read-ahead corruption bug
+  that drops the first byte of later commands. The harness preserves source
+  endings instead of repairing them; `test-launcher-line-endings.ps1` and
+  `cc-sync` reject malformed source artifacts.
 - One narrowly-scoped cosmetic string substitution for `cc-status.cmd`, whose
   single-line embedded Cyrillic message hits a related corruption that (unlike the
   line-boundary case CRLF fixes) breaks the entire surrounding `powershell -Command`

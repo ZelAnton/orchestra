@@ -62,8 +62,8 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'codex\processor.md') "codex-processor-v1`n"
     Write-File (Join-Path $repo 'codex\agents\orchestra_coder.toml') "name = 'orchestra_coder'`n"
     Write-File (Join-Path $repo 'codex\agents\orchestra_reviewer.toml') "name = 'orchestra_reviewer'`n"
-    Write-File (Join-Path $repo 'launchers\cc-sync.cmd') "@echo off`n"
-    Write-File (Join-Path $repo 'launchers\cc-doctor.cmd') "@echo off`n"
+    Write-File (Join-Path $repo 'launchers\cc-sync.cmd') "@echo off`r`n"
+    Write-File (Join-Path $repo 'launchers\cc-doctor.cmd') "@echo off`r`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.sh') "#!/usr/bin/env bash`n"
     # tools/*.ps1: sync mirrors the WHOLE folder into scripts/ (task T-115), except its own
     # sync-runtime.ps1 engine, so EVERY runner resolves from a mirror-only project. The
@@ -121,7 +121,7 @@ Assert-FileText (Join-Path $dest 'agents\coder.md') "coder-v1`n" 'clean: coder.m
 Assert-FileText (Join-Path $dest 'agents\processor.md') "processor-v1`n" 'clean: processor.md mirrored'
 Assert-True (-not (Test-Path (Join-Path $dest 'agents\coder.template.md'))) 'clean: coder.template.md excluded'
 Assert-True (-not (Test-Path (Join-Path $dest 'agents\reviewer.template.md'))) 'clean: reviewer.template.md excluded'
-Assert-FileText (Join-Path $dest 'scripts\cc-sync.cmd') "@echo off`n" 'clean: cc-sync.cmd mirrored'
+Assert-FileText (Join-Path $dest 'scripts\cc-sync.cmd') "@echo off`r`n" 'clean: cc-sync.cmd mirrored byte-for-byte with CRLF'
 Assert-True (-not (Test-Path (Join-Path $dest 'scripts\cc-sync.sh'))) 'clean: .sh not mirrored when glob is *.cmd'
 Assert-FileText (Join-Path $dest 'scripts\config.example.md') "config-v1`n" 'clean: config.example.md mirrored'
 Assert-FileText (Join-Path $dest 'scripts\constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored'
@@ -342,9 +342,20 @@ try {
 }
 
 # =============================================================================
+# 8) A malformed Windows launcher is rejected before any mirror publication.
+# =============================================================================
+$repoE = New-SyntheticRepo
+$destE = New-Root
+Write-File (Join-Path $repoE 'launchers\cc-sync.cmd') "@echo off`nrem bare LF must fail`n"
+$r = Invoke-Sync -Repo $repoE -Dest $destE
+Assert-True ($r.ExitCode -eq 1) "cmd-eol: malformed source exits 1 (got $($r.ExitCode))"
+Assert-True ($r.Err -match 'bare LF') "cmd-eol: failure explains the CRLF contract (err=$($r.Err.Trim()))"
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $destE 'scripts\cc-sync.cmd'))) 'cmd-eol: malformed launcher is not published'
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
-foreach ($d in @($repo, $dest, $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS)) {
+foreach ($d in @($repo, $dest, $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS, $repoE, $destE)) {
     Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
 }
 Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
@@ -354,5 +365,5 @@ if ($script:Failures.Count -gt 0) {
     foreach ($f in $script:Failures) { Write-Host "  $f" }
     exit 1
 }
-Write-Host 'OK - tools/sync-runtime.ps1 behaves per contract (clean mirror, stale pruning, rollback, dir-heal, crash recovery).'
+Write-Host 'OK - tools/sync-runtime.ps1 behaves per contract (clean mirror, stale pruning, rollback, dir-heal, crash recovery, CMD byte guard).'
 exit 0

@@ -390,8 +390,9 @@ PID/PPID/имя потомков до очистки,
 executable/path. Перед запуском `tools/processkit-runtime.ps1` выполняет fail-closed
 `probe` (schema 1, reserved exit band 100–119 и поверхности run/inspect/cancel/kill/list/prune),
 а затем оборачивает всю Claude/Codex-сессию в `processkit-cli run`. Неверный явный backend
-останавливает launcher с exit 10. Для Windows после установки через `setx`/изменения PATH
-нужен новый терминал; без него явно задай полный путь в `CC_PROCESSKIT_CLI`.
+останавливает launcher с exit 10. На Windows resolver читает process, затем User/Machine
+scope, поэтому полный путь, записанный в системную `CC_PROCESSKIT_CLI`, виден сразу даже из
+уже открытого терминала. Только обновлённый `PATH` по-прежнему требует нового терминала.
 
 JSONL каждой корневой сессии сохраняется в `.work/processes/_processor/*.processkit.jsonl`:
 там есть `run_id`, реальный root PID, механизм (`job_object`/`cgroup_v2`/`process_group`),

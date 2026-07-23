@@ -19,4 +19,4 @@
 # endings; the blob itself is committed with CRLF. Do not change this to
 # `text eol=crlf` — that keeps an LF blob and relies on checkout conversion, which
 # jj (eol-conversion=none) does not perform, so the working copy would get LF.
-*.cmd -text
+*.cmd -text whitespace=cr-at-eol

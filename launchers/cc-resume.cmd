@@ -34,10 +34,16 @@ if /I not "%PROVIDER%"=="claude" (
   exit /b 2
 )
 set "USE_PROCESSKIT_RUNTIME="
-if defined CC_PROCESSKIT_PYTHON set "USE_PROCESSKIT_RUNTIME=1"
-if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" set "USE_PROCESSKIT_RUNTIME=1"
-if not defined CC_PROCESSKIT_CLI where processkit-cli >nul 2>&1 && set "USE_PROCESSKIT_RUNTIME=1"
-if defined USE_PROCESSKIT_RUNTIME if not exist "%PROCESSKIT_RUNTIME%" (
+if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
+if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_PYTHON (
+  echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
+  exit /b 12
+)
+if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" (
+  echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
+  exit /b 12
+)
+if not defined USE_PROCESSKIT_RUNTIME where processkit-cli >nul 2>&1 && (
   echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
   exit /b 12
 )
@@ -130,14 +136,8 @@ echo Codex processor runtime не найден. Запусти cc-sync из chec
 exit /b 12
 :codex_runtime_found
 set "USE_PROCESSKIT_RUNTIME="
-if defined CC_PROCESSKIT_PYTHON set "USE_PROCESSKIT_RUNTIME=1"
-if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" set "USE_PROCESSKIT_RUNTIME=1"
-if not defined CC_PROCESSKIT_CLI where processkit-cli >nul 2>&1 && set "USE_PROCESSKIT_RUNTIME=1"
+if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
 if not defined USE_PROCESSKIT_RUNTIME goto :codex_resume_uncontained
-if not exist "%PROCESSKIT_RUNTIME%" (
-  echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
-  exit /b 12
-)
 pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-resume-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :codex_resume_uncontained

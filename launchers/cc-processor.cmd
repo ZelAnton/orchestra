@@ -96,10 +96,16 @@ goto :parse
 
 :run
 set "USE_PROCESSKIT_RUNTIME="
-if defined CC_PROCESSKIT_PYTHON set "USE_PROCESSKIT_RUNTIME=1"
-if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" set "USE_PROCESSKIT_RUNTIME=1"
-if not defined CC_PROCESSKIT_CLI where processkit-cli >nul 2>&1 && set "USE_PROCESSKIT_RUNTIME=1"
-if defined USE_PROCESSKIT_RUNTIME if not exist "%PROCESSKIT_RUNTIME%" (
+if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
+if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_PYTHON (
+  echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
+  exit /b 12
+)
+if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" (
+  echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
+  exit /b 12
+)
+if not defined USE_PROCESSKIT_RUNTIME where processkit-cli >nul 2>&1 && (
   echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
   exit /b 12
 )

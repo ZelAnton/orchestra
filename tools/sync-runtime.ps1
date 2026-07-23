@@ -89,6 +89,41 @@ function Stop-Sync {
 # =============================================================================
 
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$script:StrictUtf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
+
+function Assert-WindowsLauncherBytes {
+    param([object[]]$Pairs)
+
+    # cmd.exe can silently drop the first byte of later command lines when a UTF-8
+    # batch file mixes CRLF and bare LF (especially after non-ASCII comments). The
+    # repository therefore stores *.cmd verbatim as CRLF (`*.cmd -text`). Validate
+    # the source bytes before publishing so cc-sync can never install a launcher that
+    # only fails after it reaches the user's PATH.
+    foreach ($pair in $Pairs) {
+        if ($pair.Kind -ne 'launcher' -or [System.IO.Path]::GetExtension([string]$pair.Source) -ine '.cmd') {
+            continue
+        }
+
+        $bytes = [System.IO.File]::ReadAllBytes([string]$pair.Source)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw "Windows launcher must be UTF-8 without BOM: $($pair.Source)"
+        }
+        try {
+            [void]$script:StrictUtf8NoBom.GetString($bytes)
+        } catch {
+            throw "Windows launcher is not valid UTF-8: $($pair.Source)"
+        }
+
+        for ($i = 0; $i -lt $bytes.Length; $i++) {
+            if ($bytes[$i] -eq 0x0A -and ($i -eq 0 -or $bytes[$i - 1] -ne 0x0D)) {
+                throw "Windows launcher contains a bare LF; normalize the source to CRLF before sync: $($pair.Source)"
+            }
+            if ($bytes[$i] -eq 0x0D -and ($i + 1 -ge $bytes.Length -or $bytes[$i + 1] -ne 0x0A)) {
+                throw "Windows launcher contains a bare CR; normalize the source to CRLF before sync: $($pair.Source)"
+            }
+        }
+    }
+}
 
 function Test-PathWithinRoot {
     param([string]$Path, [string]$Root)
@@ -497,6 +532,11 @@ $manifestPath = Join-Path $DestinationRoot '.orchestra-sync-manifest.json'
 $previous = Read-Manifest -ManifestPath $manifestPath -Root $DestinationRoot
 
 $pairs = Get-ManagedPairs -Repo $RepoRoot -Dest $DestinationRoot -Glob $LauncherGlob
+try {
+    Assert-WindowsLauncherBytes -Pairs $pairs
+} catch {
+    Stop-Sync 1 $_.Exception.Message
+}
 $newManaged = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($p in $pairs) { [void]$newManaged.Add([System.IO.Path]::GetFullPath($p.Dest)) }
 
