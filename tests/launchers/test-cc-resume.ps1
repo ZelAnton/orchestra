@@ -176,4 +176,30 @@ exit 0
     finally {
         Remove-Sandbox $paths
     }
+
+    # --- Scenario 6: standalone CLI selection wraps the addressed Claude resume.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-resume.cmd'
+        Install-FakeClaude -Paths $paths
+        Install-FakeProcessKitRuntime -Paths $paths
+        Write-Lease -Paths $paths -Role 'processor'
+        $claudeCapture = Join-Path $paths.Root 'claude-args.txt'
+        $runtimeCapture = Join-Path $paths.Root 'processkit-runtime-args.txt'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -EnvVars @{
+            FAKE_ARGS_FILE = $claudeCapture
+            FAKE_PROCESSKIT_RUNTIME_ARGS = $runtimeCapture
+            FAKE_PROCESSKIT_RUNTIME_EXIT = '24'
+            CC_PROCESSKIT_CLI = (Join-Path $paths.Root 'selected-processkit-cli.exe')
+        }
+        Assert-Equal 24 $result.ExitCode '[standalone resume containment] runtime exit code is forwarded'
+        Assert-NoFileExists $claudeCapture '[standalone resume containment] launcher does not bypass the runtime'
+        $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
+        Assert-True ($captured[0] -eq 'run-root') '[standalone resume containment] runtime action is run-root'
+        Assert-True ($captured -contains 'processor-resume-claude') '[standalone resume containment] addressed resume label is preserved'
+        Assert-True ($captured -contains '--continue') '[standalone resume containment] addressed Claude continuation is preserved'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }

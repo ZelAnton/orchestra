@@ -384,16 +384,35 @@ PID/PPID/имя потомков до очистки,
 промежуточным parent, но при параллельных командах является кандидатом, а не доказательством
 владения (один PID может попасть в несколько пересекающихся окон).
 
-Корневой дополнительный слой задаётся **системной переменной** `CC_PROCESSKIT_PYTHON`:
-точный Python executable, в котором работает `import processkit`. Тогда `cc-processor` и
-`cc-resume` оборачивают всю сессию выбранного provider в `python -m processkit run -- ...` (Windows Job
-Object/Linux cgroup или pgroup); неверно заданный backend останавливает launcher с exit 10.
-Без переменной поведение обратно совместимо. В любом случае эти launchers принудительно
-передают всему дереву `MSBUILDDISABLENODEREUSE=1` и `DOTNET_CLI_USE_MSBUILD_SERVER=0`.
-Та же переменная наследуется `tools/supervisor.ps1`: каждый его внешний вызов дополнительно
-идёт через отдельный `processkit run`, поэтому Job/cgroup закрывается на границе команды, а
-не только в конце всей корневой сессии. Поле verdict `containment` показывает
-`processkit`/`process-group`/`pid-tree`.
+Предпочтительный корневой слой — standalone `processkit-cli` schema 1. Launchers сначала
+читают **системную переменную** `CC_PROCESSKIT_CLI`: пусто означает автообнаружение
+`processkit-cli` в `PATH`, `off` отключает CLI, другое значение задаёт обязательный точный
+executable/path. Перед запуском `tools/processkit-runtime.ps1` выполняет fail-closed
+`probe` (schema 1, reserved exit band 100–119 и поверхности run/inspect/cancel/kill/list/prune),
+а затем оборачивает всю Claude/Codex-сессию в `processkit-cli run`. Неверный явный backend
+останавливает launcher с exit 10. Для Windows после установки через `setx`/изменения PATH
+нужен новый терминал; без него явно задай полный путь в `CC_PROCESSKIT_CLI`.
+
+JSONL каждой корневой сессии сохраняется в `.work/processes/_processor/*.processkit.jsonl`:
+там есть `run_id`, реальный root PID, механизм (`job_object`/`cgroup_v2`/`process_group`),
+members/cleanup и terminal `runner_exit`. Живые runs адресуются штатными
+`processkit-cli list/inspect/cancel/kill`; сырой argv по умолчанию не пишется.
+
+`CC_PROCESSKIT_PYTHON` остаётся deprecated-совместимым fallback: точный Python executable с
+`import processkit` используется лишь когда standalone CLI отключён/не найден. Без обоих
+backend поведение обратно совместимо. В любом случае launchers передают всему дереву
+`MSBUILDDISABLENODEREUSE=1` и `DOTNET_CLI_USE_MSBUILD_SERVER=0`.
+Тот же resolver наследует `tools/supervisor.ps1`: каждый внешний вызов получает отдельный
+container. Supervisor читает terminal JSONL, поэтому runner `spawn_error`/`container_error`
+не смешивается с настоящим child exit code из полосы 100–119, а при deadline/cancel сначала
+адресно вызывает `kill --run-id`, затем применяет старый PID/PGID fallback. Поле verdict
+`containment` показывает `processkit-cli`/`processkit-python`/`process-group`/`pid-tree`.
+В `processkit-cli 0.2.0` нет mediated stdin. Поэтому вызов supervisor с непустым
+`--stdin-text`/`--stdin-file` не теряет ввод: при настроенном Python fallback он использует
+его inherited stdin, иначе явно деградирует на прежний PID/PGID backend и ставит
+`containment_degraded_reason=processkit-cli-no-mediated-stdin`. Корневой CLI-run
+тоже не предоставляет интерактивный stdin/TTY; текущий launcher рассчитан на автономный
+prompt-run. Запрос на `--inherit-stdin`/`--stdin-file` вынесен владельцам CLI.
 
 Матрица устойчивости этого пути — `tools/harness.ps1` (полный жизненный цикл когорты для
 git и jj с fault injection после каждого критического перехода): быстрый срез

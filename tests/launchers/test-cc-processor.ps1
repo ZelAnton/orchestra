@@ -299,4 +299,31 @@ exit 0
     finally {
         Remove-Sandbox $paths
     }
+
+    # --- Scenario 11: standalone CLI selection delegates through the shared
+    # ProcessKit runtime and preserves its exit code instead of starting Claude directly.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
+        Install-FakeClaude -Paths $paths
+        Install-FakeProcessKitRuntime -Paths $paths
+        $claudeCapture = Join-Path $paths.Root 'claude-args.txt'
+        $runtimeCapture = Join-Path $paths.Root 'processkit-runtime-args.txt'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -EnvVars @{
+            FAKE_ARGS_FILE = $claudeCapture
+            FAKE_PROCESSKIT_RUNTIME_ARGS = $runtimeCapture
+            FAKE_PROCESSKIT_RUNTIME_EXIT = '23'
+            CC_PROCESSKIT_CLI = (Join-Path $paths.Root 'selected-processkit-cli.exe')
+        }
+        Assert-Equal 23 $result.ExitCode '[standalone containment] runtime exit code is forwarded'
+        Assert-NoFileExists $claudeCapture '[standalone containment] launcher does not bypass the runtime'
+        $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
+        Assert-True ($captured[0] -eq 'run-root') '[standalone containment] runtime action is run-root'
+        Assert-True ($captured -contains '--work' -and $captured -contains '--label') '[standalone containment] durable work/label coordinates are passed'
+        $separator = [Array]::IndexOf($captured, '--')
+        Assert-True ($separator -ge 0 -and $captured[$separator + 1] -eq 'claude') '[standalone containment] exact Claude target follows separator'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }

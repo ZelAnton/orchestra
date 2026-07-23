@@ -45,6 +45,16 @@ resolve_state_tx() {
   fi
 }
 
+resolve_processkit_runtime() {
+  local script_dir
+  script_dir="$(CDPATH='' cd -- "${0%/*}" && pwd)"
+  if [ -f "$script_dir/../tools/processkit-runtime.ps1" ]; then
+    printf '%s\n' "$script_dir/../tools/processkit-runtime.ps1"
+  elif [ -f "$script_dir/processkit-runtime.ps1" ]; then
+    printf '%s\n' "$script_dir/processkit-runtime.ps1"
+  fi
+}
+
 # --force-lock: route the operator's force-takeover of .work/orchestrator.lock through the single
 # transactional path `state-tx.ps1 release --force` - the same owner/legacy/corrupt/foreign-lock
 # diagnostics the TUI's force-lock uses, so the two operator front-ends share one audited path
@@ -104,6 +114,23 @@ if [ "$PROVIDER" != "claude" ] && [ "$PROVIDER" != "codex" ]; then
   exit 2
 fi
 
+USE_PROCESSKIT_RUNTIME=false
+if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+  USE_PROCESSKIT_RUNTIME=true
+elif [ -n "${CC_PROCESSKIT_CLI:-}" ] && [ "${CC_PROCESSKIT_CLI}" != "off" ]; then
+  USE_PROCESSKIT_RUNTIME=true
+elif [ -z "${CC_PROCESSKIT_CLI:-}" ] && command -v processkit-cli >/dev/null 2>&1; then
+  USE_PROCESSKIT_RUNTIME=true
+fi
+PROCESSKIT_RUNTIME=""
+if $USE_PROCESSKIT_RUNTIME; then
+  PROCESSKIT_RUNTIME="$(resolve_processkit_runtime)"
+  if [ -z "$PROCESSKIT_RUNTIME" ]; then
+    echo "ProcessKit runtime is missing; run cc-sync from the Orchestra checkout." >&2
+    exit 12
+  fi
+fi
+
 if [ "$PROVIDER" = "codex" ]; then
   SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd)"
   CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/../tools/codex-processor-runtime.ps1"
@@ -119,12 +146,8 @@ if [ "$PROVIDER" = "codex" ]; then
     CODEX_LAUNCH+=(-Model "${MODEL_ARG[1]}")
   fi
   CODEX_LAUNCH+=("${EXTRA_ARGS[@]}")
-  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
-    if ! "$CC_PROCESSKIT_PYTHON" -c 'import processkit' >/dev/null 2>&1; then
-      echo "CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: $CC_PROCESSKIT_PYTHON" >&2
-      exit 10
-    fi
-    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- "${CODEX_LAUNCH[@]}"
+  if $USE_PROCESSKIT_RUNTIME; then
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --work "$PWD/.work" --label processor-start-codex -- "${CODEX_LAUNCH[@]}"
   fi
   exec "${CODEX_LAUNCH[@]}"
 fi
@@ -159,11 +182,7 @@ fi
 # no duplicate persistent allow-rule in the settings files and does not re-run the static
 # search.
 export CC_CODEX_EXEC_GRANT="codex exec"
-if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
-  if ! "$CC_PROCESSKIT_PYTHON" -c 'import processkit' >/dev/null 2>&1; then
-    echo "CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: $CC_PROCESSKIT_PYTHON" >&2
-    exit 10
-  fi
-  exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+if $USE_PROCESSKIT_RUNTIME; then
+  exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --work "$PWD/.work" --label processor-start-claude -- claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 fi
 exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."

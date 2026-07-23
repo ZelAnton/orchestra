@@ -76,6 +76,10 @@ function Invoke-Spv {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
+    # Keep host-installed ProcessKit binaries from changing baseline scenarios. Tests
+    # opt into a CLI explicitly when they exercise the standalone backend.
+    $psi.Environment['CC_PROCESSKIT_CLI'] = 'off'
+    $psi.Environment['CC_PROCESSKIT_PYTHON'] = ''
     foreach ($name in $EnvironmentOverrides.Keys) {
         $psi.Environment[[string]$name] = [string]$EnvironmentOverrides[$name]
     }
@@ -187,7 +191,26 @@ exit $code
 }.Invoke()
 
 # =============================================================================
-# 0d. Process snapshot diffs stay typed and consistent under StrictMode.
+# 0d. The standalone CLI contract is also fail-closed and takes precedence over the
+#     legacy Python fallback. A missing explicit binary must never start the target.
+# =============================================================================
+{
+    $d = New-TempDir
+    $marker = Join-Path $d 'must-not-run-cli.txt'
+    $worker = New-Worker $d
+    $r = Invoke-Spv @(
+        'run', '--file', $worker, '--args-json', (ArgsJson @('--touch', $marker)),
+        '--result-file', (Join-Path $d 'result.json')
+    ) -EnvironmentOverrides @{
+        CC_PROCESSKIT_CLI = (Join-Path $d 'missing-processkit-cli.exe')
+        CC_PROCESSKIT_PYTHON = (Join-Path $d 'also-missing-python.exe')
+    }
+    Assert-Exit $r 2 'missing standalone ProcessKit backend -> fail-closed usage/config error'
+    Assert-True (-not (Test-Path -LiteralPath $marker)) 'missing standalone ProcessKit backend must not start the target command'
+}.Invoke()
+
+# =============================================================================
+# 0e. Process snapshot diffs stay typed and consistent under StrictMode.
 #     A real global snapshot cannot deterministically require zero candidates: another
 #     process on a shared CI/desktop host may start during this call.
 # =============================================================================
@@ -581,6 +604,7 @@ if ($script:Failures.Count -eq 0) {
     Write-Host "OK - all supervisor tests passed."
     exit 0
 }
+
 Write-Host "FAILED - $($script:Failures.Count) assertion(s):"
 foreach ($f in $script:Failures) { Write-Host "  $f" }
 exit 1

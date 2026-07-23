@@ -27,6 +27,8 @@ rem боремся: не передавайте в EXTRA_ARGS произволь
 
 setlocal
 set "LAUNCHER_DIR=%~dp0"
+set "PROCESSKIT_RUNTIME=%~dp0..\tools\processkit-runtime.ps1"
+if not exist "%PROCESSKIT_RUNTIME%" set "PROCESSKIT_RUNTIME=%~dp0processkit-runtime.ps1"
 rem Do not use %%CD%% for the target root: a real environment variable named CD
 rem shadows cmd.exe's dynamic current-directory value (GitHub Windows runners set one).
 for %%I in (.) do set "PROJECT_ROOT=%%~fI"
@@ -93,6 +95,14 @@ shift
 goto :parse
 
 :run
+set "USE_PROCESSKIT_RUNTIME="
+if defined CC_PROCESSKIT_PYTHON set "USE_PROCESSKIT_RUNTIME=1"
+if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" set "USE_PROCESSKIT_RUNTIME=1"
+if not defined CC_PROCESSKIT_CLI where processkit-cli >nul 2>&1 && set "USE_PROCESSKIT_RUNTIME=1"
+if defined USE_PROCESSKIT_RUNTIME if not exist "%PROCESSKIT_RUNTIME%" (
+  echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
+  exit /b 12
+)
 if /I "%PROVIDER%"=="codex" goto :run_codex
 if /I not "%PROVIDER%"=="claude" (
   echo Недопустимый provider "%PROVIDER%". Разрешены: claude, codex.
@@ -128,18 +138,13 @@ rem дублирующего постоянного allow-правила в sett
 rem поиск заново. Внутри setlocal — переменная видна дочернему процессу claude и не утекает
 rem в окружение вызывающей оболочки.
 set "CC_CODEX_EXEC_GRANT=codex exec"
-rem Optional kernel-backed containment for the WHOLE Claude session. Set the user/system
-rem variable CC_PROCESSKIT_PYTHON to a Python executable where `import processkit` works.
-rem An explicitly configured but broken backend is fail-closed: silently running without
-rem containment would defeat the operator's expectation.
-if not defined CC_PROCESSKIT_PYTHON goto :run_uncontained
-"%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
-if errorlevel 1 goto :containment_error
-"%CC_PROCESSKIT_PYTHON%" -m processkit run -- claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
-exit /b
-:containment_error
-echo CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: "%CC_PROCESSKIT_PYTHON%"
-exit /b 10
+rem Prefer the standalone processkit-cli (CC_PROCESSKIT_CLI or PATH) for the whole
+rem provider session. processkit-runtime validates probe schema/surfaces, writes durable
+rem JSONL under .work\processes\_processor, and falls back to CC_PROCESSKIT_PYTHON only
+rem when no CLI is selected. Explicitly broken backends fail closed with exit 10.
+if not defined USE_PROCESSKIT_RUNTIME goto :run_uncontained
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-start-claude -- claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+exit /b %ERRORLEVEL%
 :run_uncontained
 claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 exit /b %ERRORLEVEL%
@@ -153,14 +158,12 @@ echo Codex processor runtime не найден. Запусти cc-sync из chec
 echo Проверены: "%LAUNCHER_DIR%..\tools\codex-processor-runtime.ps1" и "%LAUNCHER_DIR%codex-processor-runtime.ps1".
 exit /b 12
 :codex_runtime_found
-if not defined CC_PROCESSKIT_PYTHON goto :run_codex_uncontained
-"%CC_PROCESSKIT_PYTHON%" -c "import processkit" >nul 2>&1
-if errorlevel 1 goto :containment_error
+if not defined USE_PROCESSKIT_RUNTIME goto :run_codex_uncontained
 if defined MODEL_VALUE goto :run_codex_contained_model
-"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" %EXTRA_ARGS%
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-start-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :run_codex_contained_model
-"%CC_PROCESSKIT_PYTHON%" -m processkit run -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-start-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :run_codex_uncontained
 if defined MODEL_VALUE goto :run_codex_uncontained_model

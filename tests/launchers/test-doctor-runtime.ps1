@@ -83,6 +83,7 @@ function Invoke-Doctor {
     # default so a machine with real CODEX_* set cannot make these scenarios flaky.
     $defaults = @{
         CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = ''
+        CC_PROCESSKIT_CLI = 'off'; CC_PROCESSKIT_PYTHON = ''
         ORCHESTRA_AUTO_APPROVE = ''; ORCHESTRA_PROVIDER = ''
         ORCHESTRA_CODEX_MODEL = ''; ORCHESTRA_CODEX_REASONING = ''
         ORCHESTRA_CODEX_SANDBOX = ''; ORCHESTRA_CODEX_MAX_THREADS = ''

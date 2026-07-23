@@ -168,18 +168,20 @@ artifact, binds it to the current diff and policy, and records
 `decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; it simply does not park the processor.
 Use `off` (or remove the variable) to restore interactive approvals.
 
-On Windows, optional kernel-backed containment for the entire processor session can be
-enabled with a user/system environment variable pointing to a Python installation of
-`processkit`:
+Install the standalone `processkit-cli` on `PATH` to enable kernel-backed containment
+automatically for the whole processor session. To pin an exact binary (also useful until a
+new terminal sees an updated system `PATH`), set a user/system environment variable:
 
 ```powershell
-setx CC_PROCESSKIT_PYTHON "C:\path\to\python.exe"
+setx CC_PROCESSKIT_CLI "C:\Tools\processkit-cli.exe"
 ```
 
-Open a new terminal after `setx`; `cc-doctor` verifies the import. When configured,
+Open a new terminal after `setx`; `cc-doctor` verifies the versioned probe contract.
 `cc-processor` and `cc-resume` run the selected Claude or Codex root through
-`python -m processkit run -- ...` and fail
-closed if that backend is broken. With or without ProcessKit, those launchers disable
+`processkit-cli run`, persist lifecycle JSONL under `.work/processes/_processor`, and fail
+closed if an explicit backend is broken. Set `CC_PROCESSKIT_CLI=off` to disable standalone
+discovery. `CC_PROCESSKIT_PYTHON` remains a deprecated compatibility fallback when no CLI is
+selected. With or without ProcessKit, those launchers disable
 persistent MSBuild worker/server reuse in their child environment, and leaf build/test
 commands use Orchestra's per-command supervisor cleanup and process diagnostics. They also
 keep the bounded `codex-runtime.ps1` calls in the foreground by supplying 1,900,000 ms Claude

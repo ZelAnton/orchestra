@@ -23,7 +23,8 @@ one launcher.
 spawning each test with Windows PowerShell (`powershell.exe`) - which is what the
 `.cmd`-launcher tests were validated against; on macOS/Linux it runs only the
 cross-platform engine tests marked with a `# ci:posix` comment
-(`test-sync-runtime.ps1`, `test-doctor-runtime.ps1`, `test-generate-coders.ps1`),
+(`test-sync-runtime.ps1`, `test-doctor-runtime.ps1`, `test-processkit-runtime.ps1`,
+`test-generate-coders.ps1`),
 spawning them with `pwsh`, and skips the Windows-only `.cmd`-launcher tests. The CI
 matrix runs this file on both `windows-latest` and `ubuntu-latest`.
 

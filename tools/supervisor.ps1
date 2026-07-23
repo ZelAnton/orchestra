@@ -86,6 +86,7 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 # Read-TextOrEmpty, Format-UtcNow, ConvertTo-Win32Arg/ConvertTo-Win32CommandLine; T-240).
 # Dot-sourced like tools/proc-tree.ps1 (loaded below).
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'processkit-runtime.ps1')
 $script:ErrPrefix = 'SPVERR'  # coded-error tag decoded by the catch dispatcher
 
 # --------------------------------------------------------------------------
@@ -371,34 +372,35 @@ function Test-ProcessDiagnosticsEnabled {
     return [bool]([string](Opt 'process-log-file' ''))
 }
 
-function Resolve-ProcessKitPython {
-    $configured = [string][Environment]::GetEnvironmentVariable('CC_PROCESSKIT_PYTHON')
-    if ([string]::IsNullOrWhiteSpace($configured)) { return '' }
-    $configured = $configured.Trim()
-    $cmd = @(Get-Command $configured -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
-    if (-not $cmd -or -not $cmd.Source) {
-        Fail 2 "CC_PROCESSKIT_PYTHON executable not found: $configured"
+function Resolve-SupervisorProcessKitBackend {
+    try { return Resolve-OrchestraProcessKitBackend }
+    catch { Fail 2 $_.Exception.Message }
+}
+
+function Read-ProcessKitLifecycle {
+    param([string]$Path)
+    $terminal = $null
+    $started = $null
+    [object[]]$members = @()
+    if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        foreach ($line in @(Get-Content -LiteralPath $Path -Encoding utf8 -ErrorAction SilentlyContinue)) {
+            if ([string]::IsNullOrWhiteSpace([string]$line)) { continue }
+            try { $pkEvent = [string]$line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            switch ([string]$pkEvent.event) {
+                'run_started' { $started = $pkEvent }
+                'members_snapshot' { $members = @($pkEvent.members) }
+                'runner_exit' { $terminal = $pkEvent }
+            }
+        }
     }
-    # Launchers preflight the import once for the session. A direct supervisor call may not
-    # have passed through them, so keep the explicit backend fail-closed here too. Avoid a
-    # shell: the configured executable and fixed import probe are separate argv values.
-    $probePsi = New-Object System.Diagnostics.ProcessStartInfo
-    $probePsi.FileName = [string]$cmd.Source
-    $probePsi.UseShellExecute = $false
-    $probePsi.CreateNoWindow = $true
-    $probePsi.RedirectStandardOutput = $true
-    $probePsi.RedirectStandardError = $true
-    if ($probePsi | Get-Member -Name 'ArgumentList' -MemberType Property -ErrorAction SilentlyContinue) {
-        $probePsi.ArgumentList.Add('-c'); $probePsi.ArgumentList.Add('import processkit')
-    } else { $probePsi.Arguments = '-c "import processkit"' }
-    $probe = $null
-    try {
-        $probe = [System.Diagnostics.Process]::Start($probePsi)
-        $probe.WaitForExit()
-        if ($probe.ExitCode -ne 0) { Fail 2 "CC_PROCESSKIT_PYTHON cannot import processkit: $($cmd.Source)" }
-    } catch { Fail 2 "CC_PROCESSKIT_PYTHON preflight failed: $($_.Exception.Message)" }
-    finally { if ($probe) { try { $probe.Dispose() } catch { } } }
-    return [string]$cmd.Source
+    return [pscustomobject]@{ Terminal = $terminal; Started = $started; Members = $members }
+}
+
+function Invoke-ProcessKitHardStop {
+    param([string]$CliPath, [string]$RunId)
+    if (-not ($CliPath -and $RunId)) { return }
+    try { [void](Invoke-ProcessKitCaptured -FilePath $CliPath -ArgumentList @('kill', '--run-id', $RunId)) }
+    catch { }
 }
 
 # --------------------------------------------------------------------------
@@ -428,8 +430,28 @@ function Invoke-SupervisedCall {
         [int]$DeadlineSec, [string]$CancelFile, [int]$OutputMaxBytes,
         [int[]]$CrashExitCodes, [int[]]$ErrorExitCodes
     )
-    $processkitPython = Resolve-ProcessKitPython
-    $setsidLauncher = if ($processkitPython) { $null } else { Resolve-SetsidLauncher }
+    $processkitBackend = Resolve-SupervisorProcessKitBackend
+    $containmentDegradedReason = ''
+    if ($processkitBackend.Kind -eq 'cli' -and -not [string]::IsNullOrEmpty($StdinText)) {
+        # processkit-cli 0.2.0 gives the child null stdin and exposes no stdin source
+        # surface. Preserve supervisor's existing --stdin-text/--stdin-file contract
+        # instead of silently discarding input; the PID/PGID cleanup remains active.
+        # Re-enable CLI containment here once probe advertises a mediated-stdin surface.
+        try { $stdinBackend = Resolve-OrchestraProcessKitPythonBackend }
+        catch { Fail 2 $_.Exception.Message }
+        if ($null -ne $stdinBackend) {
+            $processkitBackend = $stdinBackend
+        } else {
+            $processkitBackend = [pscustomobject]@{ Kind = 'none'; Path = ''; Version = ''; SchemaVersion = 0; Explicit = $false }
+            $containmentDegradedReason = 'processkit-cli-no-mediated-stdin'
+        }
+    }
+    $processkitCli = if ($processkitBackend.Kind -eq 'cli') { [string]$processkitBackend.Path } else { '' }
+    $processkitPython = if ($processkitBackend.Kind -eq 'python') { [string]$processkitBackend.Path } else { '' }
+    $setsidLauncher = if ($processkitBackend.Kind -ne 'none') { $null } else { Resolve-SetsidLauncher }
+    $containmentKind = if ($processkitCli) { 'processkit-cli' } elseif ($processkitPython) { 'processkit-python' } elseif ($setsidLauncher) { 'process-group' } else { 'pid-tree' }
+    $processkitEvents = ''
+    $processkitRunId = ''
     # `setsid missing-target` itself starts successfully and reports 127 after its exec
     # fails. Preserve the supervisor contract that an unresolvable executable is a spawn
     # crash by skipping the wrapper in that case, so Process.Start surfaces the native
@@ -447,7 +469,14 @@ function Invoke-SupervisedCall {
     }
     $launchFile = $FilePath
     $launchArgs = @($CallArgs)
-    if ($processkitPython) {
+    if ($processkitCli) {
+        $processkitRunId = 'orchestra-supervisor-' + [guid]::NewGuid().ToString('N')
+        $processkitEvents = Join-Path ([System.IO.Path]::GetTempPath()) ($processkitRunId + '.jsonl')
+        $childCwd = if ($WorkingDirectory) { [System.IO.Path]::GetFullPath($WorkingDirectory) } else { [System.IO.Path]::GetFullPath((Get-Location).Path) }
+        $launchFile = $processkitCli
+        $launchArgs = @('run', '--run-id', $processkitRunId, '--cwd', $childCwd,
+            '--jsonl', $processkitEvents, '--create-no-window', '--', $FilePath) + @($CallArgs)
+    } elseif ($processkitPython) {
         # ProcessKit owns a race-free kernel container for this individual call
         # (CREATE_SUSPENDED -> Job Object assign -> resume on Windows). This reaches
         # persistent grandchildren even after every intermediate parent has exited, which
@@ -491,13 +520,17 @@ function Invoke-SupervisedCall {
     catch {
         # The process could not even be spawned - a tool/infrastructure crash.
         $sw.Stop()
-        return [pscustomobject]@{
+        $spawnResult = [pscustomobject]@{
             reason = 'crash'; exit_code = $null; timed_out = $false; cancelled = $false
             duration_ms = [int]$sw.Elapsed.TotalMilliseconds; output_bytes = 0; output_truncated = $false
             output_sha256 = (Sha256Hex ([byte[]]@())); stdout = ''; stderr = ''
             outcome_reason = "spawn failed: $($_.Exception.Message)"; pid = $null
-            containment = if ($processkitPython) { 'processkit' } elseif ($setsidLauncher) { 'process-group' } else { 'pid-tree' }
+            containment = $containmentKind
+            containment_degraded_reason = $containmentDegradedReason
+            processkit_events_file = $processkitEvents; processkit_run_id = $processkitRunId
         }
+        if (-not $diagEnabled -and $processkitEvents) { Remove-Item -LiteralPath $processkitEvents -Force -ErrorAction SilentlyContinue }
+        return $spawnResult
     }
     $posixPgid = if ($setsidLauncher) { [int]$proc.Id } else { 0 }
 
@@ -538,6 +571,14 @@ function Invoke-SupervisedCall {
     if ($diagEnabled) {
         $temporalCandidates = [object[]]@(Get-NewProcessCandidates -Before $globalBefore -After $globalAtExit)
     }
+    # Ask the addressable ProcessKit runner to tear down its own kernel container before
+    # falling back to the supervisor's PID/PGID cleanup. This preserves ProcessKit's
+    # race-free membership knowledge when a deadline/cancel arrives after an intermediate
+    # parent has already exited.
+    if ($processkitCli -and ($timedOut -or $cancelled)) {
+        Invoke-ProcessKitHardStop -CliPath $processkitCli -RunId $processkitRunId
+        try { [void]$proc.WaitForExit(5000) } catch { }
+    }
     # Cleanup is an invariant of the call, not an exceptional timeout path. A successful
     # build may deliberately leave reusable workers behind; they still belong to this
     # isolated invocation and must not survive it.
@@ -570,6 +611,32 @@ function Invoke-SupervisedCall {
 
     $rc = $null
     try { $rc = $proc.ExitCode } catch { $rc = $null }
+    $runnerFailureSource = ''
+    $processkitRootPid = $null
+    $lifecycle = $null
+    if ($processkitCli) {
+        $lifecycle = Read-ProcessKitLifecycle -Path $processkitEvents
+        if ($null -ne $lifecycle.Started -and $null -ne $lifecycle.Started.root_pid) {
+            $processkitRootPid = [int]$lifecycle.Started.root_pid
+        }
+        if ($null -eq $lifecycle.Terminal) {
+            if (-not ($timedOut -or $cancelled)) { $runnerFailureSource = 'missing_runner_exit' }
+        } else {
+            $source = [string]$lifecycle.Terminal.source
+            if ($source -eq 'child_exit') {
+                if ($null -ne $lifecycle.Terminal.child_code) { $rc = [int]$lifecycle.Terminal.child_code }
+            } elseif ($source -eq 'timeout') {
+                if (-not $cancelled) { $timedOut = $true }
+            } elseif ($source -in @('cancelled', 'control_cancel', 'control_kill')) {
+                # A supervisor deadline/cancel is already the authoritative reason for
+                # the addressable kill we just sent. Do not let the runner's mechanical
+                # `control_kill` terminal event rewrite timeout into cancelled.
+                if (-not $timedOut) { $cancelled = $true }
+            } else {
+                $runnerFailureSource = if ($source) { $source } else { 'unknown_runner_exit' }
+            }
+        }
+    }
     try { $proc.Dispose() } catch { }
 
     # Classify the four stop reasons.
@@ -579,6 +646,8 @@ function Invoke-SupervisedCall {
         $reason = 'cancelled'; $outcomeReason = 'cancel requested'
     } elseif ($timedOut) {
         $reason = 'timeout'; $outcomeReason = "deadline exceeded (${DeadlineSec}s)"
+    } elseif ($runnerFailureSource) {
+        $reason = 'crash'; $outcomeReason = "processkit runner failure: $runnerFailureSource"
     } elseif ($null -eq $rc) {
         $reason = 'crash'; $outcomeReason = 'exit code unavailable after run'
     } elseif ($rc -eq 0) {
@@ -593,15 +662,21 @@ function Invoke-SupervisedCall {
         $reason = 'error'; $outcomeReason = "exit code $rc"
     }
 
-    return [pscustomobject]@{
+    $result = [pscustomobject]@{
         reason = $reason; exit_code = $rc; timed_out = $timedOut; cancelled = $cancelled
         duration_ms = [int]$sw.Elapsed.TotalMilliseconds; output_bytes = $totalBytes
         output_truncated = $truncated; output_sha256 = $sha; stdout = $stdout; stderr = $stderr
-        outcome_reason = $outcomeReason; pid = $procId; cleanup_attempted = $true
-        containment = if ($processkitPython) { 'processkit' } elseif ($setsidLauncher) { 'process-group' } else { 'pid-tree' }
+        outcome_reason = $outcomeReason; pid = if ($null -ne $processkitRootPid) { $processkitRootPid } else { $procId }; cleanup_attempted = $true
+        containment = $containmentKind; containment_runner_pid = $procId
+        containment_degraded_reason = $containmentDegradedReason
+        processkit_events_file = $processkitEvents; processkit_run_id = $processkitRunId
+        processkit_mechanism = if ($null -ne $lifecycle -and $null -ne $lifecycle.Started) { [string]$lifecycle.Started.mechanism } else { '' }
+        processkit_abrupt_cleanup = if ($null -ne $lifecycle -and $null -ne $lifecycle.Started) { [string]$lifecycle.Started.abrupt_cleanup } else { '' }
         descendants_before_cleanup = $descendantsBefore; survivors_after_cleanup = $descendantsAfter
         temporal_candidates = $temporalCandidates; temporal_candidates_after_cleanup = $temporalAfter
     }
+    if (-not $diagEnabled -and $processkitEvents) { Remove-Item -LiteralPath $processkitEvents -Force -ErrorAction SilentlyContinue }
+    return $result
 }
 
 # --------------------------------------------------------------------------
@@ -644,6 +719,14 @@ function Save-ProcessDiagnostics {
         # task descriptors, while process evidence must survive for post-run diagnosis.
         $path = Join-Path $work "processes/$task/$role-$label-a$Attempt-p$pidPart.json"
     }
+    $processkitEventsPath = ''
+    $sourceEvents = [string](Get-Prop $Res 'processkit_events_file')
+    if ($sourceEvents -and (Test-Path -LiteralPath $sourceEvents -PathType Leaf)) {
+        $processkitEventsPath = [System.IO.Path]::ChangeExtension($path, '.processkit.jsonl')
+        $eventDir = Split-Path -Parent $processkitEventsPath
+        if ($eventDir -and -not (Test-Path -LiteralPath $eventDir)) { [void](New-Item -ItemType Directory -Force -Path $eventDir) }
+        Move-Item -LiteralPath $sourceEvents -Destination $processkitEventsPath -Force
+    }
     $record = [ordered]@{
         schema = 'orchestra/process-diagnostics@1'
         task_id = [string](Opt 'task-id' '')
@@ -654,6 +737,12 @@ function Save-ProcessDiagnostics {
         outcome = $Res.reason
         cleanup_attempted = [bool](Get-Prop $Res 'cleanup_attempted')
         containment      = [string](Get-Prop $Res 'containment')
+        containment_runner_pid = Get-Prop $Res 'containment_runner_pid'
+        containment_degraded_reason = [string](Get-Prop $Res 'containment_degraded_reason')
+        processkit_run_id = [string](Get-Prop $Res 'processkit_run_id')
+        processkit_mechanism = [string](Get-Prop $Res 'processkit_mechanism')
+        processkit_abrupt_cleanup = [string](Get-Prop $Res 'processkit_abrupt_cleanup')
+        processkit_events_file = $processkitEventsPath
         descendants_before_cleanup = @($Res.descendants_before_cleanup)
         survivors_after_cleanup = @($Res.survivors_after_cleanup)
         temporal_candidates = @((Get-Prop $Res 'temporal_candidates'))
@@ -680,6 +769,11 @@ function New-Verdict {
         root_pid         = $Res.pid
         cleanup_attempted = [bool](Get-Prop $Res 'cleanup_attempted')
         containment      = [string](Get-Prop $Res 'containment')
+        containment_runner_pid = Get-Prop $Res 'containment_runner_pid'
+        containment_degraded_reason = [string](Get-Prop $Res 'containment_degraded_reason')
+        processkit_run_id = [string](Get-Prop $Res 'processkit_run_id')
+        processkit_mechanism = [string](Get-Prop $Res 'processkit_mechanism')
+        processkit_abrupt_cleanup = [string](Get-Prop $Res 'processkit_abrupt_cleanup')
         descendant_count_before_cleanup = @((Get-Prop $Res 'descendants_before_cleanup')).Count
         survivor_count_after_cleanup = @((Get-Prop $Res 'survivors_after_cleanup')).Count
         temporal_candidate_count = @((Get-Prop $Res 'temporal_candidates')).Count

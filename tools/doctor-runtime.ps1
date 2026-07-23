@@ -125,7 +125,8 @@ if (Test-OrchestraSourceCheckout $ProjectRoot) {
     Write-Host 'OK   target is the Orchestra source checkout (all identity markers present); relative tools/*.ps1 is authoritative'
 } else {
     $shadowNames = @('policy.ps1', 'policy-schema.ps1', 'queue-tx.ps1', 'state-tx.ps1',
-        'outbox.ps1', 'redaction.ps1', 'supervisor.ps1', 'codex-runtime.ps1')
+        'outbox.ps1', 'redaction.ps1', 'supervisor.ps1', 'codex-runtime.ps1',
+        'processkit-runtime.ps1')
     $shadowed = @($shadowNames | Where-Object {
         Test-Path -LiteralPath (Join-Path (Join-Path $ProjectRoot 'tools') $_) -PathType Leaf
     })
@@ -260,20 +261,27 @@ if (Test-Path -LiteralPath $authFile -PathType Leaf) {
 
 Write-Host ''
 Write-Host '== Process containment =='
-$processkitPython = Get-EnvTrimmed 'CC_PROCESSKIT_PYTHON'
-if (-not $processkitPython) {
-    Write-Host 'INFO root containment: CC_PROCESSKIT_PYTHON is not set; launchers still disable .NET build-worker reuse and per-command supervisor cleanup remains active'
+$processkitRuntime = Join-Path $PSScriptRoot 'processkit-runtime.ps1'
+if (-not (Test-Path -LiteralPath $processkitRuntime -PathType Leaf)) {
+    Write-Host 'FAIL root containment: processkit-runtime.ps1 is missing from the Orchestra runtime mirror; run cc-sync'
 } else {
-    $pkBin = Get-Command $processkitPython -ErrorAction SilentlyContinue
-    if (-not $pkBin) {
-        Write-Host ('FAIL root containment: CC_PROCESSKIT_PYTHON executable not found: ' + $processkitPython)
-    } else {
-        & $processkitPython -c 'import processkit' *> $null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host ('OK   root containment: cc-processor/cc-resume will use ProcessKit via ' + $pkBin.Source)
-        } else {
-            Write-Host ('FAIL root containment: Python exists but cannot import processkit: ' + $pkBin.Source + ' (launchers fail closed with exit 10)')
+    try {
+        . $processkitRuntime
+        $pkBackend = Resolve-OrchestraProcessKitBackend
+        switch ([string]$pkBackend.Kind) {
+            'cli' {
+                Write-Host ('OK   root containment: standalone processkit-cli ' + $pkBackend.Version + ' verified at ' + $pkBackend.Path)
+                Write-Host 'OK   lifecycle diagnostics: schema 1 JSONL + inspect/cancel/kill/list/prune surfaces verified; root events persist under .work/processes/_processor'
+            }
+            'python' {
+                Write-Host ('WARN root containment: using legacy Python ProcessKit fallback via ' + $pkBackend.Path + '; install processkit-cli or set CC_PROCESSKIT_CLI')
+            }
+            default {
+                Write-Host 'INFO root containment: processkit-cli not found and CC_PROCESSKIT_PYTHON is not set; launchers still disable .NET build-worker reuse and per-command supervisor cleanup remains active'
+            }
         }
+    } catch {
+        Write-Host ('FAIL root containment: ' + $_.Exception.Message + ' (launchers and supervisor fail closed)')
     }
 }
 Write-Host 'OK   build workers: processor launchers export MSBUILDDISABLENODEREUSE=1 and DOTNET_CLI_USE_MSBUILD_SERVER=0 to the whole agent tree'

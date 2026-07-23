@@ -59,13 +59,26 @@ export DOTNET_CLI_USE_MSBUILD_SERVER=0
 # Explicit user/system values override these per-session defaults.
 export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
 export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
-if [ -n "${CC_PROCESSKIT_PYTHON:-}" ] && ! "$CC_PROCESSKIT_PYTHON" -c 'import processkit' >/dev/null 2>&1; then
-  echo "CC_PROCESSKIT_PYTHON is set but processkit cannot be imported: $CC_PROCESSKIT_PYTHON" >&2
-  exit 10
+
+SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd)"
+PROCESSKIT_RUNTIME="$SCRIPT_DIR/../tools/processkit-runtime.ps1"
+if [ ! -f "$PROCESSKIT_RUNTIME" ]; then
+  PROCESSKIT_RUNTIME="$SCRIPT_DIR/processkit-runtime.ps1"
+fi
+USE_PROCESSKIT_RUNTIME=false
+if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+  USE_PROCESSKIT_RUNTIME=true
+elif [ -n "${CC_PROCESSKIT_CLI:-}" ] && [ "${CC_PROCESSKIT_CLI}" != "off" ]; then
+  USE_PROCESSKIT_RUNTIME=true
+elif [ -z "${CC_PROCESSKIT_CLI:-}" ] && command -v processkit-cli >/dev/null 2>&1; then
+  USE_PROCESSKIT_RUNTIME=true
+fi
+if $USE_PROCESSKIT_RUNTIME && [ ! -f "$PROCESSKIT_RUNTIME" ]; then
+  echo "ProcessKit runtime is missing; run cc-sync from the Orchestra checkout." >&2
+  exit 12
 fi
 
 if [ "$PROVIDER" = "codex" ]; then
-  SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd)"
   CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/../tools/codex-processor-runtime.ps1"
   if [ ! -f "$CODEX_PROCESSOR_RUNTIME" ]; then
     CODEX_PROCESSOR_RUNTIME="$SCRIPT_DIR/codex-processor-runtime.ps1"
@@ -75,8 +88,8 @@ if [ "$PROVIDER" = "codex" ]; then
     exit 12
   fi
   CODEX_LAUNCH=(pwsh -NoProfile -File "$CODEX_PROCESSOR_RUNTIME" resume -Root "$PWD" "$@")
-  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
-    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- "${CODEX_LAUNCH[@]}"
+  if $USE_PROCESSKIT_RUNTIME; then
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --work "$PWD/.work" --label processor-resume-codex -- "${CODEX_LAUNCH[@]}"
   fi
   exec "${CODEX_LAUNCH[@]}"
 fi
@@ -86,14 +99,14 @@ fi
 # PowerShell 7 ("role": ) and 5.1 ("role":  ), so a spacing-tolerant regex is used.
 LEASE=".work/orchestrator.lock/lease.json"
 if [ -f "$LEASE" ] && grep -Eq '"role"[[:space:]]*:[[:space:]]*"processor"' "$LEASE"; then
-  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
-    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+  if $USE_PROCESSKIT_RUNTIME; then
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --work "$PWD/.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
   fi
   exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 else
   echo "No addressed processor lease (.work/orchestrator.lock/lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session."
-  if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
-    exec "$CC_PROCESSKIT_PYTHON" -m processkit run -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+  if $USE_PROCESSKIT_RUNTIME; then
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --work "$PWD/.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
   fi
   exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 fi

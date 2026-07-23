@@ -140,6 +140,14 @@ function Install-Launcher {
         $dest = Join-Path $Paths.Scripts $n
         [System.IO.File]::WriteAllText($dest, $normalized, (New-Object System.Text.UTF8Encoding($false)))
 
+        # cc-processor/cc-resume resolve the ProcessKit adapter from either the checkout
+        # tools/ directory or the flat cc-sync mirror. Launcher fixtures model the latter,
+        # so install that runtime dependency beside the launcher as cc-sync does.
+        if ($n -in @('cc-processor.cmd', 'cc-resume.cmd')) {
+            Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tools/processkit-runtime.ps1') `
+                -Destination (Join-Path $Paths.Scripts 'processkit-runtime.ps1') -Force
+        }
+
         foreach ($m in [regex]::Matches($text, 'call\s+"%~dp0([A-Za-z0-9_.-]+\.cmd)"')) {
             $dep = $m.Groups[1].Value
             if (-not $installed.Contains($dep)) { $queue.Enqueue($dep) }
@@ -255,6 +263,17 @@ function Install-FakeStateTx {
     Set-Content -LiteralPath (Join-Path $Paths.Scripts 'state-tx.ps1') -Value $script:FakeStateTxScript -Encoding utf8
 }
 
+function Install-FakeProcessKitRuntime {
+    param([Parameter(Mandatory)] $Paths)
+    @'
+if ($env:FAKE_PROCESSKIT_RUNTIME_ARGS) {
+    $args | Set-Content -LiteralPath $env:FAKE_PROCESSKIT_RUNTIME_ARGS -Encoding utf8
+}
+$code = if ($env:FAKE_PROCESSKIT_RUNTIME_EXIT) { [int]$env:FAKE_PROCESSKIT_RUNTIME_EXIT } else { 0 }
+exit $code
+'@ | Set-Content -LiteralPath (Join-Path $Paths.Scripts 'processkit-runtime.ps1') -Encoding utf8
+}
+
 function Get-CapturedArgs {
     param([Parameter(Mandatory)] [string] $CaptureFile)
     if (-not (Test-Path -LiteralPath $CaptureFile)) {
@@ -293,6 +312,8 @@ function Invoke-Launcher {
     $originalPath = $env:PATH
     $originalLocation = Get-Location
     $setEnvVars = @{}
+    $effectiveEnvVars = @{ CC_PROCESSKIT_CLI = 'off'; CC_PROCESSKIT_PYTHON = '' }
+    foreach ($k in $EnvVars.Keys) { $effectiveEnvVars[$k] = $EnvVars[$k] }
     try {
         if ($MinimalPath) {
             $sysRoot = $env:SystemRoot
@@ -300,9 +321,9 @@ function Invoke-Launcher {
         } else {
             $env:PATH = "$($Paths.Bin);$originalPath"
         }
-        foreach ($k in $EnvVars.Keys) {
+        foreach ($k in $effectiveEnvVars.Keys) {
             $setEnvVars[$k] = [Environment]::GetEnvironmentVariable($k)
-            Set-Item -Path "env:$k" -Value $EnvVars[$k]
+            Set-Item -Path "env:$k" -Value $effectiveEnvVars[$k]
         }
         Set-Location -LiteralPath $Paths.Project
         # Several launchers run "chcp 65001" followed by a Cyrillic "rem"
