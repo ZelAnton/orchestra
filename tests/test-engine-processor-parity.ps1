@@ -65,7 +65,7 @@
     from>to, deduplicated by event_id, sorted). As the engine grows to cover later phases, the
     shared vocabulary widens and this oracle tightens - without ever licensing a big-bang.
 
-    TWO PAIRED HERMETIC RUNS. The `на ревью>готова к слиянию` identities come for free from the
+    SIX PAIRED HERMETIC RUNS. The `на ревью>готова к слиянию` identities come for free from the
     SAME clean two-task scenario the T-110 oracle already drove (harness scenario `clean` /
     engine `run --once --review` over T-101+T-102 - both simply reach a clean review pass at
     cycle 1). The incomplete-cycle and REVIEW_LOOP_MAX-escalation identities need a task whose
@@ -78,6 +78,13 @@
     `T-101` recurring across the two independent fixtures is expected (harness convention:
     every scenario function names its primary task `T-101`) and harmless - the compared surface
     is a set of `type|batch|task|from>to` tuples, and the tuples differ by transition.
+
+    Four further independent pairings cover the terminal `conflict`, `quarantine`, `policy`, and
+    `checks` harness scenarios. Their fingerprints are compared pair-by-pair, with an
+    anti-vacuity assertion for every scenario, so identities contributed by the clean pairing
+    cannot mask a missing terminal path. The policy pairing compares its structural common
+    surface and separately asserts both safe terminal outcomes: the harness intentionally does
+    not emit a policy escalation status event, while the engine's fail-closed staging does.
 
     FAITHFULNESS. The identity extractor here reproduces `tools/harness.ps1`'s Get-OutboxDigest
     byte-for-byte; a hard assertion cross-checks that running it over EACH harness run's own kept
@@ -245,6 +252,73 @@ function Select-Compared {
 # unique identity set restricted to the shared vocabulary.
 function Compared-Fingerprint { param($Ids) return (Sha256Hex ((@(Select-Compared $Ids) | Sort-Object -Unique) -join ';')) }
 
+# `harness` deliberately models a policy denial without a separate task.status_changed event,
+# while the engine's fail-closed leaf reports its own escalation transition. The stable common
+# parity surface for that one pairing is therefore the structural lifecycle only; endpoint
+# outcome assertions below make the terminal policy branch non-vacuous.
+function Select-PolicyCompared {
+    param($Ids)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($id in @($Ids)) {
+        $type = ([string]$id -split '\|', 2)[0]
+        if ($type -eq 'cohort.opened' -or $type -eq 'task.captured' -or $type -eq 'cohort.closed') {
+            $out.Add([string]$id)
+        }
+    }
+    return $out
+}
+
+function Assert-ScenarioPair {
+    param(
+        [string]$Name,
+        $HarnessJson,
+        [string]$HarnessEvents,
+        [string]$EngineEvents,
+        [switch]$PolicySurface
+    )
+    Assert-True ($null -ne $HarnessJson) "$Name harness scenario returned JSON"
+    Assert-True (Test-Path -LiteralPath $HarnessEvents) "$Name harness scenario wrote events.jsonl"
+    Assert-True (Test-Path -LiteralPath $EngineEvents) "$Name engine scenario wrote events.jsonl"
+    if ($null -eq $HarnessJson -or -not (Test-Path -LiteralPath $HarnessEvents) -or -not (Test-Path -LiteralPath $EngineEvents)) { return }
+
+    $harnessIds = Get-OutboxIdentities $HarnessEvents
+    $engineIds = Get-OutboxIdentities $EngineEvents
+    Assert-Equal ([string]$HarnessJson.outbox) (Digest-Of $harnessIds) `
+        "$Name extractor reproduces harness Get-OutboxDigest"
+    $harnessCompared = if ($PolicySurface) { @(Select-PolicyCompared $harnessIds | Sort-Object -Unique) } else { @(Select-Compared $harnessIds | Sort-Object -Unique) }
+    $engineCompared = if ($PolicySurface) { @(Select-PolicyCompared $engineIds | Sort-Object -Unique) } else { @(Select-Compared $engineIds | Sort-Object -Unique) }
+    Assert-True ($harnessCompared.Count -gt 0) "$Name compared event surface is non-empty"
+    Assert-Equal ($harnessCompared -join "`n") ($engineCompared -join "`n") `
+        "$Name processor-prose and engine terminal event surfaces converge"
+}
+
+function New-EngineFixture {
+    param([string]$Label, [object[]]$Seeds)
+    $work = Join-Path ([System.IO.Path]::GetTempPath()) ('orc-parity-engine-' + $Label + '-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Force -Path $work
+    $script:TempDirs.Add($work)
+    $ok = $true
+    foreach ($seed in @($Seeds)) {
+        $p = Invoke-Ps $script:QueueTx @('propose', '--work', $work, '--id', [string]$seed.Id, '--title', [string]$seed.Title)
+        if ($p.ExitCode -ne 0) {
+            $script:Failures.Add("FAIL - $Label seed propose $($seed.Id) exited $($p.ExitCode): $($p.Err.Trim())")
+            $ok = $false
+            continue
+        }
+        $descDir = Join-Path (Join-Path $work 'tasks') ([string]$seed.Id)
+        $null = New-Item -ItemType Directory -Force -Path $descDir
+        $descText = "# $($seed.Id)`nСтатус: не начата`nБатч: $batchId`nКонфликт-домен: $($seed.Domain)`n"
+        [System.IO.File]::WriteAllText((Join-Path $descDir 'task.md'), $descText, $script:Utf8)
+    }
+    return [pscustomobject]@{ Work = $work; Events = (Join-Path $work 'events.jsonl'); SeedOk = $ok }
+}
+
+function Invoke-EngineScenario {
+    param($Fixture, [string[]]$Extra)
+    return (Invoke-Proc $script:EngineBin (@('run', '--once', '--work', $Fixture.Work, '--tools', $script:ToolsDir,
+        '--base', 'sandbox-base', '--batch', $batchId, '--json') + $Extra))
+}
+
 # --------------------------------------------------------------------------
 # Cleanup of every temp fixture we created (best-effort, always runs).
 # --------------------------------------------------------------------------
@@ -408,6 +482,79 @@ try {
     }
 
     # ======================================================================
+    # TERMINAL PAIRING 3 (T-304): a merge conflict quarantines T-102 while
+    # T-101 still publishes. The engine's deterministic merger injection is
+    # the equivalent hermetic staging knob.
+    # ======================================================================
+    $harnessJson3 = $null; $harnessEvents3 = ''
+    $hr3 = Invoke-Ps $script:Harness @('scenario', '--vcs', 'git', '--name', 'conflict', '--keep', '--json')
+    if ($hr3.ExitCode -ne 0) { $script:Failures.Add("FAIL - harness conflict scenario exited $($hr3.ExitCode): $($hr3.Err.Trim())") }
+    else { try { $harnessJson3 = $hr3.Out.Trim() | ConvertFrom-Json } catch { $script:Failures.Add("FAIL - harness conflict scenario produced unparseable JSON: $($hr3.Out)") } }
+    if ($harnessJson3) { $script:TempDirs.Add([string]$harnessJson3.fixture); $harnessEvents3 = Join-Path ([string]$harnessJson3.fixture) 'repo/.work/events.jsonl' }
+    $fixture3 = New-EngineFixture 'conflict' @(
+        [pscustomobject]@{ Id = 'T-101'; Title = 'conf one'; Domain = 'alpha/**' },
+        [pscustomobject]@{ Id = 'T-102'; Title = 'conf two'; Domain = 'beta/**' })
+    if ($fixture3.SeedOk) {
+        $er3 = Invoke-EngineScenario $fixture3 @('--cohort-size', '2', '--review', '--join', '--inject-merge-conflict', 'T-102')
+        if ($er3.ExitCode -ne 0) { $script:Failures.Add("FAIL - engine conflict pairing exited $($er3.ExitCode): $($er3.Err.Trim())$($er3.Out.Trim())") }
+        else {
+            Assert-True ($er3.Out -match '"quarantined":\["T-102"\]') 'engine conflict staging quarantined T-102'
+            Assert-True ($er3.Out -match '"published":\["T-101"\]') 'engine conflict staging published survivor T-101'
+        }
+    }
+
+    # ======================================================================
+    # TERMINAL PAIRING 4 (T-304): a required integration check never clears
+    # quarantine in the prose harness; the engine's deterministic failing
+    # integration gate leaves its batch unpublished. Both share the terminal
+    # cohort event surface (open/capture/review/ready/join/closed, no publish).
+    # ======================================================================
+    $harnessJson4 = $null; $harnessEvents4 = ''
+    $hr4 = Invoke-Ps $script:Harness @('scenario', '--vcs', 'git', '--name', 'quarantine', '--keep', '--json')
+    if ($hr4.ExitCode -ne 0) { $script:Failures.Add("FAIL - harness quarantine scenario exited $($hr4.ExitCode): $($hr4.Err.Trim())") }
+    else { try { $harnessJson4 = $hr4.Out.Trim() | ConvertFrom-Json } catch { $script:Failures.Add("FAIL - harness quarantine scenario produced unparseable JSON: $($hr4.Out)") } }
+    if ($harnessJson4) { $script:TempDirs.Add([string]$harnessJson4.fixture); $harnessEvents4 = Join-Path ([string]$harnessJson4.fixture) 'repo/.work/events.jsonl' }
+    $fixture4 = New-EngineFixture 'quarantine' @([pscustomobject]@{ Id = 'T-101'; Title = 'flaky one'; Domain = 'alpha/**' })
+    if ($fixture4.SeedOk) {
+        $er4 = Invoke-EngineScenario $fixture4 @('--cohort-size', '1', '--review', '--join', '--inject-f-findings', '--integration-loop-max', '1')
+        if ($er4.ExitCode -ne 0) { $script:Failures.Add("FAIL - engine quarantine pairing exited $($er4.ExitCode): $($er4.Err.Trim())$($er4.Out.Trim())") }
+        else { Assert-True ($er4.Out -match '"integration":"failed"' -and $er4.Out -match '"published":\[\]') 'engine failing integration gate left the batch unpublished' }
+    }
+
+    # ======================================================================
+    # TERMINAL PAIRING 5 (T-304): denylisted policy work terminates safely.
+    # The harness invokes the real policy guard; the engine uses its existing
+    # fail-closed deterministic leaf escalation staging knob.
+    # ======================================================================
+    $harnessJson5 = $null; $harnessEvents5 = ''
+    $hr5 = Invoke-Ps $script:Harness @('scenario', '--vcs', 'git', '--name', 'policy', '--keep', '--json')
+    if ($hr5.ExitCode -ne 0) { $script:Failures.Add("FAIL - harness policy scenario exited $($hr5.ExitCode): $($hr5.Err.Trim())") }
+    else { try { $harnessJson5 = $hr5.Out.Trim() | ConvertFrom-Json } catch { $script:Failures.Add("FAIL - harness policy scenario produced unparseable JSON: $($hr5.Out)") } }
+    if ($harnessJson5) { $script:TempDirs.Add([string]$harnessJson5.fixture); $harnessEvents5 = Join-Path ([string]$harnessJson5.fixture) 'repo/.work/events.jsonl' }
+    $fixture5 = New-EngineFixture 'policy' @([pscustomobject]@{ Id = 'T-101'; Title = 'policy one'; Domain = 'alpha/**' })
+    if ($fixture5.SeedOk) {
+        $er5 = Invoke-EngineScenario $fixture5 @('--cohort-size', '1', '--review', '--join', '--inject-escalate', 'T-101')
+        if ($er5.ExitCode -ne 0) { $script:Failures.Add("FAIL - engine policy pairing exited $($er5.ExitCode): $($er5.Err.Trim())$($er5.Out.Trim())") }
+        else { Assert-True ($er5.Out -match '"to":"escalated"') 'engine policy staging escalated the denied task' }
+    }
+
+    # ======================================================================
+    # TERMINAL PAIRING 6 (T-304): a passing required-check gate reaches the
+    # same one-task publication/archival surface as the engine join barrier.
+    # ======================================================================
+    $harnessJson6 = $null; $harnessEvents6 = ''
+    $hr6 = Invoke-Ps $script:Harness @('scenario', '--vcs', 'git', '--name', 'checks', '--keep', '--json')
+    if ($hr6.ExitCode -ne 0) { $script:Failures.Add("FAIL - harness checks scenario exited $($hr6.ExitCode): $($hr6.Err.Trim())") }
+    else { try { $harnessJson6 = $hr6.Out.Trim() | ConvertFrom-Json } catch { $script:Failures.Add("FAIL - harness checks scenario produced unparseable JSON: $($hr6.Out)") } }
+    if ($harnessJson6) { $script:TempDirs.Add([string]$harnessJson6.fixture); $harnessEvents6 = Join-Path ([string]$harnessJson6.fixture) 'repo/.work/events.jsonl' }
+    $fixture6 = New-EngineFixture 'checks' @([pscustomobject]@{ Id = 'T-101'; Title = 'checks one'; Domain = 'alpha/**' })
+    if ($fixture6.SeedOk) {
+        $er6 = Invoke-EngineScenario $fixture6 @('--cohort-size', '1', '--review', '--join')
+        if ($er6.ExitCode -ne 0) { $script:Failures.Add("FAIL - engine checks pairing exited $($er6.ExitCode): $($er6.Err.Trim())$($er6.Out.Trim())") }
+        else { Assert-True ($er6.Out -match '"published":\["T-101"\]') 'engine checks staging published T-101' }
+    }
+
+    # ======================================================================
     # Compare the fingerprints.
     # ======================================================================
     if ($harnessJson1 -and $harnessJson2 -and (Test-Path -LiteralPath $harnessEvents1) -and (Test-Path -LiteralPath $harnessEvents2) -and
@@ -475,6 +622,18 @@ try {
         $perturbedFp = Sha256Hex ((@($perturbed) | Sort-Object -Unique) -join ';')
         Assert-True ($perturbedFp -cne $engineFp) 'a perturbed review/fix-cycle identity yields a DIFFERENT fingerprint (drift detector has teeth)'
     }
+
+    # Each terminal pairing is checked independently. Do not merge these into the aggregate
+    # clean/review-cycle fingerprint above: doing so would allow a clean scenario to make a
+    # terminal pairing vacuous by contributing the same broad event identities.
+    if ($harnessJson3) { Assert-Equal 'partial' ([string]$harnessJson3.outcome) 'harness conflict terminal outcome is partial publication' }
+    Assert-ScenarioPair 'conflict' $harnessJson3 $harnessEvents3 $fixture3.Events
+    if ($harnessJson4) { Assert-Equal 'escalated' ([string]$harnessJson4.outcome) 'harness quarantine terminal outcome is escalation after bounded retries' }
+    Assert-ScenarioPair 'quarantine/check-gate' $harnessJson4 $harnessEvents4 $fixture4.Events
+    if ($harnessJson5) { Assert-Equal 'escalated' ([string]$harnessJson5.outcome) 'harness policy terminal outcome is safe escalation' }
+    Assert-ScenarioPair 'policy' $harnessJson5 $harnessEvents5 $fixture5.Events -PolicySurface
+    if ($harnessJson6) { Assert-Equal 'published' ([string]$harnessJson6.outcome) 'harness required-check terminal outcome is publication' }
+    Assert-ScenarioPair 'checks' $harnessJson6 $harnessEvents6 $fixture6.Events
 } finally {
     Cleanup
 }
@@ -483,7 +642,7 @@ try {
 # Report.
 # ==========================================================================
 if ($script:Failures.Count -eq 0) {
-    Write-Host 'OK - engine and processor-prose converge on the shared fingerprint (pre-cutover equivalence oracle, T-110 + T-128 surface).'
+    Write-Host 'OK - engine and processor-prose converge on clean, review-cycle and terminal conflict/quarantine/policy/checks parity surfaces (pre-cutover equivalence oracle, T-110 + T-128 + T-304).'
     exit 0
 }
 Write-Host "FAILED - $($script:Failures.Count) assertion(s):"

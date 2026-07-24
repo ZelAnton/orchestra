@@ -97,6 +97,12 @@ workspace, коммитит результаты листовых агентов
 - `engine/src/contract.rs::validate_merge_report_for_ready` связывает распарсенные outcome-строки
   merger с фактическим `ready`-набором до первой мутации join-барьера: ровно один результат на
   каждую ready-задачу, без лишних или дублирующих id; неполный/чужой отчёт fail-closed.
+- `tests/test-engine-processor-parity.ps1` — pre-cutover oracle: помимо clean и review-cycle,
+  он отдельно сопоставляет timestamp/event-id-независимый event surface для terminal-сценариев
+  harness `conflict`, `quarantine`, `policy` и `checks` с эквивалентными staging knobs engine.
+  Каждая пара имеет non-vacuity assertion; policy осознанно сравнивает structural surface и
+  отдельно подтверждает safe terminal outcome, потому что harness не эмитит policy-escalation
+  status event, а engine эмитит fail-closed transition.
 - `engine run` имеет два явных режима: `--once` выполняет одну когорту, а `--drain` удерживает
   одну owner-аренду и последовательно открывает когорты. На безопасной границе `--drain` сначала
   уважает `.work/PAUSE`, затем heartbeat-ит owner и вызывает `queue-tx inbox-drain`, после чего

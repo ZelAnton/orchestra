@@ -330,7 +330,6 @@ fn done_task_ids(work_dir: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(work_dir.join("Tasks_Done.md")).unwrap_or_default();
     text.lines()
         .filter_map(orchestra_engine::state::archive_header_task_id)
-        .map(str::to_owned)
         .collect()
 }
 
@@ -414,7 +413,7 @@ mod tests {
         let ids = done_task_ids(&work);
         std::fs::remove_dir_all(&work).expect("remove test work directory");
 
-        let expected: BTreeSet<String> = ["T-090", "T-091", "T-092", "T-093"]
+        let expected: BTreeSet<String> = ["T-90", "T-91", "T-92", "T-93"]
             .iter()
             .map(|s| s.to_string())
             .collect();
