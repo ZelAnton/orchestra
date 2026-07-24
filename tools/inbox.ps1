@@ -468,7 +468,7 @@ function Cmd-List {
             Write-Output "$($message.id)  $($message.processing_status)/$($message.reply_status)  from=$($message.from_project.name)  $($message.subject)"
         }
         Write-Output "count=$($messages.Count)"
-        foreach ($error in @($projection.errors)) { Write-Output "error id=$($error.id) message=$($error.error)" }
+        foreach ($diagnostic in @($projection.errors)) { Write-Output "error id=$($diagnostic.id) message=$($diagnostic.error)" }
     }
 }
 
@@ -548,7 +548,7 @@ function Cmd-Reconcile {
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 5 }
     else {
         Write-Output "reconciled=$($updated.Count)"
-        foreach ($error in @($projection.errors)) { Write-Output "error id=$($error.id) message=$($error.error)" }
+        foreach ($diagnostic in @($projection.errors)) { Write-Output "error id=$($diagnostic.id) message=$($diagnostic.error)" }
     }
 }
 
@@ -589,7 +589,7 @@ function Cmd-Actionable {
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 5 }
     else {
         Write-Output "actionable=$($result.count) new=$($new.Count) unresolved=$($unresolved.Count) completable=$($completable.Count) reply_pending=$($replyPending.Count)"
-        foreach ($error in @($projection.errors)) { Write-Output "error id=$($error.id) message=$($error.error)" }
+        foreach ($diagnostic in @($projection.errors)) { Write-Output "error id=$($diagnostic.id) message=$($diagnostic.error)" }
     }
 }
 
