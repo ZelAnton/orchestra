@@ -92,6 +92,9 @@ workspace, коммитит результаты листовых агентов
   `completed_ids` читает только заголовки `### [T-NNN]` в `Tasks_Done.md` и добавляет
   дескрипторы в состояниях `done`/`published`; `archive_header_task_id` и общий
   `now_epoch_secs` экспортируются через `engine::state` для `plan --dry-run` и `run --once`.
+- `engine/src/contract.rs::validate_merge_report_for_ready` связывает распарсенные outcome-строки
+  merger с фактическим `ready`-набором до первой мутации join-барьера: ровно один результат на
+  каждую ready-задачу, без лишних или дублирующих id; неполный/чужой отчёт fail-closed.
 - `engine/src/supervise.rs` гарантирует уничтожение всего дерева процесса не только при
   timeout/cancel, но и при ошибке watchdog-вызова `Child::try_wait`: аварийная ветка вызывает
   `kill_tree` до выхода из цикла, оставляя `timed_out=false` и `cancelled=false`, поэтому

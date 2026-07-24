@@ -19,6 +19,7 @@
 //! pure functions over the review text — no model judgment involved.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 /// A finding's lifecycle status (the four words the contract uses, plus a catch-all).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +259,40 @@ pub fn parse_merge_report(text: &str) -> Vec<MergeLine> {
         }
     }
     out
+}
+
+/// Fail closed unless a merge report gives exactly one outcome for every task admitted to the
+/// join barrier. Parsing intentionally remains permissive about report prose; this second layer
+/// binds the recognized outcome lines to the authoritative `ready` set before any state mutation.
+pub fn validate_merge_report_for_ready(
+    lines: &[MergeLine],
+    ready: &[String],
+) -> Result<(), String> {
+    let expected: HashSet<&str> = ready.iter().map(String::as_str).collect();
+    let mut seen = HashSet::new();
+    let mut problems = Vec::new();
+
+    for line in lines {
+        if !expected.contains(line.id.as_str()) {
+            problems.push(format!("unexpected outcome for {}", line.id));
+        } else if !seen.insert(line.id.as_str()) {
+            problems.push(format!("duplicate outcome for {}", line.id));
+        }
+    }
+    for id in ready {
+        if !seen.contains(id.as_str()) {
+            problems.push(format!("missing outcome for {id}"));
+        }
+    }
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "merge report does not exactly cover the ready set: {}",
+            problems.join("; ")
+        ))
+    }
 }
 
 /// Parse a review.md / review_integration.md body into its findings.
@@ -745,6 +780,25 @@ mod tests {
         // Only the well-formed T-202 line survives (bad id, empty sha, unknown verb dropped).
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].id, "T-202");
+    }
+
+    #[test]
+    fn merge_report_ready_coverage_requires_exactly_one_known_outcome_per_task() {
+        let ready = vec!["T-101".to_string(), "T-102".to_string()];
+        let complete = parse_merge_report("- [T-101] merged=one\n- [T-102] quarantined=conflict\n");
+        assert_eq!(validate_merge_report_for_ready(&complete, &ready), Ok(()));
+
+        let missing = parse_merge_report("- [T-101] merged=one\n");
+        assert!(validate_merge_report_for_ready(&missing, &ready)
+            .unwrap_err()
+            .contains("missing outcome for T-102"));
+
+        let duplicate_and_foreign = parse_merge_report(
+            "- [T-101] merged=one\n- [T-101] quarantined=conflict\n- [T-999] merged=other\n- [T-102] merged=two\n",
+        );
+        let error = validate_merge_report_for_ready(&duplicate_and_foreign, &ready).unwrap_err();
+        assert!(error.contains("duplicate outcome for T-101"));
+        assert!(error.contains("unexpected outcome for T-999"));
     }
 
     #[test]

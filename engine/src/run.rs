@@ -69,7 +69,8 @@ use serde_json::json;
 use crate::claude::{ClaudeCall, PermissionPosture};
 use crate::codex::{CodexCall, Sandbox};
 use crate::contract::{
-    parse_changed_files, parse_merge_report, parse_outcome, parse_review, MergeOutcome,
+    parse_changed_files, parse_merge_report, parse_outcome, parse_review,
+    validate_merge_report_for_ready, MergeOutcome,
 };
 use crate::lease::{self, AcquireVerdict};
 use crate::resolvers::{
@@ -1864,6 +1865,8 @@ impl<'a> Runner<'a> {
 
             // --- 4.2/4.3: sequential merge, decided off merge_report.md ----------------------
             let report = self.run_merge_round(&ready)?;
+            validate_merge_report_for_ready(&report, &ready)
+                .map_err(|message| RunError::new(exit::FAILED, message))?;
             for line in &report {
                 let prereqs = prereqs_of(snap, &line.id);
                 let domain = descriptor_globs(snap, &line.id);
