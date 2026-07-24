@@ -97,6 +97,11 @@ workspace, коммитит результаты листовых агентов
 - `engine/src/contract.rs::validate_merge_report_for_ready` связывает распарсенные outcome-строки
   merger с фактическим `ready`-набором до первой мутации join-барьера: ровно один результат на
   каждую ready-задачу, без лишних или дублирующих id; неполный/чужой отчёт fail-closed.
+- `engine run` имеет два явных режима: `--once` выполняет одну когорту, а `--drain` удерживает
+  одну owner-аренду и последовательно открывает когорты. На безопасной границе `--drain` сначала
+  уважает `.work/PAUSE`, затем heartbeat-ит owner и вызывает `queue-tx inbox-drain`, после чего
+  `run_body` перечитывает Snapshot; итоговый отчёт содержит все когорты, totals и причину
+  остановки (`queue-empty`/`paused`/`cohort-limit`). Лимит задаёт `--max-cohorts <n>`.
 - `engine/src/supervise.rs` гарантирует уничтожение всего дерева процесса не только при
   timeout/cancel, но и при ошибке watchdog-вызова `Child::try_wait`: аварийная ветка вызывает
   `kill_tree` до выхода из цикла, оставляя `timed_out=false` и `cancelled=false`, поэтому

@@ -40,7 +40,7 @@
 //!                             succeeds when the lock is free or provably stale and cleanly refuses
 //!                             a live processor lease; `release` presents the engine's own owner id
 //!                             so it can only remove its own lease. See `src/lease.rs`.
-//!   run      --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]
+//!   run      <--once|--drain> --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]
 //!            [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>]
 //!            [--live] [--codex-coder <off|fast|fast+std>] [--codex-network] [--json]
 //!                             Drive ONE cohort/phase end-to-end over a SANDBOX `.work` (task
@@ -53,7 +53,9 @@
 //!                             calls routed through the executor resolvers, each stating its
 //!                             permission posture on its own argv. `--work` is REQUIRED and has no
 //!                             default, so this can never touch the repository's live `.work`.
-//!                             `--once` is required.
+//!                             Select exactly one mode: `--once` runs one cohort; `--drain`
+//!                             keeps the owner lease and opens consecutive cohorts until the
+//!                             queue is empty, `.work/PAUSE` appears, or `--max-cohorts` is met.
 //!   __fake-agent ...          Hidden: a deterministic stand-in child used by the
 //!                             hermetic tests, by `selfcheck`, and by `run`'s round (emits
 //!                             stream-json; `--mode leaf` carries a parseable leaf report, and
@@ -1094,23 +1096,25 @@ fn lease_status(script: &str, work: &str, json: bool) -> i32 {
     lease_exit::OK
 }
 
-/// `run --once --work <sandbox>` — drive ONE cohort/phase end-to-end over a SANDBOX `.work`
+/// `run <--once|--drain> --work <sandbox>` — drive one or more cohort/phases over a SANDBOX `.work`
 /// (task T-109). `--work` is REQUIRED and has NO default, so `run` can never silently resolve the
-/// repository's live `.work`; `--once` is the only mode. Offline by DEFAULT: the round drives the
+/// repository's live `.work`; exactly one mode is required. Offline by DEFAULT: each round drives the
 /// deterministic `__fake-agent` stand-in. Opt into real leaf model calls with `--live` (task
 /// T-244): each leaf then spawns a real `claude -p`/`codex exec` child with its permission posture
 /// stated explicitly on its own argv; the transactional invariants (K-006) are unchanged.
 fn cmd_run(args: &[String]) {
-    if !args.iter().any(|a| a == "--once") {
+    let once = args.iter().any(|a| a == "--once");
+    let drain = args.iter().any(|a| a == "--drain");
+    if once == drain {
         eprintln!(
-            "usage: run --once --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]\n\
+            "usage: run <--once|--drain> --work <sandbox> [--root <dir>] [--tools <dir>] [--base <ref>]\n\
              \x20          [--batch <id>] [--cohort-size <n>] [--ttl <sec>] [--inject-escalate <T-ID>]\n\
              \x20          [--review] [--inject-findings <T-ID>] [--review-loop-max <n>]\n\
              \x20          [--converge-after <n>] [--join] [--integration-loop-max <n>]\n\
              \x20          [--inject-merge-conflict <T-ID>] [--inject-f-findings]\n\
              \x20          [--integration-converge-after <n>] [--live] [--leaf-deadline <sec>]\n\
-             \x20          [--codex-coder <off|fast|fast+std>] [--codex-network] [--json]\n\
-             (--once is the only mode; --work is REQUIRED and has no default, so run never touches the live .work.\n\
+             \x20          [--codex-coder <off|fast|fast+std>] [--codex-network] [--max-cohorts <n>] [--json]\n\
+             (--once runs one cohort; --drain runs consecutive cohorts; --work is REQUIRED and has no default.\n\
              \x20 --live opts into real claude/codex leaf calls — off by default the round stays hermetic.\n\
              \x20 --leaf-deadline overrides the per-leaf wall-clock budget; the default is 60s offline, minutes under --live)"
         );
@@ -1203,6 +1207,16 @@ fn cmd_run(args: &[String]) {
     // a rebuild — a shared 60s cap would time-out→tree-kill every live leaf into escalation (R-01).
     let leaf_deadline_override = opt(args, "--leaf-deadline").and_then(|s| s.parse::<u64>().ok());
     let json = args.iter().any(|a| a == "--json");
+    let max_cohorts = match opt(args, "--max-cohorts") {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(value) if value > 0 => value,
+            _ => {
+                eprintln!("run: --max-cohorts must be a positive integer");
+                exit(run::exit::USAGE);
+            }
+        },
+        None => usize::MAX,
+    };
 
     let cfg = RunConfig {
         work,
@@ -1230,6 +1244,22 @@ fn cmd_run(args: &[String]) {
         leaf_deadline: run::resolve_leaf_deadline(leaf_deadline_override, live),
     };
 
+    if drain {
+        match run::run_drain(&cfg, max_cohorts) {
+            Ok(report) => {
+                if json {
+                    println!("{}", report.to_json());
+                } else {
+                    print!("{}", report.to_human());
+                }
+            }
+            Err(e) => {
+                eprintln!("run: {}", e.message);
+                exit(e.code);
+            }
+        }
+        return;
+    }
     match run::run_once(&cfg) {
         Ok(report) => {
             if json {

@@ -64,7 +64,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::claude::{ClaudeCall, PermissionPosture};
 use crate::codex::{CodexCall, Sandbox};
@@ -510,8 +510,9 @@ impl RunReport {
         s
     }
 
-    /// Render the report as one compact JSON object (stable field order).
-    pub fn to_json(&self) -> String {
+    /// Render the report as a JSON value. Kept separate from [`Self::to_json`] so a drain
+    /// summary can embed real cohort objects rather than JSON-escaped strings.
+    pub fn to_json_value(&self) -> Value {
         json!({
             "owner": self.owner,
             "batch_id": self.batch_id,
@@ -544,6 +545,90 @@ impl RunReport {
                     "cycles": r.cycles,
                 })),
             })).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Render the report as one compact JSON object (stable field order).
+    pub fn to_json(&self) -> String {
+        self.to_json_value().to_string()
+    }
+}
+
+/// The deterministic stop condition of a continuous `run --drain` invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainStop {
+    QueueEmpty,
+    Paused,
+    CohortLimit,
+}
+
+impl DrainStop {
+    fn as_str(self) -> &'static str {
+        match self {
+            DrainStop::QueueEmpty => "queue-empty",
+            DrainStop::Paused => "paused",
+            DrainStop::CohortLimit => "cohort-limit",
+        }
+    }
+}
+
+/// Aggregate report for a continuous run. Every cohort keeps its own full [`RunReport`], while
+/// the aggregate makes the terminal condition and cross-cohort totals explicit to operators.
+#[derive(Debug, Clone)]
+pub struct DrainReport {
+    pub owner: String,
+    pub cohorts: Vec<RunReport>,
+    pub stopped_by: DrainStop,
+    pub lease_released: bool,
+}
+
+impl DrainReport {
+    pub fn to_human(&self) -> String {
+        let mut s = String::new();
+        let admitted: usize = self.cohorts.iter().map(|r| r.admitted.len()).sum();
+        let published: usize = self
+            .cohorts
+            .iter()
+            .filter_map(|r| r.join.as_ref())
+            .map(|j| j.published.len())
+            .sum();
+        let events: usize = self.cohorts.iter().map(|r| r.events_appended).sum();
+        let _ = writeln!(s, "Engine run --drain (owner={})", self.owner);
+        for (index, report) in self.cohorts.iter().enumerate() {
+            let _ = writeln!(s, "\nCohort {} of {}", index + 1, self.cohorts.len());
+            s.push_str(&report.to_human());
+        }
+        let _ = writeln!(
+            s,
+            "Drain summary · cohorts={} · admitted={} · published={} · events={} · stopped_by={} · lease released: {}",
+            self.cohorts.len(),
+            admitted,
+            published,
+            events,
+            self.stopped_by.as_str(),
+            self.lease_released
+        );
+        s
+    }
+
+    pub fn to_json(&self) -> String {
+        let admitted: usize = self.cohorts.iter().map(|r| r.admitted.len()).sum();
+        let published: usize = self
+            .cohorts
+            .iter()
+            .filter_map(|r| r.join.as_ref())
+            .map(|j| j.published.len())
+            .sum();
+        let events: usize = self.cohorts.iter().map(|r| r.events_appended).sum();
+        json!({
+            "owner": self.owner,
+            "cohorts": self.cohorts.iter().map(RunReport::to_json_value).collect::<Vec<_>>(),
+            "cohorts_completed": self.cohorts.len(),
+            "tasks_admitted": admitted,
+            "tasks_published": published,
+            "events_appended": events,
+            "stopped_by": self.stopped_by.as_str(),
+            "lease_released": self.lease_released,
         })
         .to_string()
     }
@@ -747,27 +832,7 @@ fn prereqs_of(snap: &Snapshot, id: &str) -> Vec<String> {
 
 /// Drive ONE cohort/phase end-to-end over the sandbox `.work` in `cfg.work`.
 pub fn run_once(cfg: &RunConfig) -> Result<RunReport, RunError> {
-    if !cfg.work.is_dir() {
-        return Err(RunError::new(
-            exit::USAGE,
-            format!("work directory not found: {}", cfg.work.display()),
-        ));
-    }
-    for (name, path) in [
-        ("state-tx.ps1", cfg.state_tx()),
-        ("queue-tx.ps1", cfg.queue_tx()),
-        ("outbox.ps1", cfg.outbox()),
-    ] {
-        if !path.exists() {
-            return Err(RunError::new(
-                exit::USAGE,
-                format!(
-                    "{name} not found at {} (pass --tools <dir> or --root <project root>)",
-                    path.display()
-                ),
-            ));
-        }
-    }
+    validate_run_config(cfg)?;
 
     let mut r = Runner::new(cfg);
     let owner = r.acquire_lease()?;
@@ -790,6 +855,104 @@ pub fn run_once(cfg: &RunConfig) -> Result<RunReport, RunError> {
                     .push_str(" (warning: lease could not be released cleanly)");
             }
             Err(e)
+        }
+    }
+}
+
+/// Validate the sandbox and all transactional tools before acquiring an owner lease.
+fn validate_run_config(cfg: &RunConfig) -> Result<(), RunError> {
+    if !cfg.work.is_dir() {
+        return Err(RunError::new(
+            exit::USAGE,
+            format!("work directory not found: {}", cfg.work.display()),
+        ));
+    }
+    for (name, path) in [
+        ("state-tx.ps1", cfg.state_tx()),
+        ("queue-tx.ps1", cfg.queue_tx()),
+        ("outbox.ps1", cfg.outbox()),
+    ] {
+        if !path.exists() {
+            return Err(RunError::new(
+                exit::USAGE,
+                format!(
+                    "{name} not found at {} (pass --tools <dir> or --root <project root>)",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Drain consecutive cohorts while retaining one owner lease. A `PAUSE` file is checked only at
+/// cohort boundaries, so a running cohort remains atomic and no new work is admitted after pause.
+/// At each admitted-cohort boundary it renews the owner lease and drains `.work/queue_inbox/`
+/// transactionally before reloading the next [`Snapshot`].
+pub fn run_drain(cfg: &RunConfig, max_cohorts: usize) -> Result<DrainReport, RunError> {
+    if max_cohorts == 0 {
+        return Err(RunError::new(
+            exit::USAGE,
+            "--max-cohorts must be at least 1",
+        ));
+    }
+    validate_run_config(cfg)?;
+
+    let mut lease_runner = Runner::new(cfg);
+    let owner = lease_runner.acquire_lease()?;
+    lease_runner.owner = owner.clone();
+    let mut reports = Vec::new();
+    let mut stopped_by = DrainStop::CohortLimit;
+    let result: Result<(), RunError> = (|| {
+        for n in 1..=max_cohorts {
+            // This is the one safe inter-cohort boundary: a pause prevents *all* following
+            // mutations, then the existing owner lease is renewed and accumulated proposals are
+            // made visible before `run_body` takes its fresh Snapshot.
+            if cfg.work.join("PAUSE").exists() {
+                stopped_by = DrainStop::Paused;
+                break;
+            }
+            lease_runner.heartbeat()?;
+            lease_runner.drain_queue_inbox()?;
+
+            let mut cohort_cfg = cfg.clone();
+            cohort_cfg.batch_id = format!("{}-{:03}", cfg.batch_id, n);
+            let mut runner = Runner::new(&cohort_cfg);
+            runner.owner = owner.clone();
+            let report = runner.run_body()?;
+            if report.idle_reason.is_some() {
+                // `run_body` had to load a fresh Snapshot to establish emptiness, but it did not
+                // open a cohort or mutate state. Keep that no-op probe out of the aggregate of
+                // actually processed cohorts.
+                stopped_by = DrainStop::QueueEmpty;
+                break;
+            }
+            let mut report = report;
+            report.owner = owner.clone();
+            report.events_appended = runner.events;
+            report.lease_released = false;
+            reports.push(report);
+            lease_runner.heartbeat()?;
+        }
+        Ok(())
+    })();
+    let released = lease_runner.release_lease().unwrap_or(false);
+    match result {
+        Ok(()) => Ok(DrainReport {
+            owner,
+            // A cohort report records its own boundary and therefore correctly remains `false`:
+            // the single retained owner lease is released only once, on this aggregate report.
+            cohorts: reports,
+            stopped_by,
+            lease_released: released,
+        }),
+        Err(mut error) => {
+            if !released {
+                error
+                    .message
+                    .push_str(" (warning: lease could not be released cleanly)");
+            }
+            Err(error)
         }
     }
 }
@@ -925,6 +1088,15 @@ impl<'a> Runner<'a> {
     fn heartbeat(&self) -> Result<(), RunError> {
         let argv = lease::heartbeat_argv(&self.work_s, &self.owner);
         self.tool_ok(&self.cfg.state_tx(), &argv, "lease heartbeat")?;
+        Ok(())
+    }
+
+    /// Make proposals accumulated while the owner lease was held visible to the next cohort. The
+    /// queue tool owns its own short transaction lock and keeps malformed dependency records in
+    /// the audit quarantine, so a successful drain is safe to run at every cohort boundary.
+    fn drain_queue_inbox(&self) -> Result<(), RunError> {
+        let argv = vec!["inbox-drain".into(), "--work".into(), self.work_s.clone()];
+        self.tool_ok(&self.cfg.queue_tx(), &argv, "queue inbox drain")?;
         Ok(())
     }
 

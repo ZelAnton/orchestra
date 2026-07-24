@@ -327,7 +327,7 @@ mod tests {
         let completed = completed_ids(&work, &snapshot);
         fs::remove_dir_all(&work).expect("remove test work directory");
 
-        let expected: BTreeSet<String> = ["T-090", "T-091", "T-092", "T-093"]
+        let expected: BTreeSet<String> = ["T-90", "T-91", "T-92", "T-93"]
             .iter()
             .map(|s| s.to_string())
             .collect();

@@ -1,4 +1,4 @@
-//! Hermetic, offline end-to-end proof of `engine run --once` (task T-109): drive the REAL built
+//! Hermetic, offline end-to-end proof of `engine run --once` / `--drain` (task T-109/T-303): drive the REAL built
 //! binary as the headless engine over a throwaway **sandbox** `.work` and the REAL transaction
 //! tools (`queue-tx.ps1` / `state-tx.ps1` / `outbox.ps1`), and assert the engine drives ONE
 //! cohort/phase end to end — take its owner lease, admit a cohort by readiness, capture each task,
@@ -121,6 +121,20 @@ fn queue_propose(
     cmd.output().expect("spawn queue-tx propose")
 }
 
+/// Queue a task through the active-owner proposal inbox. `inbox-drain` assigns its next numeric
+/// task id at the following safe cohort boundary.
+fn queue_inbox_add(host: &str, work: &Path, title: &str, predecessors: &str) -> Output {
+    let script = tools_dir().join("queue-tx.ps1");
+    Command::new(host)
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .args(["inbox-add", "--work"])
+        .arg(work)
+        .args(["--title", title, "--predecessors", predecessors])
+        .output()
+        .expect("spawn queue-tx inbox-add")
+}
+
 /// Seed the planner-owned descriptor that supplies a task's typed conflict-domain to admission.
 fn write_planned_descriptor(work: &Path, id: &str, state: &str, domain: Option<&str>) {
     let dir = work.join("tasks").join(id);
@@ -144,6 +158,20 @@ fn engine_run(work: &Path, extra: &[&str]) -> Output {
         cmd.arg(a);
     }
     cmd.output().expect("spawn engine run")
+}
+
+/// Run `engine run --drain` over the sandbox with the real tools.
+fn engine_drain(work: &Path, extra: &[&str]) -> Output {
+    let mut cmd = Command::new(BIN);
+    cmd.args(["run", "--drain", "--work"])
+        .arg(work)
+        .arg("--tools")
+        .arg(tools_dir())
+        .args(["--base", "sandbox-base"]);
+    for a in extra {
+        cmd.arg(a);
+    }
+    cmd.output().expect("spawn engine drain")
 }
 
 fn stdout_of(o: &Output) -> String {
@@ -266,6 +294,125 @@ fn opens_cohort_and_runs_one_round_end_to_end() {
     assert!(
         out.contains("\"verdict\":\"готово\""),
         "round used the offline leaf stand-in: {out}"
+    );
+}
+
+#[test]
+fn drain_runs_sequential_cohorts_and_makes_boundary_inbox_visible() {
+    let host = host_or_skip!();
+    let sb = Sandbox::new();
+
+    // T-701 is initially ready. T-702 exists only in queue_inbox and depends on T-701, proving
+    // that the second cohort both drains the inbox at its safe boundary and observes the first
+    // cohort's archive publication through the normal readiness resolver.
+    let first = queue_propose(&host, &sb.work, "T-701", "first drain cohort", None);
+    assert!(
+        first.status.success(),
+        "propose T-701: {}",
+        stderr_of(&first)
+    );
+    let queued = queue_inbox_add(&host, &sb.work, "second drain cohort", "T-701");
+    assert!(
+        queued.status.success(),
+        "inbox-add T-702: {}",
+        stderr_of(&queued)
+    );
+    write_planned_descriptor(&sb.work, "T-701", "не начата", Some("engine/src/**"));
+    // Do not pre-create a T-702 descriptor: `inbox-drain` derives its next id from all known
+    // runtime artifacts, so a speculative descriptor would reserve an id and obscure the actual
+    // proposal allocation. The second one-task cohort safely admits its unknown domain.
+
+    let run = engine_drain(
+        &sb.work,
+        &[
+            "--batch",
+            "B-drain",
+            "--cohort-size",
+            "1",
+            "--join",
+            "--max-cohorts",
+            "3",
+            "--json",
+        ],
+    );
+    let out = stdout_of(&run);
+    assert!(
+        run.status.success(),
+        "drain exits 0: {out} / {}",
+        stderr_of(&run)
+    );
+
+    assert!(
+        out.contains("\"batch_id\":\"B-drain-001\"") && out.contains("\"admitted\":[\"T-701\"]"),
+        "first cohort ran T-701: {out}"
+    );
+    assert!(
+        out.contains("\"batch_id\":\"B-drain-002\"") && out.contains("\"admitted\":[\"T-702\"]"),
+        "second cohort drained the inbox and admitted the now-ready T-702: {out}"
+    );
+    assert!(
+        out.contains("\"cohorts_completed\":2") && out.contains("\"stopped_by\":\"queue-empty\""),
+        "the empty boundary probe is reported without counting it as a third cohort: {out}"
+    );
+    assert!(
+        out.contains("\"tasks_published\":2") && out.contains("\"lease_released\":true"),
+        "aggregate reports both publications and a released retained lease: {out}"
+    );
+    assert_eq!(
+        out.matches("\"lease_released\":false").count(),
+        2,
+        "each nested cohort correctly reports that the retained lease was not released between cohorts: {out}"
+    );
+
+    let done = sb.read("Tasks_Done.md");
+    assert!(
+        done.contains("[T-701]") && done.contains("[T-702]"),
+        "both sequential cohorts were published and archived: {done}"
+    );
+    let queue = sb.read("Tasks_Queue.md");
+    assert!(
+        !queue.contains("[T-701]") && !queue.contains("[T-702]"),
+        "both archived queue tasks were removed: {queue}"
+    );
+    assert!(
+        !sb.work.join("orchestrator.lock").exists(),
+        "one retained lease was released after the final aggregate"
+    );
+}
+
+#[test]
+fn drain_honours_pause_before_opening_the_next_cohort() {
+    let host = host_or_skip!();
+    let sb = Sandbox::new();
+    let queued = queue_propose(&host, &sb.work, "T-721", "pause boundary", None);
+    assert!(
+        queued.status.success(),
+        "propose T-721: {}",
+        stderr_of(&queued)
+    );
+    fs::write(sb.work.join("PAUSE"), "operator requested pause\n").expect("write PAUSE");
+
+    let run = engine_drain(&sb.work, &["--batch", "B-paused", "--json"]);
+    let out = stdout_of(&run);
+    assert!(
+        run.status.success(),
+        "paused drain exits 0: {out} / {}",
+        stderr_of(&run)
+    );
+    assert!(
+        out.contains("\"cohorts_completed\":0")
+            && out.contains("\"stopped_by\":\"paused\"")
+            && out.contains("\"lease_released\":true"),
+        "pause is reported without beginning a cohort: {out}"
+    );
+    let queue = sb.read("Tasks_Queue.md");
+    assert!(
+        queue.contains("[T-721]") && queue.contains("не начата"),
+        "the pause leaves an otherwise-ready task unclaimed: {queue}"
+    );
+    assert!(
+        !sb.work.join("orchestrator.lock").exists(),
+        "the retained owner lease is released on a paused drain"
     );
 }
 
@@ -436,7 +583,7 @@ fn run_requires_a_work_dir_and_accepts_live() {
         stderr_of(&missing_work)
     );
 
-    // `--once` is the only mode.
+    // One explicit mode is required: neither `--once` nor `--drain` may be inferred.
     let no_once = Command::new(BIN)
         .args(["run", "--work", "/tmp/whatever"])
         .output()
@@ -444,7 +591,17 @@ fn run_requires_a_work_dir_and_accepts_live() {
     assert_eq!(
         no_once.status.code(),
         Some(2),
-        "missing --once is a usage error"
+        "missing run mode is a usage error"
+    );
+
+    let two_modes = Command::new(BIN)
+        .args(["run", "--once", "--drain", "--work", "/tmp/whatever"])
+        .output()
+        .expect("spawn engine run with both modes");
+    assert_eq!(
+        two_modes.status.code(),
+        Some(2),
+        "two run modes are also a usage error"
     );
 
     // `--live` (task T-244) is now ACCEPTED, not refused: passing it without `--work` falls through
