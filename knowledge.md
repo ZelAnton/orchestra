@@ -92,6 +92,8 @@ workspace, коммитит результаты листовых агентов
   `completed_ids` читает только заголовки `### [T-NNN]` в `Tasks_Done.md` и добавляет
   дескрипторы в состояниях `done`/`published`; `archive_header_task_id` и общий
   `now_epoch_secs` экспортируются через `engine::state` для `plan --dry-run` и `run --once`.
+  `Предпосылки:` принимают только exact comma-separated `T-<digits>` tokens и канонизируют
+  leading zeros (`T-045` → `T-45`), что совпадает с `queue-tx` и Snapshot, потребляемым TUI.
 - `engine/src/contract.rs::validate_merge_report_for_ready` связывает распарсенные outcome-строки
   merger с фактическим `ready`-набором до первой мутации join-барьера: ровно один результат на
   каждую ready-задачу, без лишних или дублирующих id; неполный/чужой отчёт fail-closed.

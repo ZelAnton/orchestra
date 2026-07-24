@@ -29,11 +29,7 @@ pub fn now_epoch_secs() -> u64 {
 pub fn completed_ids(work: &Path, _snap: &Snapshot) -> BTreeSet<String> {
     let mut set = BTreeSet::new();
     if let Ok(text) = fs::read_to_string(work.join("Tasks_Done.md")) {
-        set.extend(
-            text.lines()
-                .filter_map(archive_header_task_id)
-                .map(str::to_owned),
-        );
+        set.extend(text.lines().filter_map(archive_header_task_id));
     }
     set
 }
@@ -49,8 +45,8 @@ pub fn completed_ids(work: &Path, _snap: &Snapshot) -> BTreeSet<String> {
 ///     `# Активная задача T-NNN` / `# Active task T-NNN` (case-insensitive, either language).
 ///
 /// In every shape the id must be `T-` followed by at least one digit; a bare `T-` or a
-/// non-numeric `T-abc` is rejected. Returns a borrow of the id substring (`"T-NNN"`) or `None`.
-pub fn archive_header_task_id(line: &str) -> Option<&str> {
+/// non-numeric `T-abc` is rejected. Returns the canonical numeric id (`T-045` → `T-45`) or `None`.
+pub fn archive_header_task_id(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
     // `#` is ASCII (1 byte), so the count of leading '#' is a valid char boundary to slice at.
     let hashes = trimmed.len() - trimmed.trim_start_matches('#').len();
@@ -84,16 +80,15 @@ pub fn archive_header_task_id(line: &str) -> Option<&str> {
 /// least one digit and NOTHING else — the strict, whole-token check mirroring queue-tx's
 /// `\[\s*T-0*(\d+)\s*\]` (which allows only whitespace, never trailing text, before `]`). Rejects
 /// a bare `T-` or a non-numeric `T-abc`.
-fn valid_task_id(id: &str) -> Option<&str> {
-    let digits = id.strip_prefix("T-")?;
-    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then_some(id)
+fn valid_task_id(id: &str) -> Option<String> {
+    canonical_task_id(id)
 }
 
 /// The id inside a legacy H1 token, mirroring queue-tx's `T-0*(\d+)\b`: `T-` then at least one
 /// digit, ending at a word boundary — end of token, or a trailing non-alphanumeric char (`.`/`,`)
 /// tolerated as queue-tx's `\b` does. `T-1abc` / `T-1_` (a word char right after the digits) is
 /// rejected, exactly as `\b` fails there.
-fn legacy_id_token(token: &str) -> Option<&str> {
+fn legacy_id_token(token: &str) -> Option<String> {
     let digits = token.strip_prefix("T-")?;
     let n = digits.chars().take_while(char::is_ascii_digit).count();
     if n == 0 {
@@ -102,7 +97,7 @@ fn legacy_id_token(token: &str) -> Option<&str> {
     match digits[n..].chars().next() {
         Some(c) if c.is_alphanumeric() || c == '_' => None,
         // "T-" is 2 ASCII bytes and the digit run is `n` ASCII bytes, so `2 + n` is a valid slice.
-        _ => Some(&token[..2 + n]),
+        _ => canonical_task_id(&token[..2 + n]),
     }
 }
 
@@ -123,22 +118,30 @@ pub(crate) fn line_field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|l| l.strip_prefix(key).map(str::trim))
 }
 
-/// Parse a comma-separated `Предпосылки:` value into T-ids, dropping empties and any token that
-/// is not a T-id (`нет`, dashes, stray words).
+/// Parse a comma-separated `Предпосылки:` value into canonical T-ids, dropping empties and any
+/// invalid token (`нет`, dashes, stray words). Every consumer compares the canonical numeric form:
+/// `T-45` and `T-045` are the same prerequisite, while `T-45abc` is not a T-id at all.
 pub(crate) fn parse_task_id_list(value: &str) -> Vec<String> {
     value
         .split(',')
         .map(str::trim)
-        .filter(|t| is_task_id(t))
-        .map(String::from)
+        .filter_map(canonical_task_id)
         .collect()
 }
 
-/// `^T-\d` — a T-id is `T-` followed by at least one digit (mirrors `events::parse`).
+/// A canonicalizable T-id is exactly `T-` followed by one or more ASCII digits.
+pub(crate) fn canonical_task_id(s: &str) -> Option<String> {
+    let digits = s.strip_prefix("T-")?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let value = digits.parse::<u64>().ok()?;
+    Some(format!("T-{value}"))
+}
+
+/// Exact task-id validation used for record identities (not prerequisite aliases).
 pub(crate) fn is_task_id(s: &str) -> bool {
-    s.strip_prefix("T-")
-        .and_then(|r| r.chars().next())
-        .is_some_and(|c| c.is_ascii_digit())
+    canonical_task_id(s).is_some()
 }
 
 /// `^B-\d` — a batch id is `B-` followed by at least one digit (a `B-<UTC-stamp>`).
@@ -226,36 +229,48 @@ mod tests {
     fn archive_header_task_id_accepts_all_normative_shapes() {
         // H3 (canonical writer shape) and H2 bracketed headings.
         assert_eq!(
-            archive_header_task_id("### [T-091] H3 entry — статус: завершена"),
-            Some("T-091")
+            archive_header_task_id("### [T-091] H3 entry — статус: завершена").as_deref(),
+            Some("T-91")
         );
         assert_eq!(
-            archive_header_task_id("## [T-090] H2 entry — статус: завершена"),
-            Some("T-090")
+            archive_header_task_id("## [T-090] H2 entry — статус: завершена").as_deref(),
+            Some("T-90")
         );
         // Whitespace variants: leading indent, no space before `[`, spaces inside brackets.
-        assert_eq!(archive_header_task_id("   ###[T-1] tight"), Some("T-1"));
-        assert_eq!(archive_header_task_id("### [ T-7 ] spaced"), Some("T-7"));
+        assert_eq!(
+            archive_header_task_id("   ###[T-1] tight").as_deref(),
+            Some("T-1")
+        );
+        assert_eq!(
+            archive_header_task_id("### [ T-7 ] spaced").as_deref(),
+            Some("T-7")
+        );
         // Legacy non-bracketed H1, both languages, case-insensitive.
         assert_eq!(
-            archive_header_task_id("# Активная задача T-092"),
-            Some("T-092")
+            archive_header_task_id("# Активная задача T-092").as_deref(),
+            Some("T-92")
         );
-        assert_eq!(archive_header_task_id("# Active task T-093"), Some("T-093"));
         assert_eq!(
-            archive_header_task_id("# активная ЗАДАЧА T-094"),
-            Some("T-094")
+            archive_header_task_id("# Active task T-093").as_deref(),
+            Some("T-93")
         );
-        assert_eq!(archive_header_task_id("# ACTIVE TASK T-095"), Some("T-095"));
+        assert_eq!(
+            archive_header_task_id("# активная ЗАДАЧА T-094").as_deref(),
+            Some("T-94")
+        );
+        assert_eq!(
+            archive_header_task_id("# ACTIVE TASK T-095").as_deref(),
+            Some("T-95")
+        );
         // Legacy H1 id ends at a word boundary (queue-tx `\b`): a trailing `.` or extra token is
         // tolerated, so the resolvers agree on such a header too.
         assert_eq!(
-            archive_header_task_id("# Активная задача T-096."),
-            Some("T-096")
+            archive_header_task_id("# Активная задача T-096.").as_deref(),
+            Some("T-96")
         );
         assert_eq!(
-            archive_header_task_id("# Active task T-097 (note)"),
-            Some("T-097")
+            archive_header_task_id("# Active task T-097 (note)").as_deref(),
+            Some("T-97")
         );
     }
 
@@ -333,6 +348,8 @@ mod tests {
         assert_eq!(parse_task_id_list("T-102, T-103"), vec!["T-102", "T-103"]);
         assert!(parse_task_id_list("нет").is_empty());
         assert_eq!(parse_task_id_list("T-1, —, foo"), vec!["T-1"]);
+        assert_eq!(parse_task_id_list("T-045, T-45"), vec!["T-45", "T-45"]);
+        assert!(parse_task_id_list("T-45abc").is_empty());
     }
 
     #[test]

@@ -190,8 +190,9 @@ function Parse-Task {
     foreach ($bl in $body) {
         $pm = [regex]::Match($bl, $PredRegex)
         if ($pm.Success) {
-            foreach ($t in [regex]::Matches($pm.Groups[1].Value, 'T-0*(\d+)')) {
-                [void]$preds.Add([int]$t.Groups[1].Value)
+            foreach ($token in @($pm.Groups[1].Value -split ',' | ForEach-Object { $_.Trim() })) {
+                $t = [regex]::Match($token, '^T-0*(\d+)$')
+                if ($t.Success) { [void]$preds.Add([int]$t.Groups[1].Value) }
             }
         }
     }
