@@ -156,28 +156,42 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Match $r.Output 'not-ready: T-102.*waiting on T-101' '[archive-header] body mention does not complete T-101'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
-    # --- Scenario 3c: all supported archive heading shapes satisfy prerequisites
+    # --- Scenario 3c: the ONE normative archive-header contract (docs/queue_contract.md §12).
+    # All previously divergent heading shapes — H2 `##`, H3 `###`, legacy H1 ru/en — satisfy a
+    # prerequisite identically, while a body mention and a digitless `### [T-]` header do NOT.
+    # This is the SAME archive fixture the engine (`state::util`) and tui (`done_task_ids`) unit
+    # tests assert, so all three resolvers agree on one archive record (T-293).
     $W = New-Work
     try {
         $q = @(
             '# Очередь задач', '',
-            '### [T-093] Dependent task — статус: не начата',
+            '### [T-200] All-shapes dependent — статус: не начата',
             'body',
-            'Предпосылки: T-090, T-091, T-092'
+            'Предпосылки: T-090, T-091, T-092, T-093', '',
+            '### [T-201] Body-mention dependent — статус: не начата',
+            'body',
+            'Предпосылки: T-999'
         ) -join "`n"
         $done = @(
-            '# Завершённые задачи', '',
+            '# Выполненные задачи', '',
             '## [T-090] H2 archive entry — статус: завершена',
             '### [T-091] H3 archive entry — статус: завершена',
             '# Активная задача T-092',
-            'Состояние: завершена'
+            'Состояние: завершена',
+            '# Active task T-093', '',
+            'Body mention of T-999 must not count',
+            '### [T-] digitless header must not count'
         ) -join "`n"
         [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
         [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Done.md'), $done, (New-Object System.Text.UTF8Encoding($false)))
 
-        $r = Run-Tool @('ready', '--work', $W, '--id', 'T-093')
-        Assert-Equal 0 $r.ExitCode '[archive-heading-variants] dependent task is ready'
-        Assert-Match $r.Output 'ready\s+T-093' '[archive-heading-variants] H2, H3 and legacy H1 headings are recognized'
+        $r = Run-Tool @('ready', '--work', $W, '--id', 'T-200')
+        Assert-Equal 0 $r.ExitCode '[archive-header-contract] H2/H3/legacy-H1 headings all satisfy the prerequisite'
+        Assert-Match $r.Output 'ready\s+T-200' '[archive-header-contract] all four normative shapes recognized'
+
+        $r = Run-Tool @('ready', '--work', $W, '--id', 'T-201')
+        Assert-Equal 6 $r.ExitCode '[archive-header-contract] a body mention / digitless header does not satisfy'
+        Assert-Match $r.Output 'missing predecessor T-999' '[archive-header-contract] body mention T-999 is not an archive record'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
     # --- Scenario 4: fan-in (one task waits on several predecessors) --------
