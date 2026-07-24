@@ -58,6 +58,7 @@ function New-TempDir {
     return $d
 }
 function New-EventsFile { param([string]$Dir) return (Join-Path $Dir 'events.jsonl') }
+function New-OutboxLockPath { param([string]$Dir) return (Join-Path $Dir 'outbox-tx.lock') }
 
 # Runs outbox.ps1 as a child pwsh process; returns @{ ExitCode; Out; Err }. Args are
 # passed verbatim through ArgumentList (no shell), so JSON with backslashes is exact.
@@ -85,6 +86,48 @@ function Invoke-Outbox {
     $errT = $proc.StandardError.ReadToEndAsync()
     $proc.WaitForExit()
     return [pscustomobject]@{ ExitCode = $proc.ExitCode; Out = $outT.Result; Err = $errT.Result }
+}
+
+# Starts the real outbox tool without waiting. OUTBOX_TEST_LOCK_WAIT_SIGNAL is emitted by
+# tools/outbox.ps1 only after its atomic CreateNew probe has actually found the resolved
+# outbox lock contended, giving concurrency tests a deterministic blocked-reader handshake.
+function Start-OutboxAsync {
+    param([string[]]$ToolArgs, [string]$LockWaitSignal)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $script:PsExe
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $script:Utf8
+    $psi.StandardErrorEncoding = $script:Utf8
+    if ($LockWaitSignal) { $psi.EnvironmentVariables['OUTBOX_TEST_LOCK_WAIT_SIGNAL'] = $LockWaitSignal }
+    foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
+        $psi.ArgumentList.Add($a)
+    }
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    return [pscustomobject]@{
+        Process = $proc
+        OutTask = $proc.StandardOutput.ReadToEndAsync()
+        ErrTask = $proc.StandardError.ReadToEndAsync()
+    }
+}
+
+function Complete-OutboxAsync {
+    param($Running, [int]$TimeoutMs, [string]$Label)
+    $exited = $Running.Process.WaitForExit($TimeoutMs)
+    Assert-True $exited "$Label process completes within the safety budget"
+    if (-not $exited) {
+        try { $Running.Process.Kill() } catch { }
+        return [pscustomobject]@{ ExitCode = -999; Out = ''; Err = 'timed out' }
+    }
+    # Parameterless WaitForExit ensures redirected async output has fully drained.
+    $Running.Process.WaitForExit()
+    return [pscustomobject]@{
+        ExitCode = $Running.Process.ExitCode
+        Out      = $Running.OutTask.Result
+        Err      = $Running.ErrTask.Result
+    }
 }
 function Outbox-Id { param([string[]]$ToolArgs) return ((Invoke-Outbox (@('event-id') + $ToolArgs)).Out.Trim()) }
 
@@ -271,10 +314,11 @@ function Ref-UuidV5 {
 # =============================================================================
 {
     $dir = New-TempDir; $ev = New-EventsFile $dir
-    Write-File "$ev.lock" '99999'   # simulate a concurrently held lock
+    $heldLock = New-OutboxLockPath $dir
+    Write-File $heldLock '99999'   # simulate a concurrently held canonical outbox lock
     $r = Invoke-Outbox @('append', '--events', $ev, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}', '--lock-timeout-ms', '400')
     Assert-Exit $r 7 'a parallel writer that cannot take the lock is rejected (rc=7)'
-    Remove-Item -LiteralPath "$ev.lock" -Force
+    Remove-Item -LiteralPath $heldLock -Force
 
     # owner binding against the orchestrator.lock lease.
     $work = New-TempDir
@@ -573,6 +617,147 @@ function Ref-UuidV5 {
     Assert-Equal 3 (Line-Count $ev) 'built append after raw rejection preserves physical line boundaries'
     $verify = Invoke-Outbox @('verify', '--events', $ev, '--json')
     Assert-Exit $verify 0 'events.jsonl remains line-by-line valid after raw multiline rejections'
+}.Invoke()
+
+# =============================================================================
+# 15. Concurrent read/verify/metrics during an ACTIVE writer hold (T-294). The writer's
+#     documented single-writer critical section is: take the outbox lock, THEN open
+#     events.jsonl with [System.IO.FileShare]::None for the whole write (Cmd-Append).
+#     Windows sharing is governed by the FIRST opener's granted share mode, so a reader
+#     that only requests a more permissive share cannot itself survive that window - the
+#     fix is that `read`/`verify`/`metrics` now take the SAME lock for their whole read.
+#
+#     This is deliberately mixed addressing: the simulated writer derives events.jsonl +
+#     outbox-tx.lock from a `--work` directory exactly as append does, while every real
+#     consumer is invoked with `--events <work>/events.jsonl`. The writer waits on a release
+#     handshake instead of sleeping for a guessed duration. The test releases it only after
+#     the real consumer reports that its atomic CreateNew probe found that SAME canonical
+#     lock contended, proving the consumer reached the blocked state during FileShare.None.
+# =============================================================================
+{
+    $holdWriterText = @'
+param(
+    [Parameter(Mandatory)][string]$WorkPath,
+    [Parameter(Mandatory)][string]$ReadyPath,
+    [Parameter(Mandatory)][string]$ReleasePath,
+    [Parameter(Mandatory)][int]$TimeoutMs
+)
+# Mirrors `append --work X`: both paths are derived from X, then the canonical lock is
+# acquired before events.jsonl is opened with FileShare.None.
+$eventsPath = Join-Path $WorkPath 'events.jsonl'
+$lockPath = Join-Path $WorkPath 'outbox-tx.lock'
+$lockFs = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+try { $b = [System.Text.Encoding]::ASCII.GetBytes("$PID"); $lockFs.Write($b, 0, $b.Length) } finally { $lockFs.Dispose() }
+try {
+    $fs = [System.IO.File]::Open($eventsPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        [System.IO.File]::WriteAllText($ReadyPath, 'holding')
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+        while (-not (Test-Path -LiteralPath $ReleasePath) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 20
+        }
+        if (-not (Test-Path -LiteralPath $ReleasePath)) { throw 'timed out waiting for reader-blocked release handshake' }
+        $fs.Seek(0, [System.IO.SeekOrigin]::End) | Out-Null
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        $line = '{"schema_version":1,"event_id":"33333333-3333-4333-8333-333333333333","occurred_at":"2026-07-24T09:00:00Z","type":"cohort.opened","batch_id":"B-hold","actor":{"kind":"agent","name":"processor"},"payload":{}}' + "`n"
+        $bytes = $enc.GetBytes($line)
+        $fs.Write($bytes, 0, $bytes.Length)
+        $fs.Flush($true)
+    } finally { $fs.Dispose() }
+} finally {
+    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+}
+'@
+
+    function Wait-ForPath {
+        param([string]$Path, [int]$TimeoutMs)
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+        while (-not (Test-Path -LiteralPath $Path) -and [DateTime]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 20
+        }
+        return (Test-Path -LiteralPath $Path)
+    }
+
+    function Start-WriterHold {
+        param([string]$Dir, [int]$TimeoutMs)
+        $wrapper = Join-Path $Dir 'hold-writer.ps1'
+        [System.IO.File]::WriteAllText($wrapper, $holdWriterText, $script:Utf8)
+        $readyPath = Join-Path $Dir 'writer-ready'
+        $releasePath = Join-Path $Dir 'release-writer'
+        $proc = Start-Process -FilePath $script:PsExe -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+            '-WorkPath', $Dir, '-ReadyPath', $readyPath, '-ReleasePath', $releasePath,
+            '-TimeoutMs', "$TimeoutMs"
+        ) -NoNewWindow -PassThru
+        $ready = Wait-ForPath $readyPath 20000
+        Assert-True $ready '[concurrency] the simulated --work writer holds both the canonical lock and FileShare.None before dispatch'
+        return [pscustomobject]@{ Process = $proc; ReleasePath = $releasePath }
+    }
+
+    $waitBudgetMs = 60000
+
+    function Invoke-DuringWriterHold {
+        param([string]$Command, [string]$Dir, [string[]]$ExtraArgs)
+        $eventsPath = New-EventsFile $Dir
+        # Exercise the real append --work resolution before mixing in an --events consumer.
+        Invoke-Outbox @('append', '--work', $Dir, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') | Out-Null
+        $writer = Start-WriterHold -Dir $Dir -TimeoutMs $waitBudgetMs
+        $blockedPath = Join-Path $Dir "$Command-reader-blocked"
+        $running = Start-OutboxAsync -ToolArgs (@($Command, '--events', $eventsPath, '--lock-timeout-ms', "$waitBudgetMs") + $ExtraArgs) -LockWaitSignal $blockedPath
+
+        # This signal is written only after the real consumer's CreateNew attempt failed
+        # against the writer's canonical lock. Until then the writer keeps FileShare.None.
+        $blocked = Wait-ForPath $blockedPath 20000
+        Assert-True $blocked "[concurrency] $Command --events is confirmed blocked on the --work writer's canonical lock"
+        if ($blocked) {
+            Assert-True (-not $running.Process.HasExited) "[concurrency] $Command remains pending until the writer is released"
+        }
+
+        # Always release after the bounded handshake wait so a failed assertion cannot strand
+        # either child. Correct implementations reach this point only after confirmed overlap.
+        Write-File $writer.ReleasePath 'release'
+        $result = Complete-OutboxAsync $running $waitBudgetMs "[concurrency] $Command"
+        $writerExited = $writer.Process.WaitForExit($waitBudgetMs)
+        Assert-True $writerExited '[concurrency] the simulated writer completes after the reader-blocked handshake'
+        if ($writerExited) { Assert-Equal 0 $writer.Process.ExitCode '[concurrency] the simulated writer exits cleanly' }
+        return $result
+    }
+
+    # -- read: blocks behind the mixed-address writer lock, then succeeds on release. --
+    $dir1 = New-TempDir
+    $r1 = Invoke-DuringWriterHold -Command 'read' -Dir $dir1 -ExtraArgs @()
+    Assert-Exit $r1 0 'read during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
+    Assert-NotContains $r1.Err 'cannot read' 'read never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    Assert-Contains $r1.Out 'new=2' 'read observes both the pre-existing and the writer''s newly-appended event once released'
+
+    # -- verify: same, and reports both committed events. --
+    $dir2 = New-TempDir
+    $r2 = Invoke-DuringWriterHold -Command 'verify' -Dir $dir2 -ExtraArgs @('--json')
+    Assert-Exit $r2 0 'verify during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
+    Assert-NotContains $r2.Err 'cannot read' 'verify never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    $vobj = $r2.Out | ConvertFrom-Json
+    Assert-Equal 2 $vobj.events 'verify sees both events once the writer released'
+
+    # -- metrics: same, over the shared events-common reader. --
+    $dir3 = New-TempDir
+    $r3 = Invoke-DuringWriterHold -Command 'metrics' -Dir $dir3 -ExtraArgs @('--json')
+    Assert-Exit $r3 0 'metrics during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
+    Assert-NotContains $r3.Err 'cannot read' 'metrics never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    $mobj = $r3.Out | ConvertFrom-Json
+    Assert-Equal 2 $mobj.total_events 'metrics sees both events once the writer released'
+
+    # -- Regression guard: a foreign exclusive holder OUTSIDE the documented lock protocol
+    #    (no lock file - i.e. not `append`) still correctly fails as unreadable (rc=3), so
+    #    this fix targets the DOCUMENTED writer's lock+FileShare.None window specifically
+    #    and does not blanket-mask every IOException as a transient write race. --
+    $dir4 = New-TempDir; $ev4 = New-EventsFile $dir4
+    Invoke-Outbox @('append', '--events', $ev4, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') | Out-Null
+    $rogueFs = [System.IO.File]::Open($ev4, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $rRogue = Invoke-Outbox @('verify', '--events', $ev4, '--lock-timeout-ms', '2000')
+        Assert-Exit $rRogue 3 '[concurrency] a foreign exclusive holder outside the lock protocol still correctly fails as unreadable (rc=3)'
+        Assert-Contains $rRogue.Err 'cannot read' 'a genuine unreadable-file error still reports "cannot read"'
+    } finally { $rogueFs.Dispose() }
 }.Invoke()
 
 # =============================================================================

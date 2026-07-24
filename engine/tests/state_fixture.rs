@@ -123,6 +123,47 @@ fn state_json_reflects_every_source_and_canonical_names() {
 }
 
 #[test]
+fn state_presentations_include_delivery_target() {
+    let w = TmpWork::new();
+    w.write(
+        "Tasks_Queue.md",
+        "### [T-201] Empty lane defaults to current — статус: не начата\n\
+Delivery target:\n\n\
+### [T-202] Parked for next major — статус: не начата\n\
+Delivery target: next_major\n",
+    );
+
+    let json_out = run_state(&w.dir, &["--json"]);
+    let json_stdout = String::from_utf8_lossy(&json_out.stdout);
+    assert!(
+        json_out.status.success(),
+        "state --json exited nonzero: {json_stdout} / {}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(json_stdout.trim()).expect("valid JSON line");
+    assert_eq!(v["queue"][0]["delivery_target"], "current");
+    assert_eq!(v["queue"][1]["delivery_target"], "next_major");
+
+    let human_out = run_state(&w.dir, &[]);
+    let human_stdout = String::from_utf8_lossy(&human_out.stdout);
+    assert!(
+        human_out.status.success(),
+        "state exited nonzero: {human_stdout} / {}",
+        String::from_utf8_lossy(&human_out.stderr)
+    );
+    let current_line = human_stdout
+        .lines()
+        .find(|line| line.contains("T-201"))
+        .expect("current queue entry line");
+    assert!(current_line.contains("delivery_target=current"));
+    let parked_line = human_stdout
+        .lines()
+        .find(|line| line.contains("T-202"))
+        .expect("next_major queue entry line");
+    assert!(parked_line.contains("delivery_target=next_major (parked, not admitted)"));
+}
+
+#[test]
 fn state_idle_when_cohort_integration_batch_absent() {
     let w = TmpWork::new();
     // Only a queue — no cohort/integration/batch artifacts (the normal idle state).

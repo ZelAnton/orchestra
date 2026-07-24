@@ -107,6 +107,13 @@ $script:ReasonExit = [ordered]@{ ok = 0; timeout = 3; cancelled = 4; crash = 5; 
 # cancelled/budget are terminal for the loop (success / quarantine / checkpoint / stop).
 $script:TransientReasons = @('timeout', 'crash')
 
+# Bound on how long the post-teardown stdout/stderr collection waits for the ReadToEndAsync
+# tasks to complete before degrading to what has been captured. In the normal case both tasks
+# are already complete and this is never approached; it only caps the pathological case where a
+# descendant survived Stop-ProcessTree and still holds an inherited copy of the pipe's write end,
+# so EOF (and the Task's completion) never arrives - see Receive-BoundedStreamText.
+$script:StreamCollectGraceMs = 5000
+
 # --------------------------------------------------------------------------
 # Small IO helpers.
 # --------------------------------------------------------------------------
@@ -423,6 +430,40 @@ function Get-CappedText {
 # ==========================================================================
 # Core: supervise ONE child call. Returns a structured, non-sensitive result.
 # ==========================================================================
+# --------------------------------------------------------------------------
+# Bounded collection of one redirected stream's ReadToEndAsync task after teardown.
+# `Task.Wait(timeout)` returns $true once the task has completed (RanToCompletion, faulted or
+# cancelled) and rethrows a faulted task's exception; we treat "completed with error" as done
+# (its text degrades to '' via GetResult's own catch, matching the prior behaviour) and flag
+# ONLY a genuine timeout, so a survivor still holding the pipe cannot block the call forever.
+# --------------------------------------------------------------------------
+function Wait-StreamTaskBounded {
+    param($Task, [int]$TimeoutMs)
+    if ($null -eq $Task) { return [pscustomobject]@{ Text = ''; TimedOut = $false } }
+    $completed = $false
+    try { $completed = $Task.Wait([Math]::Max(0, $TimeoutMs)) }
+    catch { $completed = $true }
+    if (-not $completed) { return [pscustomobject]@{ Text = ''; TimedOut = $true } }
+    $text = ''
+    try { $text = [string]$Task.GetAwaiter().GetResult() } catch { $text = '' }
+    return [pscustomobject]@{ Text = $text; TimedOut = $false }
+}
+
+# Collect stdout AND stderr within a SHARED grace, so the TOTAL wait is bounded by a single
+# grace period no matter which stream a survivor wedged. Returns @{ Stdout; Stderr; TimedOut }.
+function Receive-BoundedStreamText {
+    param($OutTask, $ErrTask, [int]$GraceMs)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $outWait = Wait-StreamTaskBounded $OutTask $GraceMs
+    $remaining = [int][Math]::Max(0, $GraceMs - $sw.ElapsedMilliseconds)
+    $errWait = Wait-StreamTaskBounded $ErrTask $remaining
+    return [pscustomobject]@{
+        Stdout   = $outWait.Text
+        Stderr   = $errWait.Text
+        TimedOut = ([bool]$outWait.TimedOut -or [bool]$errWait.TimedOut)
+    }
+}
+
 function Invoke-SupervisedCall {
     param(
         [string]$FilePath, [string[]]$CallArgs, [string]$StdinText,
@@ -615,9 +656,14 @@ function Invoke-SupervisedCall {
     }
     $sw.Stop()
 
-    $stdoutFull = ''; $stderrFull = ''
-    try { $stdoutFull = [string]$outTask.GetAwaiter().GetResult() } catch { $stdoutFull = '' }
-    try { $stderrFull = [string]$errTask.GetAwaiter().GetResult() } catch { $stderrFull = '' }
+    # Bounded collection: a descendant that survived the teardown above can keep the child's pipe
+    # write end open, so these ReadToEndAsync tasks may never complete. Wait at most a shared
+    # grace, then degrade to what was captured and flag the shortfall - never an unbounded
+    # GetResult() that would let a fired deadline/cancel silently become an infinite block.
+    $collected = Receive-BoundedStreamText $outTask $errTask $script:StreamCollectGraceMs
+    $stdoutFull = [string]$collected.Stdout
+    $stderrFull = [string]$collected.Stderr
+    $outputCollectionTimedOut = [bool]$collected.TimedOut
     $outRes = Get-CappedText $stdoutFull $OutputMaxBytes
     $errRes = Get-CappedText $stderrFull $OutputMaxBytes
     $stdout = $outRes.Text
@@ -684,7 +730,8 @@ function Invoke-SupervisedCall {
     $result = [pscustomobject]@{
         reason = $reason; exit_code = $rc; timed_out = $timedOut; cancelled = $cancelled
         duration_ms = [int]$sw.Elapsed.TotalMilliseconds; output_bytes = $totalBytes
-        output_truncated = $truncated; output_sha256 = $sha; stdout = $stdout; stderr = $stderr
+        output_truncated = $truncated; output_collection_timed_out = $outputCollectionTimedOut
+        output_sha256 = $sha; stdout = $stdout; stderr = $stderr
         outcome_reason = $outcomeReason; pid = if ($null -ne $processkitRootPid) { $processkitRootPid } else { $procId }; cleanup_attempted = $true
         containment = $containmentKind; containment_runner_pid = $procId
         containment_degraded_reason = $containmentDegradedReason
@@ -784,6 +831,7 @@ function New-Verdict {
         attempts         = $Attempt
         output_bytes     = $Res.output_bytes
         output_truncated = $Res.output_truncated
+        output_collection_timed_out = [bool](Get-Prop $Res 'output_collection_timed_out')
         output_sha256    = $Res.output_sha256
         outcome_reason   = $Res.outcome_reason
         root_pid         = $Res.pid
@@ -1203,17 +1251,23 @@ function Cmd-Version { Write-Output 'orchestra-supervisor 1' }
 # --------------------------------------------------------------------------
 # Dispatch
 # --------------------------------------------------------------------------
-try {
-    switch ($Command) {
-        'run'       { Cmd-Run }
-        'supervise' { Cmd-Supervise }
-        'observe'   { Cmd-Observe }
-        'budget'    { Cmd-Budget }
-        'version'   { Cmd-Version }
-        default {
-            Fail 2 "unknown command '$Command'. Valid: run, supervise, observe, budget, version"
+# Only dispatch when run as a script (`pwsh -File ...` / `& supervisor.ps1 ...`), NOT when the
+# file is dot-sourced for its functions. tests/test-supervisor.ps1 dot-sources it to unit-test
+# the bounded-collection helpers directly; a dot-sourced load must define functions without
+# running a command or calling `exit` (which would terminate the caller's own session).
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        switch ($Command) {
+            'run'       { Cmd-Run }
+            'supervise' { Cmd-Supervise }
+            'observe'   { Cmd-Observe }
+            'budget'    { Cmd-Budget }
+            'version'   { Cmd-Version }
+            default {
+                Fail 2 "unknown command '$Command'. Valid: run, supervise, observe, budget, version"
+            }
         }
+    } catch {
+        exit (Resolve-CatchExit $_ 'SPVERR' 'supervisor' 'SUPERVISOR_DEBUG')
     }
-} catch {
-    exit (Resolve-CatchExit $_ 'SPVERR' 'supervisor' 'SUPERVISOR_DEBUG')
 }

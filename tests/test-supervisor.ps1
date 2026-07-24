@@ -462,6 +462,37 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
 }.Invoke()
 
 # =============================================================================
+# 4c. T-292: bounded post-teardown stdout/stderr collection. A descendant that survives the
+#     tree-kill can keep an inherited pipe write end open, so the ReadToEndAsync task never
+#     completes (EOF never arrives). The supervisor must degrade to what it captured and flag
+#     the shortfall, NEVER block on GetResult() forever. Simulated deterministically by a
+#     ReadToEndAsync-shaped Task that never completes (a TaskCompletionSource we never set) -
+#     exactly the shape an EOF-less, survivor-held pipe produces - so the test is offline,
+#     fast and free of the pipe-inheritance hazards a real surviving grandchild would create.
+# =============================================================================
+{
+    # Dot-source the tool for its internal helpers; the dispatch guard skips running a command.
+    . $script:Tool
+    $wedged = New-Object 'System.Threading.Tasks.TaskCompletionSource[string]'   # never completes
+    $doneErr = [System.Threading.Tasks.Task]::FromResult('captured-stderr')
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $collected = Receive-BoundedStreamText $wedged.Task $doneErr 300
+    $sw.Stop()
+    Assert-True ($sw.Elapsed.TotalMilliseconds -lt 3000) "bounded collection returns promptly on a wedged stream (was $([int]$sw.Elapsed.TotalMilliseconds)ms, not an infinite block)"
+    Assert-True ([bool]$collected.TimedOut) 'a never-completing (survivor-held pipe) stream is flagged as a collection timeout'
+    Assert-Equal '' ([string]$collected.Stdout) 'the un-collectable stream degrades to empty rather than blocking'
+    Assert-Equal 'captured-stderr' ([string]$collected.Stderr) 'a stream that DID reach EOF is still fully captured alongside the wedged one'
+
+    # Regression guard: two fully completed reads are NOT flagged and keep their full content.
+    $both = Receive-BoundedStreamText ([System.Threading.Tasks.Task]::FromResult('full-stdout')) ([System.Threading.Tasks.Task]::FromResult('full-stderr')) 300
+    Assert-True (-not [bool]$both.TimedOut) 'fully collected streams are not flagged as timed out'
+    Assert-Equal 'full-stdout' ([string]$both.Stdout) 'normal stdout fully captured within the grace'
+    Assert-Equal 'full-stderr' ([string]$both.Stderr) 'normal stderr fully captured within the grace'
+
+    $wedged.SetResult('release')   # release the simulated task so nothing lingers after the test
+}.Invoke()
+
+# =============================================================================
 # 5. Output-volume cap: transient capture truncated; full byte count still reported.
 # =============================================================================
 {
