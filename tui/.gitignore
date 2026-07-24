@@ -1,4 +1,3 @@
-# Rust build output for the operator TUI crate (tui/, task T-102). Source, Cargo.toml and the
-# committed Cargo.lock are tracked; only the compiled target/ tree is ignored (mirrors the
-# engine/target/ rule in the repo-root .gitignore).
+# The Cargo workspace writes ordinary TUI builds to ../target/. Keep an explicitly configured
+# local CARGO_TARGET_DIR out of source control too.
 /target/

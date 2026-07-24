@@ -39,13 +39,13 @@ each piece under `cargo test`.
 ## Run it
 
 ```sh
-cd engine
-cargo test            # hermetic, offline, token-free: unit tests + the e2e spike
-cargo run -- selfcheck    # supervise a stand-in child (success / timeout / error cases)
-cargo run -- argv claude  # print the argv the engine WOULD spawn for a claude call
-cargo run -- argv codex   # print the fail-closed codex exec argv
-cargo run -- events tail ../.work/events.jsonl            # decode the outbox to EOF and exit
-cargo run -- events tail --follow ../.work/events.jsonl   # keep polling for new events (^C to stop)
+# Run from the repository root. engine and tui share one Cargo workspace, lock file and target.
+cargo test --locked --workspace    # hermetic, offline, token-free: all Rust tests
+cargo run --locked -p orchestra-engine -- selfcheck    # supervise a stand-in child (success / timeout / error cases)
+cargo run --locked -p orchestra-engine -- argv claude  # print the argv the engine WOULD spawn for a claude call
+cargo run --locked -p orchestra-engine -- argv codex   # print the fail-closed codex exec argv
+cargo run --locked -p orchestra-engine -- events tail .work/events.jsonl            # decode the outbox to EOF and exit
+cargo run --locked -p orchestra-engine -- events tail --follow .work/events.jsonl   # keep polling for new events (^C to stop)
 ```
 
 `events tail` opens the file **read-only** — it never writes, truncates, or locks it — so it is
@@ -54,8 +54,8 @@ unique, fully-committed event as one normalized JSON line and never emits a torn
 trailing record.
 
 The first `cargo build`/`cargo test` performs a one-time online fetch of `serde_json`; after that
-`engine/Cargo.lock` is committed and the crate builds and tests **offline** (the smoke gate stays
-green with no network). The T-097 spike modules remain dependency-free; only `events` uses a crate.
+the root `Cargo.lock` is committed and the workspace builds and tests **offline** (the smoke gate
+stays green with no network). The T-097 spike modules remain dependency-free; only `events` uses a crate.
 
 A **real** model call is strictly opt-in and never runs in tests or `selfcheck`:
 

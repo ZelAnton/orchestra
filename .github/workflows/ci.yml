@@ -455,11 +455,11 @@ jobs:
     # or vice versa (a separate top-level job). Runs on the same windows-latest +
     # ubuntu-latest matrix as `validate`, for the same reason (T-090): both are supported
     # targets, so a Linux-only or Windows-only Rust break must surface independently
-    # rather than being masked by its sibling. `Cargo.lock` is already committed for both
-    # crates (T-097 engine, T-102 tui), so every cargo invocation below is `--locked`: it
-    # builds against the exact committed lockfile and never runs `cargo update`, so the
-    # gate stays offline-safe with respect to dependency resolution (the runner's own
-    # one-time toolchain/registry-index fetch is unrelated and outside this job's control).
+    # rather than being masked by its sibling. The root Cargo workspace owns one committed
+    # `Cargo.lock` (T-305), so every cargo invocation below is `--locked`: it builds against
+    # the exact committed lockfile and never runs `cargo update`, so the gate stays offline-safe
+    # with respect to dependency resolution (the runner's own one-time toolchain/registry-index
+    # fetch is unrelated and outside this job's control).
     runs-on: ${{ matrix.os }}
     strategy:
       # Report both platforms independently, exactly like `validate` above.
@@ -486,17 +486,16 @@ jobs:
           cargo clippy --version
           cargo fmt --version
 
-      - name: Build, test and lint the engine crate
-        working-directory: engine
+      - name: Build, test and lint the Rust workspace
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --locked --all-targets
+          cargo build --locked --workspace --all-targets
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo test --locked
+          cargo test --locked --workspace
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo fmt --check
+          cargo fmt --check --all
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check engine crate advisories (cargo-deny, only if configured)
@@ -513,19 +512,6 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
           cargo deny check
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-      - name: Build, test and lint the tui crate
-        working-directory: tui
-        run: |
-          $ErrorActionPreference = "Stop"
-          cargo build --locked --all-targets
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo test --locked
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo clippy --locked --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo fmt --check
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check tui crate advisories (cargo-deny, only if configured)

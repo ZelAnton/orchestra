@@ -1,0 +1,8 @@
+[workspace]
+members = ["engine", "tui"]
+resolver = "2"
+
+# Both Rust packages are private operator tooling. Keep their release policy in the workspace
+# root so Cargo applies it uniformly rather than ignoring package-local profile sections.
+[profile.release]
+opt-level = 2

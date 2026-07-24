@@ -84,6 +84,11 @@ workspace, коммитит результаты листовых агентов
 
 ### Rust engine и TUI
 
+- Корневой `Cargo.toml` — virtual workspace с членами `engine` и `tui`: единственные
+  `Cargo.lock` и `target/` принадлежат корню, а package manifests сохраняют локальные
+  метаданные. CI `engine-tui` запускает один `--locked --workspace` build/test/clippy/fmt gate;
+  package-local cargo-команда всё равно резолвит этот корень, поэтому два независимых lock/target
+  дерева не должны возвращаться.
 - `engine/src/time.rs` — единый публичный dependency-free конвертер Unix epoch seconds в
   `YYYY-MM-DDTHH:MM:SSZ`; его используют engine run и TUI вместо локальных копий алгоритма
   Howard Hinnant `civil_from_days`, а проверки известных дат, leap day и лексической

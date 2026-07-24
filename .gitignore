@@ -1,7 +1,11 @@
 .work/
-# Rust build output for the engine spike (engine/, task T-097). Source, Cargo.toml and
-# Cargo.lock are tracked; only the compiled target/ tree is ignored.
+# Rust workspace build output (engine/ + tui/). Source manifests and the root Cargo.lock are
+# tracked; Cargo resolves every member into this shared target/ tree.
+/target/
+# Old standalone build directories may remain on a developer machine after the workspace move;
+# they are caches only and must not become source changes.
 engine/target/
+tui/target/
 # Stray stdout/stderr capture artifacts occasionally left behind by ad hoc test/debug
 # runs of tests/launchers/*.ps1 (e.g. manual out/err redirection while iterating).
 tests/launchers/*.tmp

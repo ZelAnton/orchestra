@@ -11,9 +11,9 @@ publish = false
 # the `events` module (T-101) pulls in `serde_json` for robust parsing of the `.work/events.jsonl`
 # outbox (README.md "Spike outcome"); and `supervise` (T-130) uses `libc` — ONLY on Unix — for the
 # production no-orphan tree-kill: spawn the child as its own process-group leader and `killpg` the
-# whole group on timeout/cancel (the POSIX counterpart to `taskkill /T /F` on Windows). Cargo.lock
-# is committed so the offline smoke gate stays green after the one initial dependency fetch. The
-# Rust line's async `processkit` crate (kill-on-drop Job Object / cgroup v2 / process group) stays
+# whole group on timeout/cancel (the POSIX counterpart to `taskkill /T /F` on Windows). The
+# workspace-root Cargo.lock keeps the offline smoke gate green after the one initial dependency
+# fetch. The Rust line's async `processkit` crate (kill-on-drop Job Object / cgroup v2 / process group) stays
 # the intended substrate once the engine goes async on tokio; it is not pulled in here because it
 # is tokio-async and edition-2024 (above this crate's MSRV) while this supervisor is synchronous.
 
@@ -36,6 +36,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "orchestra-engine"
 path = "src/main.rs"
-
-[profile.release]
-opt-level = 2
