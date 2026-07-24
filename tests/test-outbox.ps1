@@ -576,6 +576,115 @@ function Ref-UuidV5 {
 }.Invoke()
 
 # =============================================================================
+# 15. Concurrent read/verify/metrics during an ACTIVE writer hold (T-294). The writer's
+#     documented single-writer critical section is: take the outbox lock, THEN open
+#     events.jsonl with [System.IO.FileShare]::None for the whole write (Cmd-Append).
+#     Windows sharing is governed by the FIRST opener's granted share mode, so a reader
+#     that only requests a more permissive share cannot itself survive that window - the
+#     fix is that `read`/`verify`/`metrics` now take the SAME lock for their whole read, so
+#     they never attempt to open the file while that window is active; they simply wait and
+#     then read once the writer releases. This section simulates that exact protocol (lock
+#     file + FileShare.None open, held for a bounded delay) from a real child process and
+#     asserts each command completes cleanly (rc=0, no "cannot read" / rc=3) rather than
+#     spuriously failing with the writer's ordinary write window misclassified as an
+#     unreadable file.
+# =============================================================================
+{
+    $holdWriterText = @'
+param([Parameter(Mandatory)][string]$EventsPath, [Parameter(Mandatory)][int]$HoldMs)
+# Mirrors tools/outbox.ps1 Cmd-Append's real critical section: Acquire-Lock (CreateNew +
+# PID), THEN open the events file with FileShare.None for the duration of the "write".
+$lockPath = "$EventsPath.lock"
+$lockFs = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+try { $b = [System.Text.Encoding]::ASCII.GetBytes("$PID"); $lockFs.Write($b, 0, $b.Length) } finally { $lockFs.Dispose() }
+try {
+    $fs = [System.IO.File]::Open($EventsPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        Start-Sleep -Milliseconds $HoldMs
+        $fs.Seek(0, [System.IO.SeekOrigin]::End) | Out-Null
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        $line = '{"schema_version":1,"event_id":"33333333-3333-4333-8333-333333333333","occurred_at":"2026-07-24T09:00:00Z","type":"cohort.opened","batch_id":"B-hold","actor":{"kind":"agent","name":"processor"},"payload":{}}' + "`n"
+        $bytes = $enc.GetBytes($line)
+        $fs.Write($bytes, 0, $bytes.Length)
+        $fs.Flush($true)
+    } finally { $fs.Dispose() }
+} finally {
+    Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+}
+'@
+
+    function Start-WriterHold {
+        param([string]$Dir, [string]$EventsPath, [int]$HoldMs)
+        $wrapper = Join-Path $Dir 'hold-writer.ps1'
+        [System.IO.File]::WriteAllText($wrapper, $holdWriterText, $script:Utf8)
+        $lockPath = "$EventsPath.lock"
+        $proc = Start-Process -FilePath $script:PsExe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper, '-EventsPath', $EventsPath, '-HoldMs', "$HoldMs") -NoNewWindow -PassThru
+        # Bounded wait for the simulated writer to actually take its lock: its real critical
+        # section (matching Cmd-Append) starts only once this file exists, so the reader
+        # dispatched right after this must race the ACTIVE FileShare.None window, not a gap
+        # before the writer even started. Generous (child-process spawn latency under load -
+        # AV scanning, CPU contention from other tests - is observed to occasionally run into
+        # several seconds; see the matching --lock-timeout-ms / WaitForExit budgets below).
+        $deadline = [DateTime]::UtcNow.AddMilliseconds(20000)
+        while (-not (Test-Path -LiteralPath $lockPath) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 20 }
+        Assert-True (Test-Path -LiteralPath $lockPath) '[concurrency] the simulated writer took its lock before the reader is dispatched'
+        return $proc
+    }
+
+    # The DELIBERATE hold duration that creates the overlap window (small, for test speed);
+    # the --lock-timeout-ms / WaitForExit budgets below are a SEPARATE, much larger safety
+    # margin against unrelated child-process spawn jitter (AV scanning / CPU contention),
+    # not an expectation that the wait routinely takes anywhere near that long.
+    $holdMs = 700
+    $waitBudgetMs = 60000
+
+    # -- read: blocks behind the writer's lock, then succeeds once it releases. --
+    $dir1 = New-TempDir; $ev1 = New-EventsFile $dir1
+    Invoke-Outbox @('append', '--events', $ev1, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') | Out-Null
+    $p1 = Start-WriterHold -Dir $dir1 -EventsPath $ev1 -HoldMs $holdMs
+    $r1 = Invoke-Outbox @('read', '--events', $ev1, '--lock-timeout-ms', "$waitBudgetMs")
+    Assert-True ($p1.WaitForExit($waitBudgetMs)) '[concurrency] the simulated writer completes'
+    Assert-Exit $r1 0 'read during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
+    Assert-NotContains $r1.Err 'cannot read' 'read never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    Assert-Contains $r1.Out 'new=2' 'read observes both the pre-existing and the writer''s newly-appended event once released'
+
+    # -- verify: same, and reports both committed events. --
+    $dir2 = New-TempDir; $ev2 = New-EventsFile $dir2
+    Invoke-Outbox @('append', '--events', $ev2, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') | Out-Null
+    $p2 = Start-WriterHold -Dir $dir2 -EventsPath $ev2 -HoldMs $holdMs
+    $r2 = Invoke-Outbox @('verify', '--events', $ev2, '--lock-timeout-ms', "$waitBudgetMs", '--json')
+    Assert-True ($p2.WaitForExit($waitBudgetMs)) '[concurrency] the simulated writer completes'
+    Assert-Exit $r2 0 'verify during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
+    Assert-NotContains $r2.Err 'cannot read' 'verify never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    $vobj = $r2.Out | ConvertFrom-Json
+    Assert-Equal 2 $vobj.events 'verify sees both events once the writer released'
+
+    # -- metrics: same, over the shared events-common reader. --
+    $dir3 = New-TempDir; $ev3 = New-EventsFile $dir3
+    Invoke-Outbox @('append', '--events', $ev3, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') | Out-Null
+    $p3 = Start-WriterHold -Dir $dir3 -EventsPath $ev3 -HoldMs $holdMs
+    $r3 = Invoke-Outbox @('metrics', '--events', $ev3, '--lock-timeout-ms', "$waitBudgetMs", '--json')
+    Assert-True ($p3.WaitForExit($waitBudgetMs)) '[concurrency] the simulated writer completes'
+    Assert-Exit $r3 0 'metrics during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
+    Assert-NotContains $r3.Err 'cannot read' 'metrics never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    $mobj = $r3.Out | ConvertFrom-Json
+    Assert-Equal 2 $mobj.total_events 'metrics sees both events once the writer released'
+
+    # -- Regression guard: a foreign exclusive holder OUTSIDE the documented lock protocol
+    #    (no lock file - i.e. not `append`) still correctly fails as unreadable (rc=3), so
+    #    this fix targets the DOCUMENTED writer's lock+FileShare.None window specifically
+    #    and does not blanket-mask every IOException as a transient write race. --
+    $dir4 = New-TempDir; $ev4 = New-EventsFile $dir4
+    Invoke-Outbox @('append', '--events', $ev4, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') | Out-Null
+    $rogueFs = [System.IO.File]::Open($ev4, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $rRogue = Invoke-Outbox @('verify', '--events', $ev4, '--lock-timeout-ms', '2000')
+        Assert-Exit $rRogue 3 '[concurrency] a foreign exclusive holder outside the lock protocol still correctly fails as unreadable (rc=3)'
+        Assert-Contains $rRogue.Err 'cannot read' 'a genuine unreadable-file error still reports "cannot read"'
+    } finally { $rogueFs.Dispose() }
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in $script:TempDirs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }

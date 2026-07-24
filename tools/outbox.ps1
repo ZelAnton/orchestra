@@ -66,7 +66,9 @@
       4   integrity conflict (same event_id already present with a different type)
       5   validation failure (envelope / payload invalid)
       6   unrepairable corruption (a newline-terminated committed line is meaningfully invalid)
-      7   could not acquire the outbox lock (timeout; a parallel writer holds it)
+      7   could not acquire the outbox lock (timeout; another writer or reader holds it -
+          `append`, `read`, `verify` and `metrics` all serialize on this same lock, see
+          "Concurrent read vs. the writer" below)
       13  not the run owner (--owner does not match the orchestrator.lock lease)
 
 .EXAMPLE
@@ -521,6 +523,40 @@ function Read-Outbox {
 # dedup in one place). Read-Outbox above stays for the writer-side paths (verify/read/append).
 
 # --------------------------------------------------------------------------
+# Concurrent read vs. the writer (T-294). Cmd-Append opens events.jsonl with
+# [System.IO.FileShare]::None for its whole write critical section (the file is EXCLUSIVE
+# while open: Windows sharing is governed by the FIRST opener's granted share mode, so a
+# reader that merely requests a more permissive share - e.g. FileShare.ReadWrite, as
+# tools/events-common.ps1::Read-EventStream does - still fails with IOException while that
+# handle is open; changing only the reader's requested share cannot close this race).
+#
+# The chosen fix is therefore lock-based, not share-based: `read`, `verify` and `metrics`
+# below each take the SAME outbox lock (Paths.Lock / <events>.lock, Acquire-Lock/
+# Release-Lock, shared with Cmd-Append) for their entire read. Cmd-Append already holds
+# this lock for its ENTIRE critical section, including the FileShare.None open/write/flush/
+# dispose - so a reader that holds the same lock is GUARANTEED to never attempt to open
+# events.jsonl while a write is in flight; it simply waits (bounded by its own
+# --lock-timeout-ms, default 30000 like `append`) and reads only once the writer has
+# released. This is airtight (proven by construction, not by a share-flag combination),
+# unlike option (a). A genuinely unreadable file (missing/corrupt outside any writer
+# window, e.g. permission-denied) still surfaces as Fail 3 from Read-BytesOrEmpty/
+# Read-EventStream, unmasked by this change - only the "writer is mid-flight" IOException is
+# eliminated.
+#
+# Cursor-file concurrency (Cmd-Read, `--cursor`): because Cmd-Read now holds this SAME lock
+# across its ENTIRE body (cursor read -> outbox read -> Write-TextAtomic cursor write-back),
+# concurrent `read` invocations - whether against the same or a different --cursor path, and
+# whether concurrent with each other or with an `append` - are fully serialized by this one
+# lock. The cursor's read-modify-write is therefore atomic relative to any other cursor
+# advance: two overlapping `read --cursor X` calls can never interleave (one always
+# completes, including its Write-TextAtomic rename, before the other even opens the cursor
+# file), so there is no lost-update window on byte_offset/delivered_ids. This is an explicit
+# design choice (not merely Write-TextAtomic's own rename-atomicity, which only makes ONE
+# write atomic, not a concurrent read+advance sequence) - do not remove the lock from
+# Cmd-Read without re-establishing an equivalent guarantee.
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
 # Owner (single-writer) check against the orchestrator.lock lease.
 # --------------------------------------------------------------------------
 function Assert-Owner {
@@ -659,44 +695,51 @@ function Cmd-Append {
 # ==========================================================================
 function Cmd-Verify {
     $paths = Resolve-Paths
-    $ob = Read-Outbox $paths.Events 'read'
-    $total = 0; $valid = 0
-    $invalid = New-Object System.Collections.Generic.List[string]
-    $ids = @{}
-    $dups = New-Object System.Collections.Generic.List[string]
-    $lineNo = 0
-    foreach ($r in $ob.Records) {
-        $lineNo++
-        $total++
-        if (-not $r.Valid) { [void]$invalid.Add("line ${lineNo}: $($r.Error)"); continue }
-        $valid++
-        $id = [string]$r.Obj.event_id
-        if ($ids.ContainsKey($id)) { [void]$dups.Add("line ${lineNo}: duplicate event_id $id") } else { $ids[$id] = $true }
-    }
-    $tornMsg = if ($null -ne $ob.TornTail) { "torn tail present ($($ob.TornTail.Error)) - a subsequent append repairs it" } else { 'none' }
-    if ([bool](Opt 'json' $false)) {
-        # NB: assign List/collection values directly; an inline @(...) inside an
-        # [ordered]@{} literal trips a "Argument types do not match" parser quirk.
-        $out = [ordered]@{
-            events        = $total
-            valid         = $valid
-            invalid       = $invalid
-            unique_ids    = $ids.Count
-            duplicates    = $dups
-            torn_tail     = ($null -ne $ob.TornTail)
-            torn_detail   = $tornMsg
+    # Take the SAME outbox lock Cmd-Append holds for its whole write ("Concurrent read vs.
+    # the writer" above): guarantees this read never races the writer's FileShare.None
+    # window, instead of merely hoping a share-flag combination happens to be compatible.
+    $timeout = [int](Opt 'lock-timeout-ms' 30000)
+    Acquire-Lock $paths.Lock $timeout
+    try {
+        $ob = Read-Outbox $paths.Events 'read'
+        $total = 0; $valid = 0
+        $invalid = New-Object System.Collections.Generic.List[string]
+        $ids = @{}
+        $dups = New-Object System.Collections.Generic.List[string]
+        $lineNo = 0
+        foreach ($r in $ob.Records) {
+            $lineNo++
+            $total++
+            if (-not $r.Valid) { [void]$invalid.Add("line ${lineNo}: $($r.Error)"); continue }
+            $valid++
+            $id = [string]$r.Obj.event_id
+            if ($ids.ContainsKey($id)) { [void]$dups.Add("line ${lineNo}: duplicate event_id $id") } else { $ids[$id] = $true }
         }
-        Write-Output ($out | ConvertTo-Json -Depth 6 -Compress)
-    } else {
-        Write-Output "outbox: events=$total valid=$valid unique_ids=$($ids.Count) duplicates=$($dups.Count) torn_tail=$tornMsg"
-        foreach ($m in $invalid) { Write-Output "  invalid: $m" }
-        foreach ($m in $dups) { Write-Output "  $m" }
-    }
-    # A meaningfully invalid newline-terminated line is hard corruption; blank separator
-    # lines remain skipped-invalid diagnostics and do not make verification blocking.
-    $hardBad = @($ob.Records | Where-Object { -not $_.Valid -and -not $_.Unterminated -and -not [string]::IsNullOrWhiteSpace($_.Text) })
-    if ($hardBad.Count -gt 0) { exit 6 }
-    if ($dups.Count -gt 0) { exit 4 }
+        $tornMsg = if ($null -ne $ob.TornTail) { "torn tail present ($($ob.TornTail.Error)) - a subsequent append repairs it" } else { 'none' }
+        if ([bool](Opt 'json' $false)) {
+            # NB: assign List/collection values directly; an inline @(...) inside an
+            # [ordered]@{} literal trips a "Argument types do not match" parser quirk.
+            $out = [ordered]@{
+                events        = $total
+                valid         = $valid
+                invalid       = $invalid
+                unique_ids    = $ids.Count
+                duplicates    = $dups
+                torn_tail     = ($null -ne $ob.TornTail)
+                torn_detail   = $tornMsg
+            }
+            Write-Output ($out | ConvertTo-Json -Depth 6 -Compress)
+        } else {
+            Write-Output "outbox: events=$total valid=$valid unique_ids=$($ids.Count) duplicates=$($dups.Count) torn_tail=$tornMsg"
+            foreach ($m in $invalid) { Write-Output "  invalid: $m" }
+            foreach ($m in $dups) { Write-Output "  $m" }
+        }
+        # A meaningfully invalid newline-terminated line is hard corruption; blank separator
+        # lines remain skipped-invalid diagnostics and do not make verification blocking.
+        $hardBad = @($ob.Records | Where-Object { -not $_.Valid -and -not $_.Unterminated -and -not [string]::IsNullOrWhiteSpace($_.Text) })
+        if ($hardBad.Count -gt 0) { exit 6 }
+        if ($dups.Count -gt 0) { exit 4 }
+    } finally { Release-Lock $paths.Lock }
 }
 
 # ==========================================================================
@@ -704,50 +747,59 @@ function Cmd-Verify {
 # ==========================================================================
 function Cmd-Read {
     $paths = Resolve-Paths
-    $ob = Read-Outbox $paths.Events 'read'
+    # Take the SAME outbox lock Cmd-Append holds for its whole write, for this command's
+    # ENTIRE body (cursor read through cursor write-back) - see "Concurrent read vs. the
+    # writer" above for why this is what actually closes the race, and why it is also what
+    # makes a concurrent cursor read-modify-write safe (no lost update between two
+    # overlapping `read --cursor` calls).
+    $timeout = [int](Opt 'lock-timeout-ms' 30000)
+    Acquire-Lock $paths.Lock $timeout
+    try {
+        $ob = Read-Outbox $paths.Events 'read'
 
-    $startOffset = 0
-    $delivered = New-Object 'System.Collections.Generic.HashSet[string]'
-    $cursorPath = [string](Opt 'cursor' '')
-    if ($cursorPath -and (Test-Path -LiteralPath $cursorPath)) {
-        try {
-            $cur = (Read-TextOrEmpty $cursorPath) | ConvertFrom-Json
-            if (Has-Prop $cur 'byte_offset') { $startOffset = [int]$cur.byte_offset }
-            if (Has-Prop $cur 'delivered_ids') { foreach ($id in @($cur.delivered_ids)) { [void]$delivered.Add([string]$id) } }
-        } catch { Fail 3 "cursor $cursorPath is unreadable" }
-    }
-
-    $new = New-Object System.Collections.Generic.List[object]
-    $skippedInvalid = 0
-    $skippedDup = 0
-    $advance = $startOffset
-    foreach ($r in $ob.Records) {
-        if ($r.Unterminated) { continue }                 # never consume a torn/unterminated tail
-        if ($r.Span.Start -lt $startOffset) { continue }  # already consumed in a prior cursor read
-        $advance = $r.Span.End + 1
-        if (-not $r.Valid) { $skippedInvalid++; continue }
-        $id = [string]$r.Obj.event_id
-        if (-not $delivered.Add($id)) { $skippedDup++; continue }
-        [void]$new.Add($r.Obj)
-    }
-
-    if ($cursorPath) {
-        $curOut = [ordered]@{ byte_offset = $advance; delivered_ids = $delivered }
-        Write-TextAtomic $cursorPath ($curOut | ConvertTo-Json -Depth 6 -Compress)
-    }
-
-    if ([bool](Opt 'json' $false)) {
-        $out = [ordered]@{
-            new_count        = $new.Count
-            skipped_invalid  = $skippedInvalid
-            skipped_dup      = $skippedDup
-            byte_offset      = $advance
-            events           = $new
+        $startOffset = 0
+        $delivered = New-Object 'System.Collections.Generic.HashSet[string]'
+        $cursorPath = [string](Opt 'cursor' '')
+        if ($cursorPath -and (Test-Path -LiteralPath $cursorPath)) {
+            try {
+                $cur = (Read-TextOrEmpty $cursorPath) | ConvertFrom-Json
+                if (Has-Prop $cur 'byte_offset') { $startOffset = [int]$cur.byte_offset }
+                if (Has-Prop $cur 'delivered_ids') { foreach ($id in @($cur.delivered_ids)) { [void]$delivered.Add([string]$id) } }
+            } catch { Fail 3 "cursor $cursorPath is unreadable" }
         }
-        Write-Output ($out | ConvertTo-Json -Depth 30 -Compress)
-    } else {
-        Write-Output "read: new=$($new.Count) skipped_invalid=$skippedInvalid skipped_dup=$skippedDup byte_offset=$advance"
-    }
+
+        $new = New-Object System.Collections.Generic.List[object]
+        $skippedInvalid = 0
+        $skippedDup = 0
+        $advance = $startOffset
+        foreach ($r in $ob.Records) {
+            if ($r.Unterminated) { continue }                 # never consume a torn/unterminated tail
+            if ($r.Span.Start -lt $startOffset) { continue }  # already consumed in a prior cursor read
+            $advance = $r.Span.End + 1
+            if (-not $r.Valid) { $skippedInvalid++; continue }
+            $id = [string]$r.Obj.event_id
+            if (-not $delivered.Add($id)) { $skippedDup++; continue }
+            [void]$new.Add($r.Obj)
+        }
+
+        if ($cursorPath) {
+            $curOut = [ordered]@{ byte_offset = $advance; delivered_ids = $delivered }
+            Write-TextAtomic $cursorPath ($curOut | ConvertTo-Json -Depth 6 -Compress)
+        }
+
+        if ([bool](Opt 'json' $false)) {
+            $out = [ordered]@{
+                new_count        = $new.Count
+                skipped_invalid  = $skippedInvalid
+                skipped_dup      = $skippedDup
+                byte_offset      = $advance
+                events           = $new
+            }
+            Write-Output ($out | ConvertTo-Json -Depth 30 -Compress)
+        } else {
+            Write-Output "read: new=$($new.Count) skipped_invalid=$skippedInvalid skipped_dup=$skippedDup byte_offset=$advance"
+        }
+    } finally { Release-Lock $paths.Lock }
 }
 
 # ==========================================================================
@@ -760,113 +812,121 @@ function Cmd-Read {
 # ==========================================================================
 function Cmd-Metrics {
     $paths = Resolve-Paths
-    $stream = Read-EventStream $paths.Events
-    $events = $stream.Events
+    # Same outbox lock as Cmd-Append/Cmd-Verify/Cmd-Read ("Concurrent read vs. the writer"
+    # above): Read-EventStream (tools/events-common.ps1) itself already opens with
+    # FileShare.ReadWrite, but that alone cannot survive the writer's FileShare.None window
+    # (the FIRST opener's share governs); the lock is what actually closes the race.
+    $timeout = [int](Opt 'lock-timeout-ms' 30000)
+    Acquire-Lock $paths.Lock $timeout
+    try {
+        $stream = Read-EventStream $paths.Events
+        $events = $stream.Events
 
-    $typeCounts = [ordered]@{}
-    foreach ($t in $script:KnownTypes) { $typeCounts[$t] = 0 }
-    $codexDur = New-Object System.Collections.Generic.List[int]
-    $roundStart = @{}   # "batch|wave" -> occurred_at
-    $roundDur = New-Object System.Collections.Generic.List[object]
-    $taskCaptured = @{} # task_id -> earliest occurred_at
-    $taskDone = @{}     # task_id -> occurred_at of status_changed to выполнена
-    # usage.recorded aggregation (T-248). ACTUAL and ESTIMATED are summed into SEPARATE buckets
-    # and never merged into one figure (plans/OBSERVABILITY_PLATFORM_PLAN.md §8): a heuristic
-    # estimate must never be presented as, or added to, a provider-exact count.
-    $usageActual = [ordered]@{ n = 0; input_tokens = 0; output_tokens = 0; cache_read_input_tokens = 0; cache_creation_input_tokens = 0; total_tokens = 0 }
-    $usageEstimated = [ordered]@{ n = 0; total_tokens = 0 }
-    $usageBySource = @{}   # source -> @{ actual_total_tokens; estimated_total_tokens; n }
+        $typeCounts = [ordered]@{}
+        foreach ($t in $script:KnownTypes) { $typeCounts[$t] = 0 }
+        $codexDur = New-Object System.Collections.Generic.List[int]
+        $roundStart = @{}   # "batch|wave" -> occurred_at
+        $roundDur = New-Object System.Collections.Generic.List[object]
+        $taskCaptured = @{} # task_id -> earliest occurred_at
+        $taskDone = @{}     # task_id -> occurred_at of status_changed to выполнена
+        # usage.recorded aggregation (T-248). ACTUAL and ESTIMATED are summed into SEPARATE buckets
+        # and never merged into one figure (plans/OBSERVABILITY_PLATFORM_PLAN.md §8): a heuristic
+        # estimate must never be presented as, or added to, a provider-exact count.
+        $usageActual = [ordered]@{ n = 0; input_tokens = 0; output_tokens = 0; cache_read_input_tokens = 0; cache_creation_input_tokens = 0; total_tokens = 0 }
+        $usageEstimated = [ordered]@{ n = 0; total_tokens = 0 }
+        $usageBySource = @{}   # source -> @{ actual_total_tokens; estimated_total_tokens; n }
 
-    foreach ($e in $events) {
-        $type = [string]$e.type
-        if ($typeCounts.Contains($type)) { $typeCounts[$type] = $typeCounts[$type] + 1 }
-        $pl = $e.payload
-        switch ($type) {
-            'codex.attempt' {
-                if ((Has-Prop $pl 'duration_ms') -and ([string]$pl.duration_ms -match '^\d+$')) { [void]$codexDur.Add([int]$pl.duration_ms) }
-            }
-            'cohort.round_started' {
-                $w = if (Has-Prop $pl 'wave') { [string]$pl.wave } else { '?' }
-                $roundStart["$([string](Get-Prop $e 'batch_id'))|$w"] = $e.occurred_at
-            }
-            'cohort.round_closed' {
-                $w = if (Has-Prop $pl 'wave') { [string]$pl.wave } else { '?' }
-                $k = "$([string](Get-Prop $e 'batch_id'))|$w"
-                if ($roundStart.ContainsKey($k)) {
-                    $ms = [int]((To-Utc $e.occurred_at) - (To-Utc $roundStart[$k])).TotalMilliseconds
-                    [void]$roundDur.Add([pscustomobject]@{ key = $k; duration_ms = $ms })
+        foreach ($e in $events) {
+            $type = [string]$e.type
+            if ($typeCounts.Contains($type)) { $typeCounts[$type] = $typeCounts[$type] + 1 }
+            $pl = $e.payload
+            switch ($type) {
+                'codex.attempt' {
+                    if ((Has-Prop $pl 'duration_ms') -and ([string]$pl.duration_ms -match '^\d+$')) { [void]$codexDur.Add([int]$pl.duration_ms) }
                 }
-            }
-            'task.captured' {
-                $t = [string](Get-Prop $e 'task_id')
-                if ($t -and (-not $taskCaptured.ContainsKey($t))) { $taskCaptured[$t] = $e.occurred_at }
-            }
-            'task.status_changed' {
-                $t = [string](Get-Prop $e 'task_id')
-                $to = if (Has-Prop $pl 'to') { [string]$pl.to } else { '' }
-                if ($t -and $to -eq 'выполнена') { $taskDone[$t] = $e.occurred_at }
-            }
-            'usage.recorded' {
-                # Single shared usage interpretation (tools/events-common.ps1 Get-EventUsage):
-                # the total-tokens rule and the estimated/actual split, identical to metrics.ps1.
-                # Cast to [int] to keep this projection's integer token contract (an outbox
-                # usage.recorded token field is a validated non-negative integer on write).
-                $u = Get-EventUsage $e
-                $tot = if ($null -ne $u.Total) { [int]$u.Total } else { 0 }
-                $src = $u.Source
-                if (-not $usageBySource.ContainsKey($src)) { $usageBySource[$src] = [ordered]@{ actual_total_tokens = 0; estimated_total_tokens = 0; n = 0 } }
-                $usageBySource[$src].n = $usageBySource[$src].n + 1
-                if ($u.Estimated) {
-                    $usageEstimated.n = $usageEstimated.n + 1
-                    $usageEstimated.total_tokens = $usageEstimated.total_tokens + $tot
-                    $usageBySource[$src].estimated_total_tokens = $usageBySource[$src].estimated_total_tokens + $tot
-                } else {
-                    $usageActual.n = $usageActual.n + 1
-                    $usageActual.input_tokens = $usageActual.input_tokens + [int]$u.InputTokens
-                    $usageActual.output_tokens = $usageActual.output_tokens + [int]$u.OutputTokens
-                    $usageActual.cache_read_input_tokens = $usageActual.cache_read_input_tokens + [int]$u.CacheReadTokens
-                    $usageActual.cache_creation_input_tokens = $usageActual.cache_creation_input_tokens + [int]$u.CacheCreationTokens
-                    $usageActual.total_tokens = $usageActual.total_tokens + $tot
-                    $usageBySource[$src].actual_total_tokens = $usageBySource[$src].actual_total_tokens + $tot
+                'cohort.round_started' {
+                    $w = if (Has-Prop $pl 'wave') { [string]$pl.wave } else { '?' }
+                    $roundStart["$([string](Get-Prop $e 'batch_id'))|$w"] = $e.occurred_at
+                }
+                'cohort.round_closed' {
+                    $w = if (Has-Prop $pl 'wave') { [string]$pl.wave } else { '?' }
+                    $k = "$([string](Get-Prop $e 'batch_id'))|$w"
+                    if ($roundStart.ContainsKey($k)) {
+                        $ms = [int]((To-Utc $e.occurred_at) - (To-Utc $roundStart[$k])).TotalMilliseconds
+                        [void]$roundDur.Add([pscustomobject]@{ key = $k; duration_ms = $ms })
+                    }
+                }
+                'task.captured' {
+                    $t = [string](Get-Prop $e 'task_id')
+                    if ($t -and (-not $taskCaptured.ContainsKey($t))) { $taskCaptured[$t] = $e.occurred_at }
+                }
+                'task.status_changed' {
+                    $t = [string](Get-Prop $e 'task_id')
+                    $to = if (Has-Prop $pl 'to') { [string]$pl.to } else { '' }
+                    if ($t -and $to -eq 'выполнена') { $taskDone[$t] = $e.occurred_at }
+                }
+                'usage.recorded' {
+                    # Single shared usage interpretation (tools/events-common.ps1 Get-EventUsage):
+                    # the total-tokens rule and the estimated/actual split, identical to metrics.ps1.
+                    # Cast to [int] to keep this projection's integer token contract (an outbox
+                    # usage.recorded token field is a validated non-negative integer on write).
+                    $u = Get-EventUsage $e
+                    $tot = if ($null -ne $u.Total) { [int]$u.Total } else { 0 }
+                    $src = $u.Source
+                    if (-not $usageBySource.ContainsKey($src)) { $usageBySource[$src] = [ordered]@{ actual_total_tokens = 0; estimated_total_tokens = 0; n = 0 } }
+                    $usageBySource[$src].n = $usageBySource[$src].n + 1
+                    if ($u.Estimated) {
+                        $usageEstimated.n = $usageEstimated.n + 1
+                        $usageEstimated.total_tokens = $usageEstimated.total_tokens + $tot
+                        $usageBySource[$src].estimated_total_tokens = $usageBySource[$src].estimated_total_tokens + $tot
+                    } else {
+                        $usageActual.n = $usageActual.n + 1
+                        $usageActual.input_tokens = $usageActual.input_tokens + [int]$u.InputTokens
+                        $usageActual.output_tokens = $usageActual.output_tokens + [int]$u.OutputTokens
+                        $usageActual.cache_read_input_tokens = $usageActual.cache_read_input_tokens + [int]$u.CacheReadTokens
+                        $usageActual.cache_creation_input_tokens = $usageActual.cache_creation_input_tokens + [int]$u.CacheCreationTokens
+                        $usageActual.total_tokens = $usageActual.total_tokens + $tot
+                        $usageBySource[$src].actual_total_tokens = $usageBySource[$src].actual_total_tokens + $tot
+                    }
                 }
             }
         }
-    }
 
-    $critical = New-Object System.Collections.Generic.List[object]
-    foreach ($t in $taskDone.Keys) {
-        if ($taskCaptured.ContainsKey($t)) {
-            $ms = [int]((To-Utc $taskDone[$t]) - (To-Utc $taskCaptured[$t])).TotalMilliseconds
-            [void]$critical.Add([pscustomobject]@{ task_id = $t; critical_path_ms = $ms })
+        $critical = New-Object System.Collections.Generic.List[object]
+        foreach ($t in $taskDone.Keys) {
+            if ($taskCaptured.ContainsKey($t)) {
+                $ms = [int]((To-Utc $taskDone[$t]) - (To-Utc $taskCaptured[$t])).TotalMilliseconds
+                [void]$critical.Add([pscustomobject]@{ task_id = $t; critical_path_ms = $ms })
+            }
         }
-    }
 
-    function Stat { param($List)
-        if ($List.Count -eq 0) { return [ordered]@{ n = 0; total_ms = 0; min_ms = 0; max_ms = 0; avg_ms = 0 } }
-        $sum = 0; $min = [int]::MaxValue; $max = 0
-        foreach ($v in $List) { $sum += $v; if ($v -lt $min) { $min = $v }; if ($v -gt $max) { $max = $v } }
-        return [ordered]@{ n = $List.Count; total_ms = $sum; min_ms = $min; max_ms = $max; avg_ms = [int]($sum / $List.Count) }
-    }
+        function Stat { param($List)
+            if ($List.Count -eq 0) { return [ordered]@{ n = 0; total_ms = 0; min_ms = 0; max_ms = 0; avg_ms = 0 } }
+            $sum = 0; $min = [int]::MaxValue; $max = 0
+            foreach ($v in $List) { $sum += $v; if ($v -lt $min) { $min = $v }; if ($v -gt $max) { $max = $v } }
+            return [ordered]@{ n = $List.Count; total_ms = $sum; min_ms = $min; max_ms = $max; avg_ms = [int]($sum / $List.Count) }
+        }
 
-    $usage = [ordered]@{
-        actual    = $usageActual
-        estimated = $usageEstimated
-        by_source = $usageBySource
-    }
+        $usage = [ordered]@{
+            actual    = $usageActual
+            estimated = $usageEstimated
+            by_source = $usageBySource
+        }
 
-    $out = [ordered]@{
-        total_events   = $events.Count
-        type_counts    = $typeCounts
-        codex_attempt  = (Stat $codexDur)
-        round_durations = $roundDur
-        critical_paths = $critical
-        usage          = $usage
-    }
-    if ([bool](Opt 'json' $false)) {
-        Write-Output ($out | ConvertTo-Json -Depth 8 -Compress)
-    } else {
-        Write-Output "metrics: events=$($events.Count) codex.attempt(n=$($out.codex_attempt.n) avg_ms=$($out.codex_attempt.avg_ms)) rounds=$($roundDur.Count) critical_paths=$($critical.Count) usage(actual_tokens=$($usageActual.total_tokens) n=$($usageActual.n); estimated_tokens=$($usageEstimated.total_tokens) n=$($usageEstimated.n))"
-    }
+        $out = [ordered]@{
+            total_events   = $events.Count
+            type_counts    = $typeCounts
+            codex_attempt  = (Stat $codexDur)
+            round_durations = $roundDur
+            critical_paths = $critical
+            usage          = $usage
+        }
+        if ([bool](Opt 'json' $false)) {
+            Write-Output ($out | ConvertTo-Json -Depth 8 -Compress)
+        } else {
+            Write-Output "metrics: events=$($events.Count) codex.attempt(n=$($out.codex_attempt.n) avg_ms=$($out.codex_attempt.avg_ms)) rounds=$($roundDur.Count) critical_paths=$($critical.Count) usage(actual_tokens=$($usageActual.total_tokens) n=$($usageActual.n); estimated_tokens=$($usageEstimated.total_tokens) n=$($usageEstimated.n))"
+        }
+    } finally { Release-Lock $paths.Lock }
 }
 
 function Cmd-Version { Write-Output 'orchestra-outbox 1' }
