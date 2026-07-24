@@ -58,20 +58,25 @@ impl Cursor {
     }
 
     /// Parse a persisted cursor. A malformed / partial cursor is an error (the caller decides
-    /// whether to fall back to a fresh cursor).
+    /// whether to fall back to a fresh cursor): this includes a `{}` empty object, a
+    /// `byte_offset` that is not a non-negative integer, and a `delivered_ids` that is not an
+    /// array — not just non-JSON / non-object input.
     pub fn from_json(s: &str) -> Result<Cursor, String> {
         let v: Value = serde_json::from_str(s).map_err(|e| format!("cursor is unreadable: {e}"))?;
         let obj = v.as_object().ok_or("cursor must be a JSON object")?;
-        let byte_offset = obj.get("byte_offset").and_then(|v| v.as_u64()).unwrap_or(0);
+        let byte_offset = obj
+            .get("byte_offset")
+            .ok_or("cursor is missing \"byte_offset\"")?
+            .as_u64()
+            .ok_or("cursor \"byte_offset\" is not a non-negative integer")?;
         let delivered_ids = obj
             .get("delivered_ids")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+            .ok_or("cursor is missing \"delivered_ids\"")?
+            .as_array()
+            .ok_or("cursor \"delivered_ids\" is not an array")?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
         Ok(Cursor {
             byte_offset,
             delivered_ids,
@@ -352,6 +357,50 @@ mod tests {
         let evs = r2.poll().unwrap();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].event_id, "evt-c");
+    }
+
+    #[test]
+    fn from_json_rejects_non_object() {
+        assert!(Cursor::from_json("not json").is_err());
+        assert!(Cursor::from_json("[1,2,3]").is_err());
+    }
+
+    #[test]
+    fn from_json_rejects_empty_object() {
+        // `{}` is valid JSON but a partial cursor per the documented contract: error, not a
+        // silent fallback to byte_offset=0 / empty delivered_ids (which would cause a full
+        // replay without any diagnostic for the caller).
+        assert!(Cursor::from_json("{}").is_err());
+    }
+
+    #[test]
+    fn from_json_rejects_non_numeric_byte_offset() {
+        let err = Cursor::from_json(r#"{"byte_offset":"nope","delivered_ids":[]}"#).unwrap_err();
+        assert!(
+            err.contains("byte_offset"),
+            "error mentions the field: {err}"
+        );
+    }
+
+    #[test]
+    fn from_json_rejects_non_array_delivered_ids() {
+        let err = Cursor::from_json(r#"{"byte_offset":5,"delivered_ids":"nope"}"#).unwrap_err();
+        assert!(
+            err.contains("delivered_ids"),
+            "error mentions the field: {err}"
+        );
+    }
+
+    #[test]
+    fn from_json_accepts_well_formed_cursor() {
+        let cur = Cursor::from_json(r#"{"byte_offset":5,"delivered_ids":["evt-a"]}"#).unwrap();
+        assert_eq!(
+            cur,
+            Cursor {
+                byte_offset: 5,
+                delivered_ids: vec!["evt-a".to_string()],
+            }
+        );
     }
 
     #[test]
