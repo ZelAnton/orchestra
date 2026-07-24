@@ -183,7 +183,9 @@ already-open Windows terminal. A `PATH`-only installation still needs a new term
 lifecycle JSONL under `.work/processes/_processor`. Interactive Claude roots require the
 probe surface `run:--inherit-stdio`; older CLI releases automatically use a direct
 console-attached fallback so the Claude TUI cannot disappear behind redirected stdio.
-Supervised leaf commands remain ProcessKit-contained. Explicitly broken backends fail
+ProcessKit CLI 0.2.2 provides that surface, so current interactive roots remain contained.
+Its `run:--stdin-file` surface also keeps supervised calls with mediated input inside the
+ProcessKit container. Explicitly broken backends fail
 closed. Set `CC_PROCESSKIT_CLI=off` to disable standalone
 discovery. `CC_PROCESSKIT_PYTHON` remains a deprecated compatibility fallback when no CLI is
 selected. With or without ProcessKit, those launchers disable

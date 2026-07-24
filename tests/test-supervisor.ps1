@@ -36,6 +36,9 @@
         running the child.
       * observe: emits a non-sensitive journal line + codex.attempt event args that the
         real tools/outbox.ps1 accepts.
+      * Optional released ProcessKit CLI integration: when ORCHESTRA_PROCESSKIT_TEST_CLI
+        is set, mediated stdin reaches the child through run:--stdin-file without
+        degrading kernel containment or leaving the staging file behind.
 
 .EXAMPLE
     pwsh -File tests/test-supervisor.ps1
@@ -210,7 +213,49 @@ exit $code
 }.Invoke()
 
 # =============================================================================
-# 0e. Process snapshot diffs stay typed and consistent under StrictMode.
+# 0e. Released ProcessKit CLI mediated-stdin integration (optional).
+# =============================================================================
+{
+    $realCli = [string][Environment]::GetEnvironmentVariable('ORCHESTRA_PROCESSKIT_TEST_CLI')
+    if (-not [string]::IsNullOrWhiteSpace($realCli)) {
+        $contract = (& $realCli probe --json | ConvertFrom-Json)
+        if (@($contract.surface) -contains 'run:--stdin-file') {
+            $d = New-TempDir
+            $worker = Join-Path $d 'stdin-worker.ps1'
+            $stdinSource = Join-Path $d 'stdin-source.txt'
+            $capture = Join-Path $d 'stdin.out'
+            $result = Join-Path $d 'stdin-result.json'
+            Write-File $worker @'
+$value = [Console]::In.ReadToEnd()
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($value)
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try { $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) }
+finally { $sha.Dispose() }
+Write-Output "LEN=$($bytes.Length);SHA=$hash"
+'@
+            $payload = ('processkit-022-input|' + ('x' * (256KB)))
+            Write-File $stdinSource $payload
+            $expectedHash = [System.Security.Cryptography.SHA256]::Create()
+            try { $expectedHashText = -join ($expectedHash.ComputeHash($script:Utf8.GetBytes($payload)) | ForEach-Object { $_.ToString('x2') }) }
+            finally { $expectedHash.Dispose() }
+            $r = Invoke-Spv -ToolArgs @(
+                'run', '--file', $worker, '--stdin-file', $stdinSource,
+                '--stdout-file', $capture, '--result-file', $result, '--json'
+            ) -EnvironmentOverrides @{ CC_PROCESSKIT_CLI = $realCli }
+            Assert-Exit $r 0 'released CLI mediated-stdin call succeeds'
+            $verdict = Read-File $result | ConvertFrom-Json
+            Assert-Equal 'processkit-cli' ([string]$verdict.containment) 'mediated stdin remains ProcessKit-contained'
+            Assert-Equal '' ([string]$verdict.containment_degraded_reason) 'mediated stdin does not record containment degradation'
+            $expectedCapture = "LEN=$($script:Utf8.GetByteCount($payload));SHA=$expectedHashText"
+            Assert-Equal $expectedCapture ((Read-File $capture).TrimEnd("`r", "`n")) 'released CLI delivers the exact large stdin payload without runner-pipe deadlock'
+            $staging = Join-Path ([System.IO.Path]::GetTempPath()) (([string]$verdict.processkit_run_id) + '.stdin')
+            Assert-True (-not (Test-Path -LiteralPath $staging)) 'mediated-stdin staging file is removed after the call'
+        }
+    }
+}.Invoke()
+
+# =============================================================================
+# 0f. Process snapshot diffs stay typed and consistent under StrictMode.
 #     A real global snapshot cannot deterministically require zero candidates: another
 #     process on a shared CI/desktop host may start during this call.
 # =============================================================================

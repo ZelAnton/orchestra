@@ -87,6 +87,8 @@ Assert-Equal 0 (@(Get-ChildItem -LiteralPath $work -Recurse -Filter '*.processki
 
 $realCli = [string][Environment]::GetEnvironmentVariable('ORCHESTRA_PROCESSKIT_TEST_CLI')
 if (-not [string]::IsNullOrWhiteSpace($realCli)) {
+    $realContract = (& $realCli probe --json | ConvertFrom-Json)
+    $supportsInheritedStdio = @($realContract.surface) -contains 'run:--inherit-stdio'
     $realWork = New-TempDir
     $realMarker = Join-Path $realWork 'marker.txt'
     $real = Invoke-Runtime @('run-root', '--work', $realWork, '--label', 'released-cli', '--',
@@ -108,10 +110,16 @@ if (-not [string]::IsNullOrWhiteSpace($realCli)) {
     $interactive = Invoke-Runtime @('run-root', '--interactive', '--work', $interactiveWork,
         '--label', 'interactive-root', '--', $script:Pwsh, '-NoProfile', '-NonInteractive',
         '-File', $worker, $interactiveMarker, '7') -Environment @{ CC_PROCESSKIT_CLI = $realCli }
-    Assert-Equal 7 $interactive.ExitCode 'CLI without inherited-stdio surface preserves direct interactive fallback child code'
-    Assert-True (Test-Path -LiteralPath $interactiveMarker -PathType Leaf) 'interactive fallback runs the target directly'
-    Assert-True ($interactive.Err -match 'lacks run:--inherit-stdio') 'interactive fallback explains why root containment is degraded'
-    Assert-Equal 0 (@(Get-ChildItem -LiteralPath $interactiveWork -Recurse -Filter '*.processkit.jsonl').Count) 'interactive fallback does not create a fake contained lifecycle'
+    Assert-Equal 7 $interactive.ExitCode 'interactive root preserves child exit code'
+    Assert-True (Test-Path -LiteralPath $interactiveMarker -PathType Leaf) 'interactive root runs the target'
+    $interactiveEvents = @(Get-ChildItem -LiteralPath $interactiveWork -Recurse -Filter '*.processkit.jsonl')
+    if ($supportsInheritedStdio) {
+        Assert-Equal 1 $interactiveEvents.Count 'inherited-stdio capability keeps interactive root contained'
+        Assert-True ($interactive.Err -notmatch 'lacks run:--inherit-stdio') 'capable CLI does not emit a degradation warning'
+    } else {
+        Assert-True ($interactive.Err -match 'lacks run:--inherit-stdio') 'legacy interactive fallback explains why root containment is degraded'
+        Assert-Equal 0 $interactiveEvents.Count 'legacy interactive fallback does not create a fake contained lifecycle'
+    }
 }
 
 foreach ($dir in $script:TempDirs) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }

@@ -411,13 +411,12 @@ container. Supervisor читает terminal JSONL, поэтому runner `spawn_
 не смешивается с настоящим child exit code из полосы 100–119, а при deadline/cancel сначала
 адресно вызывает `kill --run-id`, затем применяет старый PID/PGID fallback. Поле verdict
 `containment` показывает `processkit-cli`/`processkit-python`/`process-group`/`pid-tree`.
-В `processkit-cli 0.2.0` нет mediated stdin. Поэтому вызов supervisor с непустым
-`--stdin-text`/`--stdin-file` не теряет ввод: при настроенном Python fallback он использует
-его inherited stdin, иначе явно деградирует на прежний PID/PGID backend и ставит
-`containment_degraded_reason=processkit-cli-no-mediated-stdin`. CLI 0.2.0 также не
-предоставляет полный inherited stdio/TTY для Claude root: root автоматически деградирует на
-direct console-attached запуск. Запрос на `--inherit-stdio`/`--stdin-file` вынесен владельцам
-CLI; после появления probe token root containment включится автоматически.
+`processkit-cli 0.2.2` предоставляет `run:--stdin-file` и `run:--inherit-stdio`. Поэтому
+supervisor с непустым `--stdin-text`/`--stdin-file` сохраняет ввод во временный UTF-8 файл,
+передаёт CLI только путь и удаляет файл после завершения вызова; leaf-команда остаётся в container.
+Интерактивный Claude root наследует console stdio и также остаётся contained. Для старого
+CLI без этих probe surfaces сохраняются прежние безопасные fallback: PID/PGID для mediated
+stdin и direct console-attached root вместо молчаливой потери ввода/TTY.
 
 Матрица устойчивости этого пути — `tools/harness.ps1` (полный жизненный цикл когорты для
 git и jj с fault injection после каждого критического перехода): быстрый срез

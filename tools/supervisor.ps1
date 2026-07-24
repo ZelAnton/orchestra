@@ -432,11 +432,10 @@ function Invoke-SupervisedCall {
     )
     $processkitBackend = Resolve-SupervisorProcessKitBackend
     $containmentDegradedReason = ''
-    if ($processkitBackend.Kind -eq 'cli' -and -not [string]::IsNullOrEmpty($StdinText)) {
-        # processkit-cli 0.2.0 gives the child null stdin and exposes no stdin source
-        # surface. Preserve supervisor's existing --stdin-text/--stdin-file contract
-        # instead of silently discarding input; the PID/PGID cleanup remains active.
-        # Re-enable CLI containment here once probe advertises a mediated-stdin surface.
+    $processkitSupportsStdinFile = ($processkitBackend.Kind -eq 'cli' -and @($processkitBackend.Surfaces) -contains 'run:--stdin-file')
+    if ($processkitBackend.Kind -eq 'cli' -and -not [string]::IsNullOrEmpty($StdinText) -and -not $processkitSupportsStdinFile) {
+        # Older CLI releases give the child null stdin and expose no mediated source.
+        # Preserve supervisor's input contract instead of silently discarding bytes.
         try { $stdinBackend = Resolve-OrchestraProcessKitPythonBackend }
         catch { Fail 2 $_.Exception.Message }
         if ($null -ne $stdinBackend) {
@@ -452,6 +451,7 @@ function Invoke-SupervisedCall {
     $containmentKind = if ($processkitCli) { 'processkit-cli' } elseif ($processkitPython) { 'processkit-python' } elseif ($setsidLauncher) { 'process-group' } else { 'pid-tree' }
     $processkitEvents = ''
     $processkitRunId = ''
+    $processkitStdinFile = ''
     # `setsid missing-target` itself starts successfully and reports 127 after its exec
     # fails. Preserve the supervisor contract that an unresolvable executable is a spawn
     # crash by skipping the wrapper in that case, so Process.Start surfaces the native
@@ -472,10 +472,15 @@ function Invoke-SupervisedCall {
     if ($processkitCli) {
         $processkitRunId = 'orchestra-supervisor-' + [guid]::NewGuid().ToString('N')
         $processkitEvents = Join-Path ([System.IO.Path]::GetTempPath()) ($processkitRunId + '.jsonl')
+        if (-not [string]::IsNullOrEmpty($StdinText) -and $processkitSupportsStdinFile) {
+            $processkitStdinFile = Join-Path ([System.IO.Path]::GetTempPath()) ($processkitRunId + '.stdin')
+        }
         $childCwd = if ($WorkingDirectory) { [System.IO.Path]::GetFullPath($WorkingDirectory) } else { [System.IO.Path]::GetFullPath((Get-Location).Path) }
         $launchFile = $processkitCli
         $launchArgs = @('run', '--run-id', $processkitRunId, '--cwd', $childCwd,
-            '--jsonl', $processkitEvents, '--create-no-window', '--', $FilePath) + @($CallArgs)
+            '--jsonl', $processkitEvents, '--create-no-window')
+        if ($processkitStdinFile) { $launchArgs += @('--stdin-file', $processkitStdinFile) }
+        $launchArgs += @('--', $FilePath) + @($CallArgs)
     } elseif ($processkitPython) {
         # ProcessKit owns a race-free kernel container for this individual call
         # (CREATE_SUSPENDED -> Job Object assign -> resume on Windows). This reaches
@@ -516,6 +521,13 @@ function Invoke-SupervisedCall {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
+    if ($processkitStdinFile) {
+        try { [System.IO.File]::WriteAllText($processkitStdinFile, $StdinText, $script:Utf8) }
+        catch {
+            Remove-Item -LiteralPath $processkitStdinFile -Force -ErrorAction SilentlyContinue
+            Fail 2 "cannot stage ProcessKit stdin file: $($_.Exception.Message)"
+        }
+    }
     try { [void]$proc.Start() }
     catch {
         # The process could not even be spawned - a tool/infrastructure crash.
@@ -529,6 +541,7 @@ function Invoke-SupervisedCall {
             containment_degraded_reason = $containmentDegradedReason
             processkit_events_file = $processkitEvents; processkit_run_id = $processkitRunId
         }
+        if ($processkitStdinFile) { Remove-Item -LiteralPath $processkitStdinFile -Force -ErrorAction SilentlyContinue }
         if (-not $diagEnabled -and $processkitEvents) { Remove-Item -LiteralPath $processkitEvents -Force -ErrorAction SilentlyContinue }
         return $spawnResult
     }
@@ -538,7 +551,13 @@ function Invoke-SupervisedCall {
     # stdout/stderr cannot deadlock against the stdin write; the byte cap is applied after.
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
-    try { $proc.StandardInput.Write($StdinText); $proc.StandardInput.Close() }
+    try {
+        # A capable ProcessKit CLI reads the staged file itself. Do not duplicate a
+        # potentially large payload into the runner's own stdin: it need not read that
+        # pipe, so a synchronous write could fill the buffer and deadlock the supervisor.
+        if (-not $processkitStdinFile) { $proc.StandardInput.Write($StdinText) }
+        $proc.StandardInput.Close()
+    }
     catch {
         # The child may exit before consuming stdin - not fatal.
     }
@@ -675,6 +694,7 @@ function Invoke-SupervisedCall {
         descendants_before_cleanup = $descendantsBefore; survivors_after_cleanup = $descendantsAfter
         temporal_candidates = $temporalCandidates; temporal_candidates_after_cleanup = $temporalAfter
     }
+    if ($processkitStdinFile) { Remove-Item -LiteralPath $processkitStdinFile -Force -ErrorAction SilentlyContinue }
     if (-not $diagEnabled -and $processkitEvents) { Remove-Item -LiteralPath $processkitEvents -Force -ErrorAction SilentlyContinue }
     return $result
 }
