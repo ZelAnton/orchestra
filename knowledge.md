@@ -668,7 +668,9 @@ original/sender/key. Повтор после потери stdout не дубли
 на ответ несовпадающий контент fail-closed.
 `reconcile` связывает сообщения с задачами по точной строке provenance в очереди,
 `Tasks_Done.md` и дескрипторах, а archive-resolver поддерживает оба исторических формата
-заголовка. Нормативный контракт — `docs/inbox_contract.md`; `cc-sync` публикует его как
+заголовка. Агрегирующие `list`/`reconcile`/`actionable` пропускают одну невалидную запись,
+сохраняя валидную проекцию и возвращая diagnostics `errors`; адресные `show`/`mark`/`reply`
+по-прежнему строго отвергают такую запись. Нормативный контракт — `docs/inbox_contract.md`; `cc-sync` публикует его как
 `~/.claude/specs/Inbox_Contract.md`.
 
 Registry entry дополнительно несёт project-owned `products`/`dependencies`. Полный

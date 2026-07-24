@@ -322,11 +322,25 @@ function Get-AllMessages {
     param([string]$Root)
     Assert-InboxExists $Root
     $items = [System.Collections.Generic.List[object]]::new()
+    $errors = [System.Collections.Generic.List[object]]::new()
     foreach ($file in @(Get-ChildItem -LiteralPath (Get-MessagesPath $Root) -File -Filter 'msg-*.json' -ErrorAction SilentlyContinue)) {
         $id = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-        $items.Add((Read-Message -Root $Root -Id $id))
+        try {
+            $items.Add((Read-Message -Root $Root -Id $id))
+        } catch {
+            # A cross-project inbox is an aggregate projection. One stale or corrupt
+            # record must not hide every other message; singular operations keep their
+            # strict Read-Message behaviour and report the original error instead.
+            $errors.Add([pscustomobject][ordered]@{
+                id = $id
+                error = [string]$_.Exception.Message
+            })
+        }
     }
-    return @($items.ToArray() | Sort-Object created_at, id)
+    return [pscustomobject][ordered]@{
+        messages = @($items.ToArray() | Sort-Object created_at, id)
+        errors = @($errors.ToArray() | Sort-Object id)
+    }
 }
 
 function Assert-StatusTransition {
@@ -438,19 +452,23 @@ function Cmd-Send {
 
 function Cmd-List {
     $root = Get-Root
-    $messages = @(Get-AllMessages $root)
+    $projection = Get-AllMessages $root
+    $messages = @($projection.messages)
     $statusRaw = [string](Opt 'status' '')
     if ($statusRaw) {
         $wanted = @($statusRaw -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
         foreach ($status in $wanted) { if ($script:Statuses -notcontains $status) { Fail 2 "invalid processing status '$status'" } }
         $messages = @($messages | Where-Object { $wanted -contains [string]$_.processing_status })
     }
-    if ([bool](Opt 'json' $false)) { [pscustomobject]@{ count = $messages.Count; messages = $messages } | ConvertTo-Json -Depth 12 }
+    if ([bool](Opt 'json' $false)) {
+        [pscustomobject]@{ count = $messages.Count; messages = $messages; errors = @($projection.errors) } | ConvertTo-Json -Depth 12
+    }
     else {
         foreach ($message in $messages) {
             Write-Output "$($message.id)  $($message.processing_status)/$($message.reply_status)  from=$($message.from_project.name)  $($message.subject)"
         }
         Write-Output "count=$($messages.Count)"
+        foreach ($error in @($projection.errors)) { Write-Output "error id=$($error.id) message=$($error.error)" }
     }
 }
 
@@ -509,7 +527,8 @@ function Cmd-Reconcile {
     $lock = Get-InboxLockPath $root
     Acquire-Lock -LockPath $lock
     try {
-        foreach ($message in @(Get-AllMessages $root)) {
+        $projection = Get-AllMessages $root
+        foreach ($message in @($projection.messages)) {
             $id = [string]$message.id
             if (-not $links.ContainsKey($id)) { continue }
             if ([string]$message.processing_status -in @('implemented', 'rejected')) { continue }
@@ -525,19 +544,23 @@ function Cmd-Reconcile {
             if ($changed) { Write-Message -Root $root -Message $message; $updated.Add($id) }
         }
     } finally { Release-Lock -LockPath $lock }
-    $result = [pscustomobject]@{ updated = @($updated.ToArray()); count = $updated.Count }
+    $result = [pscustomobject]@{ updated = @($updated.ToArray()); count = $updated.Count; errors = @($projection.errors) }
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 5 }
-    else { Write-Output "reconciled=$($updated.Count)" }
+    else {
+        Write-Output "reconciled=$($updated.Count)"
+        foreach ($error in @($projection.errors)) { Write-Output "error id=$($error.id) message=$($error.error)" }
+    }
 }
 
 function Cmd-Actionable {
     $root = Get-Root
     $done = Get-TaskIdsFromArchive $root
+    $projection = Get-AllMessages $root
     $new = [System.Collections.Generic.List[string]]::new()
     $unresolved = [System.Collections.Generic.List[string]]::new()
     $completable = [System.Collections.Generic.List[string]]::new()
     $replyPending = [System.Collections.Generic.List[string]]::new()
-    foreach ($message in @(Get-AllMessages $root)) {
+    foreach ($message in @($projection.messages)) {
         $status = [string]$message.processing_status
         if ($status -in @('implemented', 'rejected') -and [string]$message.reply_status -ne 'final') {
             $replyPending.Add([string]$message.id)
@@ -561,9 +584,13 @@ function Cmd-Actionable {
         unresolved = @($unresolved.ToArray())
         completable = @($completable.ToArray())
         reply_pending = @($replyPending.ToArray())
+        errors = @($projection.errors)
     }
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 5 }
-    else { Write-Output "actionable=$($result.count) new=$($new.Count) unresolved=$($unresolved.Count) completable=$($completable.Count) reply_pending=$($replyPending.Count)" }
+    else {
+        Write-Output "actionable=$($result.count) new=$($new.Count) unresolved=$($unresolved.Count) completable=$($completable.Count) reply_pending=$($replyPending.Count)"
+        foreach ($error in @($projection.errors)) { Write-Output "error id=$($error.id) message=$($error.error)" }
+    }
 }
 
 function Cmd-Reply {

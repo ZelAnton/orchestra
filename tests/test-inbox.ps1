@@ -115,6 +115,16 @@ try {
     Assert-Exit $newList 0 'list new messages'
     Assert-Equal 1 ([int](($newList.Out | ConvertFrom-Json).count)) 'receiver sees one new message'
 
+    # Aggregate operations retain valid messages and expose diagnostics when another
+    # cross-project writer leaves a stale or malformed record in the inbox.
+    $brokenMessageId = 'msg-corrupt-0001'
+    Write-TestFile (Join-Path $script:RepoB ('.inbox/messages/' + $brokenMessageId + '.json')) '{not-json'
+    $listWithBrokenRecord = Invoke-Inbox @('list', '--root', $script:RepoB, '--json')
+    Assert-Exit $listWithBrokenRecord 0 'list skips a malformed unrelated message record'
+    $listWithBrokenProjection = $listWithBrokenRecord.Out | ConvertFrom-Json
+    Assert-Equal 1 ([int]$listWithBrokenProjection.count) 'list keeps valid messages when another record is malformed'
+    Assert-Equal $brokenMessageId ([string]$listWithBrokenProjection.errors[0].id) 'list identifies the skipped malformed record'
+
     $invalid = Invoke-Inbox @('mark', '--root', $script:RepoB, '--id', $messageId, '--status', 'queued', '--task', 'T-101')
     Assert-Exit $invalid 6 'new -> queued transition is rejected until critical review marks read'
 
@@ -143,6 +153,7 @@ Inbox message: $messageId
     Assert-Exit $reconcile 0 'reconcile queue provenance into message state'
     if ($reconcile.ExitCode -ne 0) { throw "reconcile failed: $($reconcile.Err) $($reconcile.Out)" }
     Assert-Equal 1 ([int](($reconcile.Out | ConvertFrom-Json).count)) 'one message reconciled'
+    Assert-Equal $brokenMessageId ([string](($reconcile.Out | ConvertFrom-Json).errors[0].id)) 'reconcile reports but skips the malformed record'
     $queued = (Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $messageId, '--json')).Out | ConvertFrom-Json
     Assert-Equal 'queued' ([string]$queued.processing_status) 'read message becomes queued after task allocation'
     Assert-Equal 'T-101,T-102' ((@($queued.queue_tasks) | Sort-Object) -join ',') 'all derived tasks are linked to the message'
@@ -152,6 +163,7 @@ Inbox message: $messageId
     if ($beforeDoneResult.ExitCode -ne 0) { throw "actionable before completion failed: $($beforeDoneResult.Err) $($beforeDoneResult.Out)" }
     $beforeDone = $beforeDoneResult.Out | ConvertFrom-Json
     Assert-Equal 0 ([int]$beforeDone.count) 'queued work is not completable before archive evidence exists'
+    Assert-Equal $brokenMessageId ([string]$beforeDone.errors[0].id) 'actionable reports but skips the malformed record'
     $premature = Invoke-Inbox @('mark', '--root', $script:RepoB, '--id', $messageId, '--status', 'implemented', '--remark', 'Must not be accepted yet.')
     Assert-Exit $premature 6 'implemented is rejected until every linked task is archived'
 
