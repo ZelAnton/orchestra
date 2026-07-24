@@ -16,7 +16,7 @@ use super::batch::{load_batch, BatchState, BatchTask};
 use super::cohort::{load_cohort, CohortState};
 use super::descriptor::{load_descriptors, Descriptor};
 use super::integration::{load_integration, IntegrationSnapshot};
-use super::queue::{parse_queue, QueueEntry};
+use super::queue::{parse_queue, DeliveryTarget, QueueEntry};
 
 /// A single deterministic snapshot of the control plane, sourced from one `.work/` directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +136,10 @@ impl Snapshot {
         for e in &self.queue {
             let st = e.state.map(|x| x.as_str()).unwrap_or("?");
             let _ = write!(s, "  {:<7} {:<12} {}", e.id, st, e.title);
+            let _ = write!(s, " · delivery_target={}", e.delivery_target.as_str());
+            if e.delivery_target == DeliveryTarget::NextMajor {
+                let _ = write!(s, " (parked, not admitted)");
+            }
             if let Some(a) = e.attempt {
                 let _ = write!(s, " · attempt={a}");
             }
@@ -178,6 +182,7 @@ fn queue_entry_json(e: &QueueEntry) -> Value {
         "quarantine": e.quarantine,
         "escalation_reason": e.escalation_reason,
         "prerequisites": e.prerequisites,
+        "delivery_target": e.delivery_target.as_str(),
     })
 }
 
