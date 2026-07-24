@@ -293,6 +293,42 @@ function Register-OrchestraProject {
     }
 }
 
+function Unregister-OrchestraProject {
+    param(
+        [Parameter(Mandatory)][string]$RegistryPath,
+        [Parameter(Mandatory)][string]$Selector,
+        [switch]$DetachDependents
+    )
+    return Invoke-WithOrchestraRegistryLock -RegistryPath $RegistryPath -Body {
+        $registry = Read-OrchestraRegistry $RegistryPath
+        $project = Resolve-OrchestraRegistryProject -Registry $registry -Selector $Selector
+        $dependents = @($registry.projects | Where-Object {
+            @($_.dependencies | Where-Object { [string]$_.upstream_id -eq [string]$project.id }).Count -gt 0
+        } | Sort-Object name, id)
+        if ($dependents.Count -gt 0 -and -not $DetachDependents) {
+            $names = @($dependents | ForEach-Object { "{0} ({1})" -f $_.name, $_.id }) -join ', '
+            Fail 6 "cannot unregister $($project.id): it remains an upstream for $names; rerun with --detach-dependents after confirming those graph edges are obsolete"
+        }
+
+        $now = Format-UtcNow
+        $detached = [System.Collections.Generic.List[object]]::new()
+        foreach ($dependent in $dependents) {
+            $dependent.dependencies = @($dependent.dependencies | Where-Object { [string]$_.upstream_id -ne [string]$project.id })
+            $dependent.graph_generation = [long]$dependent.graph_generation + 1
+            $dependent.graph_updated_at = $now
+            $detached.Add([pscustomobject][ordered]@{ id = [string]$dependent.id; name = [string]$dependent.name })
+        }
+        $registry.projects = @($registry.projects | Where-Object { [string]$_.id -ne [string]$project.id })
+        $registry.generation = [int]$registry.generation + 1
+        $registry.updated_at = $now
+        Write-OrchestraRegistry -Path $RegistryPath -Registry $registry
+        return [pscustomobject][ordered]@{
+            project = $project
+            detached_dependents = @($detached.ToArray())
+        }
+    }
+}
+
 function Read-OrchestraGraphSnapshot {
     param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Registry, [Parameter(Mandatory)][string]$ProjectId)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Fail 2 "dependency graph snapshot not found: $Path" }

@@ -696,6 +696,17 @@ function Read-ReleaseRecord {
             Fail 5 "release notification record has a duplicate or non-target delivery: $ReleaseId"
         }
     }
+    if ($null -eq $record.PSObject.Properties['skipped_targets']) { $record | Add-Member -NotePropertyName skipped_targets -NotePropertyValue @() }
+    $skippedIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($skip in @($record.skipped_targets)) {
+        $projectId = [string]$skip.project_id
+        if ($projectId -notmatch '^repo-[a-f0-9]{20}$' -or -not $targetIds.Contains($projectId) -or
+            $deliveryIds.Contains($projectId) -or -not $skippedIds.Add($projectId)) {
+            Fail 5 "release notification record has an invalid skipped target: $ReleaseId"
+        }
+        Assert-BoundedSingleLine -Value ([string]$skip.reason) -Name 'release skip reason' -Maximum 1024
+        $null = ConvertTo-OrchestraTimestampText $skip.skipped_at
+    }
     return $record
 }
 
@@ -705,6 +716,7 @@ function Write-ReleaseRecord {
     $Record.products = @($Record.products)
     $Record.target_project_ids = @($Record.target_project_ids)
     $Record.deliveries = @($Record.deliveries)
+    $Record.skipped_targets = @($Record.skipped_targets)
     Write-InboxAtomicFile -Path (Get-ReleasePath -Root $Root -ReleaseId ([string]$Record.id)) `
         -Label 'release notification record' -Content ($Record | ConvertTo-Json -Depth 14)
 }
@@ -715,6 +727,13 @@ function Cmd-Release {
     $version = (Require-Opt 'version').Trim()
     Assert-BoundedSingleLine -Value $version -Name 'release version' -Maximum 120
     $resume = [bool](Opt 'resume' $false)
+    $skipTarget = [string](Opt 'skip-target' '')
+    $skipReason = [string](Opt 'skip-reason' '')
+    if ($skipTarget -or $skipReason) {
+        if (-not $resume) { Fail 2 '--skip-target is accepted only with --resume' }
+        if ($skipTarget -notmatch '^repo-[a-f0-9]{20}$') { Fail 2 '--skip-target must be a frozen repo-<id> target id' }
+        Assert-BoundedSingleLine -Value $skipReason -Name 'release skip reason' -Maximum 1024
+    }
     if ($resume) {
         foreach ($contentOption in @('notes', 'notes-file', 'subject', 'product', 'release-url', 'source-revision')) {
             if ($opts.ContainsKey($contentOption)) { Fail 2 "--resume cannot be combined with --$contentOption; canonical release content is already frozen" }
@@ -777,6 +796,7 @@ function Cmd-Release {
                 source_revision = $sourceRevision
                 target_project_ids = @($dependents | ForEach-Object { [string]$_.id })
                 deliveries = @()
+                skipped_targets = @()
                 created_at = $now
                 updated_at = $now
             }
@@ -785,8 +805,33 @@ function Cmd-Release {
     } finally { Release-Lock -LockPath $lock }
 
     $delivered = [System.Collections.Generic.List[object]]::new()
+    $skipped = [System.Collections.Generic.List[object]]::new()
     $failures = [System.Collections.Generic.List[object]]::new()
+    if ($skipTarget) {
+        Acquire-Lock -LockPath $lock
+        try {
+            $current = Read-ReleaseRecord -Root $root -ReleaseId $releaseId
+            if (-not (@($current.target_project_ids) -contains $skipTarget)) { Fail 2 "--skip-target is not in release $version's frozen audience: $skipTarget" }
+            if (@($current.deliveries | Where-Object { [string]$_.project_id -eq $skipTarget }).Count -gt 0) {
+                Fail 6 "cannot skip an already delivered release target: $skipTarget"
+            }
+            if (@($current.skipped_targets | Where-Object { [string]$_.project_id -eq $skipTarget }).Count -eq 0) {
+                $current.skipped_targets = @($current.skipped_targets) + @([pscustomobject][ordered]@{
+                    project_id = $skipTarget
+                    reason = $skipReason
+                    skipped_at = Format-UtcNow
+                })
+                Write-ReleaseRecord -Root $root -Record $current
+            }
+            $record = $current
+        } finally { Release-Lock -LockPath $lock }
+    }
     foreach ($targetId in @($record.target_project_ids)) {
+        $recordedSkip = @($record.skipped_targets | Where-Object { [string]$_.project_id -eq [string]$targetId }) | Select-Object -First 1
+        if ($null -ne $recordedSkip) {
+            $skipped.Add([pscustomobject][ordered]@{ project_id = [string]$targetId; reason = [string]$recordedSkip.reason })
+            continue
+        }
         $recordedDelivery = @($record.deliveries | Where-Object { [string]$_.project_id -eq [string]$targetId }) | Select-Object -First 1
         if ($null -ne $recordedDelivery) {
             $recordedTarget = @($registry.projects | Where-Object { [string]$_.id -eq [string]$targetId }) | Select-Object -First 1
@@ -836,12 +881,14 @@ function Cmd-Release {
         version = $version
         target_count = @($record.target_project_ids).Count
         delivered_count = $delivered.Count
+        skipped_count = $skipped.Count
         failure_count = $failures.Count
         deliveries = @($delivered.ToArray())
+        skipped_targets = @($skipped.ToArray())
         failures = @($failures.ToArray())
     }
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 10 }
-    else { Write-Output "release=$releaseId version=$version targets=$($result.target_count) delivered=$($result.delivered_count) failures=$($result.failure_count)" }
+    else { Write-Output "release=$releaseId version=$version targets=$($result.target_count) delivered=$($result.delivered_count) skipped=$($result.skipped_count) failures=$($result.failure_count)" }
     if ($failures.Count -gt 0) { Fail 6 "release notification delivery failed for $($failures.Count) dependent project(s); retry with --resume" }
 }
 

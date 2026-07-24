@@ -56,6 +56,12 @@ processor that starts immediately after the manual lease check.
 `ORCHESTRA_REGISTRY_PATH` is an operator/test override. Agents must not set it themselves.
 The default is always the current user's `~/.orchestra/projects.json`.
 
+An unavailable or retired project is removed through `project-registry.ps1 unregister --project
+<id-or-name>`. The command refuses to leave dangling dependency edges; after an operator confirms
+that they are obsolete, `--detach-dependents` atomically removes those edges and records the graph
+change on every affected dependent. It removes only the registry entry, never the repository or its
+inbox directory.
+
 Runner resolution is fail-closed. Use `<root>/tools/<name>.ps1` only when that root is the
 Orchestra source checkout, proven by all three identity markers
 `agents/processor.md`, `generate-codex-agents.ps1`, and `tools/sync-runtime.ps1`.
@@ -293,6 +299,18 @@ the dependent's message and recording that delivery at the source. A retry uses 
 ```text
 pwsh -File tools/inbox.ps1 release --root <source-root> --version <X> --resume --json
 ```
+
+If a frozen target is permanently unavailable before delivery, an operator may converge that one
+immutable fan-out explicitly instead of retrying forever:
+
+```text
+pwsh -File tools/inbox.ps1 release --root <source-root> --version <X> --resume \
+  --skip-target <frozen-repo-id> --skip-reason "repository retired" --json
+```
+
+The target must belong to the record's frozen audience and must not already be delivered. The
+audited skip reason is retained in the release record; retries report it as skipped and do not
+recompute the audience.
 
 `--resume` reuses the canonical notes and original target set. A later rewrite cannot
 silently change a partially delivered release, and dependents registered after the initial

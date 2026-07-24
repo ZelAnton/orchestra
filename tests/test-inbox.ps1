@@ -17,6 +17,7 @@ $script:Root = Join-Path ([System.IO.Path]::GetTempPath()) ('orchestra-inbox-tes
 $script:RepoA = Join-Path $script:Root 'sender-repo'
 $script:RepoB = Join-Path $script:Root 'receiver-repo'
 $script:RepoC = Join-Path $script:Root 'unrelated-repo'
+$script:RepoD = Join-Path $script:Root 'retired-repo'
 $script:Registry = Join-Path $script:Root 'profile/projects.json'
 $script:RegistryTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\project-registry.ps1')).Path
 $script:InboxTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\inbox.ps1')).Path
@@ -66,7 +67,7 @@ try {
             [Environment]::SetEnvironmentVariable('ORCHESTRA_PS5_PARSE_PATH', $previousParsePath)
         }
     }
-    $null = New-Item -ItemType Directory -Force -Path $script:RepoA, $script:RepoB
+    $null = New-Item -ItemType Directory -Force -Path $script:RepoA, $script:RepoB, $script:RepoD
 
     $a1 = Invoke-Registry @('register', '--root', $script:RepoA, '--name', 'Sender', '--ensure-inbox', '--json')
     $b1 = Invoke-Registry @('register', '--root', $script:RepoB, '--name', 'Receiver', '--ensure-inbox', '--json')
@@ -401,12 +402,30 @@ completed
         Move-Item -LiteralPath $offlineRepoB -Destination $script:RepoB
     }
 
+    Move-Item -LiteralPath $script:RepoB -Destination $offlineRepoB
+    try {
+        Write-TestFile $releaseNotes 'A permanently unavailable target needs an explicit audited skip.'
+        $blockedRelease = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.2', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+        Assert-Exit $blockedRelease 6 'release records but reports a permanently unavailable undelivered target'
+        $skippedRelease = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.2', '--resume', '--skip-target', ([string]$receiver.id), '--skip-reason', 'receiver repository retired', '--json')
+        Assert-Exit $skippedRelease 0 'release resume can explicitly skip an unavailable frozen target'
+        if ($skippedRelease.ExitCode -eq 0) {
+            $skippedProjection = $skippedRelease.Out | ConvertFrom-Json
+            Assert-Equal 1 ([int]$skippedProjection.skipped_count) 'skipped frozen target is reported separately from delivery'
+            Assert-Equal ([string]$receiver.id) ([string]$skippedProjection.skipped_targets[0].project_id) 'skip preserves the frozen target identity'
+        }
+        $skipRetry = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.2', '--resume', '--json')
+        Assert-Exit $skipRetry 0 'release resume converges after the audited target skip'
+    } finally {
+        Move-Item -LiteralPath $offlineRepoB -Destination $script:RepoB
+    }
+
     Write-TestFile $releaseNotes 'Whitespace around an operator-supplied version is not part of release identity.'
     $trimmedRelease = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', ' 2.0.1 ', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
     Assert-Exit $trimmedRelease 0 'release canonicalizes surrounding version whitespace'
     Assert-Equal '2.0.1' ([string](($trimmedRelease.Out | ConvertFrom-Json).version)) 'release result carries the canonical version'
     $releaseAuditFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:RepoA '.inbox/releases') -File -Filter 'rel-*.json')
-    Assert-Equal 3 $releaseAuditFiles.Count 'source stores canonical release audit records including recovered and normalized fan-out'
+    Assert-Equal 4 $releaseAuditFiles.Count 'source stores canonical release audit records including recovered, normalized, and skipped fan-out'
 
     Write-TestFile $releaseNotes 'Changed notes must not rewrite a started fan-out.'
     $releaseConflict = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--notes-file', $releaseNotes)
@@ -430,6 +449,37 @@ completed
     $releaseNoTargets = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.1.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
     Assert-Exit $releaseNoTargets 0 'release with no dependents is a successful auditable no-op'
     Assert-Equal 0 ([int](($releaseNoTargets.Out | ConvertFrom-Json).target_count)) 'new release uses the refreshed empty audience'
+
+    $retiredRegister = Invoke-Registry @('register', '--root', $script:RepoD, '--name', 'Retired', '--ensure-inbox', '--json')
+    Assert-Exit $retiredRegister 0 'register retired project for removal workflow'
+    $retired = ($retiredRegister.Out | ConvertFrom-Json).project
+    $receiverGraphBeforeRetirement = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    $retiredDependencyPath = Join-Path $script:Root 'retired-dependent-graph.json'
+    Write-TestFile $retiredDependencyPath (@"
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": $($receiverGraphBeforeRetirement.project.graph_generation),
+  "products": ["nuget:Receiver.Package"],
+  "dependencies": [
+    {
+      "upstream": "$($retired.id)",
+      "products": [],
+      "evidence": ["retired fixture"]
+    }
+  ]
+}
+"@)
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $retiredDependencyPath)) 0 'add dependent edge before registry removal'
+    $blockedUnregister = Invoke-Registry @('unregister', '--project', ([string]$retired.id))
+    Assert-Exit $blockedUnregister 6 'registry refuses to remove an upstream with live dependent edges'
+    $unregistered = Invoke-Registry @('unregister', '--project', ([string]$retired.id), '--detach-dependents', '--json')
+    Assert-Exit $unregistered 0 'registry removal atomically detaches dependent edges'
+    if ($unregistered.ExitCode -eq 0) {
+        Assert-Equal 1 (@(($unregistered.Out | ConvertFrom-Json).detached_dependents).Count) 'registry removal reports every detached dependent'
+    }
+    Assert-Exit (Invoke-Registry @('resolve', '--project', ([string]$retired.id))) 4 'unregistered project no longer resolves'
+    $receiverGraphAfterRetirement = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 0 (@($receiverGraphAfterRetirement.dependencies).Count) 'registry removal leaves no dangling dependency edge'
 }
 finally {
     Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue

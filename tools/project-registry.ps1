@@ -8,6 +8,7 @@
     pwsh -File tools/project-registry.ps1 resolve --project repo-0123456789abcdef0123 --json
     pwsh -File tools/project-registry.ps1 graph-sync --root . --snapshot-file .work/dependency-graph.json --json
     pwsh -File tools/project-registry.ps1 dependents --project repo-0123456789abcdef0123 --json
+    pwsh -File tools/project-registry.ps1 unregister --project repo-0123456789abcdef0123 --detach-dependents --json
 #>
 
 Set-StrictMode -Version Latest
@@ -18,7 +19,7 @@ $script:ErrPrefix = 'PRJERR'
 $script:FaultEnv = 'PROJECT_REGISTRY_FAULT'
 $script:LockName = 'project-registry'
 
-$parsed = Parse-CliArgs $args -BoolFlags @('json', 'ensure-inbox')
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'ensure-inbox', 'detach-dependents')
 $Command = $parsed.Command
 $opts = $parsed.Opts
 
@@ -83,8 +84,17 @@ try {
                 Write-Output "count=$($dependents.Count)"
             }
         }
+        'unregister' {
+            $selector = Require-Opt 'project'
+            $result = Unregister-OrchestraProject -RegistryPath $registryPath -Selector $selector -DetachDependents:([bool](Opt 'detach-dependents' $false))
+            if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 8 }
+            else {
+                Write-Output "unregistered id=$($result.project.id) name=$($result.project.name)"
+                Write-Output "detached_dependents=$(@($result.detached_dependents).Count)"
+            }
+        }
         'path' { Write-Output $registryPath }
-        default { Fail 2 "unknown command '$Command' (expected register, list, resolve, graph-sync, graph-show, dependents, or path)" }
+        default { Fail 2 "unknown command '$Command' (expected register, list, resolve, graph-sync, graph-show, dependents, unregister, or path)" }
     }
     exit 0
 } catch {

@@ -673,6 +673,13 @@ original/sender/key. Повтор после потери stdout не дубли
 по-прежнему строго отвергают такую запись. Нормативный контракт — `docs/inbox_contract.md`; `cc-sync` публикует его как
 `~/.claude/specs/Inbox_Contract.md`.
 
+`project-registry.ps1 unregister --project <id-or-name>` удаляет только registry entry;
+при live inbound dependency оно fail-closed, а явный `--detach-dependents` атомарно убирает
+подтверждённо устаревшие edges и повышает generation каждого затронутого graph. Frozen release
+target, недоступный до доставки, не исчезает молча: оператор завершает именно эту аудиторию
+`release --resume --skip-target <repo-id> --skip-reason <text>`; запись хранит причину skip и
+последующие resume больше не пытаются доставить его.
+
 Registry entry дополнительно несёт project-owned `products`/`dependencies`. Полный
 snapshot `orchestra/project-graph-snapshot@1` заменяется только через
 `project-registry.ps1 graph-sync`; candidate несёт `base_graph_generation`, поэтому
