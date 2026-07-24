@@ -36,7 +36,8 @@
          and no second semantic event is ever created for an already-committed fact.
 
       4. Single-writer. Concurrent appends serialize behind an atomic CreateNew lock
-         (`<events>.lock`); a forbidden parallel writer that cannot take the lock fails
+         derived from the resolved events path (`outbox-tx.lock` beside canonical
+         `events.jsonl`); a forbidden parallel writer that cannot take the lock fails
          (exit 7). With `--owner`, an append is additionally bound to the current
          orchestrator.lock lease owner, so a writer that is not the run owner is rejected
          (exit 13) even if it momentarily holds the short lock.
@@ -307,14 +308,28 @@ function Get-CanonicalName {
 function Resolve-Paths {
     $work = [string](Opt 'work' '')
     $events = [string](Opt 'events' '')
+    if ($work) { $work = [System.IO.Path]::GetFullPath($work) }
     if (-not $events) {
         if (-not $work) { Fail 2 "need --work or --events" }
         $events = Join-Path $work 'events.jsonl'
     }
-    # With --work the lock follows the .work/<name>-tx.lock convention (companion to
-    # queue-tx.lock / state-tx.lock); with a bare --events it sits beside the file.
-    $defaultLock = if ($work) { Join-Path $work 'outbox-tx.lock' } else { "$events.lock" }
+    $events = [System.IO.Path]::GetFullPath($events)
+
+    # The default lock is a function of the RESOLVED events file, never of whether the
+    # caller spelled that file as `--work X` or `--events X/events.jsonl`. Otherwise an
+    # append using the first spelling and a consumer using the second can enter the same
+    # FileShare.None critical section through different locks. Preserve the established
+    # .work/outbox-tx.lock name for canonical events.jsonl; explicit non-canonical event
+    # filenames receive an unambiguous per-file companion lock.
+    $eventsDir = Split-Path -Parent $events
+    $eventsLeaf = Split-Path -Leaf $events
+    $defaultLock = if ([string]::Equals($eventsLeaf, 'events.jsonl', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Join-Path $eventsDir 'outbox-tx.lock'
+    } else {
+        "$events.lock"
+    }
     $lock = [string](Opt 'lock' $defaultLock)
+    $lock = [System.IO.Path]::GetFullPath($lock)
     $lease = ''
     if ($work) { $lease = Join-Path $work 'orchestrator.lock/lease.json' }
     return [pscustomobject]@{ Work = $work; Events = $events; Lock = $lock; Lease = $lease }
@@ -531,7 +546,8 @@ function Read-Outbox {
 # handle is open; changing only the reader's requested share cannot close this race).
 #
 # The chosen fix is therefore lock-based, not share-based: `read`, `verify` and `metrics`
-# below each take the SAME outbox lock (Paths.Lock / <events>.lock, Acquire-Lock/
+# below each take the SAME outbox lock (Paths.Lock, canonically derived from the resolved
+# events path regardless of `--work`/`--events` spelling, Acquire-Lock/
 # Release-Lock, shared with Cmd-Append) for their entire read. Cmd-Append already holds
 # this lock for its ENTIRE critical section, including the FileShare.None open/write/flush/
 # dispose - so a reader that holds the same lock is GUARANTEED to never attempt to open
@@ -555,6 +571,34 @@ function Read-Outbox {
 # write atomic, not a concurrent read+advance sequence) - do not remove the lock from
 # Cmd-Read without re-establishing an equivalent guarantee.
 # --------------------------------------------------------------------------
+
+# Acquire through the shared primitive. The optional test signal is deliberately emitted
+# only after an atomic CreateNew probe has ACTUALLY observed the target lock as contended;
+# tests use it to prove a reader reached the blocked state before releasing a simulated
+# writer's FileShare.None hold. Normal invocations do not set this environment variable and
+# take the production path directly.
+function Acquire-OutboxLock {
+    param([string]$LockPath, [int]$TimeoutMs)
+    $waitSignal = [Environment]::GetEnvironmentVariable('OUTBOX_TEST_LOCK_WAIT_SIGNAL')
+    if ($waitSignal) {
+        $probe = $null
+        try {
+            $probe = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        } catch [System.IO.IOException] {
+            $signalDir = Split-Path -Parent $waitSignal
+            if ($signalDir -and -not (Test-Path -LiteralPath $signalDir)) {
+                [void][System.IO.Directory]::CreateDirectory($signalDir)
+            }
+            [System.IO.File]::WriteAllText($waitSignal, 'contended', (New-Object System.Text.UTF8Encoding($false)))
+        } finally {
+            if ($null -ne $probe) {
+                $probe.Dispose()
+                Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    Acquire-Lock $LockPath $TimeoutMs
+}
 
 # --------------------------------------------------------------------------
 # Owner (single-writer) check against the orchestrator.lock lease.
@@ -634,7 +678,7 @@ function Cmd-Append {
     $eid = [string]$chk.Obj.event_id
 
     $timeout = [int](Opt 'lock-timeout-ms' 30000)
-    Acquire-Lock $paths.Lock $timeout
+    Acquire-OutboxLock $paths.Lock $timeout
     try {
         $ob = Read-Outbox $paths.Events 'read'
         # A meaningfully invalid newline-terminated committed line is unrepairable
@@ -699,7 +743,7 @@ function Cmd-Verify {
     # the writer" above): guarantees this read never races the writer's FileShare.None
     # window, instead of merely hoping a share-flag combination happens to be compatible.
     $timeout = [int](Opt 'lock-timeout-ms' 30000)
-    Acquire-Lock $paths.Lock $timeout
+    Acquire-OutboxLock $paths.Lock $timeout
     try {
         $ob = Read-Outbox $paths.Events 'read'
         $total = 0; $valid = 0
@@ -753,7 +797,7 @@ function Cmd-Read {
     # makes a concurrent cursor read-modify-write safe (no lost update between two
     # overlapping `read --cursor` calls).
     $timeout = [int](Opt 'lock-timeout-ms' 30000)
-    Acquire-Lock $paths.Lock $timeout
+    Acquire-OutboxLock $paths.Lock $timeout
     try {
         $ob = Read-Outbox $paths.Events 'read'
 
@@ -817,7 +861,7 @@ function Cmd-Metrics {
     # FileShare.ReadWrite, but that alone cannot survive the writer's FileShare.None window
     # (the FIRST opener's share governs); the lock is what actually closes the race.
     $timeout = [int](Opt 'lock-timeout-ms' 30000)
-    Acquire-Lock $paths.Lock $timeout
+    Acquire-OutboxLock $paths.Lock $timeout
     try {
         $stream = Read-EventStream $paths.Events
         $events = $stream.Events
