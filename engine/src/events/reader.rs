@@ -75,8 +75,12 @@ impl Cursor {
             .as_array()
             .ok_or("cursor \"delivered_ids\" is not an array")?
             .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
+            .map(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .ok_or("cursor \"delivered_ids\" contains a non-string element")
+            })
+            .collect::<Result<Vec<String>, &str>>()?;
         Ok(Cursor {
             byte_offset,
             delivered_ids,
@@ -389,6 +393,24 @@ mod tests {
             err.contains("delivered_ids"),
             "error mentions the field: {err}"
         );
+    }
+
+    #[test]
+    fn from_json_rejects_non_string_delivered_id() {
+        // A non-string element (int, null, nested object, ...) must not be silently discarded
+        // from `delivered_ids` — that would make dedup lose entries without any diagnostic.
+        for bad in [
+            r#"{"byte_offset":5,"delivered_ids":[123]}"#,
+            r#"{"byte_offset":5,"delivered_ids":[null]}"#,
+            r#"{"byte_offset":5,"delivered_ids":[{"id":"evt-a"}]}"#,
+            r#"{"byte_offset":5,"delivered_ids":["evt-a",42]}"#,
+        ] {
+            let err = Cursor::from_json(bad).unwrap_err();
+            assert!(
+                err.contains("delivered_ids"),
+                "error mentions the field for {bad}: {err}"
+            );
+        }
     }
 
     #[test]
