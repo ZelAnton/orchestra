@@ -68,8 +68,8 @@ function Get-OrchestraProjectName {
     param([Parameter(Mandatory)][string]$Root, [string]$Requested = '')
     $name = $Requested.Trim()
     if (-not $name) { $name = Split-Path -Leaf $Root }
-    if (-not $name -or $name.Length -gt 120 -or $name -match '[\r\n]') {
-        Fail 2 'project name must contain 1-120 characters and no line breaks'
+    if (-not $name -or $name.Length -gt 120 -or $name -match '[\x00-\x1f\x7f]') {
+        Fail 2 'project name must contain 1-120 characters and no control characters'
     }
     return $name
 }
@@ -165,6 +165,15 @@ function Assert-OrchestraPlainDirectory {
     }
 }
 
+function Assert-OrchestraPlainFile {
+    param([Parameter(Mandatory)][string]$Path, [string]$Label = 'file')
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer) { Fail 5 "$Label path is not a file: $Path" }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        Fail 5 "$Label path must not be a symlink or reparse point: $Path"
+    }
+}
+
 function Register-OrchestraProject {
     param(
         [Parameter(Mandatory)][string]$RegistryPath,
@@ -175,8 +184,10 @@ function Register-OrchestraProject {
     $canonicalRoot = Resolve-OrchestraProjectRoot $Root
     $projectName = Get-OrchestraProjectName -Root $canonicalRoot -Requested $Name
     $id = Get-OrchestraProjectId $canonicalRoot
-    if ($EnsureInbox) { $null = Ensure-OrchestraInbox $canonicalRoot }
     return Invoke-WithOrchestraRegistryLock -RegistryPath $RegistryPath -Body {
+        # Serialize inbox initialization with registration as one user-global
+        # transaction. Concurrent cc-config calls must not race two check/create pairs.
+        if ($EnsureInbox) { $null = Ensure-OrchestraInbox $canonicalRoot }
         $registry = Read-OrchestraRegistry $RegistryPath
         $now = Format-UtcNow
         $existing = @($registry.projects | Where-Object { [string]$_.id -eq $id }) | Select-Object -First 1

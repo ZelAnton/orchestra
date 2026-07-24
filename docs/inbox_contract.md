@@ -45,9 +45,10 @@ pwsh -File tools/project-registry.ps1 resolve --project <name-or-repo-id> --json
 
 The registry is the only routing authority. Never search the disk for sibling
 repositories and never trust a destination path supplied inside a message.
-Both `.inbox` and `.inbox/messages` must be real directories, not symlinks or reparse
-points; the tools reject redirected storage so the narrow cross-project write cannot
-escape the registered target root.
+Both `.inbox` and `.inbox/messages`, as well as existing message and temporary files,
+must be real filesystem objects, not symlinks or reparse points; the tools reject
+redirected storage so the narrow cross-project write cannot escape the registered target
+root.
 
 ## 3. Message storage and schema
 
@@ -96,12 +97,20 @@ pwsh -File tools/inbox.ps1 send \
   --to <target-name-or-repo-id> \
   --subject <short subject> \
   --body-file <prepared UTF-8 text file> \
+  --dedupe-key <stable-local-operation-key> \
   --json
 ```
 
 The tool derives the sender id and name from the registry, so every message is
 answerable. It writes only inside the registered target's `.inbox`; it never edits that
 repository's source, queue, `.work`, VCS, policy, or lease.
+
+Agent sends normally MUST provide a stable `--dedupe-key`, derived from durable local
+identity such as role plus task/finding id (`reviewer-T-123-R-02-v1`). The resulting
+message id is deterministic for sender, recipient, and key, so retrying after lost output
+returns the existing identical message instead of duplicating it. Reusing the key with
+different subject/body fails. The option remains optional only for deliberate interactive
+one-shot operator messages.
 
 A good request contains:
 
@@ -173,6 +182,9 @@ pwsh -File tools/inbox.ps1 reconcile --root <root> --json
 - `unresolved`: read, not linked to work, and not yet acknowledged; an acknowledged
   clarification waits for a new reply message instead of being reprocessed every boundary;
 - `completable`: queued and every linked task is present in `Tasks_Done.md`.
+- `reply_pending`: implemented or rejected, but its final reply has not yet been recorded.
+  This closes the crash window between persisting the terminal decision and routing the
+  response.
 
 The archive resolver accepts both `## [T-NNN]`/`### [T-NNN]`-style headings and
 `# Активная задача T-NNN` headings.
@@ -197,8 +209,11 @@ pwsh -File tools/inbox.ps1 reply \
 Routing goes back to the original sender through the registry. The reply id is derived
 from the original id, responding project, and dedupe key. Retrying the same reply is
 idempotent; reusing that key with different content fails instead of silently overwriting
-history. A final reply is rejected unless the original status is `implemented` or
-`rejected`.
+history. If delivery completed but the process crashed before recording the reply on the
+source request, the first delivered content wins: a retry with the same key repairs source
+state from that destination record. After source state records the reply, differing content
+again fails closed. A final reply is rejected unless the original status is `implemented`
+or `rejected`.
 
 Acknowledgement/clarification replies use `--reply-status acknowledged` and a distinct
 stable dedupe key such as `clarification-v1`.
@@ -209,7 +224,16 @@ critical reading remark, and normally leaves it `read`; read reply records are e
 from `unresolved`, preventing acknowledgement loops. `conversation_id` always identifies
 the first request, so a clarification answer can be correlated with the receiver's local
 original. A response may still justify local tasks, but only by an explicit curator
-decision using the response's own msg-id as provenance.
+decision. When it answers a clarification and the original `conversation_id` exists in the
+receiver inbox, derived tasks use `Inbox message: <conversation_id>` plus
+`Inbox response: <reply-msg-id>`, so the original request—not the evidence reply—continues
+through queued, implemented, and final response.
+
+`inbox.ps1 mark --status implemented` independently enforces that every linked task is
+already present in `Tasks_Done.md`; the role instruction is not the only guard. Reconcile
+does not mutate terminal records. If a process crashes after writing `implemented` or
+`rejected` but before recording the final reply, `reply_pending` makes the retry actionable;
+the deterministic reply id prevents duplicate delivery.
 
 ## 8. Trust, privacy, and boundaries
 

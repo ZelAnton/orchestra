@@ -653,10 +653,16 @@ override и не выставляется агентами.
 
 `tools/inbox.ps1` — единственный писатель message JSON (`orchestra/inbox-message@1`) и
 единственное разрешённое исключение для межрепозиторной записи: он может атомарно создать
-файл только в `.inbox/messages` адресата, найденного по доверенному реестру. Статус оценки
+файл только в `.inbox/messages` адресата, найденного по доверенному реестру. Каталоги inbox
+и существующие message/tmp-файлы обязаны быть обычными filesystem objects:
+symlink/reparse перенаправление отклоняется до чтения или записи. Статус оценки
 (`new/read/queued/implemented/rejected`) отделён от статуса ответа
 (`none/acknowledged/final`); переходы узкие, финальный ответ допустим только после
-`implemented`/`rejected`, reply-id детерминирован по original/sender/dedupe key.
+`implemented`/`rejected`. Агентские исходящие сообщения и ответы используют стабильный
+dedupe key: send-id детерминирован по sender/recipient/key, reply-id — по
+original/sender/key. Повтор после потери stdout не дублирует запрос, а окно crash после
+доставки ответа восстанавливается из уже созданной записи адресата; после фиксации ссылки
+на ответ несовпадающий контент fail-closed.
 `reconcile` связывает сообщения с задачами по точной строке provenance в очереди,
 `Tasks_Done.md` и дескрипторах, а archive-resolver поддерживает оба исторических формата
 заголовка. Нормативный контракт — `docs/inbox_contract.md`; `cc-sync` публикует его как

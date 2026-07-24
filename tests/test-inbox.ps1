@@ -100,6 +100,15 @@ try {
     Assert-Equal 'Sender' ([string]$sent.from_project.name) 'sender name is included automatically'
     Assert-Equal ([string]$receiver.id) ([string]$sent.to_project.id) 'destination identity is registry-derived'
 
+    $sentPath = Join-Path $script:RepoB ('.inbox/messages/' + $messageId + '.json')
+    $corrupt = [System.IO.File]::ReadAllText($sentPath) | ConvertFrom-Json
+    $corrupt.from_project.name = "Sender`nInjected"
+    Write-TestFile $sentPath ($corrupt | ConvertTo-Json -Depth 12)
+    $invalidEndpoint = Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $messageId, '--json')
+    Assert-Exit $invalidEndpoint 5 'message endpoint display names reject control characters'
+    $corrupt.from_project.name = 'Sender'
+    Write-TestFile $sentPath ($corrupt | ConvertTo-Json -Depth 12)
+
     $newList = Invoke-Inbox @('list', '--root', $script:RepoB, '--status', 'new', '--json')
     Assert-Exit $newList 0 'list new messages'
     Assert-Equal 1 ([int](($newList.Out | ConvertFrom-Json).count)) 'receiver sees one new message'
@@ -120,6 +129,12 @@ Implement the first independently reviewable part.
 Inbox message: $messageId
 
 Implement the second independently reviewable part.
+
+### [T-999] Unrelated task — status: not started
+No inbox provenance.
+
+### [P-001] Non-executable proposal — kind: proposal — status: proposed
+Inbox message: $messageId
 "@
     Write-TestFile (Join-Path $script:RepoB '.work/Tasks_Queue.md') $queue
     $reconcile = Invoke-Inbox @('reconcile', '--root', $script:RepoB, '--json')
@@ -135,6 +150,8 @@ Implement the second independently reviewable part.
     if ($beforeDoneResult.ExitCode -ne 0) { throw "actionable before completion failed: $($beforeDoneResult.Err) $($beforeDoneResult.Out)" }
     $beforeDone = $beforeDoneResult.Out | ConvertFrom-Json
     Assert-Equal 0 ([int]$beforeDone.count) 'queued work is not completable before archive evidence exists'
+    $premature = Invoke-Inbox @('mark', '--root', $script:RepoB, '--id', $messageId, '--status', 'implemented', '--remark', 'Must not be accepted yet.')
+    Assert-Exit $premature 6 'implemented is rejected until every linked task is archived'
 
     $done = @"
 ## [T-101] First delivery
@@ -154,6 +171,9 @@ completed
     Assert-Exit $implemented 0 'queued -> implemented'
     $implementedState = (Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $messageId, '--json')).Out | ConvertFrom-Json
     $remarkCountBeforeReply = @($implementedState.remarks).Count
+    $pendingReply = (Invoke-Inbox @('actionable', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 1 ([int]$pendingReply.count) 'terminal status without final reply remains actionable'
+    Assert-Equal $messageId ([string]$pendingReply.reply_pending[0]) 'implemented request is exposed as reply_pending'
     $replyBody = Join-Path $script:Root 'reply.md'
     Write-TestFile $replyBody 'Implemented through T-101 and T-102 after repository-local review.'
     $reply1 = Invoke-Inbox @('reply', '--root', $script:RepoB, '--id', $messageId, '--reply-status', 'final', '--dedupe-key', 'final-v1', '--body-file', $replyBody, '--actor', 'inbox_curator', '--json')
@@ -165,6 +185,12 @@ completed
     Assert-Equal $messageId ([string]$reply.conversation_id) 'reply retains the original conversation id'
     $senderInbox = (Invoke-Inbox @('list', '--root', $script:RepoA, '--status', 'new', '--json')).Out | ConvertFrom-Json
     Assert-Equal 1 ([int]$senderInbox.count) 'idempotent retry creates one response message'
+    $legacyReplyPath = Join-Path $script:RepoA ('.inbox/messages/' + [string]$reply.id + '.json')
+    $legacyReply = [System.IO.File]::ReadAllText($legacyReplyPath) | ConvertFrom-Json
+    $legacyReply.PSObject.Properties.Remove('conversation_id')
+    Write-TestFile $legacyReplyPath ($legacyReply | ConvertTo-Json -Depth 12)
+    $legacyRead = (Invoke-Inbox @('show', '--root', $script:RepoA, '--id', ([string]$reply.id), '--json')).Out | ConvertFrom-Json
+    Assert-Equal $messageId ([string]$legacyRead.conversation_id) 'early schema-1 reply without conversation_id is normalized on read'
     $replyRead = Invoke-Inbox @('mark', '--root', $script:RepoA, '--id', ([string]$reply.id), '--status', 'read', '--remark', 'Final upstream outcome recorded.', '--actor', 'inbox_curator')
     Assert-Exit $replyRead 0 'incoming reply can be marked read'
     $senderActionable = (Invoke-Inbox @('actionable', '--root', $script:RepoA, '--json')).Out | ConvertFrom-Json
@@ -173,10 +199,58 @@ completed
     Assert-Equal 'final' ([string]$finalOriginal.reply_status) 'original message records final reply status'
     Assert-Equal 1 (@($finalOriginal.reply_ids).Count) 'original stores one reply id after retry'
     Assert-Equal ($remarkCountBeforeReply + 1) (@($finalOriginal.remarks).Count) 'idempotent reply retry does not append a duplicate remark'
+    $afterReply = (Invoke-Inbox @('actionable', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 0 ([int]$afterReply.count) 'recorded final reply clears reply_pending'
+
+    Add-Content -LiteralPath (Join-Path $script:RepoB '.work/Tasks_Queue.md') -Value "`n### [T-103] Late unrelated task — status: not started`nInbox message: $messageId`n" -Encoding utf8
+    $terminalReconcile = Invoke-Inbox @('reconcile', '--root', $script:RepoB, '--json')
+    Assert-Exit $terminalReconcile 0 'reconcile tolerates provenance added after terminal status'
+    Assert-Equal 0 ([int](($terminalReconcile.Out | ConvertFrom-Json).count)) 'reconcile does not mutate terminal records'
+    $terminalState = (Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $messageId, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 'T-101,T-102' ((@($terminalState.queue_tasks) | Sort-Object) -join ',') 'terminal message task links remain immutable'
 
     Write-TestFile $replyBody 'Conflicting content under the same dedupe key.'
     $conflict = Invoke-Inbox @('reply', '--root', $script:RepoB, '--id', $messageId, '--reply-status', 'final', '--dedupe-key', 'final-v1', '--body-file', $replyBody)
     Assert-Exit $conflict 6 'same reply dedupe key cannot overwrite different content'
+
+    $stableBody = Join-Path $script:Root 'stable-request.md'
+    Write-TestFile $stableBody 'A request whose sender may lose command output.'
+    $maxSubject = 'S' * 240
+    $stable1 = Invoke-Inbox @('send', '--root', $script:RepoA, '--to', 'Receiver', '--subject', $maxSubject, '--body-file', $stableBody, '--dedupe-key', 'reviewer-T-200-R-01-v1', '--json')
+    $stable2 = Invoke-Inbox @('send', '--root', $script:RepoA, '--to', 'Receiver', '--subject', $maxSubject, '--body-file', $stableBody, '--dedupe-key', 'reviewer-T-200-R-01-v1', '--json')
+    Assert-Exit $stable1 0 'stable initial send succeeds'
+    Assert-Exit $stable2 0 'stable initial send retry is idempotent'
+    $stableMessage = $stable1.Out | ConvertFrom-Json
+    $stableRetry = $stable2.Out | ConvertFrom-Json
+    Assert-Equal ([string]$stableMessage.id) ([string]$stableRetry.id) 'stable initial send retry returns the same message id'
+    Write-TestFile $stableBody 'Conflicting request content under the same key.'
+    $stableConflict = Invoke-Inbox @('send', '--root', $script:RepoA, '--to', 'Receiver', '--subject', $maxSubject, '--body-file', $stableBody, '--dedupe-key', 'reviewer-T-200-R-01-v1')
+    Assert-Exit $stableConflict 6 'stable initial send key cannot overwrite different content'
+
+    $stableId = [string]$stableMessage.id
+    Assert-Exit (Invoke-Inbox @('mark', '--root', $script:RepoB, '--id', $stableId, '--status', 'read', '--remark', 'Assessed before refusal.')) 0 'crash-recovery request can be marked read'
+    Assert-Exit (Invoke-Inbox @('mark', '--root', $script:RepoB, '--id', $stableId, '--status', 'rejected', '--remark', 'A local alternative is preferred.')) 0 'crash-recovery request can be rejected'
+    Write-TestFile $replyBody 'First delivered final response wins after a crash.'
+    $previousFault = [Environment]::GetEnvironmentVariable('ORCHESTRA_INBOX_FAULT')
+    try {
+        [Environment]::SetEnvironmentVariable('ORCHESTRA_INBOX_FAULT', 'after-reply-delivery')
+        $crashedReply = Invoke-Inbox @('reply', '--root', $script:RepoB, '--id', $stableId, '--reply-status', 'final', '--dedupe-key', 'final-v1', '--body-file', $replyBody, '--json')
+    } finally {
+        [Environment]::SetEnvironmentVariable('ORCHESTRA_INBOX_FAULT', $previousFault)
+    }
+    Assert-Exit $crashedReply 1 'injected crash occurs after remote reply delivery'
+    $crashedState = (Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $stableId, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 'none' ([string]$crashedState.reply_status) 'source remains reply_pending after delivery-before-source crash'
+    Write-TestFile $replyBody 'Reconstructed text differs, but must not replace delivered history.'
+    $recoveredReply = Invoke-Inbox @('reply', '--root', $script:RepoB, '--id', $stableId, '--reply-status', 'final', '--dedupe-key', 'final-v1', '--body-file', $replyBody, '--json')
+    Assert-Exit $recoveredReply 0 'retry repairs source state from the already delivered reply'
+    $recovered = $recoveredReply.Out | ConvertFrom-Json
+    Assert-Equal 'First delivered final response wins after a crash.' ([string]$recovered.body) 'recovery preserves first delivered reply content'
+    Assert-Equal 240 ([string]$recovered.subject).Length 'default reply subject is safely truncated to its schema limit'
+    $recoveredState = (Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $stableId, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 'final' ([string]$recoveredState.reply_status) 'recovery records the final reply on the source request'
+    $postRecoveryConflict = Invoke-Inbox @('reply', '--root', $script:RepoB, '--id', $stableId, '--reply-status', 'final', '--dedupe-key', 'final-v1', '--body-file', $replyBody)
+    Assert-Exit $postRecoveryConflict 6 'different content fails after reply recovery is committed'
 }
 finally {
     Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue

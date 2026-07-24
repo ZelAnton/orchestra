@@ -57,10 +57,23 @@ function Read-Message {
     param([string]$Root, [string]$Id)
     $path = Get-MessagePath -Root $Root -Id $Id
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Fail 4 "inbox message not found: $Id" }
+    Assert-OrchestraPlainFile -Path $path -Label 'inbox message'
     try { $message = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json }
     catch { Fail 5 "inbox message is not valid JSON: $Id" }
     if ([string]$message.schema -ne 'orchestra/inbox-message@1' -or [string]$message.id -ne $Id) {
         Fail 5 "inbox message has an invalid schema or id: $Id"
+    }
+    # Compatibility with the earliest schema-1 records installed during rollout:
+    # originals derive their own conversation id; first-level replies derive the
+    # recorded parent. The next mutation persists the normalized field.
+    $conversationProperty = $message.PSObject.Properties['conversation_id']
+    if ($null -eq $conversationProperty -or [string]::IsNullOrWhiteSpace([string]$conversationProperty.Value)) {
+        $derivedConversation = if ([string]::IsNullOrWhiteSpace([string]$message.in_reply_to)) { $Id } else { [string]$message.in_reply_to }
+        if ($null -eq $conversationProperty) {
+            $message | Add-Member -NotePropertyName conversation_id -NotePropertyValue $derivedConversation
+        } else {
+            $message.conversation_id = $derivedConversation
+        }
     }
     if ([string]$message.processing_status -notin $script:Statuses -or
         [string]$message.reply_status -notin $script:ReplyStatuses) {
@@ -68,7 +81,9 @@ function Read-Message {
     }
     foreach ($endpoint in @('from_project', 'to_project')) {
         if ([string]$message.$endpoint.id -notmatch '^repo-[a-f0-9]{20}$' -or
-            [string]::IsNullOrWhiteSpace([string]$message.$endpoint.name)) {
+            [string]::IsNullOrWhiteSpace([string]$message.$endpoint.name) -or
+            ([string]$message.$endpoint.name).Length -gt 120 -or
+            [string]$message.$endpoint.name -match '[\x00-\x1f\x7f]') {
             Fail 5 "inbox message has an invalid $endpoint identity: $Id"
         }
     }
@@ -89,6 +104,7 @@ function Read-Message {
         [string]$message.in_reply_to -notmatch '^msg-[a-z0-9-]{8,120}$') {
         Fail 5 "inbox message has an invalid in_reply_to id: $Id"
     }
+    Assert-DedupeKey -Value ([string]$message.dedupe_key)
     return $message
 }
 
@@ -98,7 +114,16 @@ function Write-Message {
     $Message.queue_tasks = @($Message.queue_tasks)
     $Message.remarks = @($Message.remarks)
     $Message.reply_ids = @($Message.reply_ids)
-    Write-TextAtomic -Path (Get-MessagePath -Root $Root -Id ([string]$Message.id)) `
+    $path = Get-MessagePath -Root $Root -Id ([string]$Message.id)
+    # Get-Item inspects the directory entry itself and therefore also catches a dangling
+    # symlink which Test-Path reports as absent. A fixed atomic-write temp name must never
+    # be allowed to redirect the narrow cross-project writer outside .inbox/messages.
+    $existingPath = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existingPath) { Assert-OrchestraPlainFile -Path $path -Label 'inbox message' }
+    $tempPath = "$path.tmp"
+    $existingTemp = Get-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existingTemp) { Assert-OrchestraPlainFile -Path $tempPath -Label 'inbox message temporary file' }
+    Write-TextAtomic -Path $path `
         -Content ($Message | ConvertTo-Json -Depth 12)
 }
 
@@ -115,8 +140,8 @@ function Get-TextOption {
 
 function Assert-MessageText {
     param([string]$Subject, [string]$Body)
-    if ([string]::IsNullOrWhiteSpace($Subject) -or $Subject.Length -gt 240 -or $Subject -match '[\r\n]') {
-        Fail 2 'message subject must contain 1-240 characters and no line breaks'
+    if ([string]::IsNullOrWhiteSpace($Subject) -or $Subject.Length -gt 240 -or $Subject -match '[\x00-\x1f\x7f]') {
+        Fail 2 'message subject must contain 1-240 characters and no control characters'
     }
     $bytes = $script:Utf8.GetByteCount($Body)
     if ($bytes -gt 262144) { Fail 2 "message body exceeds the 262144-byte limit ($bytes bytes)" }
@@ -133,6 +158,23 @@ function Get-StableReplyId {
     finally { $sha.Dispose() }
     $hex = -join ($hash | ForEach-Object { $_.ToString('x2') })
     return 'msg-reply-' + $hex.Substring(0, 32)
+}
+
+function Get-StableSendId {
+    param([string]$FromId, [string]$ToId, [string]$DedupeKey)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash($script:Utf8.GetBytes("$FromId|$ToId|$DedupeKey")) }
+    finally { $sha.Dispose() }
+    $hex = -join ($hash | ForEach-Object { $_.ToString('x2') })
+    return 'msg-send-' + $hex.Substring(0, 32)
+}
+
+function Assert-DedupeKey {
+    param([string]$Value, [switch]$Required)
+    if ($Required -and [string]::IsNullOrWhiteSpace($Value)) { Fail 2 'dedupe key is required' }
+    if ($Value.Length -gt 120 -or $Value -match '[\x00-\x1f\x7f]') {
+        Fail 2 'dedupe key must contain at most 120 characters and no control characters'
+    }
 }
 
 function New-MessageRecord {
@@ -163,7 +205,7 @@ function New-MessageRecord {
 }
 
 function Write-NewMessage {
-    param([string]$Root, $Message, [switch]$Idempotent)
+    param([string]$Root, $Message, [switch]$Idempotent, [switch]$RecoverExisting)
     Assert-InboxExists $Root
     $lock = Get-InboxLockPath $Root
     Acquire-Lock -LockPath $lock
@@ -172,13 +214,18 @@ function Write-NewMessage {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             if (-not $Idempotent) { Fail 5 "message id already exists: $([string]$Message.id)" }
             $existing = Read-Message -Root $Root -Id ([string]$Message.id)
-            foreach ($field in @('id', 'subject', 'body', 'in_reply_to', 'conversation_id', 'dedupe_key')) {
+            foreach ($field in @('id', 'in_reply_to', 'conversation_id', 'dedupe_key')) {
                 if ([string]$existing.$field -ne [string]$Message.$field) { Fail 6 "idempotent reply conflicts with existing message $([string]$Message.id)" }
             }
             foreach ($endpoint in @('from_project', 'to_project')) {
                 if ([string]$existing.$endpoint.id -ne [string]$Message.$endpoint.id) {
                     Fail 6 "idempotent reply conflicts with existing message $([string]$Message.id)"
                 }
+            }
+            $contentMatches = ([string]$existing.subject -eq [string]$Message.subject -and
+                [string]$existing.body -eq [string]$Message.body)
+            if (-not $contentMatches -and -not $RecoverExisting) {
+                Fail 6 "idempotent message conflicts with existing message $([string]$Message.id)"
             }
             return $existing
         }
@@ -228,9 +275,14 @@ function Assert-StatusTransition {
 function Add-Remark {
     param($Message, [string]$Text, [string]$Actor)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    if ($script:Utf8.GetByteCount($Text) -gt 16384) { Fail 2 'remark exceeds the 16384-byte limit' }
+    if ([string]::IsNullOrWhiteSpace($Actor)) { $Actor = 'agent' }
+    if ($Actor.Length -gt 120 -or $Actor -match '[\x00-\x1f\x7f]') {
+        Fail 2 'remark actor must contain 1-120 characters and no control characters'
+    }
     $Message.remarks = @($Message.remarks) + @([pscustomobject][ordered]@{
         at = Format-UtcNow
-        actor = if ($Actor) { $Actor } else { 'agent' }
+        actor = $Actor
         text = $Text
     })
 }
@@ -258,8 +310,14 @@ function Add-TaskLinksFromText {
     $activeTask = '\u0410\u043A\u0442\u0438\u0432\u043D\u0430\u044F \u0437\u0430\u0434\u0430\u0447\u0430'
     foreach ($line in (($Text -replace "`r`n", "`n") -split "`n")) {
         if (-not $FixedTaskId) {
-            $header = [regex]::Match($line, ('^#{1,6}\s+(?:\[(T-\d+)\](?:\s|$)|' + $activeTask + '\s+(T-\d+)\b)'), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-            if ($header.Success) { $currentTask = if ($header.Groups[1].Success) { $header.Groups[1].Value } else { $header.Groups[2].Value } }
+            $recordHeader = [regex]::Match($line, '^#{1,6}\s+\[([A-Z]+-\d+)\](?:\s|$)', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($recordHeader.Success) {
+                $recordId = $recordHeader.Groups[1].Value
+                $currentTask = if ($recordId -match '^T-') { $recordId } else { '' }
+            } else {
+                $legacyHeader = [regex]::Match($line, ('^#{1,6}\s+' + $activeTask + '\s+(T-\d+)\b'), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                if ($legacyHeader.Success) { $currentTask = $legacyHeader.Groups[1].Value }
+            }
         }
         $marker = [regex]::Match($line, '^\s*Inbox message:\s*(msg-[a-z0-9-]+)\s*$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         if ($marker.Success -and $currentTask) {
@@ -296,8 +354,13 @@ function Cmd-Send {
     Assert-MessageText -Subject $subject -Body $body
     $route = Resolve-Route -Root $root -Target $target
     if ([string]$route.From.id -eq [string]$route.To.id) { Fail 2 'send targets another registered project; use local project artifacts for self-notes' }
-    $message = New-MessageRecord -From $route.From -To $route.To -Id (New-RandomMessageId) -Subject $subject -Body $body
-    $null = Write-NewMessage -Root ([string]$route.To.root) -Message $message
+    $dedupeKey = [string](Opt 'dedupe-key' '')
+    Assert-DedupeKey -Value $dedupeKey
+    $messageId = if ($dedupeKey) {
+        Get-StableSendId -FromId ([string]$route.From.id) -ToId ([string]$route.To.id) -DedupeKey $dedupeKey
+    } else { New-RandomMessageId }
+    $message = New-MessageRecord -From $route.From -To $route.To -Id $messageId -Subject $subject -Body $body -DedupeKey $dedupeKey
+    $message = Write-NewMessage -Root ([string]$route.To.root) -Message $message -Idempotent:([bool]$dedupeKey)
     if ([bool](Opt 'json' $false)) { $message | ConvertTo-Json -Depth 10 }
     else { Write-Output "sent id=$($message.id) from=$($route.From.name) to=$($route.To.name)" }
 }
@@ -349,6 +412,15 @@ function Cmd-Mark {
         if ($targetStatus -eq 'queued' -and @($message.queue_tasks).Count -eq 0 -and $tasks.Count -eq 0) {
             Fail 2 'queued status requires at least one --task T-NNN'
         }
+        if ($targetStatus -eq 'implemented') {
+            $linkedTasks = @($message.queue_tasks)
+            if ($linkedTasks.Count -eq 0) { Fail 6 'implemented status requires linked queue tasks' }
+            $done = Get-TaskIdsFromArchive $root
+            $missing = @($linkedTasks | Where-Object { -not $done.Contains([string]$_) })
+            if ($missing.Count -gt 0) {
+                Fail 6 ('implemented status requires every linked task in Tasks_Done.md; missing: ' + ($missing -join ', '))
+            }
+        }
         $message.queue_tasks = @(@($message.queue_tasks) + $tasks | Sort-Object -Unique)
         $message.processing_status = $targetStatus
         Add-Remark -Message $message -Text ([string](Opt 'remark' '')) -Actor $actor
@@ -369,6 +441,7 @@ function Cmd-Reconcile {
         foreach ($message in @(Get-AllMessages $root)) {
             $id = [string]$message.id
             if (-not $links.ContainsKey($id)) { continue }
+            if ([string]$message.processing_status -in @('implemented', 'rejected')) { continue }
             $tasks = @($links[$id] | Sort-Object)
             $merged = @(@($message.queue_tasks) + $tasks | Sort-Object -Unique)
             $changed = (@($message.queue_tasks) -join ',') -ne ($merged -join ',')
@@ -392,8 +465,13 @@ function Cmd-Actionable {
     $new = [System.Collections.Generic.List[string]]::new()
     $unresolved = [System.Collections.Generic.List[string]]::new()
     $completable = [System.Collections.Generic.List[string]]::new()
+    $replyPending = [System.Collections.Generic.List[string]]::new()
     foreach ($message in @(Get-AllMessages $root)) {
         $status = [string]$message.processing_status
+        if ($status -in @('implemented', 'rejected') -and [string]$message.reply_status -ne 'final') {
+            $replyPending.Add([string]$message.id)
+            continue
+        }
         if ($status -eq 'new') { $new.Add([string]$message.id); continue }
         if ($status -eq 'read' -and [string]$message.reply_status -eq 'none' -and
             [string]::IsNullOrWhiteSpace([string]$message.in_reply_to)) {
@@ -407,13 +485,14 @@ function Cmd-Actionable {
         }
     }
     $result = [pscustomobject][ordered]@{
-        count = $new.Count + $unresolved.Count + $completable.Count
+        count = $new.Count + $unresolved.Count + $completable.Count + $replyPending.Count
         new = @($new.ToArray())
         unresolved = @($unresolved.ToArray())
         completable = @($completable.ToArray())
+        reply_pending = @($replyPending.ToArray())
     }
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 5 }
-    else { Write-Output "actionable=$($result.count) new=$($new.Count) unresolved=$($unresolved.Count) completable=$($completable.Count)" }
+    else { Write-Output "actionable=$($result.count) new=$($new.Count) unresolved=$($unresolved.Count) completable=$($completable.Count) reply_pending=$($replyPending.Count)" }
 }
 
 function Cmd-Reply {
@@ -423,7 +502,7 @@ function Cmd-Reply {
     $replyStatus = [string](Opt 'reply-status' 'acknowledged')
     if ($replyStatus -notin @('acknowledged', 'final')) { Fail 2 "invalid --reply-status '$replyStatus'" }
     $dedupeKey = Require-Opt 'dedupe-key'
-    if ($dedupeKey.Length -gt 120 -or $dedupeKey -match '[\r\n]') { Fail 2 'dedupe key must contain 1-120 characters and no line breaks' }
+    Assert-DedupeKey -Value $dedupeKey -Required
     $body = Get-TextOption -Name 'body' -FileName 'body-file' -Required
     $original = Read-Message -Root $root -Id $id
     if ($replyStatus -eq 'final' -and [string]$original.processing_status -notin @('implemented', 'rejected')) {
@@ -431,13 +510,18 @@ function Cmd-Reply {
     }
     $route = Resolve-Route -Root $root -Target ([string]$original.from_project.id)
     if ([string]$route.From.id -ne [string]$original.to_project.id) { Fail 6 'current project is not the recipient recorded by the original message' }
-    $subject = [string](Opt 'subject' ('Re: ' + [string]$original.subject))
+    $defaultSubject = 'Re: ' + [string]$original.subject
+    if ($defaultSubject.Length -gt 240) { $defaultSubject = $defaultSubject.Substring(0, 240) }
+    $subject = [string](Opt 'subject' $defaultSubject)
     Assert-MessageText -Subject $subject -Body $body
     $replyId = Get-StableReplyId -OriginalId $id -FromId ([string]$route.From.id) -DedupeKey $dedupeKey
     $conversationId = if ([string]::IsNullOrWhiteSpace([string]$original.conversation_id)) { $id } else { [string]$original.conversation_id }
     $reply = New-MessageRecord -From $route.From -To $route.To -Id $replyId -Subject $subject -Body $body `
         -InReplyTo $id -ConversationId $conversationId -DedupeKey $dedupeKey
-    $null = Write-NewMessage -Root ([string]$route.To.root) -Message $reply -Idempotent
+    $sourceAlreadyRecorded = @($original.reply_ids) -contains $replyId
+    $reply = Write-NewMessage -Root ([string]$route.To.root) -Message $reply -Idempotent `
+        -RecoverExisting:(-not $sourceAlreadyRecorded)
+    Maybe-Fault 'after-reply-delivery'
 
     $lock = Get-InboxLockPath $root
     Acquire-Lock -LockPath $lock
