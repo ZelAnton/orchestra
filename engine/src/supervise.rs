@@ -29,12 +29,28 @@
 //! itself hard-killed BEFORE `kill_tree` runs, the group can outlive it — closing that last
 //! window needs the Job Object / cgroup GC net that `processkit` (or a future cgroup-v2 path)
 //! provides. The deterministic timeout / cancel teardown is fully covered.
+//!
+//! BOUNDED OUTPUT COLLECTION (no-hang guarantee). stdout / stderr are drained on threads that
+//! append to a shared buffer; `read_to_end`-style completion only fires once the LAST write end
+//! of the pipe is closed. If a descendant survived `kill_tree` (the same taskkill / setsid gaps
+//! noted above) it can keep an inherited copy of that write end open, so EOF — and the drain
+//! thread's completion signal — may NEVER arrive. Collection therefore waits for the drain
+//! threads only up to a bounded grace (`SpawnSpec::collect_grace`) after teardown; on expiry it
+//! takes whatever bytes were captured so far and flags `Verdict::output_collection_timed_out`,
+//! so a fired deadline / cancel can never silently degrade into an unbounded block on `recv`.
 
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Default bound on how long output collection waits for the drain threads to reach EOF after
+/// the child (and, on teardown, its tree) has been reaped. In the normal case EOF is already
+/// present and this is never approached; it only caps the pathological "a survivor still holds
+/// the pipe" case so supervision cannot block forever.
+const DEFAULT_COLLECT_GRACE: Duration = Duration::from_secs(5);
 
 // Keep PowerShell and console-based tool invocations invisible when the engine is itself
 // started without a console. This is the Win32 CREATE_NO_WINDOW creation flag.
@@ -88,6 +104,11 @@ pub struct Verdict {
     pub stdout: String,
     pub stderr: String,
     pub outcome_reason: String,
+    /// True when the bounded post-teardown collection grace expired before stdout / stderr
+    /// reached EOF (a survivor still held an inherited pipe): `stdout` / `stderr` then carry
+    /// only the bytes captured so far. Orthogonal to `reason` — the deadline / cancel / exit
+    /// classification is unchanged; this only records that the captured output may be partial.
+    pub output_collection_timed_out: bool,
 }
 
 /// What to spawn and how to bound it.
@@ -100,6 +121,10 @@ pub struct SpawnSpec {
     pub poll: Duration,
     /// If set, appearance of this file requests a cooperative cancel (e.g. .work/PAUSE).
     pub cancel_file: Option<std::path::PathBuf>,
+    /// Upper bound on how long to wait for stdout / stderr to finish draining after teardown
+    /// before degrading to the bytes captured so far (see the module's BOUNDED OUTPUT
+    /// COLLECTION note). Defaults to `DEFAULT_COLLECT_GRACE`.
+    pub collect_grace: Duration,
 }
 
 impl SpawnSpec {
@@ -111,6 +136,7 @@ impl SpawnSpec {
             deadline: None,
             poll: Duration::from_millis(50),
             cancel_file: None,
+            collect_grace: DEFAULT_COLLECT_GRACE,
         }
     }
     pub fn stdin(mut self, s: impl Into<String>) -> Self {
@@ -123,6 +149,10 @@ impl SpawnSpec {
     }
     pub fn cancel_file(mut self, p: Option<std::path::PathBuf>) -> Self {
         self.cancel_file = p;
+        self
+    }
+    pub fn collect_grace(mut self, d: Duration) -> Self {
+        self.collect_grace = d;
         self
     }
 }
@@ -173,6 +203,7 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
                 stdout: String::new(),
                 stderr: String::new(),
                 outcome_reason: format!("spawn failed: {e}"),
+                output_collection_timed_out: false,
             };
         }
     };
@@ -187,8 +218,8 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
     }
 
     // Drain stdout / stderr on their own threads (no deadlock against stdin / a full pipe).
-    let out_rx = drain(child.stdout.take());
-    let err_rx = drain(child.stderr.take());
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
 
     // Watchdog loop: poll for exit, deadline, or cancel-file.
     let mut timed_out = false;
@@ -226,8 +257,18 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
     // Reap (kill_tree already waited, but be sure) so no zombie remains.
     let _ = child.wait();
 
-    let stdout = out_rx.recv().unwrap_or_default();
-    let stderr = err_rx.recv().unwrap_or_default();
+    // Bounded output collection. Reaping the child closes OUR handle, so in the normal case the
+    // drain threads hit EOF and finish immediately; but a descendant that survived `kill_tree`
+    // can keep an inherited copy of the pipe's write end open, so EOF never arrives and the
+    // drain thread never signals completion. Wait for both drains only up to a shared grace,
+    // then take whatever was captured — never an unbounded `recv` that would silently break the
+    // deadline / cancel contract. `output_collection_timed_out` records any such shortfall.
+    let collect_deadline = Instant::now() + spec.collect_grace;
+    let stdout_done = wait_drain(&out.done, collect_deadline);
+    let stderr_done = wait_drain(&err.done, collect_deadline);
+    let output_collection_timed_out = !stdout_done || !stderr_done;
+    let stdout = snapshot(&out.buf);
+    let stderr = snapshot(&err.buf);
     let duration_ms = started.elapsed().as_millis();
 
     let (reason, exit_code, outcome_reason) = classify(exit_status, timed_out, cancelled, spec);
@@ -240,6 +281,7 @@ pub fn run(spec: &SpawnSpec) -> Verdict {
         stdout,
         stderr,
         outcome_reason,
+        output_collection_timed_out,
     }
 }
 
@@ -278,22 +320,77 @@ fn classify(
     }
 }
 
-/// Drain a pipe to a String on a thread; the receiver gets the full text once EOF hits.
-fn drain(handle: Option<impl Read + Send + 'static>) -> mpsc::Receiver<String> {
-    let (tx, rx) = mpsc::channel();
+/// A pipe being drained on a background thread: `buf` accumulates bytes as they are read (so a
+/// partial capture is always readable), and `done` fires once the thread reaches EOF or a read
+/// error. A survivor holding the write end open can leave `done` silent indefinitely — the
+/// caller therefore waits on it only up to a bounded grace (see [`wait_drain`]).
+struct Drain {
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
+/// Drain a pipe on a thread, appending to a shared buffer chunk-by-chunk (not one final
+/// `read_to_end`) so whatever was produced before any wedge stays retrievable. `done` is
+/// signalled on EOF or a read error; if `handle` is absent it fires at once with an empty buffer.
+fn drain(handle: Option<impl Read + Send + 'static>) -> Drain {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let (tx, done) = mpsc::channel();
     match handle {
         Some(mut h) => {
+            let sink = Arc::clone(&buf);
             thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = h.read_to_end(&mut buf);
-                let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match h.read(&mut chunk) {
+                        Ok(0) => break, // EOF: the last write end closed.
+                        Ok(n) => append(&sink, &chunk[..n]),
+                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+                let _ = tx.send(());
             });
         }
         None => {
-            let _ = tx.send(String::new());
+            let _ = tx.send(());
         }
     }
-    rx
+    Drain { buf, done }
+}
+
+/// Append bytes to a drain buffer, recovering a poisoned lock so a reader-thread panic can never
+/// lose bytes already captured (nor propagate the panic into the supervisor).
+fn append(buf: &Arc<Mutex<Vec<u8>>>, bytes: &[u8]) {
+    let mut guard = match buf.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.extend_from_slice(bytes);
+}
+
+/// Snapshot whatever a drain buffer currently holds as lossy UTF-8 (poison-tolerant).
+fn snapshot(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+    let guard = match buf.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    String::from_utf8_lossy(&guard).into_owned()
+}
+
+/// Wait for a drain thread to finish, but never past `deadline`. Returns true if it signalled
+/// completion (EOF / read error) in time, false if the grace expired first — i.e. a survivor is
+/// still holding the pipe's write end open and the capture is partial.
+fn wait_drain(done: &mpsc::Receiver<()>, deadline: Instant) -> bool {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    match done.recv_timeout(remaining) {
+        Ok(()) => true,
+        // Sender dropped without an explicit signal (a panicked drain thread): it will not run
+        // again, so treat collection as finished rather than falsely "still draining".
+        Err(mpsc::RecvTimeoutError::Disconnected) => true,
+        // A zero/near-zero `remaining` can time out even when a signal is already queued; re-poll
+        // once so an already-finished drain is not misreported as partial.
+        Err(mpsc::RecvTimeoutError::Timeout) => done.try_recv().is_ok(),
+    }
 }
 
 /// Terminate the child (and, on Windows, its whole tree) and wait briefly for it to die.
@@ -415,6 +512,67 @@ mod tests {
     #[ignore = "spawned explicitly by try_wait_error_cleanup_kills_child_without_masking_crash"]
     fn emergency_kill_test_child() {
         thread::sleep(Duration::from_secs(30));
+    }
+
+    // The no-hang guarantee this task adds: a descendant that survived `kill_tree` and still
+    // holds an inherited pipe write end means EOF NEVER arrives, so the drain thread never
+    // signals completion. `PartialThenBlock` reproduces exactly that shape portably — it yields
+    // the output produced before the wedge, then blocks forever with no further data and no EOF.
+    // Bounded collection must still return promptly, keep the partial bytes, and report the drain
+    // as unfinished (so `run` can flag `output_collection_timed_out`) — never block on `recv`.
+    struct PartialThenBlock {
+        sent: bool,
+    }
+    impl Read for PartialThenBlock {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.sent {
+                self.sent = true;
+                let msg = b"partial-before-wedge";
+                let n = msg.len().min(buf.len());
+                buf[..n].copy_from_slice(&msg[..n]);
+                Ok(n)
+            } else {
+                // The survivor keeps the write end open: no more data, and no EOF, ever.
+                loop {
+                    thread::park();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_collection_returns_partial_without_blocking_on_a_survivor() {
+        let d = drain(Some(PartialThenBlock { sent: false }));
+        // Let the drain thread read + append the partial bytes before it wedges.
+        thread::sleep(Duration::from_millis(100));
+        let started = Instant::now();
+        let done = wait_drain(&d.done, Instant::now() + Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        assert!(
+            !done,
+            "a wedged survivor pipe must be reported as an unfinished drain (partial capture)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "bounded collection blocked instead of degrading (waited {elapsed:?})"
+        );
+        assert!(
+            snapshot(&d.buf).contains("partial-before-wedge"),
+            "output captured before the wedge must be retained, not discarded"
+        );
+    }
+
+    #[test]
+    fn bounded_collection_captures_full_output_on_clean_eof() {
+        // The normal path must not regress: a finite reader reaches EOF, the drain finishes well
+        // within the grace, and the full content is present with no partial-collection shortfall.
+        let d = drain(Some(std::io::Cursor::new(b"complete-output".to_vec())));
+        let done = wait_drain(&d.done, Instant::now() + Duration::from_secs(5));
+        assert!(
+            done,
+            "a finite reader must finish draining within the grace"
+        );
+        assert_eq!(snapshot(&d.buf), "complete-output");
     }
 
     // The no-orphan guarantee outside Windows: a supervised child that spawns a longer-lived
