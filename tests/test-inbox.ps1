@@ -115,6 +115,10 @@ try {
     $newList = Invoke-Inbox @('list', '--root', $script:RepoB, '--status', 'new', '--json')
     Assert-Exit $newList 0 'list new messages'
     Assert-Equal 1 ([int](($newList.Out | ConvertFrom-Json).count)) 'receiver sees one new message'
+    $humanShow = Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $messageId)
+    Assert-Exit $humanShow 0 'show renders a human-readable message without --json'
+    Assert-True ($humanShow.Out -match ('id=' + [regex]::Escape($messageId))) 'human show includes message identity'
+    Assert-True ($humanShow.Out -match 'body:') 'human show labels the message body'
 
     # Aggregate operations retain valid messages and expose diagnostics when another
     # cross-project writer leaves a stale or malformed record in the inbox.

@@ -487,7 +487,19 @@ function Cmd-Show {
     $root = Get-Root
     $message = Read-Message -Root $root -Id (Require-Opt 'id')
     if ([bool](Opt 'json' $false)) { $message | ConvertTo-Json -Depth 12 }
-    else { $message | ConvertTo-Json -Depth 12 }
+    else {
+        Write-Output "id=$($message.id)"
+        Write-Output "type=$($message.message_type) status=$($message.processing_status) reply_status=$($message.reply_status)"
+        Write-Output "from=$($message.from_project.name) ($($message.from_project.id))"
+        Write-Output "to=$($message.to_project.name) ($($message.to_project.id))"
+        Write-Output "subject=$($message.subject)"
+        Write-Output 'body:'
+        Write-Output ([string]$message.body)
+        if (@($message.queue_tasks).Count -gt 0) { Write-Output "queue_tasks=$(@($message.queue_tasks) -join ',')" }
+        if (@($message.reply_ids).Count -gt 0) { Write-Output "reply_ids=$(@($message.reply_ids) -join ',')" }
+        if ($message.message_type -eq 'release') { Write-Output "release=$($message.release.version) id=$($message.release.id)" }
+        Write-Output "remarks=$(@($message.remarks).Count)"
+    }
 }
 
 function Cmd-Mark {
