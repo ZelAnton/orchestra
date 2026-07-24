@@ -1,5 +1,5 @@
 //! Tiny dependency-free CLI parser: where to point the TUI (`.work/` directory) and a couple of
-//! knobs. No `clap` — the surface is one path plus two flags, so a hand-rolled parser keeps the
+//! knobs. No `clap` — the surface is one path plus a few flags, so a hand-rolled parser keeps the
 //! dependency set minimal and the first online fetch small.
 
 use std::path::PathBuf;
@@ -11,6 +11,8 @@ pub struct Config {
     pub work_dir: PathBuf,
     /// UI refresh / input-poll cadence in milliseconds.
     pub tick_ms: u64,
+    /// Start at the user-global read-only project hub instead of a single `.work` directory.
+    pub all_projects: bool,
 }
 
 /// Outcome of parsing argv (excluding argv[0]).
@@ -42,6 +44,7 @@ pub fn usage() -> String {
     ));
     s.push_str("OPTIONS:\n");
     s.push_str("    -w, --work <PATH>    Same as the positional WORK_DIR argument\n");
+    s.push_str("        --all-projects    Read-only hub for ~/.orchestra/projects.json\n");
     s.push_str(&format!(
         "        --tick-ms <N>    UI refresh / input cadence in ms (default: {DEFAULT_TICK_MS})\n"
     ));
@@ -54,6 +57,10 @@ pub fn usage() -> String {
 an existing launcher/tool. Pause touches only its established control file; force-lock runs \
 tools/state-tx.ps1 release --force and approval decisions run tools/policy.ps1, both under \
 supervision (approval never writes approvals JSON from Rust). The TUI\nnever touches the queue, task descriptors, or code, and never runs the processor itself.\n\n",
+    );
+    s.push_str(
+        "--all-projects starts a read-only registry hub. Use Up/Down then Enter to open one \
+registered project; b returns to the hub. No command key is active until a project is opened.\n\n",
     );
     s.push_str("KEYS:\n");
     s.push_str(
@@ -81,6 +88,7 @@ supervision (approval never writes approvals JSON from Rust). The TUI\nnever tou
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
     let mut work_dir: Option<PathBuf> = None;
     let mut tick_ms: u64 = DEFAULT_TICK_MS;
+    let mut all_projects = false;
 
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
@@ -98,6 +106,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
                     .ok_or_else(|| format!("{arg} requires a path argument"))?;
                 work_dir = Some(PathBuf::from(v));
             }
+            "--all-projects" => all_projects = true,
             "--tick-ms" => {
                 let v = it
                     .next()
@@ -123,9 +132,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
         }
     }
 
+    if all_projects && work_dir.is_some() {
+        return Err("--all-projects cannot be combined with WORK_DIR or --work".to_string());
+    }
+
     Ok(Cli::Run(Config {
         work_dir: work_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_WORK_DIR)),
         tick_ms,
+        all_projects,
     }))
 }
 
@@ -149,6 +163,7 @@ mod tests {
         let c = run(&[]);
         assert_eq!(c.work_dir, PathBuf::from(".work"));
         assert_eq!(c.tick_ms, DEFAULT_TICK_MS);
+        assert!(!c.all_projects);
     }
 
     #[test]
@@ -185,5 +200,12 @@ mod tests {
     fn unknown_flag_and_double_positional_error() {
         assert!(parse(args(&["--bogus"])).is_err());
         assert!(parse(args(&["a", "b"])).is_err());
+    }
+
+    #[test]
+    fn all_projects_is_an_explicit_mode() {
+        assert!(run(&["--all-projects"]).all_projects);
+        assert!(parse(args(&["--all-projects", "--work", ".work"])).is_err());
+        assert!(parse(args(&["--all-projects", "repo/.work"])).is_err());
     }
 }

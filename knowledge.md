@@ -93,6 +93,12 @@ workspace, коммитит результаты листовых агентов
   и наследуется командами из `engine/` и `tui/`. Их `deny.toml` включают cargo-deny в CI: advisories
   fail closed, license allow-list и sources явные, wildcard requirements запрещены; известные
   platform-driven duplicate versions пока warning, а не неявно игнорируемое исключение.
+- `tui/src/hub.rs` — read-only `orchestra-tui --all-projects` hub над единственным источником
+  маршрутизации `~/.orchestra/projects.json` (или операторским `ORCHESTRA_REGISTRY_PATH`). Он не
+  сканирует sibling directories и не запускает runners: для каждого зарегистрированного root
+  показывает доступность, lease/cohort, pending approvals, escalations и actionable `.inbox`
+  messages. `Enter` открывает выбранный `.work` в прежних Overview/Decision Inbox, `b` возвращает
+  в hub; до такого явного перехода hub не маршрутизирует pause/lease/approval/force-lock keys.
 - `engine/src/time.rs` — единый публичный dependency-free конвертер Unix epoch seconds в
   `YYYY-MM-DDTHH:MM:SSZ`; его используют engine run и TUI вместо локальных копий алгоритма
   Howard Hinnant `civil_from_days`, а проверки известных дат, leap day и лексической

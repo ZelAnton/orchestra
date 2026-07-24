@@ -16,6 +16,7 @@ use ratatui::Frame;
 
 use crate::app::{AppState, CohortPhase, InboxPanel, Modal, RecentKind, Screen, TaskState};
 use crate::commands::LeaseStatus;
+use crate::hub::HubProject;
 use crate::inbox::{BlockedCard, DecisionInbox, EscalatedCard, QuarantineCard};
 
 const RED: Color = Color::Red;
@@ -29,6 +30,7 @@ const DIM: Color = Color::DarkGray;
 /// lease-status popup and the force-lock confirmation modal) draw on top of the active screen.
 pub fn render(f: &mut Frame, app: &AppState) {
     match app.screen {
+        Screen::Hub => render_hub(f, app),
         Screen::Overview => render_overview(f, app),
         Screen::DecisionInbox => render_decision_inbox(f, app),
     }
@@ -44,6 +46,107 @@ pub fn render(f: &mut Frame, app: &AppState) {
         }
         Modal::None => {}
     }
+}
+
+/// Registry hub: intentionally a read-only screen. It lists only roots supplied by the global
+/// registry; no sibling discovery, runner invocation or mutating key is available here.
+fn render_hub(f: &mut Frame, app: &AppState) {
+    let root = Layout::vertical([
+        Constraint::Length(if app.notice.is_some() { 5 } else { 4 }),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(f.area());
+
+    let summary = match &app.hub.notice {
+        Some(notice) => format!("Реестр недоступен: {notice}"),
+        None => format!("{} registered project(s)", app.hub.projects.len()),
+    };
+    let mut header_lines = vec![
+        Line::from(Span::styled(
+            "Оркестр — multi-project hub",
+            Style::default().add_modifier(Modifier::BOLD).fg(CYAN),
+        )),
+        Line::from(Span::styled(summary, Style::default().fg(DIM))),
+    ];
+    if let Some(notice) = &app.notice {
+        header_lines.push(Line::from(Span::styled(
+            notice.clone(),
+            Style::default().fg(YELLOW),
+        )));
+    }
+    f.render_widget(
+        Paragraph::new(header_lines).block(block("Registry (read-only)")),
+        root[0],
+    );
+
+    let mut lines = Vec::new();
+    if app.hub.projects.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "нет зарегистрированных проектов — запустите cc-config в нужном repository",
+            Style::default().fg(DIM),
+        )));
+    } else {
+        for (index, project) in app.hub.projects.iter().enumerate() {
+            lines.extend(hub_project_lines(project, index == app.hub.selected));
+        }
+    }
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(block("Projects"))
+            .wrap(Wrap { trim: true }),
+        root[1],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" q/Esc ", Style::default().fg(CYAN)),
+            Span::raw("выход  "),
+            Span::styled(" ↑/↓ ", Style::default().fg(CYAN)),
+            Span::raw("выбор  "),
+            Span::styled(" Enter ", Style::default().fg(CYAN)),
+            Span::raw("открыть проект  "),
+            Span::styled(" r ", Style::default().fg(CYAN)),
+            Span::raw("обновить registry"),
+        ])),
+        root[2],
+    );
+}
+
+fn hub_project_lines(project: &HubProject, selected: bool) -> Vec<Line<'static>> {
+    let color = if !project.available {
+        RED
+    } else if project.attention_count() > 0 {
+        YELLOW
+    } else {
+        GREEN
+    };
+    let marker = if selected { ">" } else { " " };
+    vec![
+        Line::from(vec![
+            Span::styled(format!("{marker} "), Style::default().fg(CYAN)),
+            Span::styled(
+                project.name.clone(),
+                Style::default().add_modifier(Modifier::BOLD).fg(color),
+            ),
+            Span::raw(format!("  [{}]", project.id)),
+        ]),
+        Line::from(Span::styled(
+            format!(
+                "  lease: {}   cohort: {}   approvals: {}   escalations: {}   inbox: {}",
+                project.lease,
+                project.cohort,
+                project.pending_approvals,
+                project.escalations,
+                project.actionable_messages,
+            ),
+            Style::default().fg(color),
+        )),
+        Line::from(Span::styled(
+            format!("  {}", project.root.display()),
+            Style::default().fg(DIM),
+        )),
+        Line::from(""),
+    ]
 }
 
 fn render_overview(f: &mut Frame, app: &AppState) {
@@ -1027,6 +1130,38 @@ mod tests {
             screen.contains("пауза") && screen.contains("force-lock"),
             "missing command-channel footer hints"
         );
+    }
+
+    #[test]
+    fn renders_registry_hub_headlessly() {
+        let mut app = AppState::new();
+        app.screen = Screen::Hub;
+        app.hub.projects.push(HubProject {
+            id: "repo-test".into(),
+            name: "Test project".into(),
+            root: std::path::PathBuf::from("C:/test-project"),
+            work_dir: std::path::PathBuf::from("C:/test-project/.work"),
+            available: true,
+            lease: "свободна".into(),
+            cohort: "B-1 · открыт".into(),
+            pending_approvals: 1,
+            escalations: 2,
+            actionable_messages: 3,
+        });
+        app.notice = Some("проект отсутствует на диске".into());
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).expect("test terminal");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("render hub");
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("проект отсутствует на диске"));
     }
 
     /// Render the §6.2 Decision Inbox screen headlessly and assert every card category, the

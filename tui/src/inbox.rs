@@ -117,6 +117,38 @@ pub struct DecisionInbox {
     pub blocked: Vec<BlockedCard>,
 }
 
+/// Build the full Decision Inbox from one `.work` directory. This is the one shared read-only
+/// loader for the detailed TUI and the multi-project hub; missing artifacts remain an empty,
+/// valid observation rather than an error.
+pub fn load(work_dir: &Path, now_iso8601: &str) -> DecisionInbox {
+    let snapshot = Snapshot::load(work_dir);
+    let pause_path = work_dir.join("PAUSE");
+    let paused = pause_path.exists();
+    let pause_note = if paused {
+        fs::read_to_string(&pause_path)
+            .ok()
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    } else {
+        None
+    };
+    let mut decision_inbox = build(&snapshot, paused, pause_note, &done_task_ids(work_dir));
+    let approvals = load_approvals(work_dir, now_iso8601);
+    decision_inbox.approvals = approvals.pending;
+    decision_inbox.expired_approvals = approvals.expired;
+    decision_inbox.approval_errors = approvals.errors;
+    decision_inbox
+}
+
+/// Task ids archived in `Tasks_Done.md`, decoded with the engine's normative header parser.
+pub fn done_task_ids(work_dir: &Path) -> BTreeSet<String> {
+    fs::read_to_string(work_dir.join("Tasks_Done.md"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(orchestra_engine::state::archive_header_task_id)
+        .collect()
+}
+
 impl DecisionInbox {
     /// Nothing at all currently needs the operator.
     pub fn is_empty(&self) -> bool {

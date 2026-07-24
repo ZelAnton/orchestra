@@ -22,11 +22,14 @@ use orchestra_engine::events::{Event, EventType};
 use serde_json::{Map, Value};
 
 use crate::commands::{ApprovalDecision, LeaseStatus};
+use crate::hub::HubState;
 use crate::inbox::{ApprovalCard, DecisionInbox};
 
 /// Which of the two screens (§6.1 overview / §6.2 Decision Inbox) is currently drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Screen {
+    /// User-global registry overview. This screen is read-only and has no command channel.
+    Hub,
     #[default]
     Overview,
     DecisionInbox,
@@ -189,6 +192,8 @@ const RECENT_CAP: usize = 40;
 /// The full display state, folded from the event stream (+ status.md overlay).
 #[derive(Debug, Default)]
 pub struct AppState {
+    /// Read-only summaries for registered projects. Populated only in `--all-projects` mode.
+    pub hub: HubState,
     pub batch: Option<BatchState>,
     tasks: BTreeMap<String, TaskState>,
     /// Newest-first feed of notable transitions; survives cohort resets, bounded to `RECENT_CAP`.
@@ -487,9 +492,19 @@ impl AppState {
     /// Switch between the §6.1 overview and the §6.2 Decision Inbox screen.
     pub fn toggle_screen(&mut self) {
         self.screen = match self.screen {
+            Screen::Hub => Screen::Hub,
             Screen::Overview => Screen::DecisionInbox,
             Screen::DecisionInbox => Screen::Overview,
         };
+    }
+
+    /// Forget one selected project's volatile projection while preserving the registry hub and
+    /// its selection. Entering a project always starts a fresh event cursor, so no event or
+    /// approval from the prior project can leak into its detailed screens.
+    pub fn reset_project_projection(&mut self) {
+        let hub = std::mem::take(&mut self.hub);
+        *self = AppState::new();
+        self.hub = hub;
     }
 
     /// Move Decision Inbox scroll focus to the next panel (R-3; wraps around).
@@ -917,6 +932,35 @@ mod tests {
         // scrolling up past 0 saturates instead of underflowing.
         app.scroll_inbox(-100);
         assert_eq!(app.inbox_scroll[InboxPanel::Quarantined as usize], 0);
+    }
+
+    #[test]
+    fn reset_project_projection_preserves_the_registry_hub() {
+        let mut app = AppState::new();
+        app.hub.projects.push(crate::hub::HubProject {
+            id: "repo-a".into(),
+            name: "A".into(),
+            root: std::path::PathBuf::new(),
+            work_dir: std::path::PathBuf::new(),
+            available: true,
+            lease: "free".into(),
+            cohort: "idle".into(),
+            pending_approvals: 0,
+            escalations: 0,
+            actionable_messages: 0,
+        });
+        app.screen = Screen::DecisionInbox;
+        app.notice = Some("old project".into());
+        app.reset_project_projection();
+
+        assert_eq!(app.screen, Screen::Overview);
+        assert_eq!(
+            app.hub
+                .selected_project()
+                .map(|project| project.id.as_str()),
+            Some("repo-a")
+        );
+        assert!(app.notice.is_none());
     }
 
     fn approval(id: &str) -> ApprovalCard {

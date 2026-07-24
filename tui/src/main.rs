@@ -22,18 +22,23 @@
 //! `a`/`d` arm approve/reject for the selected pending request; Rust never writes approval JSON —
 //! it delegates that transaction to `tools/policy.ps1`. The TUI never touches the queue / task
 //! descriptors / code and never calls `processor` or a launcher. Both approval actions
-//! require a second explicit confirmation and run under the engine supervisor.
+//! require a second explicit confirmation and run under the engine supervisor. `--all-projects`
+//! adds a separate **read-only** registry hub: it reads only registered roots and their `.work` /
+//! `.inbox` summaries, and enables this command channel only after the operator explicitly opens
+//! one selected project.
 //!
 //! The terminal is always restored — normal quit, error return, or panic (see [`terminal`]).
 
 mod app;
 mod cli;
 mod commands;
+mod hub;
 mod inbox;
 mod status;
 mod terminal;
 mod ui;
 
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,7 +46,6 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use orchestra_engine::events::TailReader;
-use orchestra_engine::state::Snapshot;
 
 use app::{AppState, InboxPanel, Modal, Screen};
 use cli::{Cli, Config};
@@ -67,16 +71,22 @@ fn main() {
 }
 
 fn run(cfg: Config) -> io::Result<()> {
-    let events_path: PathBuf = cfg.work_dir.join("events.jsonl");
-    let status_path: PathBuf = cfg.work_dir.join("status.md");
+    let mut work_dir = cfg.work_dir.clone();
+    let mut events_path: PathBuf = work_dir.join("events.jsonl");
+    let mut status_path: PathBuf = work_dir.join("status.md");
 
     let mut reader = TailReader::new(&events_path);
     let mut app = AppState::new();
     // Prime the projection with everything already in the journal (a cold observer of a
     // long-running orchestra) before drawing the first frame.
-    app.apply_all(&reader.poll()?);
-    app.status = status::load(&status_path);
-    app.replace_inbox(load_inbox(&cfg.work_dir));
+    if cfg.all_projects {
+        app.screen = Screen::Hub;
+        app.hub.reload_default();
+    } else {
+        app.apply_all(&reader.poll()?);
+        app.status = status::load(&status_path);
+        app.replace_inbox(load_inbox(&work_dir));
+    }
 
     terminal::install_panic_hook();
     let mut term = terminal::init()?;
@@ -84,21 +94,35 @@ fn run(cfg: Config) -> io::Result<()> {
 
     let tick = Duration::from_millis(cfg.tick_ms);
     let status_reload_every = Duration::from_millis(500);
+    // A hub refresh reads a compact projection from every registered root, rather than one local
+    // `.work`. It remains live without turning an operator's registry into a 2 Hz disk scan.
+    let hub_reload_every = Duration::from_secs(2);
     let mut last_status_reload = Instant::now();
 
     loop {
         // 1. Pull any newly-appended events (cursor reader: only new, unique, committed lines).
-        let new = reader.poll()?;
-        if !new.is_empty() {
-            app.apply_all(&new);
+        if app.screen != Screen::Hub {
+            let new = reader.poll()?;
+            if !new.is_empty() {
+                app.apply_all(&new);
+            }
         }
 
         // 2. Refresh the status.md overlay and the Decision Inbox on a gentle cadence (small
         // reads, cheap, read-only — no lock, never writes). `replace_inbox` also invalidates an
         // approve/reject modal if its captured one-time approval disappeared during the flow.
-        if last_status_reload.elapsed() >= status_reload_every {
-            app.status = status::load(&status_path);
-            app.replace_inbox(load_inbox(&cfg.work_dir));
+        let reload_every = if app.screen == Screen::Hub {
+            hub_reload_every
+        } else {
+            status_reload_every
+        };
+        if last_status_reload.elapsed() >= reload_every {
+            if app.screen == Screen::Hub {
+                app.hub.reload_default();
+            } else {
+                app.status = status::load(&status_path);
+                app.replace_inbox(load_inbox(&work_dir));
+            }
             last_status_reload = Instant::now();
         }
 
@@ -112,8 +136,32 @@ fn run(cfg: Config) -> io::Result<()> {
                     // An open modal captures ALL input until dismissed, so no navigation or other
                     // command can leak past the force-lock confirmation gate (§6.2).
                     if app.has_modal() {
-                        handle_modal_key(&mut app, &cfg.work_dir, k);
-                    } else if handle_key(&mut app, &cfg, &status_path, &mut last_status_reload, k) {
+                        handle_modal_key(&mut app, &work_dir, k);
+                    } else if app.screen == Screen::Hub {
+                        if handle_hub_key(
+                            &mut app,
+                            &mut reader,
+                            &mut work_dir,
+                            &mut events_path,
+                            &mut status_path,
+                            &mut last_status_reload,
+                            k,
+                        )? {
+                            break;
+                        }
+                    } else if cfg.all_projects && k.code == KeyCode::Char('b') {
+                        app.dismiss_modal();
+                        app.dismiss_lease();
+                        app.screen = Screen::Hub;
+                        app.hub.reload_default();
+                        last_status_reload = Instant::now();
+                    } else if handle_key(
+                        &mut app,
+                        &work_dir,
+                        &status_path,
+                        &mut last_status_reload,
+                        k,
+                    ) {
                         break;
                     }
                 }
@@ -124,13 +172,60 @@ fn run(cfg: Config) -> io::Result<()> {
     Ok(())
 }
 
+/// Hub-only keys. The hub has no command channel: Enter merely swaps the observer to a selected,
+/// registry-authorized `.work`; `b` from that detailed view is handled in `run` above.
+fn handle_hub_key(
+    app: &mut AppState,
+    reader: &mut TailReader,
+    work_dir: &mut PathBuf,
+    events_path: &mut PathBuf,
+    status_path: &mut PathBuf,
+    last_status_reload: &mut Instant,
+    k: KeyEvent,
+) -> io::Result<bool> {
+    match k.code {
+        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+        KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+        KeyCode::Up | KeyCode::Char('k') => app.hub.select(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.hub.select(1),
+        KeyCode::Char('r') => app.hub.reload_default(),
+        KeyCode::Enter => {
+            let selected = app.hub.selected_project().cloned();
+            match selected {
+                Some(project) if project.available => {
+                    *work_dir = project.work_dir;
+                    *events_path = work_dir.join("events.jsonl");
+                    *status_path = work_dir.join("status.md");
+                    *reader = TailReader::new(&*events_path);
+                    app.reset_project_projection();
+                    app.apply_all(&reader.poll()?);
+                    app.status = status::load(status_path);
+                    app.replace_inbox(load_inbox(work_dir));
+                    app.notice = Some(format!("открыт проект {}", project.name));
+                    *last_status_reload = Instant::now();
+                }
+                Some(project) => {
+                    app.notice = Some(format!(
+                        "проект {} недоступен: {}",
+                        project.name,
+                        project.root.display()
+                    ));
+                }
+                None => app.notice = Some("не выбран зарегистрированный проект".to_string()),
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
 /// Route a keystroke while no modal is open. Returns `true` when the app should quit. Besides the
 /// read-only navigation, this routes the §5/§6.2 safe command subset (see the module docs): `p`
 /// pause, `u` resume, `s` lease-status, `x` *arm* force-lock (which only opens the confirmation
 /// modal — the removal itself needs the explicit second keystroke handled by [`handle_modal_key`]).
 fn handle_key(
     app: &mut AppState,
-    cfg: &Config,
+    work_dir: &Path,
     status_path: &Path,
     last_status_reload: &mut Instant,
     k: KeyEvent,
@@ -147,15 +242,15 @@ fn handle_key(
         KeyCode::Tab => app.toggle_screen(),
         KeyCode::Char('r') => {
             app.status = status::load(status_path);
-            app.replace_inbox(load_inbox(&cfg.work_dir));
+            app.replace_inbox(load_inbox(work_dir));
             *last_status_reload = Instant::now();
         }
         // ---- §5/§6.2 safe command subset --------------------------------------------------
-        KeyCode::Char('p') => run_pause(app, &cfg.work_dir, last_status_reload),
-        KeyCode::Char('u') => run_resume(app, &cfg.work_dir, last_status_reload),
+        KeyCode::Char('p') => run_pause(app, work_dir, last_status_reload),
+        KeyCode::Char('u') => run_resume(app, work_dir, last_status_reload),
         // lease-status runs `state-tx.ps1 status` synchronously (a brief, read-only pwsh call);
         // the loop redraws right after, so the momentary block is acceptable for a single command.
-        KeyCode::Char('s') => app.set_lease(commands::query_lease_status(&cfg.work_dir)),
+        KeyCode::Char('s') => app.set_lease(commands::query_lease_status(work_dir)),
         // `x` only ARMS force-lock (opens the confirm modal); it never removes the lock by itself.
         KeyCode::Char('x') => app.arm_force_lock(),
         // Approval keys are intentionally scoped to Decision Inbox, so they cannot collide with
@@ -297,24 +392,7 @@ fn run_resume(app: &mut AppState, work_dir: &Path, last_status_reload: &mut Inst
 /// Only the pause file's *existence* is meaningful (see `agents/processor.md`, "Пауза — kill
 /// switch `.work/PAUSE`"); its content, if any, is carried through as an informational note only.
 fn load_inbox(work_dir: &Path) -> inbox::DecisionInbox {
-    let snapshot = Snapshot::load(work_dir);
-    let pause_path = work_dir.join("PAUSE");
-    let paused = pause_path.exists();
-    let pause_note = if paused {
-        std::fs::read_to_string(&pause_path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    } else {
-        None
-    };
-    let done_ids = done_task_ids(work_dir);
-    let mut decision_inbox = inbox::build(&snapshot, paused, pause_note, &done_ids);
-    let approvals = inbox::load_approvals(work_dir, &commands::now_iso8601());
-    decision_inbox.approvals = approvals.pending;
-    decision_inbox.expired_approvals = approvals.expired;
-    decision_inbox.approval_errors = approvals.errors;
-    decision_inbox
+    inbox::load(work_dir, &commands::now_iso8601())
 }
 
 /// Task ids already archived to `.work/Tasks_Done.md`, decoded per the SINGLE normative
@@ -326,11 +404,9 @@ fn load_inbox(work_dir: &Path) -> inbox::DecisionInbox {
 /// Read-only, best-effort: a missing/unreadable file degrades to an empty set, matching the rest
 /// of this observer's "total loading" convention (see `Snapshot::load`) — used only by
 /// `inbox::build` to confirm, not to invent, a predecessor's completion (R-2).
+#[cfg(test)]
 fn done_task_ids(work_dir: &Path) -> BTreeSet<String> {
-    let text = std::fs::read_to_string(work_dir.join("Tasks_Done.md")).unwrap_or_default();
-    text.lines()
-        .filter_map(orchestra_engine::state::archive_header_task_id)
-        .collect()
+    inbox::done_task_ids(work_dir)
 }
 
 #[cfg(test)]
@@ -358,13 +434,14 @@ mod tests {
         let cfg = Config {
             work_dir: PathBuf::from("unused"),
             tick_ms: 250,
+            all_projects: false,
         };
         let mut reloaded = Instant::now();
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
 
         assert!(!handle_key(
             &mut app,
-            &cfg,
+            &cfg.work_dir,
             Path::new("unused/status.md"),
             &mut reloaded,
             key,
@@ -374,13 +451,68 @@ mod tests {
         app.screen = Screen::DecisionInbox;
         assert!(!handle_key(
             &mut app,
-            &cfg,
+            &cfg.work_dir,
             Path::new("unused/status.md"),
             &mut reloaded,
             key,
         ));
         assert_eq!(app.modal, Modal::ConfirmApprove);
         assert!(app.take_approval_confirmation().is_some());
+    }
+
+    #[test]
+    fn hub_enter_switches_to_the_selected_registry_project_only() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orchestra-tui-hub-enter-{}-{unique}",
+            std::process::id()
+        ));
+        let selected_work = root.join(".work");
+        std::fs::create_dir_all(&selected_work).expect("create selected project work directory");
+
+        let mut app = AppState::new();
+        app.screen = Screen::Hub;
+        app.hub.projects.push(crate::hub::HubProject {
+            id: "repo-00000000000000000001".into(),
+            name: "Selected".into(),
+            root: root.clone(),
+            work_dir: selected_work.clone(),
+            available: true,
+            lease: "free".into(),
+            cohort: "idle".into(),
+            pending_approvals: 0,
+            escalations: 0,
+            actionable_messages: 0,
+        });
+
+        let mut work_dir = PathBuf::from("unrelated/.work");
+        let mut events_path = work_dir.join("events.jsonl");
+        let mut status_path = work_dir.join("status.md");
+        let mut reader = TailReader::new(&events_path);
+        let mut reloaded = Instant::now();
+        assert!(!handle_hub_key(
+            &mut app,
+            &mut reader,
+            &mut work_dir,
+            &mut events_path,
+            &mut status_path,
+            &mut reloaded,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        )
+        .expect("open selected project"));
+
+        assert_eq!(app.screen, Screen::Overview);
+        assert_eq!(work_dir, selected_work);
+        assert_eq!(events_path, work_dir.join("events.jsonl"));
+        assert_eq!(status_path, work_dir.join("status.md"));
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("Selected")));
+        std::fs::remove_dir_all(&root).expect("remove hub fixture");
     }
 
     /// T-293: `done_task_ids` now delegates to `orchestra_engine::state::archive_header_task_id`,
