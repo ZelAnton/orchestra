@@ -317,22 +317,20 @@ fn load_inbox(work_dir: &Path) -> inbox::DecisionInbox {
     decision_inbox
 }
 
-/// Task ids already archived to `.work/Tasks_Done.md`, decoded from that file's `### [T-NNN]
-/// <title>` headers (same shape as `Tasks_Queue.md`'s own headers, see
-/// `orchestra_engine::state`). Read-only, best-effort: a missing/unreadable file degrades
-/// to an empty set, matching the rest of this observer's "total loading" convention (see
-/// `Snapshot::load`) — used only by `inbox::build` to confirm, not to invent, a predecessor's
-/// completion (R-2).
+/// Task ids already archived to `.work/Tasks_Done.md`, decoded per the SINGLE normative
+/// archive-header contract by reusing `orchestra_engine::state::archive_header_task_id` — the
+/// exact same resolver `tools/queue-tx.ps1 ready` and the engine's `completed_ids` use, so one
+/// archive record satisfies (or fails) a predecessor's prerequisite identically in all three
+/// (T-293). This replaces this file's earlier independent copy, which accepted only `###` headers
+/// and used a weak `starts_with("T-")` id check (it let a digitless `T-`/`T-abc` through).
+/// Read-only, best-effort: a missing/unreadable file degrades to an empty set, matching the rest
+/// of this observer's "total loading" convention (see `Snapshot::load`) — used only by
+/// `inbox::build` to confirm, not to invent, a predecessor's completion (R-2).
 fn done_task_ids(work_dir: &Path) -> BTreeSet<String> {
     let text = std::fs::read_to_string(work_dir.join("Tasks_Done.md")).unwrap_or_default();
     text.lines()
-        .filter_map(|line| {
-            let rest = line.trim_start().strip_prefix("###")?.trim_start();
-            let rest = rest.strip_prefix('[')?;
-            let close = rest.find(']')?;
-            Some(rest[..close].trim().to_string())
-        })
-        .filter(|id| id.starts_with("T-"))
+        .filter_map(orchestra_engine::state::archive_header_task_id)
+        .map(str::to_owned)
         .collect()
 }
 
@@ -384,5 +382,42 @@ mod tests {
         ));
         assert_eq!(app.modal, Modal::ConfirmApprove);
         assert!(app.take_approval_confirmation().is_some());
+    }
+
+    /// T-293: `done_task_ids` now delegates to `orchestra_engine::state::archive_header_task_id`,
+    /// so the Decision Inbox recognizes the SAME normative archive-header shapes as
+    /// `tools/queue-tx.ps1 ready` and the engine's `completed_ids` — no longer just `###`, and no
+    /// longer letting a digitless `T-`/`T-abc` through the old weak `starts_with("T-")` check.
+    #[test]
+    fn done_task_ids_matches_the_shared_archive_header_contract() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let work = std::env::temp_dir().join(format!(
+            "orchestra-tui-done-ids-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&work).expect("create test work directory");
+        std::fs::write(
+            work.join("Tasks_Done.md"),
+            "# Выполненные задачи\n\n\
+             ## [T-090] H2 archive entry — статус: завершена\n\
+             ### [T-091] H3 archive entry — статус: завершена\n\
+             # Активная задача T-092\nСостояние: завершена\n\
+             # Active task T-093\n\n\
+             Body mention of T-999 must not count\n\
+             ### [T-] digitless header must not count\n",
+        )
+        .expect("write archive fixture");
+
+        let ids = done_task_ids(&work);
+        std::fs::remove_dir_all(&work).expect("remove test work directory");
+
+        let expected: BTreeSet<String> = ["T-090", "T-091", "T-092", "T-093"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(ids, expected);
     }
 }
