@@ -1,0 +1,29 @@
+# Shared Rust workspace policy, kept beside this member because the CI supply-chain gate runs
+# cargo-deny from engine/. The manifest resolves the root Cargo.lock (T-305).
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = true
+
+[bans]
+# The lock currently has two platform-driven windows-sys versions. Keep that visible without
+# making a supported Windows build fail; new explicit bans and wildcard requirements fail closed.
+multiple-versions = "warn"
+wildcards = "deny"
+allow = []
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

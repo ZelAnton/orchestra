@@ -474,12 +474,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Show Rust toolchain
-        # Neither engine/rust-toolchain.toml nor tui/rust-toolchain.toml exists yet (true
-        # as of this job's planning snapshot - see task T-112): both crates build against
-        # whatever stable toolchain the runner image preinstalls (already includes
-        # cargo/rustc/clippy/rustfmt). If a rust-toolchain.toml is added to either crate
-        # later, cargo/rustup pick it up automatically from that crate's working
-        # directory - no workflow change would be needed here.
+        # The root rust-toolchain.toml pins the shared workspace's compiler and requests
+        # clippy/rustfmt. Cargo/rustup discover it for both the root CI commands and direct
+        # engine/ or tui/ developer commands, so the runner's ambient stable is not part of
+        # the build contract.
         run: |
           rustc --version
           cargo --version
@@ -498,11 +496,9 @@ jobs:
           cargo fmt --check --all
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Check engine crate advisories (cargo-deny, only if configured)
-        # engine/deny.toml does not exist yet (same planning snapshot as above), so this
-        # step is a SOFT, best-effort check that only runs if a future task adds one - its
-        # absence here is intentionally NOT a failure, unlike the MANDATORY pwsh
-        # validators in `validate` above, which must fail loudly when missing.
+      - name: Check engine crate supply chain (cargo-deny)
+        # The member-local config carries the shared workspace policy; this is conditional
+        # only to retain the original activation contract if a future package opts out.
         working-directory: engine
         if: hashFiles('engine/deny.toml') != ''
         run: |
@@ -514,9 +510,9 @@ jobs:
           cargo deny check
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Check tui crate advisories (cargo-deny, only if configured)
-        # tui/deny.toml does not exist yet (same planning snapshot as above) - same soft,
-        # best-effort check as the engine crate step above.
+      - name: Check tui crate supply chain (cargo-deny)
+        # The member-local config carries the same shared workspace policy and activates
+        # this gate for the operator TUI.
         working-directory: tui
         if: hashFiles('tui/deny.toml') != ''
         run: |
