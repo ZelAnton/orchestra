@@ -480,6 +480,20 @@ completed
     Assert-Exit (Invoke-Registry @('resolve', '--project', ([string]$retired.id))) 4 'unregistered project no longer resolves'
     $receiverGraphAfterRetirement = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
     Assert-Equal 0 (@($receiverGraphAfterRetirement.dependencies).Count) 'registry removal leaves no dangling dependency edge'
+
+    $emoji = [string][char]0xD83D + [string][char]0xDE00
+    $longSubject = ('a' * 235) + $emoji
+    $longRequest = Invoke-Inbox @('send', '--root', $script:RepoA, '--to', 'Receiver', '--subject', $longSubject, '--body', 'Unicode boundary probe.', '--json')
+    Assert-Exit $longRequest 0 'send a subject whose reply prefix would cut an emoji surrogate pair'
+    if ($longRequest.ExitCode -eq 0) {
+        $longReply = Invoke-Inbox @('reply', '--root', $script:RepoB, '--id', ([string](($longRequest.Out | ConvertFrom-Json).id)), '--reply-status', 'acknowledged', '--dedupe-key', 'unicode-subject-boundary', '--body', 'Acknowledged.', '--json')
+        Assert-Exit $longReply 0 'reply truncates the default subject at a Unicode scalar boundary'
+        if ($longReply.ExitCode -eq 0) {
+            $replySubject = [string](($longReply.Out | ConvertFrom-Json).subject)
+            Assert-Equal 239 $replySubject.Length 'reply removes the high surrogate instead of retaining it at the 240-unit boundary'
+            Assert-True (-not [char]::IsHighSurrogate($replySubject[$replySubject.Length - 1])) 'reply default subject has no dangling high surrogate'
+        }
+    }
 }
 finally {
     Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue

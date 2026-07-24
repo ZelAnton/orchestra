@@ -184,6 +184,17 @@ function Assert-MessageText {
     if ($bytes -gt 262144) { Fail 2 "message body exceeds the 262144-byte limit ($bytes bytes)" }
 }
 
+function Truncate-UnicodeText {
+    param([string]$Value, [int]$Maximum)
+    if ($Value.Length -le $Maximum) { return $Value }
+    $length = $Maximum
+    if ($length -gt 0 -and [char]::IsHighSurrogate($Value[$length - 1]) -and
+        $length -lt $Value.Length -and [char]::IsLowSurrogate($Value[$length])) {
+        $length--
+    }
+    return $Value.Substring(0, $length)
+}
+
 function New-RandomMessageId {
     return 'msg-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ').ToLowerInvariant() + '-' + [guid]::NewGuid().ToString('N').Substring(0, 12)
 }
@@ -609,7 +620,7 @@ function Cmd-Reply {
     $route = Resolve-Route -Root $root -Target ([string]$original.from_project.id)
     if ([string]$route.From.id -ne [string]$original.to_project.id) { Fail 6 'current project is not the recipient recorded by the original message' }
     $defaultSubject = 'Re: ' + [string]$original.subject
-    if ($defaultSubject.Length -gt 240) { $defaultSubject = $defaultSubject.Substring(0, 240) }
+    $defaultSubject = Truncate-UnicodeText -Value $defaultSubject -Maximum 240
     $subject = [string](Opt 'subject' $defaultSubject)
     Assert-MessageText -Subject $subject -Body $body
     $replyId = Get-StableReplyId -OriginalId $id -FromId ([string]$route.From.id) -DedupeKey $dedupeKey
