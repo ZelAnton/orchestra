@@ -12,7 +12,7 @@
 # idempotent on a re-run; a file that already grants all three is left unchanged
 # and reported OK; and degenerate cases (invalid JSON, a read-only/unwritable
 # file) leave the file untouched and fall back to printing the rule(s) to add by
-# hand. It also creates .inbox/messages and idempotently registers the current project in
+# hand. It also creates .inbox/messages plus .inbox/releases and idempotently registers the current project in
 # the user-global Orchestra project registry. This launcher never calls claude/codex.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -41,6 +41,7 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
 
         $inboxMessages = Join-Path $paths.Project '.inbox\messages'
         Assert-True (Test-Path -LiteralPath $inboxMessages -PathType Container) '[fresh] .inbox/messages must be created'
+        Assert-True (Test-Path -LiteralPath (Join-Path $paths.Project '.inbox\releases') -PathType Container) '[fresh] .inbox/releases must be created'
         $registryPath = Join-Path $paths.Root 'profile/projects.json'
         Assert-FileExists $registryPath '[fresh] user-global project registry must be created'
         $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json

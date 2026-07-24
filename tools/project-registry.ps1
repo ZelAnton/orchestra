@@ -6,6 +6,8 @@
     pwsh -File tools/project-registry.ps1 register --root . --ensure-inbox
     pwsh -File tools/project-registry.ps1 list --json
     pwsh -File tools/project-registry.ps1 resolve --project repo-0123456789abcdef0123 --json
+    pwsh -File tools/project-registry.ps1 graph-sync --root . --snapshot-file .work/dependency-graph.json --json
+    pwsh -File tools/project-registry.ps1 dependents --project repo-0123456789abcdef0123 --json
 #>
 
 Set-StrictMode -Version Latest
@@ -54,8 +56,35 @@ try {
             if ([bool](Opt 'json' $false)) { $project | ConvertTo-Json -Depth 5 }
             else { Write-Output "$($project.id)  $($project.name)  $($project.root)" }
         }
+        'graph-sync' {
+            $root = Require-Opt 'root'
+            $snapshot = Require-Opt 'snapshot-file'
+            $result = Sync-OrchestraProjectGraph -RegistryPath $registryPath -Root $root -SnapshotPath $snapshot
+            if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 10 }
+            else { Write-Output "graph-synced changed=$($result.changed) project=$($result.project.id) products=$(@($result.products).Count) dependencies=$(@($result.dependencies).Count)" }
+        }
+        'graph-show' {
+            $root = Require-Opt 'root'
+            $registry = Read-OrchestraRegistry $registryPath
+            $project = Get-OrchestraRegistryProjectByRoot -Registry $registry -Root $root
+            $result = [pscustomobject][ordered]@{ project = $project; products = @($project.products); dependencies = @($project.dependencies) }
+            if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 10 }
+            else { Write-Output "project=$($project.id) products=$(@($project.products).Count) dependencies=$(@($project.dependencies).Count)" }
+        }
+        'dependents' {
+            $selector = Require-Opt 'project'
+            $registry = Read-OrchestraRegistry $registryPath
+            $project = Resolve-OrchestraRegistryProject -Registry $registry -Selector $selector
+            $dependents = @(Get-OrchestraProjectDependents -Registry $registry -UpstreamId ([string]$project.id))
+            $result = [pscustomobject][ordered]@{ project = $project; count = $dependents.Count; dependents = $dependents }
+            if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 10 }
+            else {
+                foreach ($dependent in $dependents) { Write-Output "$($dependent.id)  $($dependent.name)  $($dependent.root)" }
+                Write-Output "count=$($dependents.Count)"
+            }
+        }
         'path' { Write-Output $registryPath }
-        default { Fail 2 "unknown command '$Command' (expected register, list, resolve, or path)" }
+        default { Fail 2 "unknown command '$Command' (expected register, list, resolve, graph-sync, graph-show, dependents, or path)" }
     }
     exit 0
 } catch {

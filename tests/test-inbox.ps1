@@ -16,6 +16,7 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 $script:Root = Join-Path ([System.IO.Path]::GetTempPath()) ('orchestra-inbox-test-' + [guid]::NewGuid().ToString('N'))
 $script:RepoA = Join-Path $script:Root 'sender-repo'
 $script:RepoB = Join-Path $script:Root 'receiver-repo'
+$script:RepoC = Join-Path $script:Root 'unrelated-repo'
 $script:Registry = Join-Path $script:Root 'profile/projects.json'
 $script:RegistryTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\project-registry.ps1')).Path
 $script:InboxTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\inbox.ps1')).Path
@@ -78,6 +79,7 @@ try {
     }
     Assert-True (Test-Path -LiteralPath (Join-Path $script:RepoA '.inbox/messages') -PathType Container) 'sender inbox created'
     Assert-True (Test-Path -LiteralPath (Join-Path $script:RepoB '.inbox/messages') -PathType Container) 'receiver inbox created'
+    Assert-True (Test-Path -LiteralPath (Join-Path $script:RepoA '.inbox/releases') -PathType Container) 'sender release audit directory created'
 
     $list = Invoke-Registry @('list', '--json')
     Assert-Exit $list 0 'list registry'
@@ -188,9 +190,12 @@ completed
     $legacyReplyPath = Join-Path $script:RepoA ('.inbox/messages/' + [string]$reply.id + '.json')
     $legacyReply = [System.IO.File]::ReadAllText($legacyReplyPath) | ConvertFrom-Json
     $legacyReply.PSObject.Properties.Remove('conversation_id')
+    $legacyReply.PSObject.Properties.Remove('message_type')
+    $legacyReply.PSObject.Properties.Remove('release')
     Write-TestFile $legacyReplyPath ($legacyReply | ConvertTo-Json -Depth 12)
     $legacyRead = (Invoke-Inbox @('show', '--root', $script:RepoA, '--id', ([string]$reply.id), '--json')).Out | ConvertFrom-Json
     Assert-Equal $messageId ([string]$legacyRead.conversation_id) 'early schema-1 reply without conversation_id is normalized on read'
+    Assert-Equal 'reply' ([string]$legacyRead.message_type) 'early schema-1 reply derives its missing message type'
     $replyRead = Invoke-Inbox @('mark', '--root', $script:RepoA, '--id', ([string]$reply.id), '--status', 'read', '--remark', 'Final upstream outcome recorded.', '--actor', 'inbox_curator')
     Assert-Exit $replyRead 0 'incoming reply can be marked read'
     $senderActionable = (Invoke-Inbox @('actionable', '--root', $script:RepoA, '--json')).Out | ConvertFrom-Json
@@ -251,6 +256,135 @@ completed
     Assert-Equal 'final' ([string]$recoveredState.reply_status) 'recovery records the final reply on the source request'
     $postRecoveryConflict = Invoke-Inbox @('reply', '--root', $script:RepoB, '--id', $stableId, '--reply-status', 'final', '--dedupe-key', 'final-v1', '--body-file', $replyBody)
     Assert-Exit $postRecoveryConflict 6 'different content fails after reply recovery is committed'
+
+    $null = New-Item -ItemType Directory -Force -Path $script:RepoC
+    $c1 = Invoke-Registry @('register', '--root', $script:RepoC, '--name', 'Unrelated', '--ensure-inbox', '--json')
+    Assert-Exit $c1 0 'register unrelated project for release routing negative control'
+
+    $sourceGraphPath = Join-Path $script:Root 'source-graph.json'
+    Write-TestFile $sourceGraphPath @'
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "products": ["nuget:Sender.Package", "nuget:Sender.Tool"],
+  "dependencies": []
+}
+'@
+    $sourceGraph = Invoke-Registry @('graph-sync', '--root', $script:RepoA, '--snapshot-file', $sourceGraphPath, '--json')
+    Assert-Exit $sourceGraph 0 'source product graph sync'
+    Assert-True ([bool](($sourceGraph.Out | ConvertFrom-Json).changed)) 'first source graph sync changes registry'
+
+    $malformedGraphPath = Join-Path $script:Root 'malformed-graph.json'
+    Write-TestFile $malformedGraphPath '{"schema":"orchestra/project-graph-snapshot@1","products":"nuget:NotAnArray","dependencies":[]}'
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoA, '--snapshot-file', $malformedGraphPath)) 5 'graph sync rejects a scalar products field'
+    Write-TestFile $malformedGraphPath '{"schema":"orchestra/project-graph-snapshot@1","products":[],"dependencies":[{"upstream":"missing-shape"}]}'
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoA, '--snapshot-file', $malformedGraphPath)) 5 'graph sync rejects incomplete dependency objects before resolution'
+
+    $dependentGraphPath = Join-Path $script:Root 'dependent-graph.json'
+    Write-TestFile $dependentGraphPath (@"
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "products": ["nuget:Receiver.Package"],
+  "dependencies": [
+    {
+      "upstream": "$([string]$senderProject.id)",
+      "products": ["nuget:Sender.Package"],
+      "evidence": ["Directory.Packages.props: Sender.Package"]
+    }
+  ]
+}
+"@)
+    $dependentGraph1 = Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $dependentGraphPath, '--json')
+    $dependentGraph2 = Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $dependentGraphPath, '--json')
+    Assert-Exit $dependentGraph1 0 'dependent graph sync'
+    Assert-Exit $dependentGraph2 0 'unchanged dependent graph sync is idempotent'
+    Assert-True ([bool](($dependentGraph1.Out | ConvertFrom-Json).changed)) 'first dependent graph sync changes registry'
+    Assert-True (-not [bool](($dependentGraph2.Out | ConvertFrom-Json).changed)) 'second dependent graph sync reports unchanged'
+
+    $unrelatedGraphPath = Join-Path $script:Root 'unrelated-graph.json'
+    Write-TestFile $unrelatedGraphPath (@"
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "products": [],
+  "dependencies": [
+    {
+      "upstream": "$([string]$senderProject.id)",
+      "products": ["nuget:Sender.Tool"],
+      "evidence": ["tools.json: Sender.Tool"]
+    }
+  ]
+}
+"@)
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoC, '--snapshot-file', $unrelatedGraphPath)) 0 'second dependent registers a different source product'
+    $dependents = Invoke-Registry @('dependents', '--project', ([string]$senderProject.id), '--json')
+    Assert-Exit $dependents 0 'reverse dependency lookup'
+    $dependentState = $dependents.Out | ConvertFrom-Json
+    Assert-Equal 2 ([int]$dependentState.count) 'reverse lookup reports both repository-level dependents'
+    Assert-Equal ([string]$receiver.id) ([string]$dependentState.dependents[0].id) 'reverse lookup returns receiver'
+
+    $releaseNotes = Join-Path $script:Root 'release-notes.md'
+    Write-TestFile $releaseNotes 'Release delivery must recover after the destination write.'
+    $unknownProduct = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', 'invalid-product-probe', '--notes-file', $releaseNotes, '--product', 'nuget:NotPublished')
+    Assert-Exit $unknownProduct 6 'release rejects a product not declared by the source graph'
+    $previousReleaseFault = [Environment]::GetEnvironmentVariable('ORCHESTRA_INBOX_FAULT')
+    try {
+        [Environment]::SetEnvironmentVariable('ORCHESTRA_INBOX_FAULT', 'after-release-delivery')
+        $crashedRelease = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '1.9.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+    } finally {
+        [Environment]::SetEnvironmentVariable('ORCHESTRA_INBOX_FAULT', $previousReleaseFault)
+    }
+    Assert-Exit $crashedRelease 6 'release reports partial delivery after destination-before-source injected fault'
+    if ($crashedRelease.ExitCode -ne 6 -or $crashedRelease.Err -notmatch 'release notification delivery failed') {
+        throw "injected release did not reach the delivery fault: err=[$($crashedRelease.Err)] out=[$($crashedRelease.Out)]"
+    }
+    $resumedRelease = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '1.9.0', '--resume', '--json')
+    Assert-Exit $resumedRelease 0 'release resume repairs the source delivery record idempotently'
+    if ($resumedRelease.ExitCode -eq 0) {
+        Assert-Equal 1 ([int](($resumedRelease.Out | ConvertFrom-Json).delivered_count)) 'resumed release confirms its dependent delivery'
+    } else {
+        throw "release resume failed: err=[$($resumedRelease.Err)] out=[$($resumedRelease.Out)]"
+    }
+
+    Write-TestFile $releaseNotes "Sender.Package 2.0.0`n`n- Added bounded cancellation.`n- Changed the compatibility baseline."
+    $release1 = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--release-url', 'https://example.invalid/releases/2.0.0', '--source-revision', 'abc123', '--json')
+    $release2 = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--resume', '--json')
+    $invalidResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--resume', '--notes-file', $releaseNotes)
+    Assert-Exit $release1 0 'release notification fan-out'
+    Assert-Exit $release2 0 'release notification resume is idempotent'
+    Assert-Exit $invalidResume 2 'release resume rejects replacement content options'
+    $releaseResult = $release1.Out | ConvertFrom-Json
+    Assert-Equal 1 ([int]$releaseResult.target_count) 'release freezes one graph-derived target'
+    Assert-Equal 1 ([int]$releaseResult.delivered_count) 'release delivers to its dependent'
+    $releaseMessageId = [string]$releaseResult.deliveries[0].message_id
+    $releaseMessage = (Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $releaseMessageId, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 'release' ([string]$releaseMessage.message_type) 'dependent receives structured release message'
+    Assert-Equal '2.0.0' ([string]$releaseMessage.release.version) 'release metadata carries version'
+    Assert-Equal 'nuget:Sender.Package' ([string]$releaseMessage.release.products[0]) 'release metadata preserves product identity while normalizing ecosystem'
+    $unrelatedInbox = (Invoke-Inbox @('list', '--root', $script:RepoC, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 0 ([int]$unrelatedInbox.count) 'dependent on a different product receives no product-specific release notification'
+    $releaseAuditFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:RepoA '.inbox/releases') -File -Filter 'rel-*.json')
+    Assert-Equal 2 $releaseAuditFiles.Count 'source stores canonical release audit records including recovered fan-out'
+
+    Write-TestFile $releaseNotes 'Changed notes must not rewrite a started fan-out.'
+    $releaseConflict = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--notes-file', $releaseNotes)
+    Assert-Exit $releaseConflict 6 'canonical release content is immutable after fan-out starts'
+
+    Write-TestFile $dependentGraphPath @'
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "products": ["nuget:Receiver.Package"],
+  "dependencies": []
+}
+'@
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $dependentGraphPath)) 0 'dependency removal refreshes graph'
+    $afterRemoval = (Invoke-Registry @('dependents', '--project', ([string]$senderProject.id), '--json')).Out | ConvertFrom-Json
+    Assert-Equal 1 ([int]$afterRemoval.count) 'removing one edge preserves the dependent on another product'
+    $frozenResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--resume', '--json')
+    Assert-Exit $frozenResume 0 'existing release retains its original frozen audience after graph changes'
+    Assert-Equal 1 ([int](($frozenResume.Out | ConvertFrom-Json).target_count)) 'frozen release audience is not recomputed'
+    Write-TestFile $releaseNotes 'No current dependents should receive this release.'
+    $releaseNoTargets = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.1.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+    Assert-Exit $releaseNoTargets 0 'release with no dependents is a successful auditable no-op'
+    Assert-Equal 0 ([int](($releaseNoTargets.Out | ConvertFrom-Json).target_count)) 'new release uses the refreshed empty audience'
 }
 finally {
     Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue

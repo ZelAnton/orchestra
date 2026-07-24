@@ -25,6 +25,7 @@ $roles = [ordered]@{
     merger             = 'high'
     knowledge_curator  = 'medium'
     inbox_curator      = 'high'
+    dependency_curator = 'medium'
 }
 
 function Read-AgentSource {
@@ -94,7 +95,7 @@ provider contract at higher precedence whenever provider-specific wording confli
    `orchestra_reviewer_std`; `reviewer` -> `orchestra_reviewer`;
    `full_reviewer` -> `orchestra_full_reviewer`; `merger` -> `orchestra_merger`;
    `knowledge_curator` -> `orchestra_knowledge_curator`; `inbox_curator` ->
-   `orchestra_inbox_curator`.
+   `orchestra_inbox_curator`; `dependency_curator` -> `orchestra_dependency_curator`.
 3. The canonical `Agent(...)` operation means spawning the mapped custom agent, passing
    the complete task-specific invocation, and waiting/steering/collecting it through Codex
    multi-agent tools. Preserve the same concurrency and round barriers.

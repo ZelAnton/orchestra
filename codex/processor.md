@@ -14,7 +14,7 @@ provider contract at higher precedence whenever provider-specific wording confli
    `orchestra_reviewer_std`; `reviewer` -> `orchestra_reviewer`;
    `full_reviewer` -> `orchestra_full_reviewer`; `merger` -> `orchestra_merger`;
    `knowledge_curator` -> `orchestra_knowledge_curator`; `inbox_curator` ->
-   `orchestra_inbox_curator`.
+   `orchestra_inbox_curator`; `dependency_curator` -> `orchestra_dependency_curator`.
 3. The canonical `Agent(...)` operation means spawning the mapped custom agent, passing
    the complete task-specific invocation, and waiting/steering/collecting it through Codex
    multi-agent tools. Preserve the same concurrency and round barriers.
@@ -65,7 +65,9 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 `.work/knowledge/` в Фазе 5.5; см. «База знаний (KB)»), **executor** (пометка/возврат/
 удаление записей очереди), **inbox_curator** (критическая оценка межрепозиторных
 сообщений, постановка локально обоснованных задач и ответы отправителю; см.
-«Межрепозиторный inbox»). Опционально (адаптеры
+«Межрепозиторный inbox»), **dependency_curator** (сверка published products и прямых
+межпроектных зависимостей с committed manifests; обновляет только graph текущего проекта
+в пользовательском registry). Опционально (адаптеры
 поверх OpenAI Codex CLI, каждый с чистым фолбэком на Claude): **coder_codex** берёт
 реализацию/`R-`-фиксы уровней `coder_fast`/`coder` при `CODEX_CODER` и точечные CI/
 сборочные фиксы (Режим 3) при `CODEX_CIFIX` (см. «Codex-исполнитель и маршрутизация»,
@@ -89,6 +91,42 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 проверенные факты, влияние, границу владения и желаемый результат с альтернативами, а
 не обязательный дизайн. Он не заменяет локальный фикс/находку/эскалацию, не блокирует
 текущую задачу; сохрани возвращённый `msg-id` в отчёте.
+
+# Синхронизация опубликованного релиза и рассылка dependents
+
+Явное сообщение оператора вида «выпущена версия X, сделай pull/синхронизируй release» —
+это отдельный операционный режим `release-sync`, а не задача очереди. Выполняй его только
+когда нет незавершённой когорты; при наличии `batch.md` сначала штатно восстанови/заверши
+её либо остановись с точным конфликтом состояния.
+
+1. Возьми lease обычным owner-checked путём. Проверь чистую основную рабочую копию и
+   отсутствие непубликованных локальных коммитов, которые pull мог бы скрыть.
+2. Определи VCS и trunk обычными правилами processor. Освежи remote refs и выполни только
+   fast-forward синхронизацию локального trunk с remote trunk; force/reset с потерей
+   локальной истории запрещены. Для jj обнови remote refs, передвинь bookmark только при
+   доказанном ancestor/ff и ре-якори пустую рабочую копию на новый trunk.
+3. Подтверди, что версия/тег/release действительно видны после sync. Не рассылай извещение
+   только на основании текста пользователя, если remote/tag противоречат ему.
+4. Вызови `dependency_curator` с `MODE=refresh`, абсолютными `ROOT`, `WORK` и новым
+   committed `BASE`, чтобы products текущего проекта были актуальны. Ошибка graph sync
+   блокирует рассылку, но не разрешает ручную правку registry.
+5. Составь один канонический UTF-8 release-notes файл из авторитетных release notes/
+   changelog/tag diff. Включи версию, опубликованные products, значимые изменения,
+   migration/breaking notes и ссылку/revision; не перечисляй шум коммитов без пользы
+   потребителю.
+6. Выполни `inbox.ps1 release --root "$ROOT" --version <X> --notes-file <file>
+   --product <ecosystem:name> --release-url <url> --source-revision <sha> --json` (повтори
+   `--product` для всех продуктов именно этого release). Runtime фиксирует аудиторию на
+   момент первого вызова, создаёт каноническую release-запись и идемпотентно доставляет
+   структурированное сообщение только проектам, чьи собственные graph snapshots указывают
+   текущий проект как upstream. При crash/частичной доставке повторяй только
+   `inbox.ps1 release --root "$ROOT" --version <X> --resume --json`: заново сочинённый текст
+   не может заменить уже начатую рассылку.
+7. Нулевое число dependents — корректный результат, но явно сообщи его оператору и напомни,
+   что существующие потребители должны хотя бы раз пройти processor/`cc-deps`. Не ищи их
+   обходом диска и не рассылай по похожим именам.
+8. Сними lease и заверши режим отчётом: synced trunk/tag, release-id, target/msg ids,
+   failures. К обычной обработке очереди переходи только по отдельному запросу оператора.
 
 # Конфигурация
 
@@ -1032,8 +1070,14 @@ MAX_PARALLEL` (полный) — дальнейшие волны идут чер
 имя интеграционной ветки `integration/<B-id>`; голый вывод `date` без формата
 содержит пробелы/двоеточия и делает `git branch` невалидным).
 
-1.3. **Разбери межрепозиторный inbox, затем влей inbox популяторов** (безопасно — lock
-твой). Если `$ROOT/.inbox/messages` существует, выполни дешёвый
+1.3. **Освежи graph, разбери межрепозиторный inbox, затем влей inbox популяторов**
+(безопасно — lock твой). Сначала один раз за новую когорту вызови `dependency_curator` с
+`MODE=refresh`, абсолютными `ROOT`/`WORK` и текущим committed `BASE`. Он сверяет только
+committed manifests и атомарно заменяет products/dependencies текущего проекта в
+пользовательском registry. Ошибку graph refresh отрази в status/journal; она запрещает
+release-рассылку, но сама по себе не блокирует независимую обработку очереди.
+
+Если `$ROOT/.inbox/messages` существует, выполни дешёвый
 сначала `inbox.ps1 reconcile --root "$ROOT" --json` (crash-recovery для уже влитых, но
 ещё не связанных задач), затем `actionable --root "$ROOT" --json`; при ненулевом `count`
 вызови **inbox_curator** в режиме `MODE=all`, передав абсолютные `ROOT`/`WORK` и
@@ -2235,7 +2279,13 @@ F-циклы, Codex attempts (итог + причины, дедуп по `event_
 Резолвинг контракта/артефакта и запрет обхода диска — см. «Осведомлённость о дорожной карте
 (`.work/roadmap.md`)».
 
-6.7. **Финализация межрепозиторных запросов.** После архивации 6.1 и до возврата в
+6.7. **Освежение dependency graph и финализация межрепозиторных запросов.** После
+публикации/архивации батча вызови `dependency_curator` с `MODE=refresh`, новым committed
+`BASE` и абсолютными `ROOT`/`WORK`: это обязательная точка, которая регистрирует добавленные
+или удалённые текущим батчем зависимости до возможного будущего upstream release.
+Не обновляй registry из незакоммиченного integration/worktree состояния.
+
+После архивации 6.1 и до возврата в
 следующий батч выполни `inbox.ps1 reconcile --root "$ROOT" --json`, затем
 `actionable`. Если появился хотя бы один `completable` или `reply_pending`, вызови новый `inbox_curator` с
 `MODE=finalize`: он независимо проверит наличие всех связанных T-ID в `Tasks_Done.md`,

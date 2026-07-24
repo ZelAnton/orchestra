@@ -8,7 +8,7 @@ rem `pwsh -File ~/.claude/scripts/codex-runtime.ps1` from a cc-sync mirror - plu
 rem historical `codex exec` anchor) into .claude\settings.local.json. An existing target
 rem file is NEVER overwritten wholesale (same guarantee for all three). Finally, register
 rem the canonical project root in the user-global Orchestra registry and create
-rem .inbox\messages for cross-project communication.
+rem .inbox\messages plus .inbox\releases for cross-project communication and release audit.
 rem  - config.md: only the copyable block between the "# >>> config.md seed start" /
 rem    "# <<< config.md seed end" markers inside config.example.md's fenced code block
 rem    (headings/prose/tables are never copied).

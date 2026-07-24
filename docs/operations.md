@@ -15,8 +15,9 @@ runtime state directory (gitignored). Launchers referenced below live in
 ## 0. Registering projects and using the cross-project inbox
 
 Run `cc-config` once from every repository root. In addition to seeding `.work`, it
-creates `.inbox/messages/` and registers the canonical root in the user-global
-`~/.orchestra/projects.json`. Re-running it is safe and refreshes the same stable repo id.
+creates `.inbox/messages/` plus `.inbox/releases/` and registers the canonical root in the
+user-global `~/.orchestra/projects.json`. Re-running it is safe and refreshes the same
+stable repo id.
 Use the operator/test-only `ORCHESTRA_REGISTRY_PATH` override only for an intentionally
 separate registry; agents must never set it.
 
@@ -36,6 +37,19 @@ tasks contain `Inbox message: <msg-id>`; after every linked task reaches
 reply to the sender's registered inbox. Inspect `remarks`, `processing_status`,
 `reply_status`, and `queue_tasks` in the JSON record when diagnosing a decision. Full
 schema and transitions are in `docs/inbox_contract.md`.
+
+`cc-deps` runs the smart dependency audit on demand. The dependent repository owns each
+edge: committed manifests are checked against registered projects, then its complete
+`products`/`dependencies` snapshot is atomically replaced. Processor repeats this at the
+start of a cohort and after a published batch, so dependency additions/removals do not
+depend on re-running the one-time `cc-config` bootstrap.
+
+After publishing a product release, tell processor explicitly that version `X` was
+released and ask it to pull/synchronize. In `release-sync` mode it verifies a fast-forward
+remote sync and the release/tag, refreshes products, builds canonical release notes, then
+calls `inbox.ps1 release`. Inspect `.inbox/releases/*.json` in the source for the frozen
+target set and delivery ids. Retry a partial fan-out with `release --version X --resume`;
+never regenerate its content.
 
 ## 1. Reading `status.md` and `journal.md`
 

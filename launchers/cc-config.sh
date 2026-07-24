@@ -7,7 +7,7 @@
 # historical `codex exec` anchor) into .claude/settings.local.json. An existing target
 # file is NEVER overwritten wholesale (same guarantee for all three). Finally, register
 # the canonical project root in the user-global Orchestra registry and create
-# .inbox/messages for cross-project communication.
+# .inbox/messages plus .inbox/releases for cross-project communication and release audit.
 #   - config.md: only the copyable block between the "# >>> config.md seed start" /
 #     "# <<< config.md seed end" markers inside config.example.md's fenced code block
 #     (headings/prose/tables are never copied).

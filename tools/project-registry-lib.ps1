@@ -74,6 +74,24 @@ function Get-OrchestraProjectName {
     return $name
 }
 
+function Normalize-OrchestraProductKey {
+    param([Parameter(Mandatory)][string]$Value)
+    $key = $Value.Trim()
+    if ($key.Length -gt 240 -or $key -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}:[^\x00-\x1f\x7f:][^\x00-\x1f\x7f]{0,199}$') {
+        Fail 2 "product identity must use ecosystem:name with no control characters: $Value"
+    }
+    $parts = $key.Split(':', 2)
+    return ($parts[0].ToLowerInvariant() + ':' + $parts[1].Trim())
+}
+
+function Assert-OrchestraEvidenceText {
+    param([Parameter(Mandatory)][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 500 -or $Value -match '[\x00-\x1f\x7f]') {
+        Fail 2 'dependency evidence must contain 1-500 characters and no control characters'
+    }
+    return $Value.Trim()
+}
+
 function New-OrchestraRegistry {
     return [pscustomobject][ordered]@{
         schema     = 'orchestra/project-registry@1'
@@ -111,13 +129,54 @@ function Read-OrchestraRegistry {
             Fail 5 "project registry entry id does not match its root: $([string]$project.id)"
         }
         if (-not $seenIds.Add($expectedId)) { Fail 5 "project registry contains a duplicate project id: $expectedId" }
+        $products = @()
+        if ($null -ne $project.PSObject.Properties['products']) {
+            $products = @($project.products | ForEach-Object { Normalize-OrchestraProductKey ([string]$_) } | Sort-Object -Unique)
+        }
+        if ($products.Count -gt 100) { Fail 5 "project registry entry has too many products: $expectedId" }
+        $dependencies = [System.Collections.Generic.List[object]]::new()
+        if ($null -ne $project.PSObject.Properties['dependencies']) {
+            foreach ($dependency in @($project.dependencies)) {
+                $upstreamId = [string]$dependency.upstream_id
+                if ($upstreamId -notmatch '^repo-[a-f0-9]{20}$') { Fail 5 "project registry entry has an invalid upstream id: $expectedId" }
+                $dependencyProducts = @()
+                if ($null -ne $dependency.PSObject.Properties['products']) {
+                    $dependencyProducts = @($dependency.products | ForEach-Object { Normalize-OrchestraProductKey ([string]$_) } | Sort-Object -Unique)
+                }
+                $evidence = @()
+                if ($null -ne $dependency.PSObject.Properties['evidence']) {
+                    $evidence = @($dependency.evidence | ForEach-Object { Assert-OrchestraEvidenceText ([string]$_) } | Sort-Object -Unique)
+                }
+                if ($dependencyProducts.Count -gt 100 -or $evidence.Count -gt 100) {
+                    Fail 5 "project registry dependency metadata is too large: $expectedId -> $upstreamId"
+                }
+                $dependencies.Add([pscustomobject][ordered]@{
+                    upstream_id = $upstreamId
+                    products = $dependencyProducts
+                    evidence = $evidence
+                })
+            }
+        }
+        if ($dependencies.Count -gt 100) { Fail 5 "project registry entry has too many dependencies: $expectedId" }
         $validated.Add([pscustomobject][ordered]@{
             id                 = $expectedId
             name               = Get-OrchestraProjectName -Root $root -Requested ([string]$project.name)
             root               = $root
             registered_at      = ConvertTo-OrchestraTimestampText $project.registered_at
             last_configured_at = ConvertTo-OrchestraTimestampText $project.last_configured_at
+            products           = $products
+            dependencies       = @($dependencies.ToArray() | Sort-Object upstream_id)
+            graph_updated_at   = if ($null -ne $project.PSObject.Properties['graph_updated_at']) { ConvertTo-OrchestraTimestampText $project.graph_updated_at } else { '' }
         })
+    }
+    foreach ($project in @($validated.ToArray())) {
+        $seenUpstreams = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($dependency in @($project.dependencies)) {
+            $upstreamId = [string]$dependency.upstream_id
+            if ($upstreamId -eq [string]$project.id) { Fail 5 "project registry contains a self dependency: $upstreamId" }
+            if (-not $seenIds.Contains($upstreamId)) { Fail 5 "project registry dependency targets an unknown project: $upstreamId" }
+            if (-not $seenUpstreams.Add($upstreamId)) { Fail 5 "project registry contains a duplicate dependency: $($project.id) -> $upstreamId" }
+        }
     }
     return [pscustomobject][ordered]@{
         schema      = 'orchestra/project-registry@1'
@@ -153,6 +212,9 @@ function Ensure-OrchestraInbox {
     $messages = Join-Path $inbox 'messages'
     if (-not (Test-Path -LiteralPath $messages)) { $null = New-Item -ItemType Directory -Path $messages }
     Assert-OrchestraPlainDirectory -Path $messages -Label 'project inbox messages'
+    $releases = Join-Path $inbox 'releases'
+    if (-not (Test-Path -LiteralPath $releases)) { $null = New-Item -ItemType Directory -Path $releases }
+    Assert-OrchestraPlainDirectory -Path $releases -Label 'project inbox releases'
     return $inbox
 }
 
@@ -203,6 +265,9 @@ function Register-OrchestraProject {
                 root               = $canonicalRoot
                 registered_at      = $now
                 last_configured_at = $now
+                products           = @()
+                dependencies       = @()
+                graph_updated_at   = ''
             }
             $registry.projects = @($registry.projects) + @($project)
         }
@@ -211,6 +276,110 @@ function Register-OrchestraProject {
         Write-OrchestraRegistry -Path $RegistryPath -Registry $registry
         return $project
     }
+}
+
+function Read-OrchestraGraphSnapshot {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Registry, [Parameter(Mandatory)][string]$ProjectId)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Fail 2 "dependency graph snapshot not found: $Path" }
+    Assert-OrchestraPlainFile -Path $Path -Label 'dependency graph snapshot'
+    try { $snapshot = [System.IO.File]::ReadAllText($Path) | ConvertFrom-Json }
+    catch { Fail 5 "dependency graph snapshot is not valid JSON: $Path" }
+    if ([string]$snapshot.schema -ne 'orchestra/project-graph-snapshot@1') {
+        Fail 5 "unsupported dependency graph snapshot schema: $Path"
+    }
+    foreach ($requiredArray in @('products', 'dependencies')) {
+        $property = $snapshot.PSObject.Properties[$requiredArray]
+        if ($null -eq $property -or $property.Value -isnot [System.Array]) {
+            Fail 5 "dependency graph snapshot requires a JSON array '$requiredArray': $Path"
+        }
+    }
+    $products = @($snapshot.products | ForEach-Object { Normalize-OrchestraProductKey ([string]$_) } | Sort-Object -Unique)
+    if ($products.Count -gt 100) { Fail 2 'dependency graph snapshot has more than 100 products' }
+    $dependencies = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($item in @($snapshot.dependencies)) {
+        if ($null -eq $item -or $item -isnot [psobject]) {
+            Fail 5 "dependency graph snapshot contains a non-object dependency: $Path"
+        }
+        foreach ($requiredProperty in @('upstream', 'products', 'evidence')) {
+            $property = $item.PSObject.Properties[$requiredProperty]
+            if ($null -eq $property) {
+                Fail 5 "dependency graph entry requires '$requiredProperty': $Path"
+            }
+            if ($requiredProperty -ne 'upstream' -and $property.Value -isnot [System.Array]) {
+                Fail 5 "dependency graph entry requires a JSON array '$requiredProperty': $Path"
+            }
+        }
+        $selector = [string]$item.upstream
+        if ([string]::IsNullOrWhiteSpace($selector)) { Fail 2 'dependency graph entry requires upstream project id or name' }
+        $upstream = Resolve-OrchestraRegistryProject -Registry $Registry -Selector $selector
+        if ([string]$upstream.id -eq $ProjectId) { Fail 2 'dependency graph cannot contain the current project as its own upstream' }
+        if (-not $seen.Add([string]$upstream.id)) { Fail 2 "dependency graph contains a duplicate upstream: $selector" }
+        $dependencyProducts = @($item.products | ForEach-Object { Normalize-OrchestraProductKey ([string]$_) } | Sort-Object -Unique)
+        $evidence = @($item.evidence | ForEach-Object { Assert-OrchestraEvidenceText ([string]$_) } | Sort-Object -Unique)
+        if ($dependencyProducts.Count -gt 100 -or $evidence.Count -gt 100) { Fail 2 "dependency graph metadata is too large: $selector" }
+        $dependencies.Add([pscustomobject][ordered]@{
+            upstream_id = [string]$upstream.id
+            products = $dependencyProducts
+            evidence = $evidence
+        })
+    }
+    if ($dependencies.Count -gt 100) { Fail 2 'dependency graph snapshot has more than 100 upstream projects' }
+    return [pscustomobject][ordered]@{
+        schema = 'orchestra/project-graph-snapshot@1'
+        products = $products
+        dependencies = @($dependencies.ToArray() | Sort-Object upstream_id)
+    }
+}
+
+function Sync-OrchestraProjectGraph {
+    param(
+        [Parameter(Mandatory)][string]$RegistryPath,
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$SnapshotPath
+    )
+    $canonicalRoot = Resolve-OrchestraProjectRoot $Root
+    return Invoke-WithOrchestraRegistryLock -RegistryPath $RegistryPath -Body {
+        $registry = Read-OrchestraRegistry $RegistryPath
+        $project = Get-OrchestraRegistryProjectByRoot -Registry $registry -Root $canonicalRoot
+        $snapshot = Read-OrchestraGraphSnapshot -Path $SnapshotPath -Registry $registry -ProjectId ([string]$project.id)
+        $currentCanonical = [pscustomobject][ordered]@{
+            schema = 'orchestra/project-graph-snapshot@1'
+            products = @($project.products)
+            dependencies = @($project.dependencies)
+        } | ConvertTo-Json -Depth 8 -Compress
+        $nextCanonical = $snapshot | ConvertTo-Json -Depth 8 -Compress
+        $changed = $currentCanonical -ne $nextCanonical
+        if ($changed) {
+            $project.products = @($snapshot.products)
+            $project.dependencies = @($snapshot.dependencies)
+            $project.graph_updated_at = Format-UtcNow
+            $registry.generation = [int]$registry.generation + 1
+            $registry.updated_at = $project.graph_updated_at
+            Write-OrchestraRegistry -Path $RegistryPath -Registry $registry
+        }
+        return [pscustomobject][ordered]@{
+            changed = $changed
+            project = $project
+            products = @($project.products)
+            dependencies = @($project.dependencies)
+        }
+    }
+}
+
+function Get-OrchestraProjectDependents {
+    param([Parameter(Mandatory)]$Registry, [Parameter(Mandatory)][string]$UpstreamId, [string[]]$Products = @())
+    $productSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($product in @($Products)) { [void]$productSet.Add((Normalize-OrchestraProductKey ([string]$product))) }
+    return @($Registry.projects | Where-Object {
+        $edge = @($_.dependencies | Where-Object { [string]$_.upstream_id -eq $UpstreamId }) | Select-Object -First 1
+        if ($null -eq $edge) { return $false }
+        if ($productSet.Count -eq 0 -or @($edge.products).Count -eq 0) { return $true }
+        foreach ($edgeProduct in @($edge.products)) {
+            if ($productSet.Contains((Normalize-OrchestraProductKey ([string]$edgeProduct)))) { return $true }
+        }
+        return $false
+    } | Sort-Object name, id)
 }
 
 function Resolve-OrchestraRegistryProject {

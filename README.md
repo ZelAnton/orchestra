@@ -56,6 +56,8 @@ a human only needs to seed the queue and periodically check status or escalation
   `.work/knowledge/` in a target project, harvesting agents' `learnings.md` notes.
 - **inbox_curator** — critically evaluates cross-project requests, converts only
   locally justified outcomes into queue tasks, and sends routed replies to the sender.
+- **dependency_curator** — reconciles the current repository's published products and
+  direct registered-project dependencies, enabling deterministic release notifications.
 - **thinker** — interactively explores an idea with the user and, once agreed,
   creates queue entries for it.
 - **proposal_curator** — batch-curates the raw `P-NNN` proposal lane (`kind: proposal`)
@@ -135,9 +137,9 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
 1. `cc-config` — seeds `.work\config.md` for the project from the template block in
    `config.example.md`, and `.work\constraints.md` from the whole of
    `constraints.example.md` (an existing target file is never overwritten). It also
-   creates `.inbox/messages/` and idempotently registers the canonical project root in
-   the user-global `~/.orchestra/projects.json`, making the project addressable by other
-   Orchestra agents.
+   creates `.inbox/messages/` plus `.inbox/releases/` and idempotently registers the
+   canonical project root in the user-global `~/.orchestra/projects.json`, making the
+   project addressable by other Orchestra agents.
 2. Populate `.work\Tasks_Queue.md` with tasks. Add entries by hand following the
    queue format, or use `cc-queue <source or description>` (`queue_builder`) to
    turn a spec/backlog/description into deduplicated `T-NNN` entries, or
@@ -212,6 +214,10 @@ Windows and macOS/Linux report identically), `cc-audit` and `cc-enhance` run
 cheap actionable check before the first planning wave, before rolling top-up, and after
 archiving completed tasks; no background poller is left running. See
 `docs/inbox_contract.md` for message fields, status transitions, routing and replies.
+`cc-deps` forces an on-demand dependency-graph refresh; processor also runs it at the
+start of work and after publication. When the operator tells processor that version `X`
+was released and asks it to pull, verified release synchronization triggers an idempotent
+notification to every registered dependent from that graph.
 
 ## Further reading
 

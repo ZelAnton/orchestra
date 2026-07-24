@@ -13,6 +13,8 @@
     pwsh -File tools/inbox.ps1 list --root . --status new --json
     pwsh -File tools/inbox.ps1 mark --root . --id msg-... --status read --remark "Validated" --actor inbox_curator
     pwsh -File tools/inbox.ps1 reply --root . --id msg-... --reply-status final --dedupe-key final-v1 --body-file reply.md
+    pwsh -File tools/inbox.ps1 release --root . --version 2.0.0 --notes-file release.md --json
+    pwsh -File tools/inbox.ps1 release --root . --version 2.0.0 --resume --json
 #>
 
 Set-StrictMode -Version Latest
@@ -26,7 +28,7 @@ $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Statuses = @('new', 'read', 'queued', 'implemented', 'rejected')
 $script:ReplyStatuses = @('none', 'acknowledged', 'final')
 
-$parsed = Parse-CliArgs $args -BoolFlags @('json') -RepeatKeys @('task')
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'resume') -RepeatKeys @('task', 'product')
 $Command = $parsed.Command
 $opts = $parsed.Opts
 
@@ -34,6 +36,7 @@ function Get-Root { return (Resolve-OrchestraProjectRoot (Require-Opt 'root')) }
 function Get-Registry { return (Get-OrchestraRegistryPath ([string](Opt 'registry' ''))) }
 function Get-InboxPath { param([string]$Root) return (Join-Path $Root '.inbox') }
 function Get-MessagesPath { param([string]$Root) return (Join-Path (Get-InboxPath $Root) 'messages') }
+function Get-ReleasesPath { param([string]$Root) return (Join-Path (Get-InboxPath $Root) 'releases') }
 function Get-InboxLockPath { param([string]$Root) return (Join-Path (Get-InboxPath $Root) 'inbox.lock') }
 
 function Assert-InboxExists {
@@ -63,6 +66,14 @@ function Read-Message {
     if ([string]$message.schema -ne 'orchestra/inbox-message@1' -or [string]$message.id -ne $Id) {
         Fail 5 "inbox message has an invalid schema or id: $Id"
     }
+    $typeProperty = $message.PSObject.Properties['message_type']
+    if ($null -eq $typeProperty -or [string]::IsNullOrWhiteSpace([string]$typeProperty.Value)) {
+        $legacyType = if ([string]::IsNullOrWhiteSpace([string]$message.in_reply_to)) { 'request' } else { 'reply' }
+        if ($null -eq $typeProperty) { $message | Add-Member -NotePropertyName message_type -NotePropertyValue $legacyType }
+        else { $message.message_type = $legacyType }
+    }
+    if ($null -eq $message.PSObject.Properties['release']) { $message | Add-Member -NotePropertyName release -NotePropertyValue $null }
+    if ([string]$message.message_type -notin @('request', 'reply', 'release')) { Fail 5 "inbox message has an invalid message type: $Id" }
     # Compatibility with the earliest schema-1 records installed during rollout:
     # originals derive their own conversation id; first-level replies derive the
     # recorded parent. The next mutation persists the normalized field.
@@ -104,8 +115,39 @@ function Read-Message {
         [string]$message.in_reply_to -notmatch '^msg-[a-z0-9-]{8,120}$') {
         Fail 5 "inbox message has an invalid in_reply_to id: $Id"
     }
+    if ([string]$message.message_type -eq 'reply' -and [string]::IsNullOrWhiteSpace([string]$message.in_reply_to)) {
+        Fail 5 "inbox reply message has no in_reply_to id: $Id"
+    }
+    if ([string]$message.message_type -ne 'reply' -and -not [string]::IsNullOrWhiteSpace([string]$message.in_reply_to)) {
+        Fail 5 "only reply messages may carry in_reply_to: $Id"
+    }
+    if ([string]$message.message_type -eq 'release') {
+        if ($null -eq $message.release -or [string]$message.release.id -notmatch '^rel-[a-f0-9]{32}$') {
+            Fail 5 "inbox release message has invalid metadata: $Id"
+        }
+        Assert-BoundedSingleLine -Value ([string]$message.release.version) -Name 'release version' -Maximum 120
+        Assert-BoundedSingleLine -Value ([string]$message.release.release_url) -Name 'release URL' -Maximum 2048 -AllowEmpty
+        Assert-BoundedSingleLine -Value ([string]$message.release.source_revision) -Name 'release source revision' -Maximum 240 -AllowEmpty
+        if (@($message.release.products).Count -gt 100) { Fail 5 "inbox release message has too many products: $Id" }
+        foreach ($product in @($message.release.products)) { $null = Normalize-OrchestraProductKey ([string]$product) }
+    } elseif ($null -ne $message.release) {
+        Fail 5 "non-release inbox message carries release metadata: $Id"
+    }
     Assert-DedupeKey -Value ([string]$message.dedupe_key)
     return $message
+}
+
+function Write-InboxAtomicFile {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Content, [string]$Label = 'inbox file')
+    # Get-Item inspects the directory entry itself and therefore also catches a dangling
+    # symlink which Test-Path reports as absent. A fixed atomic-write temp name must never
+    # be allowed to redirect the narrow cross-project writer outside .inbox/messages.
+    $existingPath = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existingPath) { Assert-OrchestraPlainFile -Path $Path -Label $Label }
+    $tempPath = "$Path.tmp"
+    $existingTemp = Get-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existingTemp) { Assert-OrchestraPlainFile -Path $tempPath -Label "$Label temporary file" }
+    Write-TextAtomic -Path $Path -Content $Content
 }
 
 function Write-Message {
@@ -115,16 +157,7 @@ function Write-Message {
     $Message.remarks = @($Message.remarks)
     $Message.reply_ids = @($Message.reply_ids)
     $path = Get-MessagePath -Root $Root -Id ([string]$Message.id)
-    # Get-Item inspects the directory entry itself and therefore also catches a dangling
-    # symlink which Test-Path reports as absent. A fixed atomic-write temp name must never
-    # be allowed to redirect the narrow cross-project writer outside .inbox/messages.
-    $existingPath = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-    if ($null -ne $existingPath) { Assert-OrchestraPlainFile -Path $path -Label 'inbox message' }
-    $tempPath = "$path.tmp"
-    $existingTemp = Get-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
-    if ($null -ne $existingTemp) { Assert-OrchestraPlainFile -Path $tempPath -Label 'inbox message temporary file' }
-    Write-TextAtomic -Path $path `
-        -Content ($Message | ConvertTo-Json -Depth 12)
+    Write-InboxAtomicFile -Path $path -Label 'inbox message' -Content ($Message | ConvertTo-Json -Depth 14)
 }
 
 function Get-TextOption {
@@ -169,6 +202,15 @@ function Get-StableSendId {
     return 'msg-send-' + $hex.Substring(0, 32)
 }
 
+function Get-StableReleaseId {
+    param([string]$SourceId, [string]$Version)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash($script:Utf8.GetBytes("$SourceId|$Version")) }
+    finally { $sha.Dispose() }
+    $hex = -join ($hash | ForEach-Object { $_.ToString('x2') })
+    return 'rel-' + $hex.Substring(0, 32)
+}
+
 function Assert-DedupeKey {
     param([string]$Value, [switch]$Required)
     if ($Required -and [string]::IsNullOrWhiteSpace($Value)) { Fail 2 'dedupe key is required' }
@@ -177,10 +219,32 @@ function Assert-DedupeKey {
     }
 }
 
+function Assert-BoundedSingleLine {
+    param([string]$Value, [string]$Name, [int]$Maximum, [switch]$AllowEmpty)
+    if ((-not $AllowEmpty -and [string]::IsNullOrWhiteSpace($Value)) -or
+        $Value.Length -gt $Maximum -or $Value -match '[\x00-\x1f\x7f]') {
+        $range = if ($AllowEmpty) { "0-$Maximum" } else { "1-$Maximum" }
+        Fail 2 "$Name must contain $range characters and no control characters"
+    }
+}
+
+function Assert-ReleaseProductsOwned {
+    param($Source, [string[]]$Products)
+    $owned = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($product in @($Source.products)) { [void]$owned.Add((Normalize-OrchestraProductKey ([string]$product))) }
+    foreach ($product in @($Products)) {
+        $normalized = Normalize-OrchestraProductKey ([string]$product)
+        if (-not $owned.Contains($normalized)) {
+            Fail 6 "release product is not declared by the source project graph: $normalized; refresh dependencies/products first"
+        }
+    }
+}
+
 function New-MessageRecord {
     param(
         $From, $To, [string]$Id, [string]$Subject, [string]$Body,
-        [string]$InReplyTo = '', [string]$ConversationId = '', [string]$DedupeKey = ''
+        [string]$InReplyTo = '', [string]$ConversationId = '', [string]$DedupeKey = '',
+        [string]$MessageType = 'request', $Release = $null
     )
     $now = Format-UtcNow
     if ([string]::IsNullOrWhiteSpace($ConversationId)) { $ConversationId = $Id }
@@ -193,6 +257,8 @@ function New-MessageRecord {
         updated_at        = $now
         subject           = $Subject
         body              = $Body
+        message_type      = $MessageType
+        release           = $Release
         in_reply_to       = $InReplyTo
         conversation_id   = $ConversationId
         dedupe_key        = $DedupeKey
@@ -214,7 +280,7 @@ function Write-NewMessage {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
             if (-not $Idempotent) { Fail 5 "message id already exists: $([string]$Message.id)" }
             $existing = Read-Message -Root $Root -Id ([string]$Message.id)
-            foreach ($field in @('id', 'in_reply_to', 'conversation_id', 'dedupe_key')) {
+            foreach ($field in @('id', 'message_type', 'in_reply_to', 'conversation_id', 'dedupe_key')) {
                 if ([string]$existing.$field -ne [string]$Message.$field) { Fail 6 "idempotent reply conflicts with existing message $([string]$Message.id)" }
             }
             foreach ($endpoint in @('from_project', 'to_project')) {
@@ -223,7 +289,8 @@ function Write-NewMessage {
                 }
             }
             $contentMatches = ([string]$existing.subject -eq [string]$Message.subject -and
-                [string]$existing.body -eq [string]$Message.body)
+                [string]$existing.body -eq [string]$Message.body -and
+                (($existing.release | ConvertTo-Json -Depth 8 -Compress) -eq ($Message.release | ConvertTo-Json -Depth 8 -Compress)))
             if (-not $contentMatches -and -not $RecoverExisting) {
                 Fail 6 "idempotent message conflicts with existing message $([string]$Message.id)"
             }
@@ -517,7 +584,7 @@ function Cmd-Reply {
     $replyId = Get-StableReplyId -OriginalId $id -FromId ([string]$route.From.id) -DedupeKey $dedupeKey
     $conversationId = if ([string]::IsNullOrWhiteSpace([string]$original.conversation_id)) { $id } else { [string]$original.conversation_id }
     $reply = New-MessageRecord -From $route.From -To $route.To -Id $replyId -Subject $subject -Body $body `
-        -InReplyTo $id -ConversationId $conversationId -DedupeKey $dedupeKey
+        -InReplyTo $id -ConversationId $conversationId -DedupeKey $dedupeKey -MessageType 'reply'
     $sourceAlreadyRecorded = @($original.reply_ids) -contains $replyId
     $reply = Write-NewMessage -Root ([string]$route.To.root) -Message $reply -Idempotent `
         -RecoverExisting:(-not $sourceAlreadyRecorded)
@@ -543,6 +610,196 @@ function Cmd-Reply {
     else { Write-Output "replied id=$replyId to=$($route.To.name) original=$id status=$replyStatus" }
 }
 
+function Ensure-ReleasesDirectory {
+    param([string]$Root)
+    Assert-InboxExists $Root
+    $path = Get-ReleasesPath $Root
+    if (-not (Test-Path -LiteralPath $path)) { $null = New-Item -ItemType Directory -Path $path }
+    Assert-OrchestraPlainDirectory -Path $path -Label 'project inbox releases'
+    return $path
+}
+
+function Get-ReleasePath {
+    param([string]$Root, [string]$ReleaseId)
+    if ($ReleaseId -notmatch '^rel-[a-f0-9]{32}$') { Fail 2 "invalid release id: $ReleaseId" }
+    return (Join-Path (Get-ReleasesPath $Root) ($ReleaseId + '.json'))
+}
+
+function Read-ReleaseRecord {
+    param([string]$Root, [string]$ReleaseId)
+    $path = Get-ReleasePath -Root $Root -ReleaseId $ReleaseId
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { Fail 4 "release notification record not found: $ReleaseId" }
+    Assert-OrchestraPlainFile -Path $path -Label 'release notification record'
+    try { $record = [System.IO.File]::ReadAllText($path) | ConvertFrom-Json }
+    catch { Fail 5 "release notification record is not valid JSON: $ReleaseId" }
+    if ([string]$record.schema -ne 'orchestra/release-notification@1' -or [string]$record.id -ne $ReleaseId) {
+        Fail 5 "release notification record has invalid schema or id: $ReleaseId"
+    }
+    if ([string]$record.source_project.id -notmatch '^repo-[a-f0-9]{20}$' -or
+        [string]::IsNullOrWhiteSpace([string]$record.source_project.name) -or
+        ([string]$record.source_project.name).Length -gt 120 -or
+        [string]$record.source_project.name -match '[\x00-\x1f\x7f]') {
+        Fail 5 "release notification record has invalid source: $ReleaseId"
+    }
+    Assert-BoundedSingleLine -Value ([string]$record.version) -Name 'release version' -Maximum 120
+    Assert-BoundedSingleLine -Value ([string]$record.release_url) -Name 'release URL' -Maximum 2048 -AllowEmpty
+    Assert-BoundedSingleLine -Value ([string]$record.source_revision) -Name 'release source revision' -Maximum 240 -AllowEmpty
+    Assert-MessageText -Subject ([string]$record.subject) -Body ([string]$record.body)
+    if (@($record.products).Count -gt 100) { Fail 5 "release notification record has too many products: $ReleaseId" }
+    foreach ($product in @($record.products)) { $null = Normalize-OrchestraProductKey ([string]$product) }
+    $targetIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($targetId in @($record.target_project_ids)) {
+        if ([string]$targetId -notmatch '^repo-[a-f0-9]{20}$') { Fail 5 "release notification record has invalid target: $ReleaseId" }
+        if (-not $targetIds.Add([string]$targetId)) { Fail 5 "release notification record has a duplicate target: $ReleaseId" }
+    }
+    $deliveryIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($delivery in @($record.deliveries)) {
+        if ([string]$delivery.project_id -notmatch '^repo-[a-f0-9]{20}$' -or [string]$delivery.message_id -notmatch '^msg-[a-z0-9-]{8,120}$') {
+            Fail 5 "release notification record has invalid delivery: $ReleaseId"
+        }
+        if (-not $targetIds.Contains([string]$delivery.project_id) -or -not $deliveryIds.Add([string]$delivery.project_id)) {
+            Fail 5 "release notification record has a duplicate or non-target delivery: $ReleaseId"
+        }
+    }
+    return $record
+}
+
+function Write-ReleaseRecord {
+    param([string]$Root, $Record)
+    $Record.updated_at = Format-UtcNow
+    $Record.products = @($Record.products)
+    $Record.target_project_ids = @($Record.target_project_ids)
+    $Record.deliveries = @($Record.deliveries)
+    Write-InboxAtomicFile -Path (Get-ReleasePath -Root $Root -ReleaseId ([string]$Record.id)) `
+        -Label 'release notification record' -Content ($Record | ConvertTo-Json -Depth 14)
+}
+
+function Cmd-Release {
+    $root = Get-Root
+    $null = Ensure-ReleasesDirectory $root
+    $version = Require-Opt 'version'
+    Assert-BoundedSingleLine -Value $version -Name 'release version' -Maximum 120
+    $resume = [bool](Opt 'resume' $false)
+    if ($resume) {
+        foreach ($contentOption in @('notes', 'notes-file', 'subject', 'product', 'release-url', 'source-revision')) {
+            if ($opts.ContainsKey($contentOption)) { Fail 2 "--resume cannot be combined with --$contentOption; canonical release content is already frozen" }
+        }
+    }
+    $registryPath = Get-Registry
+    $registry = Read-OrchestraRegistry $registryPath
+    $source = Get-OrchestraRegistryProjectByRoot -Registry $registry -Root $root
+    $releaseId = Get-StableReleaseId -SourceId ([string]$source.id) -Version $version
+    $releasePath = Get-ReleasePath -Root $root -ReleaseId $releaseId
+    $lock = Get-InboxLockPath $root
+    Acquire-Lock -LockPath $lock
+    try {
+        if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
+            $record = Read-ReleaseRecord -Root $root -ReleaseId $releaseId
+            if (-not $resume) {
+                $body = Get-TextOption -Name 'notes' -FileName 'notes-file' -Required
+                $subject = [string](Opt 'subject' ("Release $($source.name) $version"))
+                Assert-MessageText -Subject $subject -Body $body
+                $products = if ($opts.ContainsKey('product')) {
+                    @($opts['product'] | ForEach-Object { Normalize-OrchestraProductKey ([string]$_) } | Sort-Object -Unique)
+                } else { @($source.products) }
+                Assert-ReleaseProductsOwned -Source $source -Products @($products)
+                $releaseUrl = [string](Opt 'release-url' '')
+                $sourceRevision = [string](Opt 'source-revision' '')
+                Assert-BoundedSingleLine -Value $releaseUrl -Name 'release URL' -Maximum 2048 -AllowEmpty
+                Assert-BoundedSingleLine -Value $sourceRevision -Name 'release source revision' -Maximum 240 -AllowEmpty
+                if ([string]$record.subject -ne $subject -or [string]$record.body -ne $body -or
+                    (@($record.products) -join "`n") -ne (@($products) -join "`n") -or
+                    [string]$record.release_url -ne $releaseUrl -or
+                    [string]$record.source_revision -ne $sourceRevision) {
+                    Fail 6 "release $version already has canonical content; retry with --resume"
+                }
+            }
+        } else {
+            if ($resume) { Fail 4 "cannot resume release $version because no canonical release record exists" }
+            $body = Get-TextOption -Name 'notes' -FileName 'notes-file' -Required
+            $subject = [string](Opt 'subject' ("Release $($source.name) $version"))
+            Assert-MessageText -Subject $subject -Body $body
+            $products = if ($opts.ContainsKey('product')) {
+                @($opts['product'] | ForEach-Object { Normalize-OrchestraProductKey ([string]$_) } | Sort-Object -Unique)
+            } else { @($source.products) }
+            Assert-ReleaseProductsOwned -Source $source -Products @($products)
+            if (@($products).Count -gt 100) { Fail 2 'release has more than 100 products' }
+            $releaseUrl = [string](Opt 'release-url' '')
+            $sourceRevision = [string](Opt 'source-revision' '')
+            Assert-BoundedSingleLine -Value $releaseUrl -Name 'release URL' -Maximum 2048 -AllowEmpty
+            Assert-BoundedSingleLine -Value $sourceRevision -Name 'release source revision' -Maximum 240 -AllowEmpty
+            $dependents = @(Get-OrchestraProjectDependents -Registry $registry -UpstreamId ([string]$source.id) -Products @($products))
+            $now = Format-UtcNow
+            $record = [pscustomobject][ordered]@{
+                schema = 'orchestra/release-notification@1'
+                id = $releaseId
+                source_project = [pscustomobject][ordered]@{ id = [string]$source.id; name = [string]$source.name }
+                version = $version
+                subject = $subject
+                body = $body
+                products = $products
+                release_url = $releaseUrl
+                source_revision = $sourceRevision
+                target_project_ids = @($dependents | ForEach-Object { [string]$_.id })
+                deliveries = @()
+                created_at = $now
+                updated_at = $now
+            }
+            Write-ReleaseRecord -Root $root -Record $record
+        }
+    } finally { Release-Lock -LockPath $lock }
+
+    $delivered = [System.Collections.Generic.List[object]]::new()
+    $failures = [System.Collections.Generic.List[object]]::new()
+    foreach ($targetId in @($record.target_project_ids)) {
+        try {
+            $target = Resolve-OrchestraRegistryProject -Registry $registry -Selector ([string]$targetId)
+            if (-not (Test-Path -LiteralPath ([string]$target.root) -PathType Container)) { throw "dependent project root is unavailable: $($target.root)" }
+            Assert-InboxExists ([string]$target.root)
+            $dedupeKey = "release:$releaseId"
+            $messageId = Get-StableSendId -FromId ([string]$source.id) -ToId ([string]$target.id) -DedupeKey $dedupeKey
+            $metadata = [pscustomobject][ordered]@{
+                id = $releaseId
+                version = [string]$record.version
+                products = @($record.products)
+                release_url = [string]$record.release_url
+                source_revision = [string]$record.source_revision
+            }
+            $message = New-MessageRecord -From $record.source_project -To $target -Id $messageId -Subject ([string]$record.subject) `
+                -Body ([string]$record.body) -DedupeKey $dedupeKey -MessageType 'release' -Release $metadata
+            $message = Write-NewMessage -Root ([string]$target.root) -Message $message -Idempotent
+            Maybe-Fault 'after-release-delivery'
+            Acquire-Lock -LockPath $lock
+            try {
+                $current = Read-ReleaseRecord -Root $root -ReleaseId $releaseId
+                if (-not (@($current.deliveries | Where-Object { [string]$_.project_id -eq [string]$target.id }).Count)) {
+                    $current.deliveries = @($current.deliveries) + @([pscustomobject][ordered]@{
+                        project_id = [string]$target.id
+                        message_id = [string]$message.id
+                        delivered_at = Format-UtcNow
+                    })
+                    Write-ReleaseRecord -Root $root -Record $current
+                }
+            } finally { Release-Lock -LockPath $lock }
+            $delivered.Add([pscustomobject][ordered]@{ project_id = [string]$target.id; name = [string]$target.name; message_id = [string]$message.id })
+        } catch {
+            $failures.Add([pscustomobject][ordered]@{ project_id = [string]$targetId; error = $_.Exception.Message })
+        }
+    }
+    $result = [pscustomobject][ordered]@{
+        release_id = $releaseId
+        version = $version
+        target_count = @($record.target_project_ids).Count
+        delivered_count = $delivered.Count
+        failure_count = $failures.Count
+        deliveries = @($delivered.ToArray())
+        failures = @($failures.ToArray())
+    }
+    if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 10 }
+    else { Write-Output "release=$releaseId version=$version targets=$($result.target_count) delivered=$($result.delivered_count) failures=$($result.failure_count)" }
+    if ($failures.Count -gt 0) { Fail 6 "release notification delivery failed for $($failures.Count) dependent project(s); retry with --resume" }
+}
+
 try {
     switch ($Command) {
         'send' { Cmd-Send }
@@ -552,7 +809,8 @@ try {
         'reconcile' { Cmd-Reconcile }
         'actionable' { Cmd-Actionable }
         'reply' { Cmd-Reply }
-        default { Fail 2 "unknown command '$Command' (expected send, list, show, mark, reconcile, actionable, or reply)" }
+        'release' { Cmd-Release }
+        default { Fail 2 "unknown command '$Command' (expected send, list, show, mark, reconcile, actionable, reply, or release)" }
     }
     exit 0
 } catch {
