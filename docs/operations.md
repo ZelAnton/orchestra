@@ -42,14 +42,16 @@ schema and transitions are in `docs/inbox_contract.md`.
 edge: committed manifests are checked against registered projects, then its complete
 `products`/`dependencies` snapshot is atomically replaced. Processor repeats this at the
 start of a cohort and after a published batch, so dependency additions/removals do not
-depend on re-running the one-time `cc-config` bootstrap.
+depend on re-running the one-time `cc-config` bootstrap. If a processor lease is live,
+manual `cc-deps` exits without mutation instead of racing the processor-owned refresh.
 
 After publishing a product release, tell processor explicitly that version `X` was
 released and ask it to pull/synchronize. In `release-sync` mode it verifies a fast-forward
 remote sync and the release/tag, refreshes products, builds canonical release notes, then
 calls `inbox.ps1 release`. Inspect `.inbox/releases/*.json` in the source for the frozen
 target set and delivery ids. Retry a partial fan-out with `release --version X --resume`;
-never regenerate its content.
+never regenerate its content. The temporary consumer notes are staged only under
+`.work/release_notifications/`, not in the tracked repository tree.
 
 ## 1. Reading `status.md` and `journal.md`
 

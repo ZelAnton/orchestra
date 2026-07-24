@@ -126,6 +126,10 @@ function Read-Message {
             Fail 5 "inbox release message has invalid metadata: $Id"
         }
         Assert-BoundedSingleLine -Value ([string]$message.release.version) -Name 'release version' -Maximum 120
+        if ([string]$message.release.version -ne ([string]$message.release.version).Trim() -or
+            [string]$message.release.id -ne (Get-StableReleaseId -SourceId ([string]$message.from_project.id) -Version ([string]$message.release.version))) {
+            Fail 5 "inbox release message has a non-canonical release identity: $Id"
+        }
         Assert-BoundedSingleLine -Value ([string]$message.release.release_url) -Name 'release URL' -Maximum 2048 -AllowEmpty
         Assert-BoundedSingleLine -Value ([string]$message.release.source_revision) -Name 'release source revision' -Maximum 240 -AllowEmpty
         if (@($message.release.products).Count -gt 100) { Fail 5 "inbox release message has too many products: $Id" }
@@ -642,6 +646,10 @@ function Read-ReleaseRecord {
         Fail 5 "release notification record has invalid source: $ReleaseId"
     }
     Assert-BoundedSingleLine -Value ([string]$record.version) -Name 'release version' -Maximum 120
+    if ([string]$record.version -ne ([string]$record.version).Trim() -or
+        [string]$record.id -ne (Get-StableReleaseId -SourceId ([string]$record.source_project.id) -Version ([string]$record.version))) {
+        Fail 5 "release notification record has a non-canonical release identity: $ReleaseId"
+    }
     Assert-BoundedSingleLine -Value ([string]$record.release_url) -Name 'release URL' -Maximum 2048 -AllowEmpty
     Assert-BoundedSingleLine -Value ([string]$record.source_revision) -Name 'release source revision' -Maximum 240 -AllowEmpty
     Assert-MessageText -Subject ([string]$record.subject) -Body ([string]$record.body)
@@ -677,7 +685,7 @@ function Write-ReleaseRecord {
 function Cmd-Release {
     $root = Get-Root
     $null = Ensure-ReleasesDirectory $root
-    $version = Require-Opt 'version'
+    $version = (Require-Opt 'version').Trim()
     Assert-BoundedSingleLine -Value $version -Name 'release version' -Maximum 120
     $resume = [bool](Opt 'resume' $false)
     if ($resume) {
@@ -752,6 +760,16 @@ function Cmd-Release {
     $delivered = [System.Collections.Generic.List[object]]::new()
     $failures = [System.Collections.Generic.List[object]]::new()
     foreach ($targetId in @($record.target_project_ids)) {
+        $recordedDelivery = @($record.deliveries | Where-Object { [string]$_.project_id -eq [string]$targetId }) | Select-Object -First 1
+        if ($null -ne $recordedDelivery) {
+            $recordedTarget = @($registry.projects | Where-Object { [string]$_.id -eq [string]$targetId }) | Select-Object -First 1
+            $delivered.Add([pscustomobject][ordered]@{
+                project_id = [string]$targetId
+                name = if ($null -ne $recordedTarget) { [string]$recordedTarget.name } else { '' }
+                message_id = [string]$recordedDelivery.message_id
+            })
+            continue
+        }
         try {
             $target = Resolve-OrchestraRegistryProject -Registry $registry -Selector ([string]$targetId)
             if (-not (Test-Path -LiteralPath ([string]$target.root) -PathType Container)) { throw "dependent project root is unavailable: $($target.root)" }

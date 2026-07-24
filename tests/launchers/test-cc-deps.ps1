@@ -16,7 +16,7 @@ Invoke-Test -Name 'cc-deps.cmd' -Body {
         $expected = @(
             '--agent', 'dependency_curator',
             '--permission-mode', (Get-ExpectedPermissionMode 'cc-deps.cmd'),
-            "Per your system prompt, refresh this repository's dependency graph now. MODE=refresh. ROOT=current repository root. WORK=.work. BASE=current committed trunk tip."
+            "Per your system prompt, refresh this repository's dependency graph now. MODE=refresh. CALLER=manual. ROOT=current repository root. WORK=.work. BASE=current committed trunk tip."
         )
         Assert-ArrayEqual $expected (Get-CapturedArgs $captureFile) 'claude argv'
     }

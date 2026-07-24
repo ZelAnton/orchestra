@@ -92,6 +92,19 @@ function Assert-OrchestraEvidenceText {
     return $Value.Trim()
 }
 
+function ConvertTo-OrchestraGraphGeneration {
+    param($Value, [string]$Label = 'graph generation')
+    [long]$parsed = 0
+    if ($Value -is [string] -or -not [long]::TryParse(
+            [string]$Value,
+            [System.Globalization.NumberStyles]::Integer,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsed) -or $parsed -lt 0) {
+        Fail 5 "$Label must be a non-negative JSON integer"
+    }
+    return $parsed
+}
+
 function New-OrchestraRegistry {
     return [pscustomobject][ordered]@{
         schema     = 'orchestra/project-registry@1'
@@ -167,6 +180,7 @@ function Read-OrchestraRegistry {
             products           = $products
             dependencies       = @($dependencies.ToArray() | Sort-Object upstream_id)
             graph_updated_at   = if ($null -ne $project.PSObject.Properties['graph_updated_at']) { ConvertTo-OrchestraTimestampText $project.graph_updated_at } else { '' }
+            graph_generation   = if ($null -ne $project.PSObject.Properties['graph_generation']) { ConvertTo-OrchestraGraphGeneration $project.graph_generation 'project graph_generation' } else { 0 }
         })
     }
     foreach ($project in @($validated.ToArray())) {
@@ -268,6 +282,7 @@ function Register-OrchestraProject {
                 products           = @()
                 dependencies       = @()
                 graph_updated_at   = ''
+                graph_generation   = 0
             }
             $registry.projects = @($registry.projects) + @($project)
         }
@@ -287,6 +302,11 @@ function Read-OrchestraGraphSnapshot {
     if ([string]$snapshot.schema -ne 'orchestra/project-graph-snapshot@1') {
         Fail 5 "unsupported dependency graph snapshot schema: $Path"
     }
+    $baseGenerationProperty = $snapshot.PSObject.Properties['base_graph_generation']
+    if ($null -eq $baseGenerationProperty) {
+        Fail 5 "dependency graph snapshot requires 'base_graph_generation': $Path"
+    }
+    $baseGraphGeneration = ConvertTo-OrchestraGraphGeneration $baseGenerationProperty.Value 'base_graph_generation'
     foreach ($requiredArray in @('products', 'dependencies')) {
         $property = $snapshot.PSObject.Properties[$requiredArray]
         if ($null -eq $property -or $property.Value -isnot [System.Array]) {
@@ -327,6 +347,7 @@ function Read-OrchestraGraphSnapshot {
     if ($dependencies.Count -gt 100) { Fail 2 'dependency graph snapshot has more than 100 upstream projects' }
     return [pscustomobject][ordered]@{
         schema = 'orchestra/project-graph-snapshot@1'
+        base_graph_generation = $baseGraphGeneration
         products = $products
         dependencies = @($dependencies.ToArray() | Sort-Object upstream_id)
     }
@@ -348,12 +369,20 @@ function Sync-OrchestraProjectGraph {
             products = @($project.products)
             dependencies = @($project.dependencies)
         } | ConvertTo-Json -Depth 8 -Compress
-        $nextCanonical = $snapshot | ConvertTo-Json -Depth 8 -Compress
+        $nextCanonical = [pscustomobject][ordered]@{
+            schema = 'orchestra/project-graph-snapshot@1'
+            products = @($snapshot.products)
+            dependencies = @($snapshot.dependencies)
+        } | ConvertTo-Json -Depth 8 -Compress
         $changed = $currentCanonical -ne $nextCanonical
         if ($changed) {
+            if ([long]$snapshot.base_graph_generation -ne [long]$project.graph_generation) {
+                Fail 6 "dependency graph changed during audit (expected generation $($snapshot.base_graph_generation), current $($project.graph_generation)); rerun the refresh"
+            }
             $project.products = @($snapshot.products)
             $project.dependencies = @($snapshot.dependencies)
             $project.graph_updated_at = Format-UtcNow
+            $project.graph_generation = [long]$project.graph_generation + 1
             $registry.generation = [int]$registry.generation + 1
             $registry.updated_at = $project.graph_updated_at
             Write-OrchestraRegistry -Path $RegistryPath -Registry $registry

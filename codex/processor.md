@@ -107,10 +107,12 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
    доказанном ancestor/ff и ре-якори пустую рабочую копию на новый trunk.
 3. Подтверди, что версия/тег/release действительно видны после sync. Не рассылай извещение
    только на основании текста пользователя, если remote/tag противоречат ему.
-4. Вызови `dependency_curator` с `MODE=refresh`, абсолютными `ROOT`, `WORK` и новым
-   committed `BASE`, чтобы products текущего проекта были актуальны. Ошибка graph sync
+4. Вызови `dependency_curator` с `MODE=refresh`, `CALLER=processor`, абсолютными `ROOT`,
+   `WORK` и новым committed `BASE`, чтобы products текущего проекта были актуальны. Ошибка graph sync
    блокирует рассылку, но не разрешает ручную правку registry.
-5. Составь один канонический UTF-8 release-notes файл из авторитетных release notes/
+5. Составь один канонический UTF-8 release-notes файл только под
+   `$WORK/release_notifications/` (не в корне/отслеживаемой части репозитория) из
+   авторитетных release notes/
    changelog/tag diff. Включи версию, опубликованные products, значимые изменения,
    migration/breaking notes и ссылку/revision; не перечисляй шум коммитов без пользы
    потребителю.
@@ -1072,7 +1074,7 @@ MAX_PARALLEL` (полный) — дальнейшие волны идут чер
 
 1.3. **Освежи graph, разбери межрепозиторный inbox, затем влей inbox популяторов**
 (безопасно — lock твой). Сначала один раз за новую когорту вызови `dependency_curator` с
-`MODE=refresh`, абсолютными `ROOT`/`WORK` и текущим committed `BASE`. Он сверяет только
+`MODE=refresh`, `CALLER=processor`, абсолютными `ROOT`/`WORK` и текущим committed `BASE`. Он сверяет только
 committed manifests и атомарно заменяет products/dependencies текущего проекта в
 пользовательском registry. Ошибку graph refresh отрази в status/journal; она запрещает
 release-рассылку, но сама по себе не блокирует независимую обработку очереди.
@@ -2280,7 +2282,8 @@ F-циклы, Codex attempts (итог + причины, дедуп по `event_
 (`.work/roadmap.md`)».
 
 6.7. **Освежение dependency graph и финализация межрепозиторных запросов.** После
-публикации/архивации батча вызови `dependency_curator` с `MODE=refresh`, новым committed
+публикации/архивации батча вызови `dependency_curator` с `MODE=refresh`,
+`CALLER=processor`, новым committed
 `BASE` и абсолютными `ROOT`/`WORK`: это обязательная точка, которая регистрирует добавленные
 или удалённые текущим батчем зависимости до возможного будущего upstream release.
 Не обновляй registry из незакоммиченного integration/worktree состояния.

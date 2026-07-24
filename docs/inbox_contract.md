@@ -37,12 +37,21 @@ pwsh -File tools/project-registry.ps1 graph-sync \
   --json
 ```
 
-Snapshot schema `orchestra/project-graph-snapshot@1` contains product identities in
-`ecosystem:name` form and direct registered upstreams with manifest evidence. Sync
+Snapshot schema `orchestra/project-graph-snapshot@1` contains the observed
+`base_graph_generation`, product identities in `ecosystem:name` form, and direct
+registered upstreams with manifest evidence. Sync
 atomically replaces only the caller project's graph; unchanged snapshots do not advance
-registry generation. `dependents --project <id-or-name> --json` is the deterministic
+registry generation. A changing stale snapshot loses a per-project generation CAS and
+must be rebuilt; it can never overwrite a newer audit. `dependents --project
+<id-or-name> --json` is the deterministic
 reverse lookup used for release fan-out. Never derive subscribers from directory names or
 by scanning sibling repositories.
+
+Each curator invocation uses its own candidate under
+`.work/dependency_graph_candidates/`. Manual `cc-deps` checks `state-tx status` and refuses
+to mutate the graph while a live processor lease exists; the processor-owned curator runs
+at its declared safe boundaries. The generation CAS closes the check/use race with a
+processor that starts immediately after the manual lease check.
 
 `ORCHESTRA_REGISTRY_PATH` is an operator/test override. Agents must not set it themselves.
 The default is always the current user's `~/.orchestra/projects.json`.

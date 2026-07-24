@@ -43,6 +43,12 @@ SBOM или разрешением автоматически обновлять
 проекта. Временный candidate JSON можешь создать только под переданным `WORK`, после
 успешного sync удали его.
 
+Вызов обязан передать `CALLER=processor|manual`. При `CALLER=manual` сначала выполни
+read-only `state-tx.ps1 status --work "$WORK"`. Если lease live, не конкурируй с processor:
+заверши без graph mutation и сообщи, что processor сам выполнит refresh на безопасной
+границе. Stale/отсутствующий lease не усыновляй и не удаляй. При `CALLER=processor` считай
+lease уже проверенным родителем; сам им не управляй. Не принимай неизвестный CALLER.
+
 Проверяй **committed tip**, переданный processor, а не незакоммиченный live WIP. Источники:
 
 - package/project manifests (`Cargo.toml`, `pyproject.toml`, `package.json`, `*.csproj`,
@@ -55,10 +61,12 @@ SBOM или разрешением автоматически обновлять
 конкретного зарегистрированного кандидата, чтобы подтвердить его published product. Это не
 разрешает обход родительских каталогов, широкое исследование чужого кода или любую запись.
 
-Не сканируй системный диск и не ищи соседние репозитории вне registry. Checkout-раннер
-`tools/project-registry.ps1` допустим только при трёх identity-маркерах Orchestra
+Не сканируй системный диск и не ищи соседние репозитории вне registry. Checkout-раннеры
+`tools/project-registry.ps1` и `tools/state-tx.ps1` допустимы только при трёх
+identity-маркерах Orchestra
 (`agents/processor.md`, `generate-codex-agents.ps1`, `tools/sync-runtime.ps1`); в обычном
-проекте используй `~/.claude/scripts/project-registry.ps1`.
+проекте используй соответствующие `~/.claude/scripts/project-registry.ps1` и
+`~/.claude/scripts/state-tx.ps1`.
 
 # Что считать связью
 
@@ -84,17 +92,21 @@ Product identity имеет форму `ecosystem:name`, например `cargo
 
 1. Выполни `project-registry.ps1 list --json` и найди текущий проект по каноническому
    `ROOT`. Если он не зарегистрирован — остановись с указанием запустить `cc-config`.
+   До аудита зафиксируй его числовой `graph_generation` как CAS-базу candidate.
 2. Ограниченным `Glob` найди релевантные manifests внутри `ROOT`; исключи `.git`, `.jj`,
    `.work/worktrees`, `_integration`, `target`, `node_modules`, build outputs и vendor.
 3. Определи полный актуальный набор products текущего проекта.
 4. Определи полный актуальный набор прямых upstream среди **зарегистрированных** проектов.
    Для каждого edge укажи product identities, если они известны, и короткое evidence с
    относительным manifest-путём и полем зависимости.
-5. Создай `$WORK/dependency_graph_candidate.json` в точной форме:
+5. Создай уникальный файл
+   `$WORK/dependency_graph_candidates/depgraph-<UTC>-<random>.json` (никогда не общий
+   фиксированный filename) в точной форме:
 
 ```json
 {
   "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": 7,
   "products": ["ecosystem:name"],
   "dependencies": [
     {
@@ -107,9 +119,12 @@ Product identity имеет форму `ecosystem:name`, например `cargo
 ```
 
 6. Вызови `project-registry.ps1 graph-sync --root "$ROOT" --snapshot-file
-   "$WORK/dependency_graph_candidate.json" --json`. Команда атомарно заменяет только graph
+   "<unique-candidate-path>" --json`. Команда атомарно заменяет только graph
    текущего проекта, проверяет upstream ids и идемпотентна при неизменном snapshot.
-7. Удали candidate после успешного sync. При ошибке оставь его как диагностику и ничего не
+   Если другой refresh уже изменил graph generation, меняющий stale candidate получает
+   CAS-отказ: не повторяй старый файл, а заново прочитай registry и пересобери аудит.
+7. Удали только свой unique candidate после успешного sync. При ошибке оставь его как
+   диагностику и ничего не
    обходи ручной правкой `~/.orchestra/projects.json`.
 
 # Финальный отчёт

@@ -673,7 +673,13 @@ original/sender/key. Повтор после потери stdout не дубли
 
 Registry entry дополнительно несёт project-owned `products`/`dependencies`. Полный
 snapshot `orchestra/project-graph-snapshot@1` заменяется только через
-`project-registry.ps1 graph-sync`; reverse lookup `dependents` не сканирует диск.
+`project-registry.ps1 graph-sync`; candidate несёт `base_graph_generation`, поэтому
+меняющая stale-запись получает CAS-отказ и не перетирает новый аудит. Неизменный stale
+snapshot остаётся идемпотентным. Reverse lookup `dependents` не сканирует диск.
+Каждый curator пишет unique candidate под `.work/dependency_graph_candidates/`; ручной
+`cc-deps` (`CALLER=manual`) при live processor lease завершается без мутации, а
+processor-вызовы передают `CALLER=processor`. Общий candidate filename запрещён, чтобы
+manual refresh не гонялся с post-publication refresh.
 Processor-режим `release-sync` после доказанного fast-forward pull/tag создаёт под
 `.inbox/releases/` каноническую `orchestra/release-notification@1`, фиксирует аудиторию и
 идемпотентно рассылает `message_type=release`. Частичный retry использует `--resume`, так

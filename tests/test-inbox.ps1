@@ -265,6 +265,7 @@ completed
     Write-TestFile $sourceGraphPath @'
 {
   "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": 0,
   "products": ["nuget:Sender.Package", "nuget:Sender.Tool"],
   "dependencies": []
 }
@@ -274,15 +275,16 @@ completed
     Assert-True ([bool](($sourceGraph.Out | ConvertFrom-Json).changed)) 'first source graph sync changes registry'
 
     $malformedGraphPath = Join-Path $script:Root 'malformed-graph.json'
-    Write-TestFile $malformedGraphPath '{"schema":"orchestra/project-graph-snapshot@1","products":"nuget:NotAnArray","dependencies":[]}'
+    Write-TestFile $malformedGraphPath '{"schema":"orchestra/project-graph-snapshot@1","base_graph_generation":1,"products":"nuget:NotAnArray","dependencies":[]}'
     Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoA, '--snapshot-file', $malformedGraphPath)) 5 'graph sync rejects a scalar products field'
-    Write-TestFile $malformedGraphPath '{"schema":"orchestra/project-graph-snapshot@1","products":[],"dependencies":[{"upstream":"missing-shape"}]}'
+    Write-TestFile $malformedGraphPath '{"schema":"orchestra/project-graph-snapshot@1","base_graph_generation":1,"products":[],"dependencies":[{"upstream":"missing-shape"}]}'
     Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoA, '--snapshot-file', $malformedGraphPath)) 5 'graph sync rejects incomplete dependency objects before resolution'
 
     $dependentGraphPath = Join-Path $script:Root 'dependent-graph.json'
     Write-TestFile $dependentGraphPath (@"
 {
   "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": 0,
   "products": ["nuget:Receiver.Package"],
   "dependencies": [
     {
@@ -300,10 +302,25 @@ completed
     Assert-True ([bool](($dependentGraph1.Out | ConvertFrom-Json).changed)) 'first dependent graph sync changes registry'
     Assert-True (-not [bool](($dependentGraph2.Out | ConvertFrom-Json).changed)) 'second dependent graph sync reports unchanged'
 
+    $staleGraphPath = Join-Path $script:Root 'stale-dependent-graph.json'
+    Write-TestFile $staleGraphPath (@"
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": 0,
+  "products": ["nuget:Stale.Writer"],
+  "dependencies": []
+}
+"@)
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $staleGraphPath)) 6 'stale changing graph snapshot loses the generation CAS'
+    $afterStaleGraph = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    Assert-Equal 1 ([long]$afterStaleGraph.project.graph_generation) 'rejected stale writer does not advance graph generation'
+    Assert-Equal 'nuget:Receiver.Package' ([string]$afterStaleGraph.products[0]) 'rejected stale writer does not replace graph content'
+
     $unrelatedGraphPath = Join-Path $script:Root 'unrelated-graph.json'
     Write-TestFile $unrelatedGraphPath (@"
 {
   "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": 0,
   "products": [],
   "dependencies": [
     {
@@ -361,8 +378,23 @@ completed
     Assert-Equal 'nuget:Sender.Package' ([string]$releaseMessage.release.products[0]) 'release metadata preserves product identity while normalizing ecosystem'
     $unrelatedInbox = (Invoke-Inbox @('list', '--root', $script:RepoC, '--json')).Out | ConvertFrom-Json
     Assert-Equal 0 ([int]$unrelatedInbox.count) 'dependent on a different product receives no product-specific release notification'
+
+    $offlineRepoB = "$($script:RepoB)-offline"
+    Move-Item -LiteralPath $script:RepoB -Destination $offlineRepoB
+    try {
+        $completedResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--resume', '--json')
+        Assert-Exit $completedResume 0 'release resume skips a previously recorded delivery whose target is now unavailable'
+        Assert-Equal 1 ([int](($completedResume.Out | ConvertFrom-Json).delivered_count)) 'skipped completed delivery remains represented in the resume result'
+    } finally {
+        Move-Item -LiteralPath $offlineRepoB -Destination $script:RepoB
+    }
+
+    Write-TestFile $releaseNotes 'Whitespace around an operator-supplied version is not part of release identity.'
+    $trimmedRelease = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', ' 2.0.1 ', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+    Assert-Exit $trimmedRelease 0 'release canonicalizes surrounding version whitespace'
+    Assert-Equal '2.0.1' ([string](($trimmedRelease.Out | ConvertFrom-Json).version)) 'release result carries the canonical version'
     $releaseAuditFiles = @(Get-ChildItem -LiteralPath (Join-Path $script:RepoA '.inbox/releases') -File -Filter 'rel-*.json')
-    Assert-Equal 2 $releaseAuditFiles.Count 'source stores canonical release audit records including recovered fan-out'
+    Assert-Equal 3 $releaseAuditFiles.Count 'source stores canonical release audit records including recovered and normalized fan-out'
 
     Write-TestFile $releaseNotes 'Changed notes must not rewrite a started fan-out.'
     $releaseConflict = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '2.0.0', '--notes-file', $releaseNotes)
@@ -371,6 +403,7 @@ completed
     Write-TestFile $dependentGraphPath @'
 {
   "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": 1,
   "products": ["nuget:Receiver.Package"],
   "dependencies": []
 }
