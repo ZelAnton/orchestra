@@ -54,6 +54,8 @@ a human only needs to seed the queue and periodically check status or escalation
   `github_sync` (syncs GitHub issues/PRs into the queue via `gh`).
 - **knowledge_curator** — the sole writer of the optional runtime knowledge base
   `.work/knowledge/` in a target project, harvesting agents' `learnings.md` notes.
+- **inbox_curator** — critically evaluates cross-project requests, converts only
+  locally justified outcomes into queue tasks, and sends routed replies to the sender.
 - **thinker** — interactively explores an idea with the user and, once agreed,
   creates queue entries for it.
 - **proposal_curator** — batch-curates the raw `P-NNN` proposal lane (`kind: proposal`)
@@ -95,7 +97,8 @@ It mirrors:
 - the launchers into your Claude scripts directory (`%USERPROFILE%\.claude\scripts`
   or `~/.claude/scripts`, which should be on `PATH`) — `launchers\*.cmd` on Windows,
   `launchers/*.sh` on macOS/Linux — plus `config.example.md` and
-  `constraints.example.md` alongside them so `cc-config` can find its templates
+  `constraints.example.md` alongside them so `cc-config` can find its templates,
+  and `docs/inbox_contract.md` as `~/.claude/specs/Inbox_Contract.md`,
   from the mirror, and `tools/doctor-runtime.ps1` (the shared engine the thin
   `cc-doctor` wrappers delegate to) so `cc-doctor` runs the same from the mirror.
 
@@ -131,7 +134,10 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
 
 1. `cc-config` — seeds `.work\config.md` for the project from the template block in
    `config.example.md`, and `.work\constraints.md` from the whole of
-   `constraints.example.md` (an existing target file is never overwritten).
+   `constraints.example.md` (an existing target file is never overwritten). It also
+   creates `.inbox/messages/` and idempotently registers the canonical project root in
+   the user-global `~/.orchestra/projects.json`, making the project addressable by other
+   Orchestra agents.
 2. Populate `.work\Tasks_Queue.md` with tasks. Add entries by hand following the
    queue format, or use `cc-queue <source or description>` (`queue_builder`) to
    turn a spec/backlog/description into deduplicated `T-NNN` entries, or
@@ -202,6 +208,10 @@ read-only Codex/configuration/orchestration preflight (a thin wrapper, like
 Windows and macOS/Linux report identically), `cc-audit` and `cc-enhance` run
 `code_auditor` and `enhancement_scout`, `cc-github` runs `github_sync`, and
 `cc-proposal` runs `proposal_curator` to curate the `P-NNN` proposal lane.
+`cc-inbox` performs an on-demand critical inbox pass. Normal processor runs do the same
+cheap actionable check before the first planning wave, before rolling top-up, and after
+archiving completed tasks; no background poller is left running. See
+`docs/inbox_contract.md` for message fields, status transitions, routing and replies.
 
 ## Further reading
 
@@ -209,6 +219,8 @@ Windows and macOS/Linux report identically), `cc-audit` and `cc-enhance` run
   its default, and the Codex/knowledge-base toggles.
 - `constraints.example.md` — the template for `.work/constraints.md`, an optional
   project policy file (e.g. a denylist of paths agents must not edit).
+- `docs/inbox_contract.md` — the global repository registry and cross-project message
+  contract, including critical intake, task provenance and reply lifecycle.
 - `knowledge.md` — the internal map of this repository (ownership, control flow,
   runtime artifacts, invariants); read it before making changes to Orchestra
   itself. It is distinct from a target project's own `.work/knowledge/`, which

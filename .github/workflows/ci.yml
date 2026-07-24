@@ -302,6 +302,21 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check project registry and cross-project inbox
+        # cc-config registers repositories globally; inbox.ps1 owns the only permitted
+        # cross-project write. Keep routing, transitions, archive reconciliation and
+        # idempotent replies under explicit cross-platform CI coverage.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-inbox.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check operational metrics aggregation
         # tests/test-metrics.ps1 (T-249): drives the read-only metrics tool as a child
         # pwsh process and checks averages/p95, journal fallback, lenient JSONL parsing,

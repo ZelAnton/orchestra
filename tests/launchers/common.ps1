@@ -145,6 +145,12 @@ function Install-Launcher {
             Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tools/processkit-runtime.ps1') `
                 -Destination (Join-Path $Paths.Scripts 'processkit-runtime.ps1') -Force
         }
+        if ($n -eq 'cc-config.cmd') {
+            foreach ($runtime in @('common.ps1', 'project-registry-lib.ps1', 'project-registry.ps1')) {
+                Copy-Item -LiteralPath (Join-Path $script:RepoRoot ('tools/' + $runtime)) `
+                    -Destination (Join-Path $Paths.Scripts $runtime) -Force
+            }
+        }
 
         foreach ($m in [regex]::Matches($text, 'call\s+"%~dp0([A-Za-z0-9_.-]+\.cmd)"')) {
             $dep = $m.Groups[1].Value
@@ -311,6 +317,11 @@ function Invoke-Launcher {
     $originalLocation = Get-Location
     $setEnvVars = @{}
     $effectiveEnvVars = @{ CC_PROCESSKIT_CLI = 'off'; CC_PROCESSKIT_PYTHON = '' }
+    if ($Name -eq 'cc-config.cmd') {
+        # cc-config now writes a user-global registry. Keep every launcher fixture fully
+        # sandboxed even when an individual scenario does not explicitly pass an override.
+        $effectiveEnvVars['ORCHESTRA_REGISTRY_PATH'] = Join-Path $Paths.Root 'profile/projects.json'
+    }
     foreach ($k in $EnvVars.Keys) { $effectiveEnvVars[$k] = $EnvVars[$k] }
     try {
         if ($MinimalPath) {

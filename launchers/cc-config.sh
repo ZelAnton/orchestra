@@ -5,7 +5,9 @@
 # `pwsh -File tools/codex-runtime.ps1` from a repo checkout or
 # `pwsh -File ~/.claude/scripts/codex-runtime.ps1` from a cc-sync mirror - plus the
 # historical `codex exec` anchor) into .claude/settings.local.json. An existing target
-# file is NEVER overwritten wholesale (same guarantee for all three).
+# file is NEVER overwritten wholesale (same guarantee for all three). Finally, register
+# the canonical project root in the user-global Orchestra registry and create
+# .inbox/messages for cross-project communication.
 #   - config.md: only the copyable block between the "# >>> config.md seed start" /
 #     "# <<< config.md seed end" markers inside config.example.md's fenced code block
 #     (headings/prose/tables are never copied).
@@ -195,3 +197,21 @@ else
   } > ".claude/settings.local.json"
   echo "Created .claude/settings.local.json with allow-rule(s): ${CODEX_ALLOW_RULES[*]} (lets coder_codex/reviewer_codex run codex autonomously via the runtime wrapper)."
 fi
+
+# --- user-global project registry + local cross-project inbox ---
+# Resolve the runtime from the source checkout first, then from the flat cc-sync mirror.
+# Registration is a required cc-config outcome: a missing/broken runtime fails the
+# launcher instead of leaving the project silently undiscoverable by other repositories.
+PROJECT_REGISTRY="$SCRIPT_DIR/../tools/project-registry.ps1"
+if [ ! -f "$PROJECT_REGISTRY" ]; then
+  PROJECT_REGISTRY="$SCRIPT_DIR/project-registry.ps1"
+fi
+if [ ! -f "$PROJECT_REGISTRY" ]; then
+  echo "Failed to register project (project-registry.ps1 not found next to the launcher or in the cc-sync mirror - run cc-sync)." >&2
+  exit 2
+fi
+if ! command -v pwsh >/dev/null 2>&1; then
+  echo "Failed to register project (pwsh is required by project-registry.ps1)." >&2
+  exit 2
+fi
+pwsh -NoProfile -File "$PROJECT_REGISTRY" register --root "$PWD" --ensure-inbox

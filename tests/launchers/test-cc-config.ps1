@@ -12,7 +12,8 @@
 # idempotent on a re-run; a file that already grants all three is left unchanged
 # and reported OK; and degenerate cases (invalid JSON, a read-only/unwritable
 # file) leave the file untouched and fall back to printing the rule(s) to add by
-# hand. This launcher never calls claude/codex.
+# hand. It also creates .inbox/messages and idempotently registers the current project in
+# the user-global Orchestra project registry. This launcher never calls claude/codex.
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 
@@ -37,6 +38,16 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Assert-True ($content -notlike '*config.md seed start*') '[fresh] start marker must not be copied'
         Assert-True ($content -notlike '*config.md seed end*') '[fresh] end marker must not be copied'
         Assert-Contains $result.Output 'Created .work\config.md' '[fresh] success message printed'
+
+        $inboxMessages = Join-Path $paths.Project '.inbox\messages'
+        Assert-True (Test-Path -LiteralPath $inboxMessages -PathType Container) '[fresh] .inbox/messages must be created'
+        $registryPath = Join-Path $paths.Root 'profile/projects.json'
+        Assert-FileExists $registryPath '[fresh] user-global project registry must be created'
+        $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
+        Assert-Equal 'orchestra/project-registry@1' ([string]$registry.schema) '[fresh] registry schema'
+        Assert-Equal 1 (@($registry.projects).Count) '[fresh] registry contains exactly this project'
+        Assert-Equal ([System.IO.Path]::GetFullPath($paths.Project)) ([string]$registry.projects[0].root) '[fresh] registry records the project root'
+        Assert-Contains $result.Output 'registered id=repo-' '[fresh] registration is reported'
     }
     finally {
         Remove-Sandbox $paths

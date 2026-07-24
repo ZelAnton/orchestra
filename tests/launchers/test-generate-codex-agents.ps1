@@ -25,14 +25,14 @@ function Write-Agent {
 try {
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'agents') | Out-Null
     Copy-Item -LiteralPath $sourceGenerator -Destination (Join-Path $root 'generate-codex-agents.ps1')
-    foreach ($role in @('planner','executor','coder_fast','coder','coder_deep','reviewer_std','reviewer','full_reviewer','merger','knowledge_curator','processor')) {
+    foreach ($role in @('planner','executor','coder_fast','coder','coder_deep','reviewer_std','reviewer','full_reviewer','merger','knowledge_curator','inbox_curator','processor')) {
         Write-Agent -Name $role
     }
 
     & pwsh -NoProfile -File (Join-Path $root 'generate-codex-agents.ps1') *> $null
     Assert-True ($LASTEXITCODE -eq 0) 'generator exits 0'
     $generated = @(Get-ChildItem -LiteralPath (Join-Path $root 'codex\agents') -Filter 'orchestra_*.toml' -File)
-    Assert-True ($generated.Count -eq 10) "exactly 10 leaf custom agents generated (got $($generated.Count))"
+    Assert-True ($generated.Count -eq 11) "exactly 11 leaf custom agents generated (got $($generated.Count))"
     $coder = Join-Path $root 'codex\agents\orchestra_coder.toml'
     $coderText = [System.IO.File]::ReadAllText($coder)
     Assert-True ($coderText.Contains('name = "orchestra_coder"')) 'generated TOML carries namespaced role name'
@@ -45,6 +45,7 @@ try {
     $processor = Join-Path $root 'codex\processor.md'
     $processorText = [System.IO.File]::ReadAllText($processor)
     Assert-True ($processorText.Contains('orchestra_full_reviewer')) 'processor overlay carries complete role mapping'
+    Assert-True ($processorText.Contains('orchestra_inbox_curator')) 'processor overlay maps the inbox curator role'
     Assert-True ($processorText.Contains('BODY-processor')) 'processor prompt embeds canonical processor body'
     Assert-True ($processorText.Contains('without falling back to Claude')) 'processor overlay forbids provider fallback'
 

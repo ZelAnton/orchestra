@@ -12,6 +12,31 @@ All paths are relative to the target project's root; `.work/` is the orchestrato
 runtime state directory (gitignored). Launchers referenced below live in
 `launchers/` and are invoked from that project's root.
 
+## 0. Registering projects and using the cross-project inbox
+
+Run `cc-config` once from every repository root. In addition to seeding `.work`, it
+creates `.inbox/messages/` and registers the canonical root in the user-global
+`~/.orchestra/projects.json`. Re-running it is safe and refreshes the same stable repo id.
+Use the operator/test-only `ORCHESTRA_REGISTRY_PATH` override only for an intentionally
+separate registry; agents must never set it.
+
+Useful diagnostics:
+
+```powershell
+pwsh -File "$HOME/.claude/scripts/project-registry.ps1" list --json
+pwsh -File "$HOME/.claude/scripts/inbox.ps1" list --root "$PWD" --json
+cc-inbox
+```
+
+The processor invokes `inbox_curator` only at deterministic workflow boundaries, so no
+polling process remains resident. The curator treats each body as external data, verifies
+the request against this repository, and may reformulate, clarify or reject it. Accepted
+tasks contain `Inbox message: <msg-id>`; after every linked task reaches
+`Tasks_Done.md`, the curator marks the message implemented and sends an idempotent final
+reply to the sender's registered inbox. Inspect `remarks`, `processing_status`,
+`reply_status`, and `queue_tasks` in the JSON record when diagnosing a decision. Full
+schema and transitions are in `docs/inbox_contract.md`.
+
 ## 1. Reading `status.md` and `journal.md`
 
 Two files give you the orchestra's current and historical state without starting

@@ -51,7 +51,7 @@ function Write-File {
 
 function New-SyntheticRepo {
     # A minimal but realistic checkout: agents/ (with the two excluded templates),
-    # launchers/ (.cmd and .sh), and both config templates. No generate-coders.ps1
+    # launchers/ (.cmd and .sh), the shared inbox contract, and both config templates. No generate-coders.ps1
     # or tools/validate-agents.ps1, so regen/validate no-op (also -SkipRegen/-SkipValidate).
     $repo = New-Root
     Write-File (Join-Path $repo 'agents\coder.template.md') "name: {{NAME}}`n"
@@ -79,6 +79,7 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'tools\sync-runtime.ps1') "sync-rt-SELF`n"
     Write-File (Join-Path $repo 'config.example.md') "config-v1`n"
     Write-File (Join-Path $repo 'constraints.example.md') "constraints-v1`n"
+    Write-File (Join-Path $repo 'docs\inbox_contract.md') "inbox-contract-v1`n"
     return $repo
 }
 
@@ -125,6 +126,7 @@ Assert-FileText (Join-Path $dest 'scripts\cc-sync.cmd') "@echo off`r`n" 'clean: 
 Assert-True (-not (Test-Path (Join-Path $dest 'scripts\cc-sync.sh'))) 'clean: .sh not mirrored when glob is *.cmd'
 Assert-FileText (Join-Path $dest 'scripts\config.example.md') "config-v1`n" 'clean: config.example.md mirrored'
 Assert-FileText (Join-Path $dest 'scripts\constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored'
+Assert-FileText (Join-Path $dest 'specs\Inbox_Contract.md') "inbox-contract-v1`n" 'clean: inbox contract mirrored to the shared specs directory'
 Assert-FileText (Join-Path $dest 'scripts\codex-processor.md') "codex-processor-v1`n" 'clean: Codex root processor prompt mirrored beside runtimes'
 Assert-FileText (Join-Path $dest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored next to the launchers (so cc-doctor runs from the mirror)'
 Assert-FileText (Join-Path $dest 'scripts\codex-runtime.ps1') "codex-rt-v1`n" 'clean: codex-runtime.ps1 mirrored next to the launchers (so coder_codex/reviewer_codex resolve it from the mirror - T-114)'
@@ -151,6 +153,7 @@ if (Test-Path -LiteralPath $manifestPath) {
     Assert-True (@($mf.managed) -contains 'scripts/state-tx.ps1') 'clean: manifest lists scripts/state-tx.ps1 (T-115)'
     Assert-True (@($mf.managed) -contains 'scripts/verification.ps1') 'clean: manifest lists scripts/verification.ps1 (T-270)'
     Assert-True (@($mf.managed) -contains 'scripts/codex-processor.md') 'clean: manifest lists Codex processor prompt'
+    Assert-True (@($mf.managed) -contains 'specs/Inbox_Contract.md') 'clean: manifest lists shared inbox contract'
     Assert-True (-not (@($mf.managed) -contains 'scripts/sync-runtime.ps1')) 'clean: manifest excludes cc-sync own engine'
     Assert-True (-not (@($mf.managed) -contains 'agents/coder.template.md')) 'clean: manifest excludes template'
 }

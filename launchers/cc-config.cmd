@@ -6,7 +6,9 @@ rem wrapper the adapters actually run, in both its layout forms -
 rem `pwsh -File tools/codex-runtime.ps1` from a repo checkout or
 rem `pwsh -File ~/.claude/scripts/codex-runtime.ps1` from a cc-sync mirror - plus the
 rem historical `codex exec` anchor) into .claude\settings.local.json. An existing target
-rem file is NEVER overwritten wholesale (same guarantee for all three).
+rem file is NEVER overwritten wholesale (same guarantee for all three). Finally, register
+rem the canonical project root in the user-global Orchestra registry and create
+rem .inbox\messages for cross-project communication.
 rem  - config.md: only the copyable block between the "# >>> config.md seed start" /
 rem    "# <<< config.md seed end" markers inside config.example.md's fenced code block
 rem    (headings/prose/tables are never copied).
@@ -55,8 +57,9 @@ if exist ".work\constraints.md" (
 
 call :seed_codex_permission
 
-endlocal
-goto :eof
+call :register_project
+set "CC_CONFIG_RC=%errorlevel%"
+endlocal & exit /b %CC_CONFIG_RC%
 
 :seed_config
 set "CC_CONFIG_TEMPLATE=%~dp0..\config.example.md"
@@ -153,3 +156,20 @@ rem routines. Only the operator (by running this launcher) ever writes this rule
 rem orchestrator/subagents never do.
 %CC_PS_EXE% -NoProfile -Command "$ErrorActionPreference='Stop'; $p='.claude\settings.local.json'; $rules=@('Bash(pwsh -File tools/codex-runtime.ps1 *)','Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)','Bash(codex exec *)'); $enc=New-Object System.Text.UTF8Encoding($false); if (Test-Path $p) { $raw=[System.IO.File]::ReadAllText($p,[System.Text.Encoding]::UTF8); $missing=@($rules | Where-Object { -not $raw.Contains($_) }); function Report($m){ Write-Host $m; foreach ($x in $missing) { Write-Host ('  - '+$x) }; exit 0 }; if ($missing.Count -eq 0) { Write-Host 'OK   .claude\settings.local.json already grants autonomous codex - left unchanged.'; exit 0 }; try { $j=$raw | ConvertFrom-Json } catch { $j=$null }; if ($null -eq $j) { Report '.claude\settings.local.json exists but is not valid JSON - cannot merge automatically; add the allow-rule(s) by hand to permissions.allow:' }; $pp=$j.PSObject.Properties['permissions']; if ($pp -and $null -ne $pp.Value -and -not ($pp.Value -is [PSCustomObject])) { Report '.claude\settings.local.json exists but its permissions is not a JSON object - cannot merge automatically; add the allow-rule(s) by hand to permissions.allow:' }; if (-not $pp -or $null -eq $pp.Value) { if ($pp) { $j.permissions=[PSCustomObject]@{} } else { $j | Add-Member -NotePropertyName permissions -NotePropertyValue ([PSCustomObject]@{}) } }; $perm=$j.permissions; $ap=$perm.PSObject.Properties['allow']; if ($ap -and $null -ne $ap.Value -and -not ($ap.Value -is [System.Array])) { Report '.claude\settings.local.json exists but its permissions.allow is not a JSON array - cannot merge automatically; add the allow-rule(s) by hand to permissions.allow:' }; if (-not $ap -or $null -eq $ap.Value) { if ($ap) { $perm.allow=@() } else { $perm | Add-Member -NotePropertyName allow -NotePropertyValue @() } }; $perm.allow=@($perm.allow)+$missing; $json=$j | ConvertTo-Json -Depth 20; $tmp=$p+'.tmp'; try { [System.IO.File]::WriteAllText($tmp,$json,$enc); [System.IO.File]::Replace($tmp,$p,[NullString]::Value) } catch { if (Test-Path $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }; Report '.claude\settings.local.json could not be written (read-only or locked?) - cannot merge automatically; add the allow-rule(s) by hand to permissions.allow:' }; Write-Host ('Merged allow-rule(s) into .claude\settings.local.json permissions.allow: '+($missing -join ', ')+' (lets coder_codex/reviewer_codex run codex autonomously via the runtime wrapper).'); exit 0 }; if (-not (Test-Path '.claude')) { New-Item -ItemType Directory -Path '.claude' -Force | Out-Null }; $o=[PSCustomObject]@{ permissions = [PSCustomObject]@{ allow = @($rules) } }; $json=$o | ConvertTo-Json -Depth 20; [System.IO.File]::WriteAllText($p, $json, $enc); Write-Host ('Created .claude\settings.local.json with allow-rule(s): '+($rules -join ', ')+' (lets coder_codex/reviewer_codex run codex autonomously via the runtime wrapper).')"
 goto :eof
+
+:register_project
+rem Register this repository in the user-global Orchestra registry and initialize its
+rem cross-project inbox. Resolve the runtime from the source checkout first, then from
+rem the flat cc-sync mirror. Registration is a required cc-config outcome: unlike the
+rem older best-effort template diagnostics, a missing/broken registry runtime returns a
+rem non-zero exit so the operator cannot believe the project is addressable when it is not.
+set "CC_PROJECT_REGISTRY=%~dp0..\tools\project-registry.ps1"
+if not exist "%CC_PROJECT_REGISTRY%" set "CC_PROJECT_REGISTRY=%~dp0project-registry.ps1"
+if not exist "%CC_PROJECT_REGISTRY%" (
+  echo Failed to register project ^(project-registry.ps1 not found next to the launcher or in the cc-sync mirror - run cc-sync^).
+  exit /b 2
+)
+%CC_PS_EXE% -NoProfile -File "%CC_PROJECT_REGISTRY%" register --root "%CD%" --ensure-inbox
+set "CC_REGISTER_RC=%errorlevel%"
+if not "%CC_REGISTER_RC%"=="0" echo Failed to register project or initialize .inbox ^(project-registry exit %CC_REGISTER_RC%^).
+exit /b %CC_REGISTER_RC%

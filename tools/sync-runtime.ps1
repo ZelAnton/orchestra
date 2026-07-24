@@ -14,6 +14,7 @@
        ($DestinationRoot, default ~/.claude) TRANSACTIONALLY:
          - agents/*.md  (minus the two generator templates) -> <dest>/agents
          - launchers    (*.cmd on Windows, *.sh on POSIX)    -> <dest>/scripts
+         - docs/inbox_contract.md                            -> <dest>/specs/Inbox_Contract.md
          - config.example.md, constraints.example.md         -> <dest>/scripts
          - tools/*.ps1  (EVERY runner except cc-sync's own   -> <dest>/scripts
            sync-runtime.ps1) so any runtime a launcher or an agent drives by a
@@ -381,6 +382,15 @@ function Get-ManagedPairs {
         }
     }
 
+    $inboxContract = Join-Path (Join-Path $Repo 'docs') 'inbox_contract.md'
+    if (Test-Path -LiteralPath $inboxContract -PathType Leaf) {
+        $pairs.Add([ordered]@{
+            Source = $inboxContract
+            Dest = Join-Path (Join-Path $Dest 'specs') 'Inbox_Contract.md'
+            Kind = 'spec'
+        })
+    }
+
     # The root Codex processor prompt is consumed by codex-processor-runtime.ps1.
     # It travels beside the launcher runtimes so the mirror-only layout needs no
     # Orchestra checkout at execution time.
@@ -544,7 +554,7 @@ $tx = New-TxContext -Root $DestinationRoot
 New-Item -ItemType Directory -Force -Path $tx.Stage | Out-Null
 New-Item -ItemType Directory -Force -Path $tx.Backup | Out-Null
 
-$counts = @{ agent = 0; launcher = 0; template = 0; runtime = 0; codex_prompt = 0 }
+$counts = @{ agent = 0; launcher = 0; template = 0; spec = 0; runtime = 0; codex_prompt = 0 }
 $removed = 0
 try {
     foreach ($p in $pairs) {
@@ -606,6 +616,7 @@ $scriptsDst = Join-Path $DestinationRoot 'scripts'
 Write-SyncInfo ("Synced {0} agent definition(s) -> {1}" -f $counts['agent'], $agentsDst)
 Write-SyncInfo ("Synced {0} launcher script(s) -> {1}" -f $counts['launcher'], $scriptsDst)
 Write-SyncInfo ("Synced {0} config template(s) -> {1}" -f $counts['template'], $scriptsDst)
+Write-SyncInfo ("Synced {0} shared specification(s) -> {1}" -f $counts['spec'], (Join-Path $DestinationRoot 'specs'))
 Write-SyncInfo ("Synced {0} launcher runtime(s) -> {1}" -f $counts['runtime'], $scriptsDst)
 Write-SyncInfo ("Synced {0} Codex processor prompt(s) -> {1}" -f $counts['codex_prompt'], $scriptsDst)
 Write-SyncInfo ("Synced {0} Codex custom agent(s) -> {1}" -f $codexPairs.Count, (Join-Path $CodexDestinationRoot 'agents'))
