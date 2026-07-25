@@ -15,6 +15,7 @@
     pwsh -File tools/inbox.ps1 reply --root . --id msg-... --reply-status final --dedupe-key final-v1 --body-file reply.md
     pwsh -File tools/inbox.ps1 release --root . --version 2.0.0 --notes-file release.md --json
     pwsh -File tools/inbox.ps1 release --root . --version 2.0.0 --resume --json
+    pwsh -File tools/inbox.ps1 release --root . --version 2.0.0 --resume --add-target repo-0123456789abcdef0123 --add-reason "graph audited after the freeze" --json
 #>
 
 Set-StrictMode -Version Latest
@@ -679,6 +680,23 @@ function Get-ReleasePath {
     return (Join-Path (Get-ReleasesPath $Root) ($ReleaseId + '.json'))
 }
 
+function Get-ReleaseAuditField {
+    param($Item, [string]$Name)
+    # Indexer form on purpose: `.PSObject.Properties.Name -contains` throws under
+    # Set-StrictMode when the inspected value carries no properties at all, and an audit
+    # entry hand-edited into a scalar (or null) is exactly that case.
+    if ($null -eq $Item) { return $null }
+    $property = $Item.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Test-ReleaseAuditText {
+    param($Value, [int]$Maximum)
+    $text = [string]$Value
+    return -not ([string]::IsNullOrWhiteSpace($text) -or $text.Length -gt $Maximum -or $text -match '[\x00-\x1f\x7f]')
+}
+
 function Read-ReleaseRecord {
     param([string]$Root, [string]$ReleaseId)
     $path = Get-ReleasePath -Root $Root -ReleaseId $ReleaseId
@@ -730,6 +748,29 @@ function Read-ReleaseRecord {
         Assert-BoundedSingleLine -Value ([string]$skip.reason) -Name 'release skip reason' -Maximum 1024
         $null = ConvertTo-OrchestraTimestampText $skip.skipped_at
     }
+    # Explicit, audited single-target audience extensions: the mirror image of skipped_targets,
+    # written only by `release --resume --add-target`. Both halves of the tolerant-read pattern
+    # are required. Absence alone means "record predates the field" and defaults to empty; a
+    # present but null/scalar value, or a malformed/duplicated entry, is refused outright, so the
+    # evidence of who was added to a frozen audience cannot be erased by rewriting the field.
+    $addedProperty = $record.PSObject.Properties['added_targets']
+    if ($null -eq $addedProperty) {
+        $record | Add-Member -NotePropertyName added_targets -NotePropertyValue @()
+    } elseif ($null -eq $addedProperty.Value -or $addedProperty.Value -isnot [array]) {
+        Fail 5 "release notification record has invalid added targets: $ReleaseId"
+    }
+    $addedIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($added in @($record.added_targets)) {
+        $addedProjectId = [string](Get-ReleaseAuditField $added 'project_id')
+        # An added target is an ordinary audience member afterwards, so it must belong to
+        # target_project_ids; it may legitimately also be delivered or later skipped.
+        if ($addedProjectId -notmatch '^repo-[a-f0-9]{20}$' -or -not $targetIds.Contains($addedProjectId) -or
+            -not $addedIds.Add($addedProjectId) -or
+            -not (Test-ReleaseAuditText (Get-ReleaseAuditField $added 'reason') 1024) -or
+            -not (Test-ReleaseAuditText (ConvertTo-OrchestraTimestampText (Get-ReleaseAuditField $added 'added_at')) 120)) {
+            Fail 5 "release notification record has an invalid added target: $ReleaseId"
+        }
+    }
     # Tolerant default: records written before this diagnostic field existed still read cleanly,
     # same forward-compatible pattern as skipped_targets above. Once present, the field must
     # preserve its array shape so malformed records cannot erase or distort audit evidence.
@@ -755,9 +796,45 @@ function Write-ReleaseRecord {
     $Record.target_project_ids = @($Record.target_project_ids)
     $Record.deliveries = @($Record.deliveries)
     $Record.skipped_targets = @($Record.skipped_targets)
+    $Record.added_targets = @($Record.added_targets)
     $Record.unaudited_projects = @($Record.unaudited_projects)
     Write-InboxAtomicFile -Path (Get-ReleasePath -Root $Root -ReleaseId ([string]$Record.id)) `
         -Label 'release notification record' -Content ($Record | ConvertTo-Json -Depth 14)
+}
+
+function Add-ReleaseTarget {
+    param([string]$Root, $Registry, $Source, $Record, [string]$TargetId, [string]$Reason)
+    # The caller must already hold the inbox lock: reading the record, deciding that this call
+    # is an audience extension, validating the target and persisting the result happen inside
+    # one hold, so a concurrent --resume/--skip-target/--add-target cannot interleave.
+    if (@($Record.skipped_targets | Where-Object { [string]$_.project_id -eq $TargetId }).Count -gt 0) {
+        Fail 6 "release target was explicitly skipped and cannot be added back: $TargetId"
+    }
+    # Already an audience member (frozen at fan-out or added by an earlier call): the audience
+    # is immutable evidence, so eligibility is not re-derived from a graph that may have moved
+    # on. The call converges on delivery instead of failing.
+    if (@($Record.target_project_ids) -contains $TargetId) { return $false }
+    # Same selection logic as the original freeze, evaluated against the record's own frozen
+    # products: without it the option would degrade into "send a release message to any
+    # registered project", which is wider than the graph-derived fan-out it belongs to.
+    $eligible = @(Get-OrchestraProjectDependents -Registry $Registry -UpstreamId ([string]$Source.id) -Products @($Record.products) |
+        ForEach-Object { [string]$_.id })
+    if ($eligible -notcontains $TargetId) {
+        $anyEdge = @(Get-OrchestraProjectDependents -Registry $Registry -UpstreamId ([string]$Source.id) |
+            ForEach-Object { [string]$_.id })
+        if ($anyEdge -contains $TargetId) {
+            Fail 6 "--add-target declares no dependency on any product of this release: $TargetId; it consumes other products of this project only"
+        }
+        Fail 6 "--add-target is not a current dependent of this project in the registry: $TargetId; that project must audit and publish its own dependency graph first"
+    }
+    $Record.target_project_ids = @($Record.target_project_ids) + @($TargetId)
+    $Record.added_targets = @($Record.added_targets) + @([pscustomobject][ordered]@{
+        project_id = $TargetId
+        reason = $Reason
+        added_at = Format-UtcNow
+    })
+    Write-ReleaseRecord -Root $Root -Record $Record
+    return $true
 }
 
 function Cmd-Release {
@@ -768,10 +845,18 @@ function Cmd-Release {
     $resume = [bool](Opt 'resume' $false)
     $skipTarget = [string](Opt 'skip-target' '')
     $skipReason = [string](Opt 'skip-reason' '')
+    $addTarget = [string](Opt 'add-target' '')
+    $addReason = [string](Opt 'add-reason' '')
     if ($skipTarget -or $skipReason) {
         if (-not $resume) { Fail 2 '--skip-target is accepted only with --resume' }
         if ($skipTarget -notmatch '^repo-[a-f0-9]{20}$') { Fail 2 '--skip-target must be a frozen repo-<id> target id' }
         Assert-BoundedSingleLine -Value $skipReason -Name 'release skip reason' -Maximum 1024
+    }
+    if ($addTarget -or $addReason) {
+        if (-not $resume) { Fail 2 '--add-target is accepted only with --resume' }
+        if ($skipTarget) { Fail 2 '--add-target and --skip-target are separate audited decisions; apply one per call' }
+        if ($addTarget -notmatch '^repo-[a-f0-9]{20}$') { Fail 2 '--add-target must be a registered repo-<id> project id' }
+        Assert-BoundedSingleLine -Value $addReason -Name 'release add reason' -Maximum 1024
     }
     if ($resume) {
         foreach ($contentOption in @('notes', 'notes-file', 'subject', 'product', 'release-url', 'source-revision')) {
@@ -784,13 +869,23 @@ function Cmd-Release {
     $releaseId = Get-StableReleaseId -SourceId ([string]$source.id) -Version $version
     $releasePath = Get-ReleasePath -Root $root -ReleaseId $releaseId
     $lock = Get-InboxLockPath $root
-    # The frozen audience (and the unaudited-projects evidence explaining its possible
-    # incompleteness) is established exactly once, on the call that creates the record.
+    # freeze vs resume vs add-target is decided exactly once, while the lock is held, and is
+    # carried forward as these captured flags. Re-deriving it by re-reading the record after
+    # the lock is released would be a TOCTOU race with a concurrent resume/skip/add call.
+    # $isFreeze also marks the single call that establishes the frozen audience (and the
+    # unaudited-projects evidence explaining its possible incompleteness).
     $isFreeze = $false
+    $isAddTarget = $false
+    $audienceExtended = $false
     Acquire-Lock -LockPath $lock
     try {
         if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
             $record = Read-ReleaseRecord -Root $root -ReleaseId $releaseId
+            if ($addTarget) {
+                $isAddTarget = $true
+                $audienceExtended = Add-ReleaseTarget -Root $root -Registry $registry -Source $source `
+                    -Record $record -TargetId $addTarget -Reason $addReason
+            }
             if (-not $resume) {
                 $body = Get-TextOption -Name 'notes' -FileName 'notes-file' -Required
                 $subject = [string](Opt 'subject' ("Release $($source.name) $version"))
@@ -811,6 +906,9 @@ function Cmd-Release {
                 }
             }
         } else {
+            # A target can only be added to an existing frozen audience; there is no path that
+            # creates a release record from an --add-target call.
+            if ($addTarget) { Fail 4 "cannot add a target to release $version because no canonical release record exists" }
             if ($resume) { Fail 4 "cannot resume release $version because no canonical release record exists" }
             $isFreeze = $true
             $body = Get-TextOption -Name 'notes' -FileName 'notes-file' -Required
@@ -849,6 +947,7 @@ function Cmd-Release {
                 target_project_ids = @($dependents | ForEach-Object { [string]$_.id })
                 deliveries = @()
                 skipped_targets = @()
+                added_targets = @()
                 unaudited_projects = $unauditedProjects
                 created_at = $now
                 updated_at = $now
@@ -939,12 +1038,20 @@ function Cmd-Release {
         deliveries = @($delivered.ToArray())
         skipped_targets = @($skipped.ToArray())
         failures = @($failures.ToArray())
+        added_count = @($record.added_targets).Count
+        added_targets = @($record.added_targets)
         unaudited_count = @($record.unaudited_projects).Count
         unaudited_projects = @($record.unaudited_projects)
     }
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 10 }
     else {
         Write-Output "release=$releaseId version=$version targets=$($result.target_count) delivered=$($result.delivered_count) skipped=$($result.skipped_count) failures=$($result.failure_count)"
+        # Reported from the captured decision, not by re-reading the record: whether this call
+        # is the one that extended the audience is only knowable under the lock it was taken in.
+        if ($isAddTarget) {
+            if ($audienceExtended) { Write-Output "added target $addTarget to the frozen audience of release $version (explicit, graph-verified)" }
+            else { Write-Output "target $addTarget already belongs to the frozen audience of release $version; audience unchanged" }
+        }
         # Non-blocking diagnostic, printed only on the call that froze the audience (see
         # $isFreeze above) so a converging --resume does not repeat it on every retry.
         if ($isFreeze -and $result.unaudited_count -gt 0) {

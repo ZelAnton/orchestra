@@ -312,11 +312,52 @@ The target must belong to the record's frozen audience and must not already be d
 audited skip reason is retained in the release record; retries report it as skipped and do not
 recompute the audience.
 
+The mirror image of that operation covers a dependent whose graph was audited only after the
+audience was frozen, so the fan-out never reached it. One explicitly named, graph-verified
+project can be added to an existing record:
+
+```text
+pwsh -File tools/inbox.ps1 release --root <source-root> --version <X> --resume \
+  --add-target <repo-id> --add-reason "graph audited after the freeze" --json
+```
+
+Constraints are deliberately narrow:
+
+- exactly one target per call, named by its stable `repo-...` id, never by name and never as a
+  recomputed set; `--add-reason` is required, like `--skip-reason`, and `--add-target` is not
+  combined with `--skip-target` in one call;
+- it is accepted only with `--resume` and therefore rejects every content/metadata option
+  (`--notes`, `--notes-file`, `--subject`, `--product`, `--release-url`, `--source-revision`):
+  notes, products, URL and revision come only from the frozen record;
+- there must already be a release record for that version; the option never creates one;
+- the target must, at call time, be a real current dependent of the source in the registry
+  whose dependency edge intersects the record's own frozen `products` — the same selection
+  logic that produced the original audience. Otherwise it fails closed. This keeps the option
+  strictly narrower than plain `send`, so it adds no new cross-project reachability;
+- a target that was explicitly skipped is not silently revived; the skip stays authoritative;
+- delivery reuses the ordinary fan-out path and the same `release:<release-id>` dedupe key, so
+  the recipient gets a normal `message_type=release` record with the same deterministic
+  per-target message id, and a crash between delivering and recording is repaired by a plain
+  `--resume`;
+- the call is idempotent: adding an already added, already present, or already delivered target
+  creates no second message and is not an error.
+
+The decision is taken once while the inbox lock is held, so a concurrent `--resume`/
+`--skip-target`/`--add-target` cannot interleave with it. The addition is recorded in the
+record's own `added_targets` audit array (`project_id`, `reason`, `added_at`), and the target
+then behaves as an ordinary audience member: it appears in `target_project_ids`, in later
+`--resume` passes, and can itself be skipped afterwards. The JSON result mirrors the array as
+`added_count`/`added_targets`. Records written before this field existed still read cleanly, but
+a present `added_targets` that is null, not an array, or carries a malformed/duplicated entry is
+rejected instead of being silently repaired.
+
 `--resume` reuses the canonical notes and original target set. A later rewrite cannot
-silently change a partially delivered release, and dependents registered after the initial
-fan-out do not retroactively enter it. Passing `--product ecosystem:name` narrows routing
-to edges whose product set intersects the release; an edge with no product list is an
-explicit repository-wide subscription. `--resume` rejects every content/metadata option.
+silently change a partially delivered release. The audience is never recomputed and dependents
+registered after the initial fan-out never enter it implicitly; the only way in is the explicit,
+audited, single-target `--add-target` decision above. Passing `--product ecosystem:name`
+narrows routing to edges whose product set intersects the release; an edge with no product
+list is an explicit repository-wide subscription. `--resume` rejects every content/metadata
+option.
 Every explicit release product must already be declared by the source project's graph;
 otherwise the runtime requires a dependency/product refresh and fails closed.
 Zero dependents is a successful, auditable result.
@@ -339,8 +380,10 @@ informational: it never changes the exit code, never blocks or fails the release
 zero-length `unaudited_projects` list remains a fully valid result. The listed ids are a
 superset of "possibly missed dependents", not a claim that any of them actually consume this
 release — the warning states only that their dependency status is unknown, so the frozen
-audience above them may be incomplete. `release` never audits a graph or infers edges on a
-dependent's behalf; reading another repository's manifests is that repository's own
+audience above them may be incomplete. If such a project later audits its graph and turns out to
+be a real consumer, `--resume --add-target` above is the supported way to deliver that already
+published release to it; the diagnostic itself never adds anyone. `release` never audits a graph
+or infers edges on a dependent's behalf; reading another repository's manifests is that repository's own
 `dependency_curator`/`cc-deps` responsibility. `project-registry.ps1 register`'s
 human-readable output separately prints one note whenever the just-registered project's own
 `graph_generation` is `0`, pointing at `cc-deps`/a processor pass as the way to audit it;

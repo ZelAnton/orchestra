@@ -51,6 +51,25 @@ function Invoke-Tool {
     return [pscustomobject]@{ ExitCode = $process.ExitCode; Out = $stdout.Result; Err = $stderr.Result }
 }
 
+function Get-ExpectedReleaseMessageId {
+    # Independently re-derives the documented deterministic per-target fan-out id
+    # (sender id, target id, dedupe key "release:<release-id>") instead of trusting the
+    # id the tool reports back, so an added target can be proved to reuse it.
+    param([string]$FromId, [string]$ToId, [string]$ReleaseId)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash($script:Utf8.GetBytes("$FromId|$ToId|release:$ReleaseId")) }
+    finally { $sha.Dispose() }
+    $hex = -join ($hash | ForEach-Object { $_.ToString('x2') })
+    return 'msg-send-' + $hex.Substring(0, 32)
+}
+
+function Get-ReleaseRecordFile {
+    param([string]$Root, [string]$Version)
+    return @(Get-ChildItem -LiteralPath (Join-Path $Root '.inbox/releases') -File -Filter 'rel-*.json') |
+        ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Record = ([System.IO.File]::ReadAllText($_.FullName) | ConvertFrom-Json) } } |
+        Where-Object { [string]$_.Record.version -eq $Version } | Select-Object -First 1
+}
+
 function Invoke-Registry { param([string[]]$ToolArgs) return (Invoke-Tool $script:RegistryTool (@($ToolArgs) + @('--registry', $script:Registry))) }
 function Invoke-Inbox { param([string[]]$ToolArgs) return (Invoke-Tool $script:InboxTool (@($ToolArgs) + @('--registry', $script:Registry))) }
 function Assert-True { param([bool]$Value, [string]$Message) if (-not $Value) { $script:Failures.Add("FAIL - $Message") } }
@@ -534,9 +553,7 @@ completed
     Assert-Exit $fullyAuditedRelease 0 'release where every registered project is audited still succeeds'
     Assert-Equal 0 ([int](($fullyAuditedRelease.Out | ConvertFrom-Json).unaudited_count)) 'a fully audited registry reports no unaudited projects'
 
-    $releasePathToPatch = @(Get-ChildItem -LiteralPath (Join-Path $script:RepoA '.inbox/releases') -File -Filter 'rel-*.json') |
-        ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Record = ([System.IO.File]::ReadAllText($_.FullName) | ConvertFrom-Json) } } |
-        Where-Object { [string]$_.Record.version -eq '3.0.0' } | Select-Object -First 1
+    $releasePathToPatch = Get-ReleaseRecordFile -Root $script:RepoA -Version '3.0.0'
     Assert-True ($null -ne $releasePathToPatch) 'locate the on-disk record for the unaudited-freeze release'
     if ($null -ne $releasePathToPatch) {
         $oldFormatRecord = $releasePathToPatch.Record
@@ -561,6 +578,216 @@ completed
         $oldFormatResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.0', '--resume', '--json')
         Assert-Exit $oldFormatResume 0 'reading a pre-existing release record without the new field does not fail'
         Assert-Equal 0 ([int](($oldFormatResume.Out | ConvertFrom-Json).unaudited_count)) 'a record missing the field defaults to an empty unaudited evidence set'
+    }
+
+    # --- T-319: one explicit, audited addition of a dependent missed by the frozen audience ---
+    $unrelated = ($c1.Out | ConvertFrom-Json).project
+    Write-TestFile $releaseNotes 'A dependent that audits its graph after the freeze must still be reachable.'
+    $lateFreeze = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+    Assert-Exit $lateFreeze 0 'freeze a release while the late dependent still has no audited edge'
+    if ($lateFreeze.ExitCode -ne 0) { throw "late-audience freeze failed: err=[$($lateFreeze.Err)] out=[$($lateFreeze.Out)]" }
+    $lateRelease = $lateFreeze.Out | ConvertFrom-Json
+    $lateReleaseId = [string]$lateRelease.release_id
+    Assert-Equal 0 ([int]$lateRelease.target_count) 'the late dependent is genuinely outside the frozen audience'
+    Assert-Equal 0 ([int]$lateRelease.added_count) 'a freshly frozen release has an empty addition audit trail'
+
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'graph audited late')) 2 'adding a target requires --resume'
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'graph audited late', '--notes-file', $releaseNotes)) 2 'adding a target rejects replacement content options'
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'graph audited late', '--product', 'nuget:Sender.Tool')) 2 'adding a target rejects replacement product routing'
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id))) 2 'an addition requires an audit reason'
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', 'Receiver', '--add-reason', 'named target')) 2 'an addition names its target by stable id, never by project name'
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'graph audited late',
+        '--skip-target', ([string]$receiver.id), '--skip-reason', 'contradictory decision')) 2 'an addition and a skip are not combined in one call'
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.9.9', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'no such release')) 4 'a target cannot be added to a release record that does not exist'
+    $addUnknownEdge = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'graph audited late')
+    Assert-Exit $addUnknownEdge 6 'a project without a current dependency edge cannot be added'
+    Assert-True ($addUnknownEdge.Err -match 'not a current dependent') 'the refusal names the missing dependency edge'
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$retired.id), '--add-reason', 'unregistered project')) 6 'an unregistered project cannot be added'
+    $addProductMismatch = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$unrelated.id), '--add-reason', 'different product')
+    Assert-Exit $addProductMismatch 6 'a dependent on another product of the same project cannot be added'
+    Assert-True ($addProductMismatch.Err -match 'no dependency on any product of this release') 'the refusal distinguishes a product mismatch from a missing edge'
+    $stillEmpty = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')
+    Assert-Exit $stillEmpty 0 'the rejected additions leave the release resumable'
+    Assert-Equal 0 ([int](($stillEmpty.Out | ConvertFrom-Json).target_count)) 'a rejected addition does not extend the frozen audience'
+
+    $receiverGraphBeforeLateAudit = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    $lateDependentGraphPath = Join-Path $script:Root 'late-dependent-graph.json'
+    Write-TestFile $lateDependentGraphPath (@"
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": $([long]$receiverGraphBeforeLateAudit.project.graph_generation),
+  "products": ["nuget:Receiver.Package"],
+  "dependencies": [
+    {
+      "upstream": "$([string]$senderProject.id)",
+      "products": ["nuget:Sender.Package"],
+      "evidence": ["Directory.Packages.props: Sender.Package"]
+    }
+  ]
+}
+"@)
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $lateDependentGraphPath)) 0 'the missed dependent audits its graph after the freeze'
+
+    $expectedAddedMessageId = Get-ExpectedReleaseMessageId -FromId ([string]$senderProject.id) -ToId ([string]$receiver.id) -ReleaseId $lateReleaseId
+    $added1 = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'dependency graph audited after the freeze', '--json')
+    Assert-Exit $added1 0 'a graph-verified late dependent is added to the frozen audience'
+    if ($added1.ExitCode -eq 0) {
+        $addedResult = $added1.Out | ConvertFrom-Json
+        Assert-Equal 1 ([int]$addedResult.target_count) 'the added target joins the frozen audience'
+        Assert-Equal 1 ([int]$addedResult.delivered_count) 'the added target receives the release in the same call'
+        Assert-Equal 1 ([int]$addedResult.added_count) 'the addition is recorded in the release audit trail'
+        Assert-Equal ([string]$receiver.id) ([string]$addedResult.added_targets[0].project_id) 'the audit entry identifies the added project'
+        Assert-Equal 'dependency graph audited after the freeze' ([string]$addedResult.added_targets[0].reason) 'the audit entry retains the operator reason'
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$addedResult.added_targets[0].added_at)) 'the audit entry records when the target was added'
+        Assert-Equal $expectedAddedMessageId ([string]$addedResult.deliveries[0].message_id) 'the added target reuses the deterministic fan-out message id'
+        $addedMessage = (Invoke-Inbox @('show', '--root', $script:RepoB, '--id', $expectedAddedMessageId, '--json')).Out | ConvertFrom-Json
+        Assert-Equal 'release' ([string]$addedMessage.message_type) 'the added target receives a structured release message'
+        Assert-Equal '4.0.0' ([string]$addedMessage.release.version) 'the added release message carries the frozen version'
+        Assert-Equal $lateReleaseId ([string]$addedMessage.release.id) 'the added release message carries the canonical release id'
+        Assert-Equal 'nuget:Sender.Package' ([string]$addedMessage.release.products[0]) 'the added release message reuses the frozen products'
+        Assert-Equal ('release:' + $lateReleaseId) ([string]$addedMessage.dedupe_key) 'the added delivery reuses the release dedupe key'
+        Assert-Equal 'A dependent that audits its graph after the freeze must still be reachable.' ([string]$addedMessage.body) 'the added delivery reuses the frozen canonical notes'
+    }
+
+    $receiverMessagesAfterAdd = @(Get-ChildItem -LiteralPath (Join-Path $script:RepoB '.inbox/messages') -File -Filter 'msg-*.json').Count
+    $added2 = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'retry after lost command output', '--json')
+    Assert-Exit $added2 0 'repeating the addition for an already delivered target is not an error'
+    if ($added2.ExitCode -eq 0) {
+        $repeatResult = $added2.Out | ConvertFrom-Json
+        Assert-Equal 1 ([int]$repeatResult.added_count) 'a repeated addition does not duplicate the audit entry'
+        Assert-Equal 1 ([int]$repeatResult.target_count) 'a repeated addition does not duplicate the audience entry'
+        Assert-Equal $expectedAddedMessageId ([string]$repeatResult.deliveries[0].message_id) 'a repeated addition converges on the same message id'
+        Assert-Equal 'dependency graph audited after the freeze' ([string]$repeatResult.added_targets[0].reason) 'a repeated addition keeps the original audited reason'
+    }
+    Assert-Equal $receiverMessagesAfterAdd (@(Get-ChildItem -LiteralPath (Join-Path $script:RepoB '.inbox/messages') -File -Filter 'msg-*.json').Count) 'a repeated addition creates no second message'
+
+    $repeatHuman = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--add-target', ([string]$receiver.id), '--add-reason', 'retry after lost command output')
+    Assert-Exit $repeatHuman 0 'human-readable repeat addition succeeds'
+    Assert-True ($repeatHuman.Out -match 'already belongs to the frozen audience') 'human output states that an already present target left the audience unchanged'
+
+    $resumeAfterAdd = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')
+    Assert-Exit $resumeAfterAdd 0 'a plain resume after the addition converges'
+    if ($resumeAfterAdd.ExitCode -eq 0) {
+        $resumeAfterAddResult = $resumeAfterAdd.Out | ConvertFrom-Json
+        Assert-Equal 1 ([int]$resumeAfterAddResult.target_count) 'resume sees the added target as an ordinary audience member'
+        Assert-Equal 1 ([int]$resumeAfterAddResult.delivered_count) 'resume reports the added delivery without repeating it'
+        Assert-Equal $expectedAddedMessageId ([string]$resumeAfterAddResult.deliveries[0].message_id) 'resume reports the recorded deterministic message id'
+    }
+    Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume',
+        '--skip-target', ([string]$receiver.id), '--skip-reason', 'too late to skip')) 6 'skip sees the added target as a frozen, already delivered audience member'
+
+    $addedOnDisk = Get-ReleaseRecordFile -Root $script:RepoA -Version '4.0.0'
+    Assert-True ($null -ne $addedOnDisk) 'locate the on-disk record carrying the added target'
+    if ($null -ne $addedOnDisk) {
+        Assert-Equal ([string]$receiver.id) ([string]$addedOnDisk.Record.target_project_ids[0]) 'the stored audience contains the added target'
+        Assert-Equal ([string]$receiver.id) ([string]$addedOnDisk.Record.added_targets[0].project_id) 'the stored audit trail identifies the added target'
+    }
+
+    # An addition whose delivery cannot complete stays recorded, and the added target then
+    # behaves like any other frozen target for the audited skip that converges the fan-out.
+    $receiverGraphBeforeDrop = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    $droppedGraphPath = Join-Path $script:Root 'dropped-dependent-graph.json'
+    Write-TestFile $droppedGraphPath (@"
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": $([long]$receiverGraphBeforeDrop.project.graph_generation),
+  "products": ["nuget:Receiver.Package"],
+  "dependencies": []
+}
+"@)
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $droppedGraphPath)) 0 'the dependent edge disappears again before the next freeze'
+    Write-TestFile $releaseNotes 'An addition must survive a failed delivery and remain convergeable.'
+    $offlineFreeze = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.1.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+    Assert-Exit $offlineFreeze 0 'freeze a second release without the late dependent'
+    $receiverGraphBeforeReaudit = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
+    Write-TestFile $lateDependentGraphPath (@"
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": $([long]$receiverGraphBeforeReaudit.project.graph_generation),
+  "products": ["nuget:Receiver.Package"],
+  "dependencies": [
+    {
+      "upstream": "$([string]$senderProject.id)",
+      "products": ["nuget:Sender.Package"],
+      "evidence": ["Directory.Packages.props: Sender.Package"]
+    }
+  ]
+}
+"@)
+    Assert-Exit (Invoke-Registry @('graph-sync', '--root', $script:RepoB, '--snapshot-file', $lateDependentGraphPath)) 0 're-audit the dependent edge before the second addition'
+    Move-Item -LiteralPath $script:RepoB -Destination $offlineRepoB
+    try {
+        $offlineAdd = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.1.0', '--resume',
+            '--add-target', ([string]$receiver.id), '--add-reason', 'audited late while the repository is unavailable', '--json')
+        Assert-Exit $offlineAdd 6 'an addition whose delivery fails reports the failure'
+        if ($offlineAdd.ExitCode -eq 6) {
+            $offlineAddResult = $offlineAdd.Out | ConvertFrom-Json
+            Assert-Equal 1 ([int]$offlineAddResult.added_count) 'a failed delivery still persists the audience addition'
+            Assert-Equal 1 ([int]$offlineAddResult.failure_count) 'the unreachable added target is reported as a failure'
+            Assert-Equal 0 ([int]$offlineAddResult.delivered_count) 'the unreachable added target is not reported as delivered'
+        }
+        $skipAdded = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.1.0', '--resume',
+            '--skip-target', ([string]$receiver.id), '--skip-reason', 'target unavailable before delivery', '--json')
+        Assert-Exit $skipAdded 0 'an added target can afterwards be skipped like any other frozen target'
+        if ($skipAdded.ExitCode -eq 0) {
+            $skipAddedResult = $skipAdded.Out | ConvertFrom-Json
+            Assert-Equal 1 ([int]$skipAddedResult.skipped_count) 'the added target is reported as skipped'
+            Assert-Equal 1 ([int]$skipAddedResult.added_count) 'skipping an added target preserves the addition audit trail'
+        }
+        Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.1.0', '--resume', '--json')) 0 'the fan-out converges after the added target is skipped'
+        $reviveSkipped = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.1.0', '--resume',
+            '--add-target', ([string]$receiver.id), '--add-reason', 'change of mind')
+        Assert-Exit $reviveSkipped 6 'an explicitly skipped target is not silently revived by a new addition'
+        Assert-True ($reviveSkipped.Err -match 'explicitly skipped') 'the refusal names the recorded skip as authoritative'
+    } finally {
+        Move-Item -LiteralPath $offlineRepoB -Destination $script:RepoB
+    }
+
+    if ($null -ne $addedOnDisk) {
+        $addedRecord = $addedOnDisk.Record
+        $addedRecord.added_targets = $null
+        Write-TestFile $addedOnDisk.Path ($addedRecord | ConvertTo-Json -Depth 14)
+        Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')) 5 'a release record with null added_targets is rejected'
+
+        $addedRecord.added_targets = [string]$receiver.id
+        Write-TestFile $addedOnDisk.Path ($addedRecord | ConvertTo-Json -Depth 14)
+        Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')) 5 'a release record with scalar added_targets is rejected'
+
+        $addedRecord.added_targets = @([pscustomobject][ordered]@{ project_id = [string]$receiver.id; added_at = '2026-01-01T00:00:00.000Z' })
+        Write-TestFile $addedOnDisk.Path ($addedRecord | ConvertTo-Json -Depth 14)
+        Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')) 5 'an addition audit entry without a reason is rejected'
+
+        $addedRecord.added_targets = @([pscustomobject][ordered]@{ project_id = [string]$unrelated.id; reason = 'never added'; added_at = '2026-01-01T00:00:00.000Z' })
+        Write-TestFile $addedOnDisk.Path ($addedRecord | ConvertTo-Json -Depth 14)
+        Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')) 5 'an addition audit entry outside the frozen audience is rejected'
+
+        $duplicateEntry = [pscustomobject][ordered]@{ project_id = [string]$receiver.id; reason = 'audited late'; added_at = '2026-01-01T00:00:00.000Z' }
+        $addedRecord.added_targets = @($duplicateEntry, $duplicateEntry)
+        Write-TestFile $addedOnDisk.Path ($addedRecord | ConvertTo-Json -Depth 14)
+        Assert-Exit (Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')) 5 'a duplicated addition audit entry is rejected'
+
+        $addedRecord.PSObject.Properties.Remove('added_targets')
+        Write-TestFile $addedOnDisk.Path ($addedRecord | ConvertTo-Json -Depth 14)
+        $legacyAddedResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '4.0.0', '--resume', '--json')
+        Assert-Exit $legacyAddedResume 0 'a release record predating added_targets still reads cleanly'
+        if ($legacyAddedResume.ExitCode -eq 0) {
+            $legacyAddedResult = $legacyAddedResume.Out | ConvertFrom-Json
+            Assert-Equal 0 ([int]$legacyAddedResult.added_count) 'a record missing the field defaults to an empty addition audit trail'
+            Assert-Equal 1 ([int]$legacyAddedResult.delivered_count) 'the recorded delivery survives the missing addition audit trail'
+        }
     }
 
     $emoji = [string][char]0xD83D + [string][char]0xDE00
