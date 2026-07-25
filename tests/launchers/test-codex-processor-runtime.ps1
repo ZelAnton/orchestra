@@ -14,7 +14,7 @@ function New-Fixture {
     $codexHome = Join-Path $base 'codex-home'
     $bin = Join-Path $base 'bin'
     New-Item -ItemType Directory -Force -Path (Join-Path $project '.work'), (Join-Path $codexHome 'agents'), $bin | Out-Null
-    foreach ($name in @('orchestra_planner','orchestra_executor','orchestra_coder_fast','orchestra_coder','orchestra_coder_deep','orchestra_reviewer_std','orchestra_reviewer','orchestra_full_reviewer','orchestra_merger','orchestra_knowledge_curator')) {
+    foreach ($name in @('orchestra_planner','orchestra_executor','orchestra_coder_fast','orchestra_coder','orchestra_coder_deep','orchestra_reviewer_std','orchestra_reviewer','orchestra_full_reviewer','orchestra_merger','orchestra_knowledge_curator','orchestra_inbox_curator','orchestra_dependency_curator')) {
         Set-Content -LiteralPath (Join-Path $codexHome "agents\$name.toml") -Value "name = '$name'`ndescription = 'fixture'`ndeveloper_instructions = 'fixture'" -Encoding utf8
     }
     $prompt = Join-Path $base 'processor.md'
@@ -68,6 +68,10 @@ function Invoke-Runtime {
 
 $f = New-Fixture
 try {
+    $r = Invoke-Runtime $f 'check'
+    Assert-True ($r.ExitCode -eq 0) "complete 12-role package passes preflight (got $($r.ExitCode), err=$($r.Err))"
+    Assert-True ($r.Out -match 'Codex custom roles = 12') 'preflight reports the complete 12-role package'
+
     $r = Invoke-Runtime $f 'start'
     Assert-True ($r.ExitCode -eq 0) "start exits 0 (got $($r.ExitCode), err=$($r.Err))"
     $capturedArgs = @(Get-Content -LiteralPath $f.Args)
@@ -135,9 +139,9 @@ try {
     Remove-Item -LiteralPath $projectAgentDir -Recurse -Force
 
     $globalDuplicate = Join-Path $f.CodexHome 'agents\different_filename.toml'
-    Set-Content -LiteralPath $globalDuplicate -Value "name = 'orchestra_reviewer'`ndescription = 'duplicate'`ndeveloper_instructions = 'duplicate'" -Encoding utf8
+    Set-Content -LiteralPath $globalDuplicate -Value "name = 'orchestra_dependency_curator'`ndescription = 'duplicate'`ndeveloper_instructions = 'duplicate'" -Encoding utf8
     $r = Invoke-Runtime $f 'check'
-    Assert-True ($r.ExitCode -eq 12) 'second global custom agent cannot duplicate a managed Orchestra role name'
+    Assert-True ($r.ExitCode -eq 12) 'second global custom agent cannot duplicate the dependency curator role name'
     Remove-Item -LiteralPath $globalDuplicate -Force
 
     if (-not $onWindows) {
@@ -151,13 +155,13 @@ try {
     $r = Invoke-Runtime $f 'start' @{ ORCHESTRA_CODEX_SANDBOX='read-only' }
     Assert-True ($r.ExitCode -eq 2) 'read-only root sandbox fails closed before Codex invocation'
 
-    Remove-Item -LiteralPath (Join-Path $f.CodexHome 'agents\orchestra_merger.toml') -Force
+    Remove-Item -LiteralPath (Join-Path $f.CodexHome 'agents\orchestra_inbox_curator.toml') -Force
     $r = Invoke-Runtime $f 'check'
-    Assert-True ($r.ExitCode -eq 12) 'missing required custom role fails preflight'
+    Assert-True ($r.ExitCode -eq 12) 'missing inbox curator role fails preflight'
 
-    Set-Content -LiteralPath (Join-Path $f.CodexHome 'agents\orchestra_merger.toml') -Value "name = 'orchestra_merger'" -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $f.CodexHome 'agents\orchestra_inbox_curator.toml') -Value "name = 'orchestra_inbox_curator'" -Encoding utf8
     $r = Invoke-Runtime $f 'check'
-    Assert-True ($r.ExitCode -eq 12) 'structurally invalid custom role fails preflight'
+    Assert-True ($r.ExitCode -eq 12) 'structurally invalid inbox curator role fails preflight'
 } finally {
     Remove-Item -LiteralPath $f.Base -Recurse -Force -ErrorAction SilentlyContinue
 }

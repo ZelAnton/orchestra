@@ -35,7 +35,8 @@ $script:RequiredAgents = @(
     'orchestra_planner', 'orchestra_executor', 'orchestra_coder_fast',
     'orchestra_coder', 'orchestra_coder_deep', 'orchestra_reviewer_std',
     'orchestra_reviewer', 'orchestra_full_reviewer', 'orchestra_merger',
-    'orchestra_knowledge_curator'
+    'orchestra_knowledge_curator', 'orchestra_inbox_curator',
+    'orchestra_dependency_curator'
 )
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $script:ExplicitPromptPath = $PromptPath
