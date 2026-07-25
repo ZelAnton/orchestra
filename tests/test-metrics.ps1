@@ -219,6 +219,36 @@ if ($unknownUsageBudget.ExitCode -eq 0) {
     Assert-Equal $null $unknownUsageData.token_budget.actual_tokens 'unknown actual-shape is not counted toward the spending gate'
 }
 
+# T-321: Get-BatchUsage recovers a `usage.recorded` event that carries NO batch_id at all
+# (the shape `tools/supervisor.ps1 observe` emitted before it learned --batch-id) via the
+# same task_id -> batch_id map Apply-Events already builds from `task.captured`. A second,
+# genuinely different explicit batch_id on another usage.recorded event must NOT be pulled
+# in by the task_id fallback (the event's own recorded claim wins over inference).
+$noBatchWork=New-Fixture
+$noBatchLine = '{"schema_version":1,"event_id":"nb01","occurred_at":"2026-07-05T00:01:00Z","type":"usage.recorded","task_id":"T-20","actor":{"kind":"tool","name":"fixture"},"payload":{"total_tokens":444,"estimated":false}}'
+$noBatchLines=@(
+    (Event-Line nb00 '2026-07-05T00:00:00Z' 'cohort.opened' B-8),
+    (Event-Line nb-c '2026-07-05T00:00:30Z' 'task.captured' B-8 T-20),
+    $noBatchLine,
+    (Event-Line nb02 '2026-07-05T00:02:00Z' 'usage.recorded' B-9 T-21 @{total_tokens=999999;estimated=$false})
+)
+Write-Utf8 (Join-Path $noBatchWork 'events.jsonl') (($noBatchLines -join "`n")+"`n")
+Write-Utf8 (Join-Path $noBatchWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000'
+$noBatchBudget=Invoke-Metrics @('budget','--work',$noBatchWork,'--batch-id','B-8','--json')
+Assert-Equal 0 $noBatchBudget.ExitCode 'no-batch-id fallback budget projection exits zero'
+if ($noBatchBudget.ExitCode -eq 0) {
+    $noBatchData=$noBatchBudget.Out|ConvertFrom-Json
+    Assert-Equal 'ok' $noBatchData.status 'a usage.recorded event without batch_id, recovered via task_id, still yields a reliable gate'
+    Assert-Equal 444 $noBatchData.token_budget.actual_tokens 'Get-BatchUsage recovers the batch-id-less usage.recorded event via task.captured task_id -> batch_id mapping'
+    Assert-True (-not $noBatchData.token_budget.exhausted) 'recovered actual spend below the configured budget leaves it open'
+}
+$noBatchOtherBudget=Invoke-Metrics @('budget','--work',$noBatchWork,'--batch-id','B-9','--json')
+Assert-Equal 0 $noBatchOtherBudget.ExitCode 'other-batch budget projection exits zero'
+if ($noBatchOtherBudget.ExitCode -eq 0) {
+    $noBatchOtherData=$noBatchOtherBudget.Out|ConvertFrom-Json
+    Assert-Equal 999999 $noBatchOtherData.token_budget.actual_tokens 'a usage.recorded event with its own explicit batch_id is counted only under that batch'
+}
+
 Write-Utf8 (Join-Path $estWork 'config.md') "COHORT_TOKEN_BUDGET: 1000`nEVENTS_OUTBOX: off"
 $offBudget=Invoke-Metrics @('budget','--work',$estWork,'--batch-id','B-4','--json')
 Assert-Equal 0 $offBudget.ExitCode 'disabled outbox budget projection exits zero'

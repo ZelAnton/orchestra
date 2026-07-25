@@ -74,7 +74,7 @@
 .EXAMPLE
     pwsh -File tools/supervisor.ps1 run --file worker.ps1 --args-json '["--id","T-1"]' --deadline-sec 60 --result-file r.json
     pwsh -File tools/supervisor.ps1 supervise --exe git --args-json '["status"]' --max-attempts 2 --budget-file b.json --budget-sec 600 --checkpoint-file cp.json --work /abs/.work --owner OWN --task-id T-1
-    pwsh -File tools/supervisor.ps1 observe --result-file r.json --stdout-file out.txt --task-id T-1 --role coder --source claude --work /abs/.work --json
+    pwsh -File tools/supervisor.ps1 observe --result-file r.json --stdout-file out.txt --task-id T-1 --role coder --source claude --batch-id B-1 --work /abs/.work --json
     pwsh -File tools/supervisor.ps1 budget --budget-file b.json --json
 #>
 
@@ -1136,6 +1136,7 @@ function Cmd-Observe {
     $role = [string](Opt 'role' 'coder')
     $mode = [string](Opt 'mode' 'full')
     $source = [string](Opt 'source' 'claude')
+    $batchId = [string](Opt 'batch-id' '')
     $budgetMs = if (Has-Prop $v 'budget_remaining_ms') { [int]$v.budget_remaining_ms } else { -1 }
 
     # T-248: best-effort claude usage from the captured stream-json transcript (--stdout-file,
@@ -1167,6 +1168,7 @@ function Cmd-Observe {
                 outcome_reason = $safeReason
             } | ConvertTo-Json -Compress)
     )
+    if ($batchId) { $eventArgs += @('--batch-id', $batchId) }
 
     # usage.recorded event args (T-248) - only when usage was actually captured. Scalar
     # allowlist only; the processor supplies the identity coordinates for the dedup key.
@@ -1190,6 +1192,7 @@ function Cmd-Observe {
             '--attempt-number', "$attempts", '--source', $source,
             '--payload', ($usagePayload | ConvertTo-Json -Compress)
         )
+        if ($batchId) { $usageEventArgs += @('--batch-id', $batchId) }
     }
 
     if ([bool](Opt 'json' $false)) {

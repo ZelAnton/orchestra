@@ -551,7 +551,7 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
         '{"type":"assistant","message":{"role":"assistant"}}' + "`n" +
         ('{"type":"result","subtype":"success","is_error":false,"result":"done ' + $secret + '","usage":{"input_tokens":3000,"output_tokens":800,"cache_read_input_tokens":1500,"cache_creation_input_tokens":200}}')
     )
-    $obs = Invoke-Spv @('observe', '--result-file', $resFile, '--stdout-file', $stdoutFile, '--task-id', 'T-9', '--role', 'coder', '--mode', 'full', '--source', 'claude', '--json')
+    $obs = Invoke-Spv @('observe', '--result-file', $resFile, '--stdout-file', $stdoutFile, '--task-id', 'T-9', '--role', 'coder', '--mode', 'full', '--source', 'claude', '--batch-id', 'B-42', '--json')
     Assert-Exit $obs 0 'observe(usage) rc=0'
     Assert-NotContains $obs.Out $secret 'observe(usage) never emits the raw transcript text'
     $obsObj = $obs.Out | ConvertFrom-Json
@@ -562,12 +562,24 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
         Assert-Equal 5500 $obsObj.usage.total_tokens 'observe(usage): total sums input+output+cache'
     }
     Assert-True ($obsObj.usage_event_args.Count -gt 0) 'observe(usage) emits usage.recorded event args'
+    # T-321: --batch-id, when given to `observe`, must be threaded into BOTH the
+    # codex.attempt event args and the usage.recorded event args - not just carried
+    # separately by the caller - so the durable envelope's own batch_id is never absent.
+    $eventArgsList = @($obsObj.event_args | ForEach-Object { [string]$_ })
+    $usageArgsList = @($obsObj.usage_event_args | ForEach-Object { [string]$_ })
+    $eventBatchIdx = [array]::IndexOf($eventArgsList, '--batch-id')
+    Assert-True ($eventBatchIdx -ge 0) 'observe(--batch-id) threads --batch-id into codex.attempt event_args'
+    if ($eventBatchIdx -ge 0) { Assert-Equal 'B-42' $eventArgsList[$eventBatchIdx + 1] 'observe(--batch-id) event_args carries the given batch id' }
+    $usageBatchIdx = [array]::IndexOf($usageArgsList, '--batch-id')
+    Assert-True ($usageBatchIdx -ge 0) 'observe(--batch-id) threads --batch-id into usage_event_args'
+    if ($usageBatchIdx -ge 0) { Assert-Equal 'B-42' $usageArgsList[$usageBatchIdx + 1] 'observe(--batch-id) usage_event_args carries the given batch id' }
     # the usage.recorded args observe emits must be accepted by the REAL outbox tool.
     $ev = Join-Path $d 'events.jsonl'
-    $usageArgs = @('append', '--events', $ev, '--batch-id', 'B-1') + @($obsObj.usage_event_args | ForEach-Object { [string]$_ })
+    $usageArgs = @('append', '--events', $ev) + $usageArgsList
     $ap = Invoke-Outbox $usageArgs
     Assert-Exit $ap 0 'outbox accepts the usage.recorded event args observe emits'
     Assert-NotContains (Read-File $ev) $secret 'the appended usage.recorded line holds no raw transcript text'
+    Assert-Contains (Read-File $ev) '"batch_id":"B-42"' 'the appended usage.recorded line carries the batch_id from observe --batch-id'
 
     # No --stdout-file -> no usage surfaced (best-effort, absent input is a clean no-op).
     $obs2 = Invoke-Spv @('observe', '--result-file', $resFile, '--task-id', 'T-9', '--role', 'coder', '--json')

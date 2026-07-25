@@ -1406,9 +1406,13 @@ processor-гейта после несентинельного возврата 
 `usage` (per-call токены; см. «`usage.recorded`»), допиши **best-effort** `usage.recorded`
 (`source=codex`, те же `task_id`/`role`/`mode`/`attempt_number`, что и у `codex.attempt`, поля
 usage и флаг `estimated` — как есть из блока). Для **Claude**-исполнителя/фолбэка, если его
-вызов обёрнут `tools/supervisor.ps1` и `observe --stdout-file` вернул `usage_event_args`
-(`source=claude`) — так же best-effort допиши `usage.recorded` этими аргументами. Отсутствие
-usage — не ошибка (событие не пишется); сбор не меняет control-flow.
+вызов обёрнут `tools/supervisor.ps1` и `observe --stdout-file --batch-id "<B-id>"` вернул
+`usage_event_args` (`source=claude`) — так же best-effort допиши `usage.recorded` этими
+аргументами. `--batch-id` у `observe` передавай **всегда** (T-321): без него `usage.recorded`
+уходит без `batch_id` в envelope, и `tools/metrics.ps1 Get-BatchUsage` восстанавливает его
+только фолбэком через `task_id → batch_id` — надёжнее не полагаться на фолбэк, а нести
+`batch_id` сразу. Отсутствие usage — не ошибка (событие не пишется); сбор не меняет
+control-flow.
 
 ### Пер-таск ревью (тиринг: reviewer / reviewer_std)
 
@@ -3066,9 +3070,12 @@ usage реально захвачен**; отсутствие usage — не о�
   §8) — флаг переносится в событие как есть.
 - **Откуда берёшь usage.** Codex: из результата `tools/codex-runtime.ps1 run` — он несёт готовый
   блок `usage` (actual из JSONL, иначе marked-estimate). Claude: из `tools/supervisor.ps1 observe
-  --stdout-file <захват stream-json>` — он парсит usage финального `result`-события и отдаёт
-  готовый `usage_event_args` (`--type usage.recorded …`). Оба пути — только неконфиденциальные
-  целые счётчики, никогда сырой вывод/промпт.
+  --stdout-file <захват stream-json> --batch-id "<B-id>"` — он парсит usage финального
+  `result`-события и отдаёт готовый `usage_event_args` (`--type usage.recorded … --batch-id
+  <B-id>`). Передавай `--batch-id` в `observe` **всегда** (T-321), а не только когда под рукой —
+  это то же поле, что несёт envelope самого события, и без него `usage.recorded` не попадает в
+  выборку `Get-BatchUsage` по прямому совпадению (только более слабым `task_id`-фолбэком). Оба
+  пути (Codex/Claude) — только неконфиденциальные целые счётчики, никогда сырой вывод/промпт.
 - `event_id` — UUIDv5 от имени
   `orchestra/usage.recorded/<source>/<task_id>/<role>/<mode>/<attempt_number>` (через
   `tools/outbox.ps1 event-id`/`append`). Дозапись — тем же best-effort `append`, что и

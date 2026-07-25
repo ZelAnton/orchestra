@@ -60,9 +60,29 @@ function Get-BatchUsage {
     param($Events, [string]$BatchId)
     $actual = 0.0; $estimated = 0.0; $actualObserved = $false; $estimatedObserved = $false
     $actualEvents = 0; $estimatedEvents = 0; $actualComplete = $true
+    # Fallback task_id -> batch_id map (same source and shape as Apply-Events' own
+    # $taskToBatch): older/degraded `usage.recorded` events emitted by `supervisor.ps1
+    # observe` before it carried --batch-id (T-321) have NO batch_id in the envelope at
+    # all, so they would otherwise silently drop out of the COHORT_TOKEN_BUDGET gate's
+    # actual-spend total even though task.captured unambiguously ties task_id to a batch.
+    $taskToBatch = @{}
+    foreach ($record in $Events) {
+        if ([string](Get-Prop $record 'type') -ne 'task.captured') { continue }
+        $t = [string](Get-Prop $record 'task_id'); $b = [string](Get-Prop $record 'batch_id')
+        if ($t -and $b) { $taskToBatch[$t] = $b }
+    }
     foreach ($record in $Events) {
         if ([string](Get-Prop $record 'type') -ne 'usage.recorded') { continue }
-        if ([string](Get-Prop $record 'batch_id') -ne $BatchId) { continue }
+        $recordBatchId = [string](Get-Prop $record 'batch_id')
+        if ($recordBatchId -ne $BatchId) {
+            # Recover via task_id ONLY when the envelope's own batch_id is absent - mirrors
+            # Apply-Events' "-not $batchId -and taskToBatch.ContainsKey" fallback. An
+            # explicit, different batch_id on the event is trusted over a task_id-derived
+            # guess (the event's own recorded claim wins over inference).
+            if ($recordBatchId) { continue }
+            $recordTaskId = [string](Get-Prop $record 'task_id')
+            if (-not $recordTaskId -or -not $taskToBatch.ContainsKey($recordTaskId) -or $taskToBatch[$recordTaskId] -ne $BatchId) { continue }
+        }
         $payload = Get-Prop $record 'payload'
         $estimatedRaw = Get-Prop $payload 'estimated'
         # An enabled safety gate must never silently classify an old/invalid usage shape as
