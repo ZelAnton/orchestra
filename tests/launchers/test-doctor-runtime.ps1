@@ -131,8 +131,9 @@ function Set-Settings { param([pscustomobject]$Case, [string]$Json) Write-File (
 # Orchestra source checkout or shadow the cc-sync mirror.
 $runtimeIdentity = New-Case
 Write-File (Join-Path $runtimeIdentity.Proj 'tools/policy.ps1') '# stale target-local copy'
+Write-File (Join-Path $runtimeIdentity.Proj 'tools/notify.ps1') '# stale target-local copy'
 $runtimeIdentityResult = Invoke-Doctor -Case $runtimeIdentity
-Assert-Contains $runtimeIdentityResult.Out 'WARN target-local tools/ contains Orchestra-named runner(s) that are ignored because this is not the Orchestra source checkout: policy.ps1' 'runtime identity: stale target-local runner is diagnosed as ignored'
+Assert-Contains $runtimeIdentityResult.Out 'WARN target-local tools/ contains Orchestra-named runner(s) that are ignored because this is not the Orchestra source checkout: policy.ps1, notify.ps1' 'runtime identity: stale target-local runners are diagnosed as ignored'
 Assert-Contains $runtimeIdentityResult.Out 'agents must use ~/.claude/scripts/<script>.ps1' 'runtime identity: diagnostic points agents at the cc-sync mirror'
 Remove-Case $runtimeIdentity
 
@@ -358,6 +359,12 @@ $c = New-Case
 Set-Config $c 'VERIFICATION_MODE: disabled'
 $r = Invoke-Doctor -Case $c
 Assert-Contains $r.Out 'OK   verification profile is explicitly disabled by operator' 'config: explicit verification disable distinguished'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'NOTIFY_CMD: echo notification'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   .work/config.md: no unknown/mistyped keys' 'config: NOTIFY_CMD is a recognized operator-owned command key'
 Remove-Case $c
 
 $c = New-Case

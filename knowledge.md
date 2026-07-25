@@ -249,7 +249,7 @@ workspace, коммитит результаты листовых агентов
   ВСЮ папку `tools/*.ps1`** (кроме своего `sync-runtime.ps1` — единственное исключение),
   поэтому `cc-sync` кладёт в целевой проект копию **каждого** раннера
   (`~/.claude/scripts/codex-runtime.ps1`, `state-tx.ps1`, `queue-tx.ps1`, `outbox.ps1`,
-  `policy.ps1`, `redaction.ps1`, … — новый раннер подхватывается автоматически, без точечного
+  `policy.ps1`, `redaction.ps1`, `notify.ps1`, … — новый раннер подхватывается автоматически, без точечного
   добавления в список); адаптеры и агенты резолвят путь к раннеру по обеим
   раскладкам (чекаут/зеркало — см. «Резолвинг раннеров `tools/*.ps1`» ниже, «Разрешение на
   запуск codex — предвыдаётся, а не выпрашивается по ходу» и `agents/coder_codex.md`,
@@ -402,6 +402,17 @@ workspace, коммитит результаты листовых агентов
   **не применяется к исходному коду/diff**. Полный нередактированный вывод — только под human
   gate **T-095** (точка расширения, не реализована; у `tools/redaction.ps1` bypass-переключателя
   нет). Тесты (детерминированные, офлайн) — `tests/test-redaction.ps1`.
+- **Операторский notification hook (T-308).** `NOTIFY_CMD` пуст по умолчанию и является
+  operator-owned ключом `.work/config.md`; `tools/notify.ps1 send` принимает только три
+  стабильных event-типа (`task.escalated`, `approval.pending`, `publish.ci_failed`), сначала
+  redacts и ограничивает свободный text, затем один раз запускает `NOTIFY_CMD` через
+  `supervisor.ps1 run` (10 s). Event и уже redacted однострочный text — последние два argv
+  команды; raw text/stdout/stderr никуда не сохраняются. Результат `disabled|sent|failed` с
+  classifier reason безопасен для journal; доставка никогда не меняет state transition, не
+  ретраится и не является approval/CI gate. `agents/processor.md` эмитит это только после
+  durable эскалации, нового undecided approval-record или `.red` required CI; тесты —
+  `tests/test-notify.ps1`, schema/doctor рассматривают ключ как high-sensitivity arbitrary
+  operator command.
 - **Защита `reviewer_codex` от негабаритного diff (T-066).** Инструкция «большой diff
   вставляй как есть» рискует молчаливой обрезкой контекста на стороне codex на крупных
   задачах (генерация кода, массовые переименования, vendoring) — обрезка дала бы формально
@@ -878,7 +889,7 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
 паттерна T-114; каноничный источник, на который ссылаются `agents/processor.md` и листовые
 роли). Агенты вызывают раннеры `tools/` голым относительным путём `tools/<script>.ps1`
 (`state-tx.ps1`, `queue-tx.ps1`, `outbox.ps1`, `policy.ps1`, `policy-schema.ps1`,
-`redaction.ps1`, `supervisor.ps1`, `harness.ps1`, `codex-runtime.ps1`, …). Этот путь
+`redaction.ps1`, `notify.ps1`, `supervisor.ps1`, `harness.ps1`, `codex-runtime.ps1`, …). Этот путь
 существует в **двух** раскладках; каждый агент, вызывающий раннер, определяет раскладку
 **один раз** и держит её до конца прогона:
 

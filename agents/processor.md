@@ -151,6 +151,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `PUBLISH_CI_DEADLINE_SEC` | 1800 | Фаза 5.4 — дедлайн ожидания полного набора обязательных CI-проверок (fail-closed по истечении) |
 | `PUBLISH_CI_BACKOFF_SEC` | 30 | Фаза 5.4 — пауза между опросами CI в цикле ожидания |
 | `APPROVAL_DEADLINE_SEC` | 86400 | Фаза 5.3/5.4 — срок действия запроса на human approval (нет ответа = отказ, fail-closed) |
+| `NOTIFY_CMD` | (не задано) | Одноразовый best-effort operator notification для `task.escalated`, свежего `approval.pending` и красного required CI; команда operator-owned, перед ней текст redacted |
 | `REVIEWER_TIERING` | true | Фаза 2 (2.4) — выбор reviewer vs reviewer_std |
 | `EVENTS_OUTBOX` | on | Событийный outbox `.work/events.jsonl`: `on`/`off`. `on` (по умолчанию) — дописывать машинные события на границах фаз/раундов, при захвате/смене статуса задачи, карантине/эскалации, слиянии и публикации; `off` — не писать (Markdown-артефакты остаются как есть). См. «Событийный outbox (`.work/events.jsonl`)» |
 | `KB` | on | База знаний (`.work/knowledge/`): `off`/`on` (с фолбэком на `$env:KB` — см. выше). `on` включает чтение KB (planner/coder/reviewer) и Фазу 5.5 (knowledge_curator); `off` отключает — см. «База знаний (KB)» |
@@ -178,7 +179,8 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 
 Ты вызываешь раннеры `tools/*.ps1` по всему промпту голым относительным путём (напр.
 `pwsh -File tools/state-tx.ps1 …`, `tools/queue-tx.ps1`, `tools/outbox.ps1`, `tools/policy.ps1`,
-`tools/policy-schema.ps1`, `tools/redaction.ps1`, `tools/supervisor.ps1`, `tools/harness.ps1`).
+`tools/policy-schema.ps1`, `tools/redaction.ps1`, `tools/supervisor.ps1`, `tools/notify.ps1`,
+`tools/harness.ps1`).
 Все они резолвятся по **одному** правилу — определи раскладку **один раз** в начале и держи её
 до конца прогона:
 
@@ -215,6 +217,39 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
 может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
 ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+
+## Операторские уведомления (`NOTIFY_CMD`)
+
+`NOTIFY_CMD` пуст/отсутствует по умолчанию — это успешный no-op, не ошибка конфигурации.
+Непустое значение — **заранее заданная оператором** shell-команда; не создавай, не меняй и не
+достраивай её сам. Как и `SMOKE_CMD`, она не входит в центральный allow-list: нужный
+локальный grant оператор выдаёт при настройке проекта.
+
+На каждой из трёх границ ниже, **после** durable state transition/approval record/CI-gate
+verdict, вызови ровно один раз:
+
+```text
+pwsh -File <resolved notify.ps1> send --work "$WORK" --root "$ROOT" \
+  --event <task.escalated|approval.pending|publish.ci_failed> --text <краткий контекст> --json
+```
+
+`notify.ps1` сам сначала запускает `redaction.ps1`, сокращает текст до одной строки и через
+`supervisor.ps1 run` с коротким фиксированным дедлайном передаёт операторской команде **двумя
+последними argv** event и redacted text. Не передавай raw CI-log, coder/reviewer output,
+secrets, prompt или shell fragment; свободный текст всё равно считается external data. Прочитай
+только JSON-поля `status`, `reason`, `duration_ms` и добавь безопасную строку
+`notify event=<...> status=<...> reason=<...> duration_ms=<...>` в `journal.md`. `disabled`,
+`failed`, timeout или невозможность redaction **не меняют** state transition, не вызывают retry,
+не открывают approval и не блокируют остальные задачи: это one-shot best-effort сигнал, а не
+гейт. Никогда не печатай/не записывай исходный text или stdout/stderr notification-команды.
+
+Границы: (1) любая терминальная смена задачи на `эскалирована` — coder failure, review/F-cycle
+stagnation и terminal quarantine; (2) только новый ещё undecided approval-record — JSON
+`approval-request` вернул `state=created` и `decision` пуст (не `existing` resume и не
+`*-auto-approved`); (3) `check-gate` дал `failed` с непустым `.red` для опубликованного SHA.
+Для CI в text достаточно batch/SHA и имён красных checks; для task/approval — T-ID или
+approval ID и classifier-derived причину. Текущий уже проверенный единичный факт допускается
+дублировать лишь после crash boundary; не сканируй диск и не заводи отдельный polling process.
 
 # Одновременно — один оркестратор (аренда владельца)
 

@@ -101,6 +101,7 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'PUBLISH_CI_BACKOFF_SEC'  'int'    '30'                               -Min 1  -Sensitivity 'medium')
         (New-ConfigKey 'PUBLISH_LINEAR_HISTORY'  'bool'   'false'                            -Sensitivity 'high')
         (New-ConfigKey 'APPROVAL_DEADLINE_SEC'   'int'    '86400'                            -Min 1  -Sensitivity 'high')
+        (New-ConfigKey 'NOTIFY_CMD'              'string' 'unset'                            -Sensitivity 'high')
         (New-ConfigKey 'REVIEWER_TIERING'        'bool'   'true')
         (New-ConfigKey 'MAIN_BRANCH'             'string' 'autodetect'                       -Sensitivity 'high')
         (New-ConfigKey 'EVENTS_OUTBOX'           'enum'   'on'     -Enum @('on', 'off'))

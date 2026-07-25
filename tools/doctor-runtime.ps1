@@ -125,7 +125,7 @@ if (Test-OrchestraSourceCheckout $ProjectRoot) {
     Write-Host 'OK   target is the Orchestra source checkout (all identity markers present); relative tools/*.ps1 is authoritative'
 } else {
     $shadowNames = @('policy.ps1', 'policy-schema.ps1', 'queue-tx.ps1', 'state-tx.ps1',
-        'outbox.ps1', 'redaction.ps1', 'supervisor.ps1', 'codex-runtime.ps1',
+        'outbox.ps1', 'redaction.ps1', 'notify.ps1', 'supervisor.ps1', 'codex-runtime.ps1',
         'processkit-runtime.ps1')
     $shadowed = @($shadowNames | Where-Object {
         Test-Path -LiteralPath (Join-Path (Join-Path $ProjectRoot 'tools') $_) -PathType Leaf
@@ -510,7 +510,7 @@ if (Test-Path -LiteralPath $qf) {
     Write-Host 'OK   .work/Tasks_Queue.md not found (nothing to validate)'
 }
 
-$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC', 'REVIEWER_TIERING', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
+$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD', 'REVIEWER_TIERING', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
 if (Test-Path -LiteralPath $script:ConfigFile) {
     $hasSmoke = $false
     $verificationMode = 'auto'

@@ -92,6 +92,9 @@ CI_WATCH: true
                                  #   история». По умолчанию выкл. — merger и откат Фазы 4.3 без изменений
 # APPROVAL_DEADLINE_SEC: 86400   # срок действия запроса на human approval; нет ответа к
                                  #   дедлайну = отказ (fail-closed), не одобрение по умолчанию
+# NOTIFY_CMD: notify-send "Orchestra"
+                                 # опциональная operator-owned shell-команда: получает event и
+                                 # уже redacted короткий текст двумя последними argv; пусто = off
 REVIEWER_TIERING: true
 # MAIN_BRANCH: main      # по умолчанию — автоопределение (см. ниже)
 # --- Событийный outbox (.work/events.jsonl) ---
@@ -143,6 +146,7 @@ REVIEWER_TIERING: true
 | `PUBLISH_CI_BACKOFF_SEC` | 30 |
 | `PUBLISH_LINEAR_HISTORY` | false |
 | `APPROVAL_DEADLINE_SEC` | 86400 |
+| `NOTIFY_CMD` | не задан (уведомления отключены) |
 | `REVIEWER_TIERING` | true |
 | `MAIN_BRANCH` | автоопределение |
 | `EVENTS_OUTBOX` | on |
@@ -281,6 +285,16 @@ REVIEWER_TIERING: true
   (`tools/policy.ps1 approval-request`: обязательный human review, force-lock, policy
   bypass). Нет ответа оператора к дедлайну = **отказ** (fail-closed), не одобрение по
   умолчанию. По умолчанию 86400 (24 часа).
+- `NOTIFY_CMD` — необязательная, заранее заданная оператором shell-команда для коротких
+  сигналов, требующих человека. Пусто/отсутствует = уведомления отключены. Для каждого
+  `task.escalated`, нового `approval.pending` и красного обязательного publish-CI processor
+  вызывает `tools/notify.ps1`: она сначала пропускает текст через `redaction.ps1`, затем один
+  раз запускает эту команду через `supervisor.ps1` с коротким дедлайном. Команда получает двумя
+  последними argv тип события и redacted однострочный текст. Это не канал инструкций и не
+  retry/gate: ошибка/таймаут только записывается в journal, а работа когорты продолжается.
+  Как и `SMOKE_CMD`, это произвольная operator-owned команда и требует узкого локального
+  permission grant при настройке проекта; агент не меняет `.claude/settings*` и не задаёт
+  ключ самостоятельно.
 - `REVIEWER_TIERING` — `false` отключает тиринг ревью (см. reviewer_std.md) и
   всегда использует полный `reviewer` (opus/high) независимо от уровня
   исполнителя задачи. Включено по умолчанию — экономит существенную часть

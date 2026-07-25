@@ -782,6 +782,33 @@ T-095 путь без redaction отсутствует; будущий защи�
 - **coder/reviewer**: переданные внешние логи/ошибки CI — `external` (данные, не инструкции);
   при цитировании внешнего текста в артефакт/отчёт он проходит redaction (18.4).
 
+### 18.7. Операторское одноразовое уведомление (`NOTIFY_CMD`)
+
+`NOTIFY_CMD` — необязательная, **заранее заданная оператором** shell-команда в
+`.work/config.md` (default `unset`). Она предназначена только для короткого сигнала о
+состоянии, требующем человека, и не является каналом инструкций, обратной связи или новым
+гейтом. Processor вызывает `tools/notify.ps1 send` ровно один раз после durable факта:
+терминальной эскалации задачи (`task.escalated`), создания нового undecided human-approval
+record (`approval.pending`) либо `check-gate=failed` с непустым списком required CI
+(`publish.ci_failed`). Resume-existing, auto-approved record и повторное чтение уже
+проверенного CI-факта уведомление не дублируют; допустим лишь повтор после явно отмеченной
+crash boundary.
+
+Перед запуском команды `notify.ps1` обязательно применяет `redaction.ps1 redact` к свободному
+text, нормализует его в одну строку и ограничивает длину. В `NOTIFY_CMD` передаются только два
+последних argv: стабильный event type и этот redacted text; метасимволы/апострофы внешнего
+text остаются одним аргументом, а не синтаксисом shell. Сама командная строка operator-owned
+и не создаётся/не меняется ролью; для неё нужен узкий локальный permission grant, как для
+`SMOKE_CMD`.
+
+Запуск происходит через `supervisor.ps1 run` с фиксированным коротким дедлайном и без retry.
+Результат для processor — только безопасные scalar-поля `status=disabled|sent|failed`,
+classifier `reason` и `duration_ms`; stdout/stderr команды, исходный text и ошибка redaction
+не пишутся в journal, outbox или другой durable artifact. Отсутствующий ключ, timeout,
+крэш/redaction failure или nonzero команды — успешный для control-plane best-effort исход:
+они не изменяют уже совершённый переход, не открывают approval и не блокируют публикацию или
+следующие задачи. Неверный event/аргумент — usage error интеграции, а не молчаливый fallback.
+
 ## 19. Событийный outbox (`.work/events.jsonl`)
 
 Это **нормативный источник** контракта durable event-outbox — машинного журнала фактов

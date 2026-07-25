@@ -1,0 +1,161 @@
+<#
+.SYNOPSIS
+    Sends one bounded, redacted operator notification for a human-attention event.
+
+.DESCRIPTION
+    `NOTIFY_CMD` is an explicitly operator-owned command in `<work>/config.md`. When it is
+    unset, this tool is a successful no-op. When set, `send` first runs the supplied text through
+    `redaction.ps1`, collapses it to a short single line, then appends the event and that safe
+    text as the final two arguments to NOTIFY_CMD. The command itself runs once through
+    `supervisor.ps1 run` with a fixed short deadline.
+
+    Delivery is deliberately best-effort: disabled, redaction-unavailable, timeout and command
+    failure all return a structured result with process exit 0. The processor records that safe
+    result in its journal and continues its normal state transition. Invalid caller arguments are
+    usage errors (exit 2), because silently changing the event type would hide a bad integration.
+
+    No raw notification command output, original text, or redaction error is emitted or written.
+    The caller receives only `event`, `status`, `reason`, and the supervised duration.
+
+.EXAMPLE
+    pwsh -File tools/notify.ps1 send --work .work --root . --event task.escalated --text "T-17 needs an operator" --json
+#>
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+
+. (Join-Path $PSScriptRoot 'common.ps1')
+$script:ErrPrefix = 'NTFERR'
+$script:AllowedEvents = @('task.escalated', 'approval.pending', 'publish.ci_failed')
+$script:DeadlineSec = 10
+$script:OutputMaxBytes = 4096
+$script:TextLimit = 400
+
+$parsed = Parse-CliArgs $args -BoolFlags @('json')
+$Command = $parsed.Command
+$opts = $parsed.Opts
+
+function Get-ConfigValue {
+    param([string]$Work, [string]$Key)
+    $file = Join-Path $Work 'config.md'
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return '' }
+    $rx = '^\s*' + [regex]::Escape($Key) + '\s*:\s*([^#]*?)\s*(?:#.*)?$'
+    foreach ($line in (Get-Content -LiteralPath $file -Encoding UTF8)) {
+        $m = [regex]::Match([string]$line, $rx)
+        if ($m.Success) { return $m.Groups[1].Value.Trim() }
+    }
+    return ''
+}
+
+function ConvertTo-PosixShellLiteral {
+    param([string]$Text)
+    # POSIX's single-quote escape is '"'"': terminate the quote, emit one literal apostrophe
+    # inside double quotes, then resume the single-quoted literal. Keep untrusted text out of
+    # the operator's command syntax even though the command itself is intentionally trusted.
+    $apostrophe = [string][char]39
+    $replacement = $apostrophe + '"' + $apostrophe + '"' + $apostrophe
+    return $apostrophe + $Text.Replace($apostrophe, $replacement) + $apostrophe
+}
+
+function Get-RedactedShortText {
+    param([string]$Text)
+    $redactor = Join-Path $PSScriptRoot 'redaction.ps1'
+    if (-not (Test-Path -LiteralPath $redactor -PathType Leaf)) { return $null }
+    $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    if ([string]::IsNullOrWhiteSpace($psExe)) { return $null }
+    $redactionArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact', '--stdin')
+    $out = @($Text | & $psExe @redactionArgs 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $short = [regex]::Replace(($out -join "`n"), '\s+', ' ').Trim()
+    if ($short.Length -gt $script:TextLimit) {
+        $short = $short.Substring(0, $script:TextLimit - 3) + '...'
+    }
+    return $short
+}
+
+function Write-Result {
+    param([string]$EventType, [string]$Status, [string]$Reason, [int]$DurationMs = 0)
+    $result = [ordered]@{
+        schema      = 'orchestra/notification@1'
+        event       = $EventType
+        status      = $Status
+        reason      = $Reason
+        duration_ms = $DurationMs
+    }
+    if ([bool](Opt 'json' $false)) {
+        Write-Output ($result | ConvertTo-Json -Compress)
+    } else {
+        Write-Output "notification event=$EventType status=$Status reason=$Reason duration_ms=$DurationMs"
+    }
+}
+
+function Cmd-Send {
+    $work = Require-Opt 'work'
+    $eventType = Require-Opt 'event'
+    $text = Require-Opt 'text'
+    if ($eventType -notin $script:AllowedEvents) {
+        Fail 2 "--event must be one of: $($script:AllowedEvents -join ', ')"
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) { Fail 2 '--text must not be empty' }
+    if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 2 "--work is not a directory: $work" }
+
+    $command = Get-ConfigValue -Work $work -Key 'NOTIFY_CMD'
+    if ([string]::IsNullOrWhiteSpace($command)) {
+        Write-Result -EventType $eventType -Status 'disabled' -Reason 'not-configured'
+        return
+    }
+
+    $safeText = Get-RedactedShortText -Text $text
+    if ($null -eq $safeText) {
+        Write-Result -EventType $eventType -Status 'failed' -Reason 'redaction-unavailable'
+        return
+    }
+
+    $root = [string](Opt 'root' '')
+    if ([string]::IsNullOrWhiteSpace($root)) { $root = Split-Path -Parent ([System.IO.Path]::GetFullPath($work)) }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+        Fail 2 "--root is not a directory: $root"
+    }
+
+    $shellCommand = $command + ' ' + (ConvertTo-PosixShellLiteral $eventType) + ' ' + (ConvertTo-PosixShellLiteral $safeText)
+    $supervisor = Join-Path $PSScriptRoot 'supervisor.ps1'
+    if (-not (Test-Path -LiteralPath $supervisor -PathType Leaf)) {
+        Write-Result -EventType $eventType -Status 'failed' -Reason 'supervisor-unavailable'
+        return
+    }
+    $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    if ([string]::IsNullOrWhiteSpace($psExe)) {
+        Write-Result -EventType $eventType -Status 'failed' -Reason 'supervisor-unavailable'
+        return
+    }
+    $supervisorArgs = @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $supervisor, 'run',
+        '--shell-command', $shellCommand,
+        '--working-directory', $root,
+        '--deadline-sec', "$($script:DeadlineSec)",
+        '--output-max-bytes', "$($script:OutputMaxBytes)",
+        '--json'
+    )
+    $raw = @(& $psExe @supervisorArgs 2>$null)
+    $exitCode = $LASTEXITCODE
+    $verdict = $null
+    try { $verdict = (($raw -join "`n") | ConvertFrom-Json) } catch { }
+    $reason = if ($verdict -and $verdict.PSObject.Properties['reason']) { [string]$verdict.reason } else { 'supervisor-unavailable' }
+    $duration = if ($verdict -and $verdict.PSObject.Properties['duration_ms']) { [int]$verdict.duration_ms } else { 0 }
+    if ($exitCode -eq 0 -and $reason -eq 'ok') {
+        Write-Result -EventType $eventType -Status 'sent' -Reason 'ok' -DurationMs $duration
+    } else {
+        Write-Result -EventType $eventType -Status 'failed' -Reason $reason -DurationMs $duration
+    }
+}
+
+try {
+    switch ($Command) {
+        'send' { Cmd-Send }
+        'version' { Write-Output 'orchestra-notify 1' }
+        default { Fail 2 "unknown command '$Command'. Valid: send, version" }
+    }
+} catch {
+    exit (Resolve-CatchExit $_ 'NTFERR' 'notify' 'NOTIFY_DEBUG')
+}

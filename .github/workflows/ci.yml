@@ -333,6 +333,21 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check operator notification hook
+        # tests/test-notify.ps1 (T-308): the optional operator-owned NOTIFY_CMD is disabled by
+        # default, receives only redacted event/text argv through supervisor, and never turns a
+        # delivery failure into a processor failure. Explicit wiring is required by K-007.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-notify.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check execution supervisor
         # tests/test-supervisor.ps1 (T-093): drives tools/supervisor.ps1 - the four-way
         # stop classification (ok / timeout / cancelled / crash / error) with distinct exit

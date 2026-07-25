@@ -211,6 +211,8 @@ platform-specific skip:
   selection, tolerant event parsing, and the no-lock/no-write invariant.
 - [`tests/test-supervisor.ps1`](../tests/test-supervisor.ps1) protects deadlines,
   cancellation, process-tree cleanup, output limits, retry classification, and budgets.
+- [`tests/test-notify.ps1`](../tests/test-notify.ps1) protects the optional `NOTIFY_CMD`:
+  redacted argv delivery, bounded supervision, and non-blocking failure containment.
 - [`tests/test-harness.ps1`](../tests/test-harness.ps1) is the mandatory CI-level lifecycle
   gate. It checks representative publication, quarantine, escalation, divergence, and
   crash-recovery equivalence scenarios over disposable repositories.
