@@ -12,12 +12,16 @@
 
     Two things it does, both deterministic and offline (no network, never opens a URL):
 
-      1. Normalization + redaction (`redact`): fold the input to a bounded, control-char-free,
-         UTF-8 text, detect binary payloads, and replace every recognized secret / credential /
+      1. Normalization + redaction (`redact`): fold the input to a control-char-free, UTF-8
+         text, detect binary payloads, and replace every recognized secret / credential /
          authorization header / URL credential / PII match with a stable, NON-reversible
          fingerprint marker `[redacted:<category>:<fp8>]`. The marker keeps the diagnostic
          context (what kind of value, and a stable per-value id so the same secret is
          recognizably the same across artifacts) but cannot be turned back into the value.
+         The `--max-bytes` size bound is applied LAST, to the already-redacted text, never to
+         the raw input: cutting raw bytes first would slice a secret that straddles the cut
+         into a head no rule can match any more, and that head would then survive verbatim
+         (T-317). See Get-BoundedRedactedText.
 
       2. Bounded external-data block (`wrap`): emit the normalized+redacted body inside a
          delimited, provenance-headed, injection-neutralized block. Every body line is quoted
@@ -49,6 +53,12 @@
 
     Runs under PowerShell 7 and Windows PowerShell 5.1. All emitted text is UTF-8 without BOM.
 
+    Cost: the rules scan the WHOLE input by design (T-317) - `--max-bytes` bounds what is
+    emitted, not how much is examined - so redacting a multi-megabyte log costs seconds. A
+    caller that must bound the work bounds the INPUT it passes (tools/supervisor.ps1 already
+    caps a captured stream via --output-max-bytes); it must never be bounded by cutting bytes
+    ahead of the rules, which is exactly the leak this ordering exists to prevent.
+
 .EXAMPLE
     pwsh -File tools/redaction.ps1 redact --file ci.log
     pwsh -File tools/redaction.ps1 redact --file ci.log --json
@@ -72,6 +82,12 @@ $Command = $parsed.Command
 $opts = $parsed.Opts
 
 $script:DefaultMaxBytes = 65536
+# How far back from the byte budget the truncation cut may search for a clean break
+# (line break, else space/tab). Bounded twice - by this absolute cap and by a quarter of the
+# budget - so a cosmetic break can never eat a meaningful share of a small budget, and the
+# visible output stays ~MaxBytes even for text with no whitespace at all. See
+# Get-BoundedRedactedText.
+$script:BreakLookback = 256
 
 # --------------------------------------------------------------------------
 # Input: raw bytes from --file or stdin (raw bytes so NUL / binary survive).
@@ -97,20 +113,28 @@ function Read-InputBytes {
 # Fingerprint: first 8 hex chars of sha256(category ':' value). Deterministic and
 # stable (same value+category -> same id, so one secret is recognizable across
 # artifacts) but not reversible.
+#
+# The hasher is created once and reused: this runs once per match, and since the size bound
+# moved after redaction (T-317) the rules see the whole input, so a big log means many more
+# calls here - creating and disposing an SHA256 instance per match was measurably the most
+# expensive part of the pipeline. The script is single-threaded, and ComputeHash resets the
+# instance state per call, so reuse changes nothing about the emitted value.
 # --------------------------------------------------------------------------
+$script:Sha256 = $null
+function Get-Sha256 {
+    if ($null -eq $script:Sha256) { $script:Sha256 = [System.Security.Cryptography.SHA256]::Create() }
+    return $script:Sha256
+}
+
 function Get-Fingerprint {
     param([string]$Value, [string]$Category)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Category + ':' + $Value))
-    } finally { $sha.Dispose() }
+    $hash = (Get-Sha256).ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Category + ':' + $Value))
     return ([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant().Substring(0, 8)
 }
 
 function Get-RawFingerprint {
     param([byte[]]$Bytes)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try { $hash = $sha.ComputeHash($Bytes) } finally { $sha.Dispose() }
+    $hash = (Get-Sha256).ComputeHash($Bytes)
     return ([System.BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant().Substring(0, 8)
 }
 
@@ -247,12 +271,114 @@ function Reserve-Literal {
     $State.Markers.Add($Literal)
     return ($script:PhOpen.ToString() + $idx + $script:PhClose.ToString())
 }
+# Substitute every reserved placeholder back to its marker in ONE pass over the text. A
+# per-marker String.Replace loop would be O(markers x text) - fine while the text was pre-cut
+# to --max-bytes, but the size bound now runs after redaction (T-317), so the text scanned
+# here is the whole input and a log with many matches (e.g. thousands of e-mail addresses)
+# would make that loop quadratic.
 function Restore-Markers {
     param($State, [string]$Text)
-    for ($i = 0; $i -lt $State.Markers.Count; $i++) {
-        $Text = $Text.Replace($script:PhOpen.ToString() + $i + $script:PhClose.ToString(), $State.Markers[$i])
+    if ($State.Markers.Count -eq 0) { return $Text }
+    $pattern = [regex]::Escape([string]$script:PhOpen) + '([0-9]+)' + [regex]::Escape([string]$script:PhClose)
+    return [regex]::Replace($Text, $pattern, {
+            param($m)
+            $idx = [int]$m.Groups[1].Value
+            if ($idx -ge 0 -and $idx -lt $State.Markers.Count) { return $State.Markers[$idx] }
+            return $m.Value
+        })
+}
+
+# Is $Text (which starts at an unclosed '[') the beginning of a `[redacted:<cat>:<fp8>]`
+# marker, i.e. a marker the cut has split? Only such a fragment is dropped; an unclosed
+# bracket in ordinary log text (`[ERROR`, `[2026-07-25`) is left alone.
+function Test-MarkerHead {
+    param([string]$Text)
+    $head = '[redacted:'
+    if ($Text.Length -lt $head.Length) { return $head.StartsWith($Text, [System.StringComparison]::Ordinal) }
+    return ($Text -cmatch '^\[redacted:[a-z0-9-]*(:[0-9a-f]{0,8})?$')
+}
+
+# --------------------------------------------------------------------------
+# Size bound, applied to the ALREADY-REDACTED text (T-317).
+#
+# The bound must never be applied to the raw input before the rules have run. A secret that
+# straddles a raw-byte cut loses exactly the tail its rule needs in order to match
+# (`github-token` wants 20+ chars after the prefix, `aws-access-key` exactly 16, `jwt` three
+# segments, ...), so the cut head stops matching any rule and survives VERBATIM in the
+# artifact - a partial secret leak in the one place this tool exists to prevent one, and the
+# closer the cut sits to the end of the token the more of the secret leaks. Redacting first
+# makes the cut harmless: by this point every recognized secret is already an opaque
+# `[redacted:...]` marker, so a cut can only split ordinary text or a marker, never expose
+# secret material.
+#
+# Bounding the WORK (how much text the rules have to scan) is therefore deliberately NOT this
+# function's job and belongs to the caller (tools/supervisor.ps1, for instance, caps a
+# captured stream before it is ever handed here): any pre-redaction byte cut re-opens the leak
+# described above, so the pipeline always scans everything it was given and bounds only what
+# it emits.
+#
+# The cut itself is still made carefully, now purely for readability:
+#   * always on a UTF-8 character boundary, surrogate pairs included (a raw byte slice decodes
+#     a split multibyte char as U+FFFD);
+#   * preferably at the nearest line break, else at the nearest space/tab, within a bounded
+#     lookback - so the visible tail is not half a word and, since no marker contains
+#     whitespace, never half a marker;
+#   * otherwise exactly at the character boundary, with a half marker dropped explicitly.
+#
+# Returns the kept text (WITHOUT the `[truncated: ...]` note, which the caller appends), a
+# Truncated flag, and the kept / total UTF-8 byte counts of the redacted text.
+# --------------------------------------------------------------------------
+function Get-BoundedRedactedText {
+    param([string]$Text, [int]$MaxBytes)
+    if ($null -eq $Text) { $Text = '' }
+    $enc = [System.Text.Encoding]::UTF8
+    $total = $enc.GetByteCount($Text)
+    if ($MaxBytes -le 0 -or $total -le $MaxBytes) {
+        return [pscustomobject]@{ Text = $Text; Truncated = $false; KeptBytes = $total; TotalBytes = $total }
     }
-    return $Text
+
+    # Longest character prefix that fits the byte budget: the encoder converts as many WHOLE
+    # characters as fit into a MaxBytes-sized buffer and reports how many it consumed, so a
+    # multibyte character (or a surrogate pair) is never split.
+    $chars = $Text.ToCharArray()
+    $buffer = New-Object 'byte[]' $MaxBytes
+    $charsUsed = 0
+    $bytesUsed = 0
+    $completed = $false
+    $enc.GetEncoder().Convert($chars, 0, $chars.Length, $buffer, 0, $buffer.Length, $true,
+        [ref]$charsUsed, [ref]$bytesUsed, [ref]$completed)
+    $cut = $charsUsed
+    if ($cut -gt $chars.Length) { $cut = $chars.Length }
+    if ($cut -lt 0) { $cut = 0 }
+    # Defensive: never end on a lone high surrogate (a flushed encoder emits its fallback
+    # rather than consuming one, but the kept text must be well-formed regardless).
+    if ($cut -gt 0 -and [char]::IsHighSurrogate($chars[$cut - 1])) { $cut-- }
+
+    # Prefer a clean break (line break first, then space/tab) within the bounded lookback. The
+    # lookback is also capped at a quarter of the budget so a cosmetic break never throws away
+    # a meaningful share of a small --max-bytes.
+    $lookback = [Math]::Min($script:BreakLookback, [int][Math]::Ceiling($cut / 4))
+    $lookbackStart = [Math]::Max(0, $cut - $lookback)
+    $breakAt = -1
+    for ($i = $cut; $i -ge $lookbackStart; $i--) {
+        if ($i -lt $chars.Length -and $chars[$i] -eq "`n") { $breakAt = $i; break }
+    }
+    if ($breakAt -lt 0) {
+        for ($i = $cut; $i -ge $lookbackStart; $i--) {
+            if ($i -lt $chars.Length -and ($chars[$i] -eq ' ' -or $chars[$i] -eq "`t")) { $breakAt = $i; break }
+        }
+    }
+    if ($breakAt -ge 0) { $cut = $breakAt }
+
+    $kept = $Text.Substring(0, $cut)
+    # Never end on half a marker (cosmetic only - a marker's text is a category plus a hash,
+    # so a fragment of it carries no secret material, but a dangling `[redac` is noise).
+    $open = $kept.LastIndexOf('[')
+    if ($open -ge 0 -and $kept.IndexOf(']', $open) -lt 0 -and (Test-MarkerHead $kept.Substring($open))) {
+        $kept = $kept.Substring(0, $open)
+    }
+
+    return [pscustomobject]@{ Text = $kept; Truncated = $true; KeptBytes = $enc.GetByteCount($kept); TotalBytes = $total }
 }
 
 # --------------------------------------------------------------------------
@@ -293,14 +419,10 @@ function Invoke-Pipeline {
         return $report
     }
 
-    # 2. size cap (on bytes), then decode UTF-8.
-    $work = $Bytes
-    if ($MaxBytes -gt 0 -and $Bytes.Length -gt $MaxBytes) {
-        $report.truncated = $true
-        $work = New-Object 'byte[]' $MaxBytes
-        [System.Array]::Copy($Bytes, $work, $MaxBytes)
-    }
-    $text = [System.Text.Encoding]::UTF8.GetString($work)
+    # 2. decode the WHOLE input as UTF-8. The size bound is deliberately NOT applied here: it
+    #    runs in step 7, over the redacted text, so that a secret straddling the cut is matched
+    #    (and replaced) as a whole before anything is dropped (T-317).
+    $text = [System.Text.Encoding]::UTF8.GetString($Bytes)
 
     # 3. normalize line endings to LF and strip C0 control chars (except tab/LF).
     $text = $text -replace "`r`n", "`n" -replace "`r", "`n"
@@ -322,13 +444,22 @@ function Invoke-Pipeline {
         $text = [regex]::Replace($text, '(?i)\b(http|ftp)(s?)://', 'hxxp$2://')
     }
 
-    if ($report.truncated) {
-        $text = $text + "`n[truncated: original_bytes=$($Bytes.Length) kept_bytes=$MaxBytes sha256=$($report.raw_sha256)]"
+    # 6. substitute the opaque placeholders back to their final markers. This happens BEFORE
+    #    the size bound so the bound measures, and cuts, exactly the text that is emitted.
+    $text = Restore-Markers $state $text
+
+    # 7. size bound, applied to the redacted text; the drop is still recorded in the report and
+    #    in a visible note (which, like before, is appended beyond the budget so it can never
+    #    be the part that gets cut). `redacted_bytes` is what step 4/5 produced, `kept_bytes`
+    #    what is actually shown, so the two numbers stay comparable.
+    $bounded = Get-BoundedRedactedText -Text $text -MaxBytes $MaxBytes
+    if ($bounded.Truncated) {
+        $report.truncated = $true
+        $text = $bounded.Text + "`n[truncated: original_bytes=$($Bytes.Length) redacted_bytes=$($bounded.TotalBytes) kept_bytes=$($bounded.KeptBytes) sha256=$($report.raw_sha256)]"
     }
 
-    # 6. substitute the opaque placeholders back to their final markers, then derive the
-    #    report from what is actually visible in the output (authoritative, no double count).
-    $text = Restore-Markers $state $text
+    # 8. derive the report from what is actually visible in the output (authoritative, no
+    #    double count).
     $counts = [ordered]@{}
     $fingerprints = [System.Collections.Generic.List[string]]::new()
     foreach ($mk in [regex]::Matches($text, '\[redacted:(?<cat>[a-z0-9-]+):(?<fp>[0-9a-f]{8})\]')) {

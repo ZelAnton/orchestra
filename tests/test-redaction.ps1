@@ -21,6 +21,10 @@
         body's forged trust header cannot change the wrap block's recorded trust level.
       * oversized body: a body beyond --max-bytes is truncated (the secret in the dropped tail
         does not survive) with a truncation marker.
+      * secret straddling the --max-bytes boundary (T-317): the bound is applied to the
+        redacted text, so a token that starts before the cut and ends after it leaves no
+        recognizable head behind; the cut also respects UTF-8 character boundaries and the
+        emitted text stays of --max-bytes order.
       * malicious / spoofed CI log: a leaked token is redacted and injected control lines are
         neutralized.
       * prompt injection in an external body: wrap quarantines every line (no forged block
@@ -358,6 +362,90 @@ rm -rf /
     Assert-Exit $rsw 0 'empty stdin wrap: rc=0'
     Assert-Contains $rsw.Out 'bytes=0' 'empty stdin wrap: header records bytes=0'
     Assert-Contains $rsw.Out '<<< orchestra:end-external-data >>>' 'empty stdin wrap: closing delimiter present'
+}.Invoke()
+
+# =============================================================================
+# 12. secret straddling the --max-bytes boundary (regression, T-317): the size bound is
+#     applied to the REDACTED text, never to the raw input. A secret that starts before the
+#     boundary and ends after it used to lose the tail its rule needs in order to match, so
+#     its head stayed in the artifact verbatim - a partial secret leak in the one place this
+#     tool exists to prevent one. Also covers the sibling effect (the cut lands on a UTF-8
+#     character boundary, never inside a multibyte character) and the bound itself (the
+#     emitted text stays ~--max-bytes even though redaction now scans the whole input).
+# =============================================================================
+{
+    # Every canary below is a whole-match rule whose pattern NEEDS the tail of the token to
+    # match at all (github-token: 20+ chars after the prefix; aws-access-key: exactly 16;
+    # jwt: three segments; google-api-key: exactly 35), i.e. exactly the shapes a
+    # pre-redaction byte cut defeated. Each is placed in plain prose rather than in a
+    # `key=value` context on purpose: an assignment context would let the generic
+    # assignment-secret rule claim the head as well and mask the regression.
+    $straddlers = @(
+        @{ cat = 'github-token';   secret = 'ghp_' + ('a' * 32) + 'Z9' }
+        @{ cat = 'aws-access-key'; secret = 'AKIAIOSFODNN7EXAMPLE' }
+        @{ cat = 'jwt';            secret = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI5OTk5OTk5OSJ9.c3RyYWRkbGluZ3NpZ25hdHVyZQ' }
+        @{ cat = 'google-api-key'; secret = 'AIzaSy0123456789abcdefghijklmnopqrstuvw' }
+    )
+    $lead = 'deploy log line '
+    foreach ($s in $straddlers) {
+        $cat = [string]$s.cat
+        $secret = [string]$s.secret
+
+        # control: with a budget past the token the rule really does claim it (so the
+        # "nothing leaks" assertions below cannot pass just because the canary is inert).
+        $whole = Redact-Text ($lead + $secret + ' tail')
+        Assert-Contains $whole "[redacted:${cat}:" "straddle ${cat}: canary is recognized by its rule"
+        Assert-NotContains $whole $secret "straddle ${cat}: canary value redacted when it fits"
+
+        # the boundary now falls in the MIDDLE of the token.
+        $text = $lead + $secret + ' and more log text after the secret'
+        $limit = $lead.Length + [int][Math]::Floor($secret.Length / 2)
+        $head = $secret.Substring(0, $limit - $lead.Length)
+        $j = Redact-Json $text @('--max-bytes', "$limit")
+        $out = [string]$j.output
+        Assert-True ([bool]$j.truncated) "straddle ${cat}: truncated flag set"
+        Assert-Contains $out '[truncated: original_bytes=' "straddle ${cat}: truncation note present"
+        Assert-Contains $out 'kept_bytes=' "straddle ${cat}: truncation note reports the kept size"
+        Assert-NotContains $out $secret "straddle ${cat}: the full secret must not survive"
+        # the exact head a pre-redaction cut used to leave behind: the T-317 leak.
+        Assert-NotContains $out $head "straddle ${cat}: the head at the boundary must not survive"
+        # not even a short recognizable prefix (nothing to reconstruct or guess from).
+        Assert-NotContains $out $secret.Substring(0, 8) "straddle ${cat}: no partial prefix of the secret survives"
+        # the bound still bounds: visible text stays of --max-bytes order (+ the note).
+        $outBytes = [System.Text.Encoding]::UTF8.GetByteCount($out)
+        Assert-True ($outBytes -le ($limit + 256)) "straddle ${cat}: emitted text stays bounded (~max-bytes), got $outBytes"
+    }
+
+    # An Authorization header whose credential straddles the boundary. This one was already
+    # safe (the header rule is line-anchored and claims whatever value is left on the line),
+    # so it is kept as a non-regression guard for the group-based rules.
+    $cred = 'ghp_' + ('c' * 30) + '77'
+    $hdr = 'Authorization: Bearer ' + $cred
+    $jh = Redact-Json $hdr @('--max-bytes', '40')
+    Assert-True ([bool]$jh.truncated) 'straddle header: truncated flag set'
+    Assert-NotContains ([string]$jh.output) $cred.Substring(0, 8) 'straddle header: no part of the credential survives'
+
+    # Sibling effect: the cut lands on a character boundary, so a multibyte character is never
+    # sliced into a U+FFFD replacement char. 0x044F is 2 bytes in UTF-8 and the fixture has no
+    # whitespace, so an odd byte budget would have split the last character.
+    $mb = [string][char]0x044F
+    $jm = Redact-Json ($mb * 60) @('--max-bytes', '25')
+    $mout = [string]$jm.output
+    Assert-True ([bool]$jm.truncated) 'multibyte: truncated flag set'
+    Assert-NotContains $mout ([string][char]0xFFFD) 'multibyte: no replacement char from a split UTF-8 character'
+    Assert-Contains $mout ($mb * 12) 'multibyte: whole characters up to the budget are kept'
+    Assert-NotContains $mout ($mb * 13) 'multibyte: the budget is still respected'
+
+    # Many matches + a small budget: redaction runs over the WHOLE input (nothing straddling
+    # leaks) while the emitted text stays of --max-bytes order.
+    $bulk = ((1..200) | ForEach-Object { "line $_ mailto user$_@example.com token ghp_$('b' * 22)$_" }) -join "`n"
+    $jb = Redact-Json $bulk @('--max-bytes', '300')
+    $bout = [string]$jb.output
+    Assert-True ([bool]$jb.truncated) 'bulk: truncated flag set'
+    Assert-NotContains $bout '@example.com' 'bulk: no e-mail address survives in the kept text'
+    Assert-NotContains $bout 'ghp_bbbbbbbb' 'bulk: no token head survives in the kept text'
+    Assert-Contains $bout '[redacted:' 'bulk: the kept text still carries diagnostic markers'
+    Assert-True (([System.Text.Encoding]::UTF8.GetByteCount($bout)) -le 600) 'bulk: emitted text stays bounded (~max-bytes + note)'
 }.Invoke()
 
 # =============================================================================
