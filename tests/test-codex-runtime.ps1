@@ -1212,6 +1212,28 @@ function Stop-GcIfAlive {
         Assert-Equal 4 $r2.Json.usage.output_tokens 'usage(estimate): output estimated chars/4 from the -o message'
         Assert-Equal 9 $r2.Json.usage.total_tokens 'usage(estimate): total is the sum of the estimated components'
     }
+
+    # (c) K-048 regression: a zero-property JSON event ('{}') and a zero-property
+    # 'usage' object ('turn.completed' with usage:{}) must not throw under StrictMode
+    # (tools/codex-runtime.ps1 Read-UsageField / Get-CodexUsage) - usage capture stays
+    # best-effort and never affects control flow (the run still succeeds, exitCode 0).
+    $fake3 = New-FakeCodex
+    $promptFile3 = New-TempFile
+    [System.IO.File]::WriteAllText($promptFile3, 'implement the thing', $script:Utf8)
+    $jsonl3 = '{}' + "`n" +
+              '{"type":"turn.completed","usage":{}}' + "`n" +
+              '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+    $r3 = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake3, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', $promptFile3, '--emit-json'
+    ) -EnvVars @{ FAKE_CODEX_STDOUT = $jsonl3; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $r3.ExitCode 'usage(empty-object): a zero-property event/usage object does not crash the run'
+    Assert-True ($null -ne $r3.Json -and $null -ne $r3.Json.usage) 'usage(empty-object): result still carries a usage block'
+    if ($r3.Json -and $r3.Json.usage) {
+        Assert-Equal $false $r3.Json.usage.estimated 'usage(empty-object): the well-formed event still counts as actual usage'
+        Assert-Equal 10 $r3.Json.usage.input_tokens 'usage(empty-object): the zero-property usage object contributes zero, not an exception'
+        Assert-Equal 5 $r3.Json.usage.output_tokens 'usage(empty-object): output tokens parsed from the well-formed event'
+    }
 }.Invoke()
 
 # =============================================================================

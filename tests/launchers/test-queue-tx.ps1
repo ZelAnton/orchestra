@@ -493,6 +493,35 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Match $metadataText "Rejection reason: DEP:invalid predecessor '3' \(expected T-NNN\)" '[inbox-strict-preds] bare-number reason is audited'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 11e: K-048 regression — a zero-property JSON record ('{}') is ---
+    # quarantined like any other invalid record, not an unhandled StrictMode exception
+    # that aborts the whole drain (tools/queue-tx.ps1 Cmd-InboxDrain).
+    $W = New-Work
+    try {
+        $inbox = Join-Path $W 'queue_inbox'
+        New-Item -ItemType Directory -Force -Path $inbox | Out-Null
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText((Join-Path $inbox 'empty-object.json'), '{}', $utf8NoBom)
+        Run-Tool @('inbox-add', '--work', $W, '--title', 'Valid Alongside Empty Object', '--body', 'good') | Out-Null
+
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[inbox-empty-object] empty-object record does not crash the drain'
+        Assert-Match $r.Output 'rejected: empty-object\.json' '[inbox-empty-object] empty-object record is reported as rejected'
+        Assert-Match $r.Output 'added: T-001' '[inbox-empty-object] the other valid record in the same drain still lands'
+
+        $rejectedDir = Join-Path $inbox 'rejected'
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $inbox -Filter '*.json' -File).Count '[inbox-empty-object] hot inbox is fully drained'
+        $rejectedRecords = @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.json' -File)
+        $metadata = @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.metadata.txt' -File)
+        Assert-Equal 1 $rejectedRecords.Count '[inbox-empty-object] empty-object record retained in audit trail'
+        Assert-Equal 1 $metadata.Count '[inbox-empty-object] companion metadata retained'
+        $metadataText = [System.IO.File]::ReadAllText($metadata[0].FullName)
+        Assert-Match $metadataText 'Rejection reason: record is missing a non-empty "title" field' '[inbox-empty-object] rejection reason names the missing title field'
+
+        Assert-Equal 1 (Get-QueueIds $W).Count '[inbox-empty-object] only the valid record reaches the queue'
+        Assert-Match (Read-Queue $W) 'Valid Alongside Empty Object' '[inbox-empty-object] valid title preserved'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 12: concurrent writers, no lost update / no duplicate id --
     $W = New-Work
     try {

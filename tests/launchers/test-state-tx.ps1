@@ -290,6 +290,26 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
         Assert-True ($null -ne (Read-Lease $W)) '[corrupt] a valid lease exists after the forced acquire'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 10b: K-048 regression - a zero-property lease.json ('{}') is ---
+    # a documented "corrupt lease" (18), not an unhandled StrictMode exception
+    # (tools/state-tx.ps1 Lease-HasProp / Read-Lease).
+    $W = New-Work
+    try {
+        $lockDir = Join-Path $W 'orchestrator.lock'
+        New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $lockDir 'lease.json') -Value '{}' -Encoding utf8
+        $r = Run-Tool @('status', '--work', $W)
+        Assert-Equal 18 $r.ExitCode '[empty-lease] status on an empty-object lease reports 18'
+        Assert-Match $r.Output "missing field 'role'" '[empty-lease] status names the first missing field'
+        $r = Run-Tool @('verify', '--work', $W, '--require-root', $ROOT, '--require-role', 'processor')
+        Assert-Equal 18 $r.ExitCode '[empty-lease] verify refuses to adopt an empty-object lease (18)'
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT)
+        Assert-Equal 18 $r.ExitCode '[empty-lease] acquire refuses to overwrite an empty-object lease without --force'
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--force')
+        Assert-Equal 0 $r.ExitCode '[empty-lease] --force overwrites the empty-object lease'
+        Assert-True ($null -ne (Read-Lease $W)) '[empty-lease] a valid lease exists after the forced acquire'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 11: transition validation ---------------------------------
     $W = New-Work
     try {
