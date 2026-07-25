@@ -92,6 +92,7 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'CALL_MAX_ATTEMPTS'       'int'    '2'                                -Min 1)
         (New-ConfigKey 'CALL_OUTPUT_MAX_BYTES'   'int'    '1048576'                          -Min 1)
         (New-ConfigKey 'COHORT_BUDGET_SEC'       'int'    '0'                                -Min 0  -Sensitivity 'medium')
+        (New-ConfigKey 'COHORT_TOKEN_BUDGET'     'int'    '0'                                -Min 0  -Sensitivity 'high')
         (New-ConfigKey 'SMOKE_CMD'               'string' 'unset'                            -Sensitivity 'medium')
         (New-ConfigKey 'VERIFICATION_MODE'       'enum'   'disabled' -Enum @('auto', 'required', 'disabled') -Sensitivity 'high')
         (New-ConfigKey 'VERIFICATION_COMMANDS'   'json-string-array' 'unset'                  -Sensitivity 'high')

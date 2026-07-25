@@ -71,6 +71,7 @@ QUARANTINE_MAX_ATTEMPTS: 3
                                  #   сбое (таймаут/крэш), прежде чем эскалировать
 # CALL_OUTPUT_MAX_BYTES: 1048576 # предел объёма захватываемого вывода вызова (байт)
 # COHORT_BUDGET_SEC: 0           # общий бюджет стенных часов когорты (сек); 0 = без лимита
+# COHORT_TOKEN_BUDGET: 0         # фактические токены моделей на когорту; 0 = без лимита
 # SMOKE_CMD: npm test   # пример; по умолчанию smoke не запускается
 # VERIFICATION_MODE: disabled    # auto | required | disabled; по умолчанию (ключ не
                                  #   задан) — disabled: неконфигурированный проект не
@@ -137,6 +138,7 @@ REVIEWER_TIERING: true
 | `CALL_MAX_ATTEMPTS` | 2 |
 | `CALL_OUTPUT_MAX_BYTES` | 1048576 |
 | `COHORT_BUDGET_SEC` | 0 (без лимита) |
+| `COHORT_TOKEN_BUDGET` | 0 (без лимита) |
 | `SMOKE_CMD` | не задано (smoke не запускается) |
 | `VERIFICATION_MODE` | disabled |
 | `VERIFICATION_COMMANDS` | не задано (`SMOKE_CMD` используется как fallback) |
@@ -213,6 +215,16 @@ REVIEWER_TIERING: true
 - `COHORT_BUDGET_SEC` — общий бюджет стенных часов на всю когорту, в секундах; `0` = без
   лимита. При исчерпании бюджета supervisor не запускает следующий вызов (`budget`), а
   дедлайн отдельного вызова подрезается до остатка бюджета.
+- `COHORT_TOKEN_BUDGET` — потолок **фактически зафиксированных** токенов моделей на одну
+  когорту; `0` = без лимита. Перед каждым новым planner/coder/reviewer/model вызовом processor читает
+  deduplicated `usage.recorded` текущего `B-id`; значения `estimated=true` отображаются отдельно
+  и никогда не входят в этот гейт, а запись без явного `estimated=false` делает снимок
+  ненадёжным. При `actual_tokens >= limit` новые вызовы не стартуют, приём
+  защёлкивается с причиной `COHORT_TOKEN_BUDGET`, а незавершённые задачи безопасно эскалируются.
+  `tools/metrics.ps1 budget --work .work --batch-id <B-id> --json` показывает actual/estimated
+  расход, остаток и exhausted; перед использованием processor требует `status=ok` и
+  `sources.telemetry_reliable=true` (иначе fail-closed). Это read-only снимок, не reservation
+  и не предсказание стоимости.
 - `SMOKE_CMD` — команда быстрой проверки сборки/тестов, которую использует
   merger после каждого слияния и coder — при самопроверке. Для финального
   pre-push гейта это обратно совместимый fallback: если `VERIFICATION_COMMANDS`

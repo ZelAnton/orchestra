@@ -154,12 +154,78 @@ $estLines=@(
     (Event-Line s06 '2026-07-04T02:00:00Z' 'cohort.closed' B-4)
 )
 Write-Utf8 (Join-Path $estWork 'events.jsonl') (($estLines -join "`n")+"`n")
+Write-Utf8 (Join-Path $estWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000'
 $estRun=Invoke-Metrics @('aggregate','--work',$estWork,'--last','1','--json')
 Assert-Equal 0 $estRun.ExitCode 'estimated-usage fixture exits zero'
 if ($estRun.ExitCode -eq 0) {
     $estData=$estRun.Out|ConvertFrom-Json
     Assert-Equal 1200 $estData.cost_per_completed_task.tokens 'actual tokens exclude the estimated figure (never mixed)'
     Assert-Equal 9999 $estData.cost_per_completed_task.estimated_tokens 'estimated tokens are reported in their own field'
+    Assert-Equal 1000 $estData.token_budget.configured_tokens 'aggregate exposes the configured per-cohort token limit'
+    Assert-True $estData.token_budget.batches[0].exhausted 'aggregate shows actual spend has exhausted the configured budget'
+}
+
+$budgetRun=Invoke-Metrics @('budget','--work',$estWork,'--batch-id','B-4','--json')
+Assert-Equal 0 $budgetRun.ExitCode 'budget projection exits zero'
+if ($budgetRun.ExitCode -eq 0) {
+    $budgetData=$budgetRun.Out|ConvertFrom-Json
+    Assert-Equal 'ok' $budgetData.status 'configured budget is enabled'
+    Assert-Equal 1200 $budgetData.token_budget.actual_tokens 'budget uses actual usage only'
+    Assert-Equal 9999 $budgetData.token_budget.estimated_tokens 'budget keeps estimated usage separate'
+    Assert-Equal 0 $budgetData.token_budget.remaining_tokens 'exhausted budget has no remaining actual tokens'
+    Assert-True $budgetData.token_budget.exhausted 'actual usage at or above limit stops new calls'
+    Assert-True $budgetData.sources.telemetry_reliable 'well-formed enabled outbox telemetry is reliable'
+}
+
+$zeroWork=New-Fixture
+Write-Utf8 (Join-Path $zeroWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000'
+Write-Utf8 (Join-Path $zeroWork 'events.jsonl') ((Event-Line z01 '2026-07-04T03:00:00Z' 'cohort.opened' B-5)+"`n")
+$zeroBudget=Invoke-Metrics @('budget','--work',$zeroWork,'--batch-id','B-5','--json')
+Assert-Equal 0 $zeroBudget.ExitCode 'empty actual spend budget projection exits zero'
+if ($zeroBudget.ExitCode -eq 0) {
+    $zeroData=$zeroBudget.Out|ConvertFrom-Json
+    Assert-Equal 'ok' $zeroData.status 'well-formed empty spend telemetry is usable'
+    Assert-Equal 0 $zeroData.token_budget.actual_tokens 'no actual usage is an exact zero, not an unavailable value'
+    Assert-True (-not $zeroData.token_budget.exhausted) 'zero actual usage leaves budget open'
+}
+$zeroAggregate=Invoke-Metrics @('aggregate','--work',$zeroWork,'--last','1','--json')
+Assert-Equal 0 $zeroAggregate.ExitCode 'zero-spend aggregate exits zero'
+if ($zeroAggregate.ExitCode -eq 0) {
+    $zeroAggregateData=$zeroAggregate.Out|ConvertFrom-Json
+    Assert-Equal $null $zeroAggregateData.token_budget.batches[0].actual_tokens 'historical aggregate does not claim exact actual spending without usage records'
+    Assert-Equal $null $zeroAggregateData.token_budget.batches[0].exhausted 'historical aggregate does not claim an unknown budget is unexhausted'
+}
+
+$unsafeWork=New-Fixture
+Write-Utf8 (Join-Path $unsafeWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000'
+Write-Utf8 (Join-Path $unsafeWork 'events.jsonl') ((Event-Line x01 '2026-07-04T03:00:00Z' 'cohort.opened' B-6)+"`n{broken}`n")
+$unsafeBudget=Invoke-Metrics @('budget','--work',$unsafeWork,'--batch-id','B-6','--json')
+Assert-Equal 0 $unsafeBudget.ExitCode 'corrupt budget telemetry returns an explicit safe projection'
+if ($unsafeBudget.ExitCode -eq 0) {
+    $unsafeData=$unsafeBudget.Out|ConvertFrom-Json
+    Assert-Equal 'telemetry_unavailable' $unsafeData.status 'skipped JSONL makes an enabled spending gate fail closed'
+    Assert-True (-not $unsafeData.sources.telemetry_reliable) 'corrupt telemetry is explicitly unreliable'
+    Assert-Equal $null $unsafeData.token_budget.actual_tokens 'unsafe telemetry does not fabricate an actual total'
+}
+
+$unknownUsageWork=New-Fixture
+Write-Utf8 (Join-Path $unknownUsageWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000'
+Write-Utf8 (Join-Path $unknownUsageWork 'events.jsonl') ((Event-Line q01 '2026-07-04T03:00:00Z' 'usage.recorded' B-7 T-1 @{total_tokens=777})+"`n")
+$unknownUsageBudget=Invoke-Metrics @('budget','--work',$unknownUsageWork,'--batch-id','B-7','--json')
+Assert-Equal 0 $unknownUsageBudget.ExitCode 'unknown actual-shape budget projection exits zero'
+if ($unknownUsageBudget.ExitCode -eq 0) {
+    $unknownUsageData=$unknownUsageBudget.Out|ConvertFrom-Json
+    Assert-Equal 'telemetry_unavailable' $unknownUsageData.status 'missing estimated=false never becomes inferred actual spending'
+    Assert-Equal $null $unknownUsageData.token_budget.actual_tokens 'unknown actual-shape is not counted toward the spending gate'
+}
+
+Write-Utf8 (Join-Path $estWork 'config.md') "COHORT_TOKEN_BUDGET: 1000`nEVENTS_OUTBOX: off"
+$offBudget=Invoke-Metrics @('budget','--work',$estWork,'--batch-id','B-4','--json')
+Assert-Equal 0 $offBudget.ExitCode 'disabled outbox budget projection exits zero'
+if ($offBudget.ExitCode -eq 0) {
+    $offData=$offBudget.Out|ConvertFrom-Json
+    Assert-Equal 'telemetry_unavailable' $offData.status 'outbox-off prevents an enabled spending gate from guessing'
+    Assert-Equal 'off' $offData.sources.events_outbox 'projection exposes the outbox configuration'
 }
 
 $empty=New-Fixture; $emptyRun=Invoke-Metrics @('aggregate','--work',$empty,'--last','5')

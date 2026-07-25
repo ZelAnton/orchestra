@@ -137,10 +137,10 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 37 $schema.config.Count 'schema has 37 config keys'
+    Assert-Equal 38 $schema.config.Count 'schema has 38 config keys'
 
     # T-095: the publish-gate tuning keys and the CI-required-checks policy section exist.
-    foreach ($k in @('PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD')) {
+    foreach ($k in @('COHORT_TOKEN_BUDGET', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD')) {
         Assert-True ([bool]($schema.config | Where-Object { $_.name -eq $k })) "schema has publish-gate key $k"
     }
     # T-282: the opt-in linear-history publish key is a fail-closed-default bool.
@@ -166,9 +166,9 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
     Assert-Exit $r 0 'validate-config accepts a valid file (empty SMOKE_CMD = unset)'
 
-    Write-Utf8 $cfg "VERIFICATION_MODE: required`nVERIFICATION_COMMANDS: [`"git status --short`", `"echo #tag`"]`nNOTIFY_CMD: echo notification`n"
+    Write-Utf8 $cfg "VERIFICATION_MODE: required`nVERIFICATION_COMMANDS: [`"git status --short`", `"echo #tag`"]`nCOHORT_TOKEN_BUDGET: 10000`nNOTIFY_CMD: echo notification`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
-    Assert-Exit $r 0 'validate-config accepts a multi-command verification profile and notification command'
+    Assert-Exit $r 0 'validate-config accepts a multi-command profile, token budget and notification command'
 
     Write-Utf8 $cfg "VERIFICATION_COMMANDS: not-json`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)

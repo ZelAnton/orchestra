@@ -24,7 +24,8 @@
 //! * [`admission`] — cohort admission planning: readiness by prerequisite completion, packing of
 //!   non-overlapping conflict-domains, and the three empty-result reasons.
 //! * [`budget`] — the cohort budget / circuit-breaker gate (`COHORT_SIZE` / `COHORT_MAX_AGE` /
-//!   `COHORT_BUDGET_SEC`), sharing [`admission::CloseReason`]'s §13.2 close vocabulary.
+//!   `COHORT_BUDGET_SEC` / `COHORT_TOKEN_BUDGET`), sharing [`admission::CloseReason`]'s §13.2
+//!   close vocabulary.
 //!
 //! **Pure by construction.** Every function is a deterministic transformation of already-parsed
 //! inputs — no mutation, no I/O, no `claude`/`codex`/`state-tx`/`queue-tx` calls. Reading the
@@ -47,7 +48,10 @@ pub use admission::{
     is_ready, plan_admission, unmet_prerequisites, ActiveClass, ActiveTask, AdmissionOutcome,
     Candidate, CloseReason, Domain, EmptyReason,
 };
-pub use budget::{admission_gate, AdmissionGate, CohortCounters, CohortThresholds};
+pub use budget::{
+    admission_gate, token_budget_gate, AdmissionGate, CohortCounters, CohortThresholds,
+    TokenBudgetGate,
+};
 pub use coder::{
     network_need, route_coder, CoderRoute, CoderRouteInput, CodexCoder, Ecosystem, EnvLimitClass,
     NetworkNeed, StayClaude,

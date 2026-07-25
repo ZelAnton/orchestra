@@ -8,6 +8,7 @@
 .EXAMPLE
     pwsh -File tools/metrics.ps1 aggregate --work /abs/.work --last 5
     pwsh -File tools/metrics.ps1 aggregate --work /abs/.work --since 2026-07-01
+    pwsh -File tools/metrics.ps1 budget --work /abs/.work --batch-id B-20260725T120000Z --json
 .NOTES
     Exit codes: 0 success (including no data), 2 usage, 3 input read failure.
 #>
@@ -23,6 +24,81 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'events-common.ps1')
 $script:ErrPrefix = 'METRICSERR'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+
+function Get-CohortTokenBudget {
+    param([string]$Work)
+    $config = Join-Path $Work 'config.md'
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return [int64]0 }
+    $rx = '^\s*COHORT_TOKEN_BUDGET\s*:\s*([^#]*?)\s*(?:#.*)?$'
+    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
+        $match = [regex]::Match([string]$line, $rx)
+        if (-not $match.Success) { continue }
+        $raw = $match.Groups[1].Value.Trim()
+        if ($raw -notmatch '^\d+$') { Fail 2 "COHORT_TOKEN_BUDGET in config.md must be a non-negative integer" }
+        try { return [int64]$raw } catch { Fail 2 "COHORT_TOKEN_BUDGET in config.md is out of range" }
+    }
+    return [int64]0
+}
+
+function Get-EventsOutbox {
+    param([string]$Work)
+    $config = Join-Path $Work 'config.md'
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return 'on' }
+    $rx = '^\s*EVENTS_OUTBOX\s*:\s*([^#]*?)\s*(?:#.*)?$'
+    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
+        $match = [regex]::Match([string]$line, $rx)
+        if (-not $match.Success) { continue }
+        $value = $match.Groups[1].Value.Trim().ToLowerInvariant()
+        if ($value -notin @('on', 'off')) { Fail 2 "EVENTS_OUTBOX in config.md must be on or off" }
+        return $value
+    }
+    return 'on'
+}
+
+function Get-BatchUsage {
+    param($Events, [string]$BatchId)
+    $actual = 0.0; $estimated = 0.0; $actualObserved = $false; $estimatedObserved = $false
+    $actualEvents = 0; $estimatedEvents = 0; $actualComplete = $true
+    foreach ($record in $Events) {
+        if ([string](Get-Prop $record 'type') -ne 'usage.recorded') { continue }
+        if ([string](Get-Prop $record 'batch_id') -ne $BatchId) { continue }
+        $payload = Get-Prop $record 'payload'
+        $estimatedRaw = Get-Prop $payload 'estimated'
+        # An enabled safety gate must never silently classify an old/invalid usage shape as
+        # exact. Only an explicit boolean `estimated=false` counts toward actual spending.
+        if ($estimatedRaw -isnot [bool]) { $actualComplete = $false; continue }
+        $usage = Get-EventUsage $record
+        if ($usage.Estimated) {
+            if ($null -eq $usage.Total) { continue }
+            $estimated += $usage.Total; $estimatedObserved = $true; $estimatedEvents++
+        } else {
+            if ($null -eq $usage.Total -or $usage.Total -lt 0 -or $usage.Total -ne [Math]::Truncate([double]$usage.Total)) {
+                $actualComplete = $false; continue
+            }
+            $actual += $usage.Total; $actualObserved = $true; $actualEvents++
+        }
+    }
+    return [pscustomobject]@{
+        ActualTokens=$actual; ActualObserved=$actualObserved; ActualComplete=$actualComplete; ActualEvents=$actualEvents
+        EstimatedTokens=$estimated; EstimatedObserved=$estimatedObserved; EstimatedEvents=$estimatedEvents
+    }
+}
+
+function New-TokenBudgetView {
+    param([int64]$Budget, [string]$BatchId, $Usage, [bool]$TelemetryReliable = $true, [bool]$AssumeZeroActual = $false)
+    $actualKnown = $TelemetryReliable -and ($Usage.ActualObserved -or $AssumeZeroActual)
+    $actual = if ($actualKnown) { $Usage.ActualTokens } else { $null }
+    $estimated = if ($TelemetryReliable -and $Usage.EstimatedObserved) { $Usage.EstimatedTokens } else { $null }
+    $enabled = $Budget -gt 0
+    $exhausted = if (-not $enabled) { $false } elseif (-not $actualKnown) { $null } else { $Usage.ActualTokens -ge $Budget }
+    $remaining = if ($enabled -and $actualKnown) { [Math]::Max(0.0, [double]$Budget - $Usage.ActualTokens) } else { $null }
+    return [ordered]@{
+        batch_id = $BatchId; budget_tokens = if ($enabled) { $Budget } else { 0 }
+        actual_tokens = $actual; estimated_tokens = $estimated
+        actual_usage_events = $Usage.ActualEvents; estimated_usage_events = $Usage.EstimatedEvents
+        remaining_tokens = $remaining; exhausted = $exhausted
+    }
+}
 
 function Set-Earlier { param($Object, [string]$Name, $Value) if ($null -ne $Value -and ($null -eq $Object.$Name -or $Value -lt $Object.$Name)) { $Object.$Name = $Value } }
 function Set-Later { param($Object, [string]$Name, $Value) if ($null -ne $Value -and ($null -eq $Object.$Name -or $Value -gt $Object.$Name)) { $Object.$Name = $Value } }
@@ -234,6 +310,7 @@ function Cmd-Aggregate {
 
     $stream = Read-EventStream (Join-Path $work 'events.jsonl')
     $batches = @{}; Apply-Events $batches $stream.Events
+    $tokenBudget = Get-CohortTokenBudget $work
     $journalPresent = Apply-Journal $batches (Join-Path $work 'journal.md')
     $eventsStatus = if (-not $stream.Present) { 'missing' } elseif ($stream.Events.Count -eq 0) { 'empty' } else { 'ok' }
     $selected = @($batches.Values | Where-Object {
@@ -281,6 +358,12 @@ function Cmd-Aggregate {
     $estTokensPerTask=if ($estTokenObserved -and $completedTasks -gt 0) { [Math]::Round($estTokens/$completedTasks,2) } else { $null }
     $costPerTask=if ($costObserved -and $completedTasks -gt 0) { [Math]::Round($costUsd/$completedTasks,4) } else { $null }
 
+    $tokenBudgetBatches = @($selected | ForEach-Object {
+        New-TokenBudgetView -Budget $tokenBudget -BatchId $_.Id -Usage ([pscustomobject]@{
+            ActualTokens=$_.Tokens; ActualObserved=$_.TokenObserved; ActualComplete=$true; ActualEvents=0
+            EstimatedTokens=$_.EstimatedTokens; EstimatedObserved=$_.EstimatedTokenObserved; EstimatedEvents=0
+        })
+    })
     $result=[ordered]@{
         status='ok'; batches=$selected.Count; batch_ids=@($selected | ForEach-Object { $_.Id }); selector=$selector
         attempts=[ordered]@{ review_r=$rStat; fix_f=$fStat; ci=$ciStat }; lead_time_queue_to_verified_ms=$leadStat
@@ -288,6 +371,7 @@ function Cmd-Aggregate {
         quarantine=[ordered]@{ tasks=$quarantinedTotal; total_tasks=$taskTotal; share=if ($taskTotal -gt 0) { [Math]::Round($quarantinedTotal/[double]$taskTotal,4) } else { $null } }
         recovery=if ($interrupted -gt 0) { [ordered]@{ interruptions=$interrupted; recovered=$recovered; success_share=[Math]::Round($recovered/[double]$interrupted,4) } } else { $null }
         cost_per_completed_task=[ordered]@{ completed_tasks=$completedTasks; tokens=$tokensPerTask; estimated_tokens=$estTokensPerTask; usd=$costPerTask; available=($null -ne $tokensPerTask -or $null -ne $costPerTask) }
+        token_budget=[ordered]@{ configured_tokens=$tokenBudget; applies_per_cohort=$true; batches=$tokenBudgetBatches }
         sources=[ordered]@{ events_status=$eventsStatus; event_count=$stream.Events.Count; journal_present=[bool]$journalPresent; skipped_jsonl_lines=$stream.Invalid }
     }
     if ([bool](Opt 'json' $false)) { Write-Output ($result | ConvertTo-Json -Depth 10 -Compress); return }
@@ -303,9 +387,44 @@ function Cmd-Aggregate {
     Write-Output "| Recovery после прерывания | $(if ($interrupted -gt 0) {"$recovered / $interrupted"} else {'недоступно'}) | — | $(if ($interrupted -gt 0) {Format-Percent $recovered $interrupted} else {'недоступно'}) |"
     $costText=if ($null -ne $tokensPerTask) { "$(Format-Number $tokensPerTask) tokens/task" } elseif ($null -ne $costPerTask) { '$'+(Format-Number $costPerTask)+'/task' } elseif ($null -ne $estTokensPerTask) { "~$(Format-Number $estTokensPerTask) tokens/task (оценка)" } else { 'недоступно' }
     Write-Output "| Стоимость на завершённую задачу | $completedTasks | $costText | — |"
+    if ($tokenBudget -gt 0) {
+        $budgetLines = @($tokenBudgetBatches | ForEach-Object {
+            $actual = if ($null -eq $_.actual_tokens) { 'недоступно' } else { Format-Number $_.actual_tokens }
+            $remaining = Format-Number $_.remaining_tokens
+            "$($_.batch_id): actual=$actual / $tokenBudget · remaining=$remaining · exhausted=$($_.exhausted)"
+        })
+        Write-Output ('COHORT_TOKEN_BUDGET (per cohort): ' + ($budgetLines -join '; '))
+    } else {
+        Write-Output 'COHORT_TOKEN_BUDGET: disabled (0).'
+    }
     if ($eventsStatus -eq 'missing') { Write-Output 'Диагностика: events.jsonl отсутствует; доступны только fallback-поля journal.md.' }
     elseif ($eventsStatus -eq 'empty') { Write-Output 'Диагностика: events.jsonl пуст; доступны только fallback-поля journal.md.' }
     if ($stream.Invalid -gt 0) { Write-Output "Пропущено некорректных строк JSONL: $($stream.Invalid)" }
+}
+
+function Cmd-Budget {
+    $work = Require-Opt 'work'
+    $batchId = Require-Opt 'batch-id'
+    foreach ($key in $opts.Keys) { if (@('work','batch-id','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
+    if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
+    if ($batchId -notmatch '^B-\S+$') { Fail 2 '--batch-id must be a B-id' }
+
+    $stream = Read-EventStream (Join-Path $work 'events.jsonl')
+    $budget = Get-CohortTokenBudget $work
+    $outbox = Get-EventsOutbox $work
+    $usage = Get-BatchUsage -Events $stream.Events -BatchId $batchId
+    $telemetryReliable = [bool]$stream.Present -and $stream.Invalid -eq 0 -and $outbox -eq 'on' -and $usage.ActualComplete
+    $view = New-TokenBudgetView -Budget $budget -BatchId $batchId -Usage $usage -TelemetryReliable $telemetryReliable -AssumeZeroActual $telemetryReliable
+    $result = [ordered]@{
+        status = if ($budget -eq 0) { 'disabled' } elseif ($telemetryReliable) { 'ok' } else { 'telemetry_unavailable' }
+        schema = 'orchestra/cohort-token-budget@1'
+        token_budget = $view
+        sources = [ordered]@{ events_status=if (-not $stream.Present) { 'missing' } elseif ($stream.Events.Count -eq 0) { 'empty' } else { 'ok' }; events_outbox=$outbox; telemetry_reliable=$telemetryReliable; event_count=$stream.Events.Count; skipped_jsonl_lines=$stream.Invalid }
+    }
+    if ([bool](Opt 'json' $false)) { Write-Output ($result | ConvertTo-Json -Depth 8 -Compress); return }
+    $actual = if ($null -eq $view.actual_tokens) { 'unavailable' } else { Format-Number $view.actual_tokens }
+    $remaining = if ($null -eq $view.remaining_tokens) { 'n/a' } else { Format-Number $view.remaining_tokens }
+    Write-Output "Cohort token budget $($batchId): actual=$actual budget=$($view.budget_tokens) remaining=$remaining exhausted=$($view.exhausted)"
 }
 
 try {
@@ -320,7 +439,11 @@ try {
     }
     $Command = $parsed.Command
     $opts = $parsed.Opts
-    switch ($Command) { 'aggregate' { Cmd-Aggregate }; default { Fail 2 "unknown command '$Command'. Valid: aggregate" } }
+    switch ($Command) {
+        'aggregate' { Cmd-Aggregate }
+        'budget' { Cmd-Budget }
+        default { Fail 2 "unknown command '$Command'. Valid: aggregate, budget" }
+    }
 } catch {
     exit (Resolve-CatchExit $_ 'METRICSERR' 'metrics' 'METRICS_DEBUG')
 }

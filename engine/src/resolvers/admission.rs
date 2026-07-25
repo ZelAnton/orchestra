@@ -261,7 +261,7 @@ impl EmptyReason {
 }
 
 /// Every reason a cohort's admission can be latched **closed** — byte-for-byte the
-/// `Приём: закрыт · причина=<COHORT_SIZE|COHORT_MAX_AGE|очередь-пуста|только-конфликты-с-готовыми>`
+/// `Приём: закрыт · причина=<COHORT_SIZE|COHORT_MAX_AGE|COHORT_TOKEN_BUDGET|очередь-пуста|только-конфликты-с-готовыми>`
 /// vocabulary encoded in `state::cohort` / `state::canonical` (§13.2). Both the admission planner
 /// (via [`EmptyReason::to_close_reason`]) and the budget/circuit-breaker gate ([`super::budget`])
 /// speak this one vocabulary; neither invents a new word.
@@ -271,6 +271,8 @@ pub enum CloseReason {
     CohortSize,
     /// `COHORT_MAX_AGE` — the cohort's admission window (or wall-clock budget) elapsed.
     CohortMaxAge,
+    /// `COHORT_TOKEN_BUDGET` — actual observed model-token usage reached the operator limit.
+    CohortTokenBudget,
     /// `очередь-пуста` — no admissible not-started candidate remains.
     QueueEmpty,
     /// `только-конфликты-с-готовыми` — every remaining candidate overlaps a Phase-2-terminal domain.
@@ -283,6 +285,7 @@ impl CloseReason {
         match self {
             CloseReason::CohortSize => "COHORT_SIZE",
             CloseReason::CohortMaxAge => "COHORT_MAX_AGE",
+            CloseReason::CohortTokenBudget => "COHORT_TOKEN_BUDGET",
             CloseReason::QueueEmpty => "очередь-пуста",
             CloseReason::OnlyConflictsWithReady => "только-конфликты-с-готовыми",
         }
@@ -711,6 +714,10 @@ mod tests {
     fn close_reason_vocabulary_matches_section_13_2() {
         assert_eq!(CloseReason::CohortSize.as_str(), "COHORT_SIZE");
         assert_eq!(CloseReason::CohortMaxAge.as_str(), "COHORT_MAX_AGE");
+        assert_eq!(
+            CloseReason::CohortTokenBudget.as_str(),
+            "COHORT_TOKEN_BUDGET"
+        );
         assert_eq!(CloseReason::QueueEmpty.as_str(), "очередь-пуста");
         assert_eq!(
             CloseReason::OnlyConflictsWithReady.as_str(),

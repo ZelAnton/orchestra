@@ -19,7 +19,7 @@ pub struct CohortState {
     pub admission: Option<CohortAdmission>,
     /// The raw `Приём:` literal, when present.
     pub admission_literal: Option<String>,
-    /// `причина=<COHORT_SIZE|COHORT_MAX_AGE|очередь-пуста|только-конфликты-с-готовыми>` on close.
+    /// `причина=<COHORT_SIZE|COHORT_MAX_AGE|COHORT_TOKEN_BUDGET|очередь-пуста|только-конфликты-с-готовыми>` on close.
     pub admission_reason: Option<String>,
     pub started_at: Option<String>,
     pub wave: Option<u32>,

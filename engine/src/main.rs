@@ -76,7 +76,7 @@ use std::time::Duration;
 
 use orchestra_engine::claude::{ClaudeCall, PermissionPosture};
 use orchestra_engine::codex::{CodexCall, Sandbox};
-use orchestra_engine::events::TailReader;
+use orchestra_engine::events::{EventType, TailReader};
 use orchestra_engine::lease::{self, exit as lease_exit, AcquireVerdict, LeaseOp};
 use orchestra_engine::resolvers::{
     admission_gate, base_reviewer, is_ready, plan_admission, unmet_prerequisites, ActiveClass,
@@ -459,7 +459,16 @@ fn cmd_plan(args: &[String]) {
     let snap = Snapshot::load(&work);
     let cfg = PlanConfig::load(&work);
     let completed = completed_ids(Path::new(&work), &snap);
-    print!("{}", render_plan(&snap, &cfg, &completed, now_epoch_secs()));
+    let usage = batch_usage(
+        Path::new(&work),
+        snap.cohort
+            .as_ref()
+            .and_then(|cohort| cohort.batch_id.as_deref()),
+    );
+    print!(
+        "{}",
+        render_plan(&snap, &cfg, &completed, now_epoch_secs(), usage)
+    );
 }
 
 /// The config keys the dry-run needs (parsed read-only from `.work/config.md`, with the documented
@@ -468,6 +477,16 @@ struct PlanConfig {
     max_parallel: u32,
     reviewer_tiering: bool,
     thresholds: CohortThresholds,
+}
+
+/// Actual/estimated usage reconstructed from deduplicated `usage.recorded` events for the active
+/// batch. This read-only snapshot feeds the pure token-budget resolver; malformed/missing event
+/// data is simply unavailable rather than treated as an instruction or a durable mutation.
+#[derive(Debug, Clone, Copy, Default)]
+struct BatchUsage {
+    actual_tokens: u64,
+    estimated_tokens: u64,
+    actual_observed: bool,
 }
 
 impl PlanConfig {
@@ -479,6 +498,8 @@ impl PlanConfig {
         let max_age_minutes = config_u64(&text, "COHORT_MAX_AGE").unwrap_or(90);
         // COHORT_BUDGET_SEC: 0 (or absent) = no budget circuit-breaker.
         let budget_sec = config_u64(&text, "COHORT_BUDGET_SEC").filter(|&b| b > 0);
+        // COHORT_TOKEN_BUDGET: 0 (or absent) = no actual-token circuit-breaker.
+        let token_budget = config_u64(&text, "COHORT_TOKEN_BUDGET").filter(|&b| b > 0);
         let reviewer_tiering = config_bool(&text, "REVIEWER_TIERING").unwrap_or(true);
         PlanConfig {
             max_parallel,
@@ -487,6 +508,7 @@ impl PlanConfig {
                 size,
                 max_age_minutes,
                 budget_sec,
+                token_budget,
             },
         }
     }
@@ -499,6 +521,7 @@ fn render_plan(
     cfg: &PlanConfig,
     completed: &BTreeSet<String>,
     now_epoch: u64,
+    usage: BatchUsage,
 ) -> String {
     let mut s = String::new();
     let _ = writeln!(
@@ -547,7 +570,19 @@ fn render_plan(
                 admitted_total: admitted,
                 age_minutes: elapsed_sec.unwrap_or(0) / 60,
                 elapsed_sec: elapsed_sec.unwrap_or(0),
+                actual_tokens: usage.actual_tokens,
             };
+            let _ = writeln!(
+                s,
+                "Token usage: actual={}{} · estimated={}",
+                usage.actual_tokens,
+                if usage.actual_observed {
+                    ""
+                } else {
+                    " (unavailable)"
+                },
+                usage.estimated_tokens
+            );
             let _ = write!(s, "Budget/circuit-breaker gate: ");
             match admission_gate(counters, cfg.thresholds) {
                 AdmissionGate::Continue => {
@@ -562,10 +597,18 @@ fn render_plan(
                 .budget_sec
                 .map(|b| b.to_string())
                 .unwrap_or_else(|| "0".to_string());
+            let token_budget_disp = cfg
+                .thresholds
+                .token_budget
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "0".to_string());
             let _ = writeln!(
                 s,
-                "  [COHORT_SIZE={}, COHORT_MAX_AGE={}m, COHORT_BUDGET_SEC={}]",
-                cfg.thresholds.size, cfg.thresholds.max_age_minutes, budget_disp
+                "  [COHORT_SIZE={}, COHORT_MAX_AGE={}m, COHORT_BUDGET_SEC={}, COHORT_TOKEN_BUDGET={}]",
+                cfg.thresholds.size,
+                cfg.thresholds.max_age_minutes,
+                budget_disp,
+                token_budget_disp
             );
         }
         None => {
@@ -728,6 +771,67 @@ fn render_plan(
     );
     let _ = writeln!(s, "      + known active-task domains only.");
     s
+}
+
+/// Sum the active batch's deduplicated `usage.recorded` payloads. `total_tokens` is canonical;
+/// a components-only historical event is accepted as a forward-compatible fallback. `estimated`
+/// never contributes to the spending gate, but is displayed separately to avoid a false exactness.
+fn batch_usage(work: &Path, batch_id: Option<&str>) -> BatchUsage {
+    let Some(batch_id) = batch_id else {
+        return BatchUsage::default();
+    };
+    let mut reader = TailReader::new(work.join("events.jsonl"));
+    let events = match reader.poll() {
+        Ok(events) => events,
+        Err(_) => return BatchUsage::default(),
+    };
+    let mut usage = BatchUsage::default();
+    for event in events {
+        if event.event_type != EventType::UsageRecorded
+            || event.batch_id.as_deref() != Some(batch_id)
+        {
+            continue;
+        }
+        let Some(tokens) = usage_total_tokens(&event.payload) else {
+            continue;
+        };
+        let Some(estimated) = event
+            .payload
+            .get("estimated")
+            .and_then(|value| value.as_bool())
+        else {
+            // The admission contract counts only an explicitly exact (`estimated=false`)
+            // figure. A historical/invalid unknown must not become an invented actual total.
+            continue;
+        };
+        if estimated {
+            usage.estimated_tokens = usage.estimated_tokens.saturating_add(tokens);
+        } else {
+            usage.actual_tokens = usage.actual_tokens.saturating_add(tokens);
+            usage.actual_observed = true;
+        }
+    }
+    usage
+}
+
+fn usage_total_tokens(payload: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+    if let Some(total) = payload.get("total_tokens").and_then(|value| value.as_u64()) {
+        return Some(total);
+    }
+    let mut total = 0_u64;
+    let mut found = false;
+    for key in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ] {
+        if let Some(value) = payload.get(key).and_then(|value| value.as_u64()) {
+            total = total.saturating_add(value);
+            found = true;
+        }
+    }
+    found.then_some(total)
 }
 
 /// Parse a `YYYY-MM-DDTHH:MM:SS` UTC timestamp (as `cohort_state.md` `Начало когорты:` writes;

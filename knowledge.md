@@ -1122,7 +1122,19 @@ codex-правилами выше (см. «Резолвинг раннеров `
   использует этот `attempts` как координату `attempt_number`, поэтому реальный retry не
   дедуплицируется с первой попыткой.
   `status.md` показывает дедуплицированный running total текущей когорты, `journal.md` —
-  итог батча; сбои всей этой телеметрии никогда не меняют control-flow.
+  итог батча; сбои этой наблюдательной телеметрии никогда не меняют control-flow, кроме
+  включённого enforceable-token-gate ниже.
+- **Токенный circuit-breaker когорты (T-309).** `COHORT_TOKEN_BUDGET: 0` отключён по
+  умолчанию; при `>0` `tools/metrics.ps1 budget --batch-id <B-id>` dedup-ит
+  `usage.recorded` и считает только явное `estimated=false`. Перед каждым новым model call processor
+  читает этот снимок и требует `status=ok` + `telemetry_reliable=true`: `actual >= limit` — это post-charge граница (без reservation), поэтому
+  уже идущий вызов может пересечь лимит, но следующий не запускается. При лимите или
+  unreadable/missing telemetry processor guarded-закрывает admission как
+  `COHORT_TOKEN_BUDGET`, эскалирует незавершённые задачи без retry/quarantine и фиксирует
+  actual/limit/remaining безопасными scalar-полями; estimated остаётся отдельной наблюдаемой
+  величиной. Чистая Rust-функция `token_budget_gate` в `engine/src/resolvers/budget.rs` разделяет
+  enforcement от read-only projection, а `orchestra-engine plan --dry-run` отображает тот же
+  batch-local счётчик и решение.
 - **Каждый init-коммит нового jj workspace должен быть описан немедленно, не
   реактивно.** `jj workspace add -r <rev>` создаёт пустой рабочекопийный коммит без
   описания; ничто не описывает его автоматически позже (merger описывает только

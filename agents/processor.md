@@ -136,6 +136,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `MAX_PARALLEL` | 5 | Фаза 2 — сколько задач когорты исполняется одновременно |
 | `COHORT_SIZE` | 3×`MAX_PARALLEL` | Фаза 2.0/2.9 — сколько задач максимум принять в одну когорту, прежде чем закрыть приём (см. «Роллинг-приём когорты») |
 | `COHORT_MAX_AGE` | 90 (минут) | Фаза 2.0/2.9 — сколько времени с начала когорты держать приём открытым (см. «Роллинг-приём когорты») |
+| `COHORT_TOKEN_BUDGET` | 0 (без лимита) | Фазы 0.3b/2 — фактические `usage.recorded` токены на один `B-id`; на лимите новых model calls нет, а приём закрывается как `COHORT_TOKEN_BUDGET` |
 | `MAIN_BRANCH` | (автоопределение) | «Определение VCS» — ветка/bookmark публикации; переопредели для проектов, где транк не `main`/`master` (напр. `develop`, `trunk`) |
 | `REVIEW_MIN_PASSES` | 2 | передаётся reviewer/reviewer_std на первом цикле, а также full_reviewer (Фаза 5.1) |
 | `REVIEW_LOOP_MAX` | 8 | Фаза 2 (2.4–2.8) — цикл ревью задачи |
@@ -505,7 +506,7 @@ planner создаёт `task.md` (описание, критерии, план, 
 ```
 # Cohort state — Batch <B-id>
 Начало когорты: <UTC ts>
-Приём: открыт | закрыт · причина=<COHORT_SIZE|COHORT_MAX_AGE|очередь-пуста|только-конфликты-с-готовыми>
+Приём: открыт | закрыт · причина=<COHORT_SIZE|COHORT_MAX_AGE|COHORT_TOKEN_BUDGET|очередь-пуста|только-конфликты-с-готовыми>
 Волна: N
 Admitted всего: M
 ```
@@ -564,8 +565,8 @@ append-only инварианта `batch.md`. Подробности — «Рол
 ## `$WORK/journal.md` (append-only, пишешь в конце каждой когорты — Фаза 6)
 ```
 ## Batch <B-id> — <дата начала> → <дата конца>
-- База: <SHA>; задач в когорте: N (волн приёма: W); MAX_PARALLEL=<k> COHORT_SIZE=<s> COHORT_MAX_AGE=<a>м
-- Приём закрыт: <причина=COHORT_SIZE|COHORT_MAX_AGE|очередь-пуста|только-конфликты-с-готовыми>
+- База: <SHA>; задач в когорте: N (волн приёма: W); MAX_PARALLEL=<k> COHORT_SIZE=<s> COHORT_MAX_AGE=<a>м COHORT_TOKEN_BUDGET=<0|N>
+- Приём закрыт: <причина=COHORT_SIZE|COHORT_MAX_AGE|COHORT_TOKEN_BUDGET|очередь-пуста|только-конфликты-с-готовыми>
 - [T-014] волна=1 · уровень=coder · исполнитель=coder · ревью=reviewer · циклов ревью=2 (1-й прогон нашёл=2, фикс-циклы=1) · diff=<файлов>/<±строк> · merged=<SHA>
 - [T-017] волна=2 · уровень=coder_fast · исполнитель=codex→Claude(fallback) · ревью=reviewer_std · циклов ревью=1 · diff=<…> · quarantined=<причина> (попытка=N)
 - Интеграционных F-циклов: 1 (F- всего: M)
@@ -901,7 +902,10 @@ bookmark сверх BASE), **не** на существовании ветки: 
    - `$WORK/cohort_state.md` **есть** → прочитай `Приём`/`Волна`/`Admitted всего`/
      `Начало когорты`. **Не доверяй сохранённому «открыт» слепо** — краш мог случиться
      ровно на границе закрытия: заново проверь условия (`Admitted всего` ≥
-     `COHORT_SIZE`? прошло ли `COHORT_MAX_AGE` минут с `Начало когорты`? предыдущий
+     `COHORT_SIZE`? прошло ли `COHORT_MAX_AGE` минут с `Начало когорты`? при
+     `COHORT_TOKEN_BUDGET>0` вернул ли `tools/metrics.ps1 budget --work "$WORK" --batch-id
+     "<B-id>" --json` `exhausted=true` **либо** `status!=ok`/
+     `sources.telemetry_reliable!=true`? предыдущий
      раунд уже получил от planner причину `очередь-пуста` или
      `только-конфликты-с-готовыми`?) — если любое из них истинно, перепиши
      `Приём: закрыт · причина=<…>`. Иначе оставь открытым.
@@ -1225,6 +1229,38 @@ Supervisor не мутирует очередь, аренду или outbox; о�
 их после возврата при ошибке. Устойчивость всего пути покрыта `tools/harness.ps1`
 (git+jj, fault injection после каждого критического перехода).
 
+### Токенный budget когорты (`COHORT_TOKEN_BUDGET`)
+
+`COHORT_TOKEN_BUDGET: 0` сохраняет прежнее неограниченное поведение. При значении `>0`
+**до первого model call каждого раунда (включая planner) и непосредственно перед каждым** запуском
+coder/reviewer/fix/full-reviewer (Claude `Agent(...)`, `coder_codex`/`reviewer_codex` или
+другой provider adapter) выполни ровно read-only снимок:
+
+```text
+pwsh -File <resolved metrics.ps1> budget --work "$WORK" --batch-id "<B-id>" --json
+```
+
+Продолжай только при `status=ok` и `sources.telemetry_reliable=true`; доверяй только
+`token_budget.actual_tokens`, `remaining_tokens`, `exhausted` и безопасным scalar diagnostics.
+`estimated_tokens` **никогда** не подмешивай в actual и не используй как гейт. Снимок dedup-ит
+`usage.recorded` по `event_id` и считает только явное `estimated=false`.
+Это post-charge ceiling, не reservation: один уже запущенный вызов может пересечь лимит, но
+после durable записи этого usage следующий model call не стартует. Не создавай отдельный
+poller и не читай JSONL вручную.
+
+Если `exhausted=true`, либо при включённом лимите снимок нельзя надёжно получить
+(`status=telemetry_unavailable`, `events_status=missing`, `skipped_jsonl_lines>0`/ошибка
+чтения, включая `EVENTS_OUTBOX: off`), **не** запускай
+planner, coder, reviewer, fix или CI-fix/model fallback. Если приём ещё открыт, защёлкни его
+guarded переходом `open → closed` как `причина=COHORT_TOKEN_BUDGET` и допиши одно
+`cohort.admission_closed`. Каждую задачу в `в работе`/`на ревью` доведи через обычный
+`check-transition` + `queue-tx escalate` до `эскалирована` с короткой classifier-derived
+причиной `COHORT_TOKEN_BUDGET actual=<N> limit=<N>` (или `telemetry-unavailable`), эмить
+`task.status_changed`, а затем вызови `NOTIFY_CMD` по уже заданному правилу `task.escalated`.
+В `status.md`/`journal.md` укажи actual/limit/remaining и факт safe halt; не записывай raw
+output. Это терминальная граница текущей когорты, не retry и не quarantine: после
+персистентных эскалаций переходи к её обычному join/cleanup пути.
+
 2.0. **Гейт паузы (начало раунда).** Прежде чем компоновать и отправлять сообщение
 этого раунда (top-up planner / реализация / фиксы / повторные ревью — в т.ч.
 предзапуск top-up следующего раунда из 2.8), проверь `$WORK/PAUSE` (см. «Пауза»): при
@@ -1292,10 +1328,11 @@ KB=<on|off>.` Planner уже сам исключает T-ID активных з�
    `cohort_state.md`) — выполни 1.5/1.6 (`git worktree prune`, создание worktree **от
    `База:` из `batch.md`, не от текущего `main`**, `executor` метит захват), допиши
    строку в `batch.md` с `волна=<K>` (не создавай файл заново — **дописывай**). После
-   доборки — если приём ещё открыт — проверь закрытие по **размеру/возрасту**:
+   доборки — если приём ещё открыт — проверь закрытие по **размеру/возрасту/actual-token budget**:
    `Admitted всего` (обнови счётчик) ≥ `COHORT_SIZE`, или прошло `COHORT_MAX_AGE`
-   минут с `Начало когорты` → `Приём: закрыт · причина=COHORT_SIZE` /
-   `· причина=COHORT_MAX_AGE` соответственно. Иначе бампни `Волна` на случай
+   минут с `Начало когорты`, или `COHORT_TOKEN_BUDGET>0` и metrics snapshot исчерпан →
+   `Приём: закрыт · причина=COHORT_SIZE` / `· причина=COHORT_MAX_AGE` /
+   `· причина=COHORT_TOKEN_BUDGET` соответственно. Иначе бампни `Волна` на случай
    следующей доборки и оставь `Приём: открыт`. **Гард перехода:** при **любом** защёлкивании
    `Приём: закрыт · причина=<…>` в этом раунде (по размеру/возрасту здесь, либо
    `очередь-пуста`/`только-конфликты-с-готовыми` выше) — до записи сверь
@@ -2876,7 +2913,7 @@ crash-safe персистентного состояния ради того, ч
 - `cohort.opened`: `{ "base": "<SHA>", "wave": 1, "tasks": ["T-…"], "max_parallel": N, "cohort_size": S, "cohort_max_age": A }`
 - `cohort.round_started`: `{ "wave": K, "active": N, "free_slots": M }`
 - `cohort.round_closed`: `{ "wave": K, "admission": "open"|"closed" }`
-- `cohort.admission_closed`: `{ "reason": "COHORT_SIZE|COHORT_MAX_AGE|очередь-пуста|только-конфликты-с-готовыми", "admitted_total": M, "waves": W }`
+- `cohort.admission_closed`: `{ "reason": "COHORT_SIZE|COHORT_MAX_AGE|COHORT_TOKEN_BUDGET|очередь-пуста|только-конфликты-с-готовыми", "admitted_total": M, "waves": W }`
 - `cohort.join_started`: `{ "ready_tasks": ["T-…"] }`
 - `cohort.published`: `{ "main_sha": "<SHA>", "pushed": true|false, "tasks": ["T-…"], "ci": "confirmed"|"unconfirmed-degraded"|"disabled" }` (поле `ci` — исход CI-гейта Фазы 5.4: `confirmed` — весь обязательный набор зелёный на опубликованном SHA; `unconfirmed-degraded` — CI не подтверждён за дедлайн/недоступен, задачи **не** заархивированы; `disabled` — `PUSH:false`/`CI_WATCH:false`)
 - `cohort.closed`: `{ "merged": N, "quarantined": N, "escalated": N }`
@@ -3165,8 +3202,8 @@ risk-классификацию и парковку задач до решени
 
 # Финальный отчёт (в чат)
 
-- Размер когорты (по волнам приёма, из `cohort_state.md`), причина закрытия приёма
-  (`COHORT_SIZE`/`COHORT_MAX_AGE`/очередь-пуста/только-конфликты-с-готовыми),
+- Размер когорты (по волнам, из `cohort_state.md`), причина закрытия приёма
+  (`COHORT_SIZE`/`COHORT_MAX_AGE`/`COHORT_TOKEN_BUDGET`/очередь-пуста/только-конфликты-с-готовыми),
   исполнители (fast/coder/deep),
   уровень ревью каждой (tiered/full).
 - Сколько слито через merger, сколько re-queued (карантин, с номером попытки) /

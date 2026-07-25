@@ -368,6 +368,12 @@ Assert-Contains $r.Out 'OK   .work/config.md: no unknown/mistyped keys' 'config:
 Remove-Case $c
 
 $c = New-Case
+Set-Config $c 'COHORT_TOKEN_BUDGET: 12000'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'OK   .work/config.md: no unknown/mistyped keys' 'config: COHORT_TOKEN_BUDGET is a recognized bounded spend key'
+Remove-Case $c
+
+$c = New-Case
 $r = Invoke-Doctor -Case $c
 Assert-Contains $r.Out 'OK   .work/config.md not found - verification is disabled by default' 'config: missing config.md defaults verification to disabled, not blocked'
 Remove-Case $c

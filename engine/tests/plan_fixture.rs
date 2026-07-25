@@ -81,7 +81,7 @@ fn run_plan(work: &PathBuf, extra: &[&str]) -> std::process::Output {
 fn seed(w: &TmpWork) {
     w.write(
         "config.md",
-        "MAX_PARALLEL: 5\nREVIEWER_TIERING: true\n# COHORT_SIZE and COHORT_MAX_AGE left as defaults\n",
+        "MAX_PARALLEL: 5\nREVIEWER_TIERING: true\nCOHORT_MAX_AGE: 999999\nCOHORT_TOKEN_BUDGET: 1000\n# COHORT_SIZE left as default\n",
     );
     w.write(
         "Tasks_Done.md",
@@ -105,6 +105,13 @@ fn seed(w: &TmpWork) {
         "batch.md",
         "# Batch B-1\nБаза: abc123\n## Задачи\n- [T-106] уровень=coder_deep ветка=task/T-106 домен=engine/src/state/** волна=1\n",
     );
+    w.write(
+        "events.jsonl",
+        r#"{"schema_version":1,"event_id":"usage-actual","occurred_at":"2026-07-11T11:40:00Z","type":"usage.recorded","batch_id":"B-1","task_id":"T-106","actor":{"kind":"agent","name":"processor"},"payload":{"source":"codex","total_tokens":1000,"estimated":false}}
+{"schema_version":1,"event_id":"usage-estimate","occurred_at":"2026-07-11T11:40:01Z","type":"usage.recorded","batch_id":"B-1","task_id":"T-106","actor":{"kind":"agent","name":"processor"},"payload":{"source":"codex","total_tokens":9999,"estimated":true}}
+{"schema_version":1,"event_id":"usage-unknown","occurred_at":"2026-07-11T11:40:02Z","type":"usage.recorded","batch_id":"B-1","task_id":"T-106","actor":{"kind":"agent","name":"processor"},"payload":{"source":"codex","total_tokens":777}}
+"#,
+    );
 }
 
 #[test]
@@ -123,7 +130,16 @@ fn dry_run_prints_gate_admission_plan_and_reviewer_tier() {
     assert!(stdout.contains("admitted=1"), "{stdout}");
     assert!(stdout.contains("Budget/circuit-breaker gate:"), "{stdout}");
     assert!(stdout.contains("COHORT_SIZE=15"), "{stdout}");
-    assert!(stdout.contains("COHORT_MAX_AGE=90m"), "{stdout}");
+    assert!(stdout.contains("COHORT_MAX_AGE=999999m"), "{stdout}");
+    assert!(stdout.contains("COHORT_TOKEN_BUDGET=1000"), "{stdout}");
+    assert!(
+        stdout.contains("Token usage: actual=1000 · estimated=9999"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("close admission · причина=COHORT_TOKEN_BUDGET"),
+        "{stdout}"
+    );
 
     // Active task T-106: really-active class, coder_deep -> reviewer tier (T-105 base_reviewer).
     assert!(
