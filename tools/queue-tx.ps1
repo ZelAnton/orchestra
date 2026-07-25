@@ -1144,8 +1144,15 @@ function Cmd-InboxDrain {
             $maxIdBefore = [int]$maxId.Value
             try {
                 $recPreds = @()
-                if (($rec.PSObject.Properties.Name -contains 'predecessors') -and $rec.predecessors) {
-                    $recPreds = @($rec.predecessors | ForEach-Object { [int]([regex]::Match([string]$_, '\d+').Value) })
+                if ($rec.PSObject.Properties.Name -contains 'predecessors') {
+                    $recPreds = @($rec.predecessors | ForEach-Object {
+                        $token = [string]$_
+                        $match = [regex]::Match($token, '^T-0*(\d+)$')
+                        if (-not $match.Success) {
+                            throw "DEP:invalid predecessor '$token' (expected T-NNN)"
+                        }
+                        [int]$match.Groups[1].Value
+                    })
                 }
                 $nt = Add-Proposal $paths $state ([string]$rec.title) $recBody $recPreds 0 $false $known $maxId
                 [void]$added.Add($nt.IdStr); [void]$consume.Add($e.FullName)
