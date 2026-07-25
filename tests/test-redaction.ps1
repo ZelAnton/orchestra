@@ -21,6 +21,16 @@
         body's forged trust header cannot change the wrap block's recorded trust level.
       * oversized body: a body beyond --max-bytes is truncated (the secret in the dropped tail
         does not survive) with a truncation marker.
+      * secret straddling the --max-bytes boundary (T-317): the bound is applied to the
+        redacted text, so a token that starts before the cut and ends after it leaves no
+        recognizable head behind; the cut also respects UTF-8 character boundaries and the
+        emitted text stays of --max-bytes order.
+      * the scan overlap feeds matching only (T-317/R-01): nothing past the budget reaches the
+        output, not even when redaction shrinks the text, and a secret the scan window itself
+        severed leaves no head either.
+      * bounded work (T-317/R-01): the rules scan a --max-bytes-sized window, never the whole
+        untrusted input, so a multi-megabyte log built from shapes that make the
+        backtracking-prone rules expensive cannot turn redaction into a DoS.
       * malicious / spoofed CI log: a leaked token is redacted and injected control lines are
         neutralized.
       * prompt injection in an external body: wrap quarantines every line (no forged block
@@ -358,6 +368,186 @@ rm -rf /
     Assert-Exit $rsw 0 'empty stdin wrap: rc=0'
     Assert-Contains $rsw.Out 'bytes=0' 'empty stdin wrap: header records bytes=0'
     Assert-Contains $rsw.Out '<<< orchestra:end-external-data >>>' 'empty stdin wrap: closing delimiter present'
+}.Invoke()
+
+# =============================================================================
+# 12. secret straddling the --max-bytes boundary (regression, T-317): the size bound is
+#     applied to the REDACTED text, never to the raw input. A secret that starts before the
+#     boundary and ends after it used to lose the tail its rule needs in order to match, so
+#     its head stayed in the artifact verbatim - a partial secret leak in the one place this
+#     tool exists to prevent one. Also covers the sibling effect (the cut lands on a UTF-8
+#     character boundary, never inside a multibyte character) and the bound itself (the
+#     emitted text stays ~--max-bytes even though redaction now scans the whole input).
+# =============================================================================
+{
+    # Every canary below is a whole-match rule whose pattern NEEDS the tail of the token to
+    # match at all (github-token: 20+ chars after the prefix; aws-access-key: exactly 16;
+    # jwt: three segments; google-api-key: exactly 35), i.e. exactly the shapes a
+    # pre-redaction byte cut defeated. Each is placed in plain prose rather than in a
+    # `key=value` context on purpose: an assignment context would let the generic
+    # assignment-secret rule claim the head as well and mask the regression.
+    $straddlers = @(
+        @{ cat = 'github-token';   secret = 'ghp_' + ('a' * 32) + 'Z9' }
+        @{ cat = 'aws-access-key'; secret = 'AKIAIOSFODNN7EXAMPLE' }
+        @{ cat = 'jwt';            secret = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI5OTk5OTk5OSJ9.c3RyYWRkbGluZ3NpZ25hdHVyZQ' }
+        @{ cat = 'google-api-key'; secret = 'AIzaSy0123456789abcdefghijklmnopqrstuvw' }
+    )
+    $lead = 'deploy log line '
+    foreach ($s in $straddlers) {
+        $cat = [string]$s.cat
+        $secret = [string]$s.secret
+
+        # control: with a budget past the token the rule really does claim it (so the
+        # "nothing leaks" assertions below cannot pass just because the canary is inert).
+        $whole = Redact-Text ($lead + $secret + ' tail')
+        Assert-Contains $whole "[redacted:${cat}:" "straddle ${cat}: canary is recognized by its rule"
+        Assert-NotContains $whole $secret "straddle ${cat}: canary value redacted when it fits"
+
+        # the boundary now falls in the MIDDLE of the token.
+        $text = $lead + $secret + ' and more log text after the secret'
+        $limit = $lead.Length + [int][Math]::Floor($secret.Length / 2)
+        $head = $secret.Substring(0, $limit - $lead.Length)
+        $j = Redact-Json $text @('--max-bytes', "$limit")
+        $out = [string]$j.output
+        Assert-True ([bool]$j.truncated) "straddle ${cat}: truncated flag set"
+        Assert-Contains $out '[truncated: original_bytes=' "straddle ${cat}: truncation note present"
+        Assert-Contains $out 'kept_bytes=' "straddle ${cat}: truncation note reports the kept size"
+        Assert-NotContains $out $secret "straddle ${cat}: the full secret must not survive"
+        # the exact head a pre-redaction cut used to leave behind: the T-317 leak.
+        Assert-NotContains $out $head "straddle ${cat}: the head at the boundary must not survive"
+        # not even a short recognizable prefix (nothing to reconstruct or guess from).
+        Assert-NotContains $out $secret.Substring(0, 8) "straddle ${cat}: no partial prefix of the secret survives"
+        # the bound still bounds: visible text stays of --max-bytes order (+ the note).
+        $outBytes = [System.Text.Encoding]::UTF8.GetByteCount($out)
+        Assert-True ($outBytes -le ($limit + 256)) "straddle ${cat}: emitted text stays bounded (~max-bytes), got $outBytes"
+    }
+
+    # An Authorization header whose credential straddles the boundary. This one was already
+    # safe (the header rule is line-anchored and claims whatever value is left on the line),
+    # so it is kept as a non-regression guard for the group-based rules.
+    $cred = 'ghp_' + ('c' * 30) + '77'
+    $hdr = 'Authorization: Bearer ' + $cred
+    $jh = Redact-Json $hdr @('--max-bytes', '40')
+    Assert-True ([bool]$jh.truncated) 'straddle header: truncated flag set'
+    Assert-NotContains ([string]$jh.output) $cred.Substring(0, 8) 'straddle header: no part of the credential survives'
+
+    # Sibling effect: the cut lands on a character boundary, so a multibyte character is never
+    # sliced into a U+FFFD replacement char. 0x044F is 2 bytes in UTF-8 and the fixture has no
+    # whitespace, so an odd byte budget would have split the last character.
+    $mb = [string][char]0x044F
+    $jm = Redact-Json ($mb * 60) @('--max-bytes', '25')
+    $mout = [string]$jm.output
+    Assert-True ([bool]$jm.truncated) 'multibyte: truncated flag set'
+    Assert-NotContains $mout ([string][char]0xFFFD) 'multibyte: no replacement char from a split UTF-8 character'
+    Assert-Contains $mout ($mb * 12) 'multibyte: whole characters up to the budget are kept'
+    Assert-NotContains $mout ($mb * 13) 'multibyte: the budget is still respected'
+
+    # Many matches + a small budget: redaction runs over the WHOLE input (nothing straddling
+    # leaks) while the emitted text stays of --max-bytes order.
+    $bulk = ((1..200) | ForEach-Object { "line $_ mailto user$_@example.com token ghp_$('b' * 22)$_" }) -join "`n"
+    $jb = Redact-Json $bulk @('--max-bytes', '300')
+    $bout = [string]$jb.output
+    Assert-True ([bool]$jb.truncated) 'bulk: truncated flag set'
+    Assert-NotContains $bout '@example.com' 'bulk: no e-mail address survives in the kept text'
+    Assert-NotContains $bout 'ghp_bbbbbbbb' 'bulk: no token head survives in the kept text'
+    Assert-Contains $bout '[redacted:' 'bulk: the kept text still carries diagnostic markers'
+    Assert-True (([System.Text.Encoding]::UTF8.GetByteCount($bout)) -le 600) 'bulk: emitted text stays bounded (~max-bytes + note)'
+}.Invoke()
+
+# =============================================================================
+# 13. the scan overlap feeds MATCHING only (regression, T-317 / R-01): the rules are handed the
+#     budget plus an overlap so a straddling secret is matched whole, but nothing that lies past
+#     the budget may reach the output - including the case where redaction SHRINKS the text (a
+#     long secret collapses to a short marker, so the emitted text is well under --max-bytes and
+#     a naive "bound the output" rule would happily show what follows), and the case where the
+#     scan window itself severed a token or a PEM block, which no rule could then match.
+# =============================================================================
+{
+    # (a) shrinkage: the PEM block (349 source chars) collapses to a ~30-char marker. The budget
+    #     is measured on the SOURCE, so the sentinel that sits past it must not be emitted even
+    #     though the redacted text is far shorter than --max-bytes.
+    $pemBody = ('MIIBOwIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Q' + "`n") * 4
+    $shrinking = "log start`n-----BEGIN RSA PRIVATE KEY-----`n" + $pemBody + "-----END RSA PRIVATE KEY-----`nSENTINEL_PAST_BUDGET"
+    $js = Redact-Json $shrinking @('--max-bytes', '200')
+    Assert-True ([bool]$js.truncated) 'shrinkage: truncated flag set'
+    Assert-Contains ([string]$js.output) '[redacted:private-key:' 'shrinkage: the straddling block is a marker (kept whole)'
+    Assert-NotContains ([string]$js.output) 'SENTINEL_PAST_BUDGET' 'shrinkage: text past the budget is not emitted just because the marker is short'
+    Assert-True ((([string]$js.output).Length) -lt 200) 'shrinkage: sanity - the redacted text really is shorter than the budget'
+
+    # (b) a token severed by the SCAN WINDOW (not by the budget): 20 KB of unbroken token past a
+    #     4 KB budget runs beyond the window, so no rule can match it. Its head must not be
+    #     emitted - that is the T-317 leak one window further out.
+    $lead = ('x' * 100)
+    $jw = Redact-Json ($lead + ' ghp_' + ('a' * 20000)) @('--max-bytes', '4096')
+    Assert-True ([int]$jw.scanned_bytes -lt [int]$jw.input_bytes) 'window: only a bounded window of the input is scanned'
+    Assert-True ([bool]$jw.truncated) 'window: truncated flag set'
+    Assert-NotContains ([string]$jw.output) 'ghp_aaaa' 'window: a token severed by the scan window leaves no head'
+    Assert-Contains ([string]$jw.output) $lead 'window: text before the severed token is still emitted'
+
+    # (c) a PEM block whose END never arrives inside the window: the rule needs the END, so the
+    #     block cannot be matched and its body would otherwise be emitted verbatim up to the
+    #     budget.
+    $untermPem = "head line`n-----BEGIN RSA PRIVATE KEY-----`n" + (('SECRETKEYBODYLINE' + ('q' * 46) + "`n") * 400)
+    $jp = Redact-Json $untermPem @('--max-bytes', '4096')
+    Assert-True ([bool]$jp.truncated) 'unterminated PEM: truncated flag set'
+    Assert-NotContains ([string]$jp.output) 'SECRETKEYBODYLINE' 'unterminated PEM: key body is not emitted verbatim'
+    Assert-NotContains ([string]$jp.output) '-----BEGIN' 'unterminated PEM: the block header is dropped with the body'
+    Assert-Contains ([string]$jp.output) 'head line' 'unterminated PEM: text before the block survives'
+}.Invoke()
+
+# =============================================================================
+# 14. bounded work over an untrusted input (regression, T-317 / R-01): this tool stands on the
+#     path of untrusted text (issue/PR bodies, CI logs, third-party output), and two of its
+#     rules cost polynomially on unlucky input - `assignment-secret` backtracks over long
+#     identifier runs that never reach a `:`/`=`, `private-key` scans lazily from every BEGIN
+#     header to the end of the text. Scanning the WHOLE input therefore turns an oversized log
+#     into an externally driven DoS on a pipeline step. The scan window must keep the work tied
+#     to --max-bytes, not to the size of the input.
+#
+#     Asserted structurally (scanned_bytes stays at the window, whatever the input size) and by
+#     wall clock (a 1 MB pathological input must not cost dramatically more than a 64 KB one).
+#     The time budgets are deliberately loose - the point is a superlinear blow-up (minutes),
+#     not a few hundred milliseconds of jitter.
+# =============================================================================
+{
+    # Ordinary in shape (this is what a minified log line or a base64 blob looks like), and
+    # worst-case for assignment-secret: long identifier runs carrying the word "token".
+    $unit = ('token' + ('a' * 60)) * 16      # ~1 KB, no whitespace
+    $smallFile = New-TempFile ($unit * 64)   # ~64 KB
+    $largeFile = New-TempFile ($unit * 1024) # ~1 MB, 16x the small one
+
+    $swSmall = [System.Diagnostics.Stopwatch]::StartNew()
+    $rSmall = Invoke-Redaction @('redact', '--file', $smallFile, '--max-bytes', '2048', '--json')
+    $swSmall.Stop()
+    $swLarge = [System.Diagnostics.Stopwatch]::StartNew()
+    $rLarge = Invoke-Redaction @('redact', '--file', $largeFile, '--max-bytes', '2048', '--json')
+    $swLarge.Stop()
+    Assert-Exit $rSmall 0 'bounded work: 64 KB pathological input succeeds'
+    Assert-Exit $rLarge 0 'bounded work: 1 MB pathological input succeeds'
+
+    $jLarge = $rLarge.Out | ConvertFrom-Json
+    Assert-True ([int]$jLarge.input_bytes -gt 1000000) 'bounded work: the fixture really is ~1 MB'
+    # the structural guarantee: the rules saw a --max-bytes-sized window, not the input.
+    Assert-True ([int]$jLarge.scanned_bytes -le (2048 + 8192)) "bounded work: scan stays inside the budget window, got $($jLarge.scanned_bytes)"
+    Assert-True ([bool]$jLarge.truncated) 'bounded work: the dropped remainder is reported'
+    Assert-True (([System.Text.Encoding]::UTF8.GetByteCount([string]$jLarge.output)) -le 2048 + 256) 'bounded work: emitted text stays bounded'
+    Assert-NotContains ([string]$jLarge.output) 'tokenaaaa' 'bounded work: an unterminated identifier run at the budget is not emitted'
+
+    # the behavioural guarantee: 16x the input must not cost 16x (let alone quadratically more).
+    # Both runs are dominated by process start-up and reading the file once, so the fixed
+    # allowance dwarfs the real difference; a scan of the whole input would blow past it.
+    $budgetMs = ($swSmall.ElapsedMilliseconds * 4) + 20000
+    Assert-True ($swLarge.ElapsedMilliseconds -le $budgetMs) "bounded work: 1 MB run ($($swLarge.ElapsedMilliseconds) ms) must not scale with input size (64 KB run: $($swSmall.ElapsedMilliseconds) ms, allowed: $budgetMs ms)"
+
+    # The other expensive rule: many BEGIN headers that never close (lazy scan to end of text).
+    $pkFile = New-TempFile (("-----BEGIN X PRIVATE KEY----- " + ('z' * 40) + "`n") * 12000)  # ~0.85 MB
+    $swPk = [System.Diagnostics.Stopwatch]::StartNew()
+    $rPk = Invoke-Redaction @('redact', '--file', $pkFile, '--max-bytes', '2048', '--json')
+    $swPk.Stop()
+    Assert-Exit $rPk 0 'bounded work: 0.85 MB of unterminated PEM headers succeeds'
+    $jPk = $rPk.Out | ConvertFrom-Json
+    Assert-True ([int]$jPk.scanned_bytes -le (2048 + 8192)) "bounded work (PEM): scan stays inside the budget window, got $($jPk.scanned_bytes)"
+    Assert-True ($swPk.ElapsedMilliseconds -le 60000) "bounded work (PEM): 0.85 MB run must stay inside a fixed budget, took $($swPk.ElapsedMilliseconds) ms"
 }.Invoke()
 
 # =============================================================================
