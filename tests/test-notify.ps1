@@ -30,7 +30,11 @@ function Write-Utf8 { param([string]$Path, [string]$Text)
 }
 function Invoke-Notify { param([string[]]$ToolArgs)
     $out = @(& $script:PsExe -NoProfile -File $script:Tool @ToolArgs 2>&1)
-    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
+    $exitCode = $LASTEXITCODE
+    # This helper deliberately exercises rejected tool invocations. Preserve their code for the
+    # assertion, but do not leak it to a CI wrapper that invokes this test via `& $p`.
+    Set-Variable -Name LASTEXITCODE -Value 0 -Scope Global
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = ($out -join "`n") }
 }
 function Assert-Equal { param($Expected, $Actual, [string]$Message)
     if ($Expected -ne $Actual) { $script:Failures.Add("FAIL - ${Message}: expected [$Expected], got [$Actual]") }
