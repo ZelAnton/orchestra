@@ -82,66 +82,6 @@ workspace, коммитит результаты листовых агентов
 проверяемый критерий достижения, связь веха↔`T-ID`), машинно-локального (как `.work/knowledge/`),
 а не сеемого шаблона; на него ссылаются будущие потребители осведомлённости о дорожной карте.
 
-### Rust engine и TUI
-
-- Корневой `Cargo.toml` — virtual workspace с членами `engine` и `tui`: единственные
-  `Cargo.lock` и `target/` принадлежат корню, а package manifests сохраняют локальные
-  метаданные. CI `engine-tui` запускает один `--locked --workspace` build/test/clippy/fmt gate;
-  package-local cargo-команда всё равно резолвит этот корень, поэтому два независимых lock/target
-  дерева не должны возвращаться.
-- Корневой `rust-toolchain.toml` закрепляет toolchain workspace и компоненты `clippy`/`rustfmt`
-  и наследуется командами из `engine/` и `tui/`. Их `deny.toml` включают cargo-deny в CI: advisories
-  fail closed, license allow-list и sources явные, wildcard requirements запрещены; известные
-  platform-driven duplicate versions пока warning, а не неявно игнорируемое исключение.
-- `tui/src/hub.rs` — read-only `orchestra-tui --all-projects` hub над единственным источником
-  маршрутизации `~/.orchestra/projects.json` (или операторским `ORCHESTRA_REGISTRY_PATH`). Он не
-  сканирует sibling directories и не запускает runners: для каждого зарегистрированного root
-  показывает доступность, lease/cohort, pending approvals, escalations и actionable `.inbox`
-  messages. `Enter` открывает выбранный `.work` в прежних Overview/Decision Inbox, `b` возвращает
-  в hub; до такого явного перехода hub не маршрутизирует pause/lease/approval/force-lock keys.
-- `engine/src/time.rs` — единый публичный dependency-free конвертер Unix epoch seconds в
-  `YYYY-MM-DDTHH:MM:SSZ`; его используют engine run и TUI вместо локальных копий алгоритма
-  Howard Hinnant `civil_from_days`, а проверки известных дат, leap day и лексической
-  монотонности живут рядом с реализацией.
-- `engine/src/state/util.rs` — единый источник readiness-набора завершённых задач:
-  `completed_ids` читает только заголовки `### [T-NNN]` в `Tasks_Done.md` и добавляет
-  дескрипторы в состояниях `done`/`published`; `archive_header_task_id` и общий
-  `now_epoch_secs` экспортируются через `engine::state` для `plan --dry-run` и `run --once`.
-  `Предпосылки:` принимают только exact comma-separated `T-<digits>` tokens и канонизируют
-  leading zeros (`T-045` → `T-45`), что совпадает с `queue-tx` и Snapshot, потребляемым TUI.
-- `engine/src/contract.rs::validate_merge_report_for_ready` связывает распарсенные outcome-строки
-  merger с фактическим `ready`-набором до первой мутации join-барьера: ровно один результат на
-  каждую ready-задачу, без лишних или дублирующих id; неполный/чужой отчёт fail-closed.
-- `tests/test-engine-processor-parity.ps1` — pre-cutover oracle: помимо clean и review-cycle,
-  он отдельно сопоставляет timestamp/event-id-независимый event surface для terminal-сценариев
-  harness `conflict`, `quarantine`, `policy` и `checks` с эквивалентными staging knobs engine.
-  Каждая пара имеет non-vacuity assertion; policy осознанно сравнивает structural surface и
-  отдельно подтверждает safe terminal outcome, потому что harness не эмитит policy-escalation
-  status event, а engine эмитит fail-closed transition.
-- `engine run` имеет два явных режима: `--once` выполняет одну когорту, а `--drain` удерживает
-  одну owner-аренду и последовательно открывает когорты. На безопасной границе `--drain` сначала
-  уважает `.work/PAUSE`, затем heartbeat-ит owner и вызывает `queue-tx inbox-drain`, после чего
-  `run_body` перечитывает Snapshot; итоговый отчёт содержит все когорты, totals и причину
-  остановки (`queue-empty`/`paused`/`cohort-limit`). Лимит задаёт `--max-cohorts <n>`.
-- `engine/src/supervise.rs` гарантирует уничтожение всего дерева процесса не только при
-  timeout/cancel, но и при ошибке watchdog-вызова `Child::try_wait`: аварийная ветка вызывает
-  `kill_tree` до выхода из цикла, оставляя `timed_out=false` и `cancelled=false`, поэтому
-  результат остаётся отличимым `Reason::Crash`, а последующий reap не ждёт живой процесс.
-- **Decision Inbox TUI — исполняемый human gate (T-250).** `tui/src/inbox.rs` сохраняет прежнюю
-  проекцию эскалаций/карантина/блокировок и read-only загружает
-  `.work/approvals/*.json`: неистёкшие undecided-заявки образуют выбираемые карточки, истёкшие и
-  ошибки JSON видны, а уже consumed (`decision != ""`) исчезают из pending. `tui/src/app.rs`
-  хранит выбор и трёхшаговый reject (ввод непустой причины → confirm → команда), `tui/src/main.rs`
-  маршрутизирует `a`/`d` **только** на экране Decision Inbox, а `tui/src/ui.rs` показывает детали,
-  deadline/привязку и исход. Единственная граница мутации — `tui/src/commands.rs`: approve/reject
-  резолвят `tools/policy.ps1` в раскладках checkout/`cc-sync`, собирают отдельные argv для
-  `approval-approve`/`approval-reject` с аргументами `--work ... --id ... --by orchestra-tui`,
-  опциональным `--note <причина>` и `--json`, затем запускают их тем же supervisor-каналом, что
-  `state-tx status`; Rust никогда не пишет
-  approval JSON напрямую. Оба решения требуют второго `y`/Enter, rejection дополнительно требует
-  причины; exit 11 после успешно записанного reject распознаётся по JSON как применённый отказ,
-  тогда как consumed/expired/ошибка показываются оператору и inbox немедленно перечитывается.
-
 ### Координация и интеграция
 
 - `processor.md` — канонический state machine: фазы 0–6, resume, лимиты циклов,
@@ -1132,9 +1072,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
   unreadable/missing telemetry processor guarded-закрывает admission как
   `COHORT_TOKEN_BUDGET`, эскалирует незавершённые задачи без retry/quarantine и фиксирует
   actual/limit/remaining безопасными scalar-полями; estimated остаётся отдельной наблюдаемой
-  величиной. Чистая Rust-функция `token_budget_gate` в `engine/src/resolvers/budget.rs` разделяет
-  enforcement от read-only projection, а `orchestra-engine plan --dry-run` отображает тот же
-  batch-local счётчик и решение.
+  величиной.
 - **Каждый init-коммит нового jj workspace должен быть описан немедленно, не
   реактивно.** `jj workspace add -r <rev>` создаёт пустой рабочекопийный коммит без
   описания; ничто не описывает его автоматически позже (merger описывает только

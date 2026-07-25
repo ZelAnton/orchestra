@@ -270,8 +270,8 @@ if ($canonicalArtifacts.Count -eq 0) {
 # matched filename that is actually a file in this repo is a self-referential doc
 # mention (e.g. "processor.md", "AGENTS.md", "plans/LOOP_ORCHESTRA_ROADMAP.md"), not a
 # `.work/` runtime artifact, and must not be checked against the runtime-artifact table.
-# `target\` is Rust build output (engine/, task T-097): gitignored, huge, and never a
-# source of doc references — skip it so this scan stays fast and never trips on it.
+# Build-output directories are ignored so this scan stays fast and only evaluates source
+# and contract inputs.
 $excludeDirs = @('\.git\\', '\.jj\\', '\.work\\', 'node_modules\\', '\\target\\')
 $repoFileNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 Get-ChildItem -Path $RepoRoot -Recurse -File | ForEach-Object {

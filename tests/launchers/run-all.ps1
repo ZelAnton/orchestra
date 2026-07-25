@@ -4,7 +4,7 @@
   tests - see common.ps1 for why), and reports a pass/fail summary.
 
   Cross-platform (task T-090): most test-*.ps1 here drive the Windows-only .cmd
-  launchers (via cmd.exe) and can only run on Windows. The engine/fixture tests that
+  launchers (via cmd.exe) and can only run on Windows. The runtime/fixture tests that
   drive the cross-platform pwsh runtimes (test-sync-runtime.ps1, test-doctor-runtime.ps1,
   test-generate-coders.ps1) are marked with a `# ci:posix` comment and run on every OS.
   So:

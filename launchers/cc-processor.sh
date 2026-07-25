@@ -57,8 +57,8 @@ resolve_processkit_runtime() {
 
 # --force-lock: route the operator's force-takeover of .work/orchestrator.lock through the single
 # transactional path `state-tx.ps1 release --force` - the same owner/legacy/corrupt/foreign-lock
-# diagnostics the TUI's force-lock uses, so the two operator front-ends share one audited path
-# instead of two independent raw removals. Fall back to a bare `rm -rf` only when pwsh (PowerShell
+# diagnostics for every force-lock invocation, keeping one audited path instead of independent
+# raw removals. Fall back to a bare `rm -rf` only when pwsh (PowerShell
 # 7) is unavailable in PATH (or the runner cannot be resolved).
 force_unlock() {
   local state_tx

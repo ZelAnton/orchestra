@@ -397,35 +397,6 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Run engine/processor parity oracle (pre-cutover equivalence)
-        # tests/test-engine-processor-parity.ps1 (T-110): the pre-cutover EQUIVALENCE ORACLE
-        # of intent doc §9.2/§13. It runs ONE clean cohort scenario two ways - the
-        # processor-prose control loop via tools/harness.ps1, and the deterministic Rust
-        # engine `run --once` (engine/src/run.rs) - over equivalent hermetic sandboxes, and
-        # asserts both converge on the SAME timestamp/event-id-independent phase-1 outbox
-        # fingerprint tools/harness.ps1 already computes; a drift fails the build (non-zero
-        # exit). It lives in `validate` (NOT engine-tui) because it is a pwsh tests/test-*.ps1
-        # that drives tools/harness.ps1 + tools/queue-tx.ps1, so it belongs with the pwsh
-        # suite and must not compromise engine-tui's documented independence from pwsh
-        # tooling. Both prerequisites it needs are present on this matrix's windows-latest +
-        # ubuntu-latest runner images: git (the harness path and checkout use it) and the
-        # Rust toolchain (the test builds the engine bin once via `cargo build --locked` when
-        # it is not already present - the same preinstalled cargo engine-tui relies on), so
-        # the oracle actually runs here rather than self-skipping into a vacuous no-op. The
-        # engine crate's own build/test/lint gate stays the separate engine-tui job. Purely
-        # additive: it does not modify agents/processor.md, tools/harness.ps1 or any other
-        # tools/*.ps1.
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $p = "./tests/test-engine-processor-parity.ps1"
-          if (-not (Test-Path $p)) {
-            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
-            exit 1
-          }
-          & $p
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
   crash-matrix:
     name: Extended crash matrix (non-blocking)
     # The fuller fault-injection enumeration over tools/harness.ps1 is deliberately
@@ -460,81 +431,4 @@ jobs:
             exit 1
           }
           & $p --vcs git --scenarios "clean,conflict,quarantine,policy,checks"
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-  engine-tui:
-    name: engine + tui crates (${{ matrix.os }})
-    # Additive job (T-112): builds, tests and lints the engine/ (T-097/T-101/T-111) and
-    # tui/ (T-102) Rust crates. Fully independent of `validate` above - it does not read
-    # or depend on any pwsh tool/launcher/test, and its failure cannot affect `validate`
-    # or vice versa (a separate top-level job). Runs on the same windows-latest +
-    # ubuntu-latest matrix as `validate`, for the same reason (T-090): both are supported
-    # targets, so a Linux-only or Windows-only Rust break must surface independently
-    # rather than being masked by its sibling. The root Cargo workspace owns one committed
-    # `Cargo.lock` (T-305), so every cargo invocation below is `--locked`: it builds against
-    # the exact committed lockfile and never runs `cargo update`, so the gate stays offline-safe
-    # with respect to dependency resolution (the runner's own one-time toolchain/registry-index
-    # fetch is unrelated and outside this job's control).
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Report both platforms independently, exactly like `validate` above.
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Show Rust toolchain
-        # The root rust-toolchain.toml pins the shared workspace's compiler and requests
-        # clippy/rustfmt. Cargo/rustup discover it for both the root CI commands and direct
-        # engine/ or tui/ developer commands, so the runner's ambient stable is not part of
-        # the build contract.
-        run: |
-          rustc --version
-          cargo --version
-          cargo clippy --version
-          cargo fmt --version
-
-      - name: Build, test and lint the Rust workspace
-        run: |
-          $ErrorActionPreference = "Stop"
-          cargo build --locked --workspace --all-targets
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo test --locked --workspace
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo clippy --locked --workspace --all-targets -- -D warnings
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          cargo fmt --check --all
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-      - name: Check engine crate supply chain (cargo-deny)
-        # The member-local config carries the shared workspace policy; this is conditional
-        # only to retain the original activation contract if a future package opts out.
-        working-directory: engine
-        if: hashFiles('engine/deny.toml') != ''
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
-            cargo install cargo-deny --locked
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          cargo deny check
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-
-      - name: Check tui crate supply chain (cargo-deny)
-        # The member-local config carries the same shared workspace policy and activates
-        # this gate for the operator TUI.
-        working-directory: tui
-        if: hashFiles('tui/deny.toml') != ''
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) {
-            cargo install cargo-deny --locked
-            if ($LASTEXITCODE -ne 0) { exit 1 }
-          }
-          cargo deny check
           if ($LASTEXITCODE -ne 0) { exit 1 }

@@ -1198,17 +1198,13 @@ function Scenario-Policy {
 
 function Scenario-ReviewCycle {
     param($Fx)
-    # T-129: the per-task review FIX CYCLE surface (task T-128) that `engine run --once --review`
-    # implements once a task reaches `на ревью` - an INCOMPLETE/findings cycle that re-reviews
+    # T-129: the per-task review FIX CYCLE surface once a task reaches `на ревью` - an
+    # INCOMPLETE/findings cycle that re-reviews
     # (`на ревью -> на ревью`, the `Циклов-ревью: N` coordinate) and, once REVIEW_LOOP_MAX is
     # exhausted, a CLEAN terminal escalation (`на ревью -> эскалирована`) through the SAME
     # queue-tx escalate path every other escalating scenario here uses - never a manual halt, never
     # a re-interpretation. A review-loop limit of 1 (findings persist and never converge) reaches
-    # escalation after exactly ONE incomplete cycle - the SAME deterministic shape
-    # tests/test-engine-processor-parity.ps1 drives on the engine side with
-    # `--review --inject-findings T-101 --review-loop-max 1`, so the two paths' review/fix-cycle
-    # event identities (mirroring engine/src/run.rs's commit_review_transition /
-    # commit_review_escalation) are directly comparable.
+    # escalation after exactly ONE incomplete cycle.
     $t1 = 'T-101'
     Seed-Task $Fx $t1 'review-cycle one'
     Step-Lease $Fx

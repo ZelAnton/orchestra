@@ -194,7 +194,6 @@ These scripts protect machine-verifiable copies of repository contracts:
 | [`tools/check-codex-sandbox-guard.ps1`](../tools/check-codex-sandbox-guard.ps1) | `approval_policy=never`, sandbox arguments, and fail-closed `ENV_LIMIT/sandbox-init` escalation in both Codex adapters and their documentation. |
 | [`tools/check-queue-contract-path-guard.ps1`](../tools/check-queue-contract-path-guard.ps1) | Canonical queue/spec resolution and the disk-wide-search ban in every role/template that cites a queue contract, plus the normative docs. |
 | [`tests/test-reviewer-codex-gate.ps1`](../tests/test-reviewer-codex-gate.ps1) | The `reviewer_codex` clean-pass and `SUMMARY-R` decision contract. |
-| [`tests/test-engine-processor-parity.ps1`](../tests/test-engine-processor-parity.ps1) | Pre-cutover outcome parity between the processor-prose control loop and deterministic Rust engine for the reference cohort. |
 
 The `validate` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) also makes
 the following behavioral tests mandatory on Windows and Linux unless the test documents a

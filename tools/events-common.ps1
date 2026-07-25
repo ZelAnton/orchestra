@@ -132,7 +132,7 @@ function Read-EventStream {
                     [void]$events.Add($event)
                 }
             }
-            # Like the engine tail reader, never consume an unterminated final record.
+            # Never consume an unterminated final record.
             if ($lineBytes.Count -gt 0) { $invalid++ }
         } finally { $stream.Dispose() }
     } catch { Fail 3 "cannot read $Path ($($_.Exception.Message))" }

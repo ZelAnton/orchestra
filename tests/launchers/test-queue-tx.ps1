@@ -159,8 +159,8 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
     # --- Scenario 3c: the ONE normative archive-header contract (docs/queue_contract.md §12).
     # All previously divergent heading shapes — H2 `##`, H3 `###`, legacy H1 ru/en — satisfy a
     # prerequisite identically, while a body mention and a digitless `### [T-]` header do NOT.
-    # This is the SAME archive fixture the engine (`state::util`) and tui (`done_task_ids`) unit
-    # tests assert, so all three resolvers agree on one archive record (T-293).
+    # This fixture exercises the normative archive-header contract so every consumer
+    # agrees on one archive record (T-293).
     $W = New-Work
     try {
         $q = @(

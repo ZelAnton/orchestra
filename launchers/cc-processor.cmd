@@ -180,8 +180,8 @@ pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -
 exit /b %ERRORLEVEL%
 
 rem --force-lock: route the operator force-takeover through the single transactional path
-rem `state-tx.ps1 release --force` - the same owner/legacy/corrupt-lock diagnostics the TUI's
-rem force-lock uses - resolving the runner by the checkout-vs-mirror rule (checkout tools\ first,
+rem `state-tx.ps1 release --force` - the same owner/legacy/corrupt-lock diagnostics for every
+rem force-lock invocation, resolving the runner by the checkout-vs-mirror rule (checkout tools\ first,
 rem then the flat cc-sync mirror next to this launcher). Fall back to a raw `rd /s /q` only when
 rem pwsh (PowerShell 7) is unavailable in PATH or the runner cannot be resolved.
 :force_unlock

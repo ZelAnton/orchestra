@@ -1,3 +1,0 @@
-# The Cargo workspace writes ordinary TUI builds to ../target/. Keep an explicitly configured
-# local CARGO_TARGET_DIR out of source control too.
-/target/

@@ -337,10 +337,8 @@ function Get-ArchiveHeaderIds {
     param([string]$Text)
     $ids = New-Object System.Collections.Generic.HashSet[int]
     foreach ($line in ($Text -split "`r?`n")) {
-        # THE single normative archive-header contract (docs/queue_contract.md §12), shared
-        # verbatim in shape with engine's `orchestra_engine::state::archive_header_task_id`
-        # (which tui/src/main.rs::done_task_ids reuses), so one archive record answers the
-        # readiness question identically for all three resolvers. Recognized shapes: a bracketed
+        # THE single normative archive-header contract (docs/queue_contract.md §12), so one
+        # archive record answers the readiness question uniformly. Recognized shapes: a bracketed
         # H2 or H3 heading (`## [T-NNN]` / `### [T-NNN]` — H3 is what the writer emits today), plus
         # the legacy non-bracketed H1 `# Активная задача T-NNN` / `# Active task T-NNN` older
         # processor revisions wrote. Only these headings: a T-ID mentioned in an archive body must
@@ -983,7 +981,7 @@ function Cmd-Ready {
         $one = $res | Where-Object { $_.Task.Id -eq $id } | Select-Object -First 1
         if (-not $one) { Fail 9 "task $(Format-Id $id) is not a 'не начата' queue task" }
         # A next_major task is parked out of the ordinary current-lane capture gate: never ready
-        # here, so the processor/engine capture gate refuses it (exit 6), same as an unmet prereq.
+        # here, so the processor capture gate refuses it (exit 6), same as an unmet prereq.
         if ($one.Delivery -eq 'next_major') {
             Write-Output "not-ready $($one.Task.IdStr): next_major delivery lane (parked; not admitted to the current cohort — see queue_contract §11.1)"
             exit 6

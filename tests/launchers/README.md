@@ -92,7 +92,7 @@ asserts the five variants are well-formed (UTF-8 without BOM, LF-only, no leftov
 `{{PLACEHOLDER}}`), deterministic (a second run is byte-identical), and reproduce the
 committed `agents/*.md` byte-for-byte.
 
-All three of these engine/generation tests are `# ci:posix`-marked, so - like
+All three of these runtime/generation tests are `# ci:posix`-marked, so - like
 `test-sync-runtime.ps1` - running them under `pwsh` on Windows and on Linux exercises
 byte-for-byte the same code, which is the cross-platform equivalence proof for doctor
 and for generation.
