@@ -4,13 +4,14 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 $Tool = Join-Path $PSScriptRoot '..\tools\verification.ps1'
+$PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $Failures = [System.Collections.Generic.List[string]]::new()
 $Dirs = [System.Collections.Generic.List[string]]::new()
 function Write-Utf8 { param([string]$Path,[string]$Text) $d=Split-Path -Parent $Path; if($d -and -not(Test-Path $d)){[void][IO.Directory]::CreateDirectory($d)}; [IO.File]::WriteAllText($Path,$Text,$Utf8) }
 function Assert-Eq { param($Expected,$Actual,[string]$Message) if($Expected -ne $Actual){$Failures.Add("FAIL - ${Message}: expected [$Expected], got [$Actual]")} }
 function Assert-Contains { param([string]$Text,[string]$Needle,[string]$Message) if(-not $Text.Contains($Needle)){$Failures.Add("FAIL - $Message (missing [$Needle] in [$Text])")} }
-function Invoke-Tool { param([string[]]$ToolArgs) $o=@(& pwsh -NoProfile -File $Tool @ToolArgs 2>&1 | ForEach-Object {$_.ToString()}); [pscustomobject]@{Exit=$LASTEXITCODE;Out=($o -join "`n")} }
+function Invoke-Tool { param([string[]]$ToolArgs) $o=@(& $PsExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Tool @ToolArgs 2>&1 | ForEach-Object {$_.ToString()}); [pscustomobject]@{Exit=$LASTEXITCODE;Out=($o -join "`n")} }
 function New-Repo {
     $root=Join-Path ([IO.Path]::GetTempPath()) ('orchestra-verification-'+[guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($root); $Dirs.Add($root)
     & git -C $root init -q; & git -C $root config user.email fixture@example.invalid; & git -C $root config user.name Fixture
@@ -46,6 +47,29 @@ try {
     try { $jsonOutput = $x.Out | ConvertFrom-Json; Assert-Eq 'pass' $jsonOutput.verdict '--json emits exactly one parseable verdict object' } catch { $Failures.Add("FAIL - --json output is not a single JSON object: $($x.Out)") }
     $evidence=(Get-Content (Join-Path $r '.work/verification.json') -Raw | ConvertFrom-Json); Assert-Eq 2 @($evidence.commands).Count 'evidence preserves both commands'
     $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--json'); Assert-Eq 0 $x.Exit 'current-head pass evidence is reusable on resume'
+
+    # The supervisor inherits the executable of the current PowerShell host. Put a
+    # failing `pwsh` first on PATH: the old hardcoded spawn would hit this shadow,
+    # whereas Windows PowerShell 5.1 or PowerShell 7 can both launch their own host.
+    $shadowBin=Join-Path ([IO.Path]::GetTempPath()) ('orchestra-verification-shadow-'+[guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($shadowBin); $Dirs.Add($shadowBin)
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        Write-Utf8 (Join-Path $shadowBin 'pwsh.cmd') "@echo off`r`nexit /b 91`r`n"
+    } else {
+        $shadowPwsh=Join-Path $shadowBin 'pwsh'
+        Write-Utf8 $shadowPwsh "#!/bin/sh`nexit 91`n"
+        & chmod +x $shadowPwsh
+    }
+    $savedPath=$env:PATH
+    try {
+        $env:PATH=$shadowBin+[IO.Path]::PathSeparator+$savedPath
+        $null=& pwsh 2>&1
+        Assert-Eq 91 $LASTEXITCODE 'test fixture shadows pwsh on PATH'
+        Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_COMMANDS: ["git --version"]'
+        $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head,'--json')
+        Assert-Eq 0 $x.Exit 'run resolves the current PowerShell host instead of pwsh from PATH'; Assert-Contains $x.Out '"verdict":"pass"' 'current-host supervisor run passes'
+    } finally {
+        $env:PATH=$savedPath
+    }
 
     # A later failing command makes the whole profile fail.
     Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_COMMANDS: ["git --version", "pwsh -NoProfile -Command ''exit 9''"]'

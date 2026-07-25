@@ -175,12 +175,13 @@ function Invoke-RunCommand {
     $runs = [System.Collections.Generic.List[object]]::new()
     $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'running' '' @(); Write-JsonAtomic $resultFile $record
     $supervisor = Join-Path $PSScriptRoot 'supervisor.ps1'
+    $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
     $i = 0
     foreach ($cmd in $verificationProfile.commands) {
         $i++
         $prefix = Join-Path $work ("verification-command-{0}" -f $i)
         $supervisorResult = "$prefix.json"; $stdoutFile = "$prefix.out.txt"; $stderrFile = "$prefix.err.txt"
-        $null = & pwsh -NoProfile -File $supervisor run --shell-command $cmd --working-directory $root --deadline-sec $deadline --output-max-bytes $maxBytes --result-file $supervisorResult --stdout-file $stdoutFile --stderr-file $stderrFile --work $work --task-id _integration --role merger --label verification --process-diagnostics 2>&1
+        $null = & $psExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $supervisor run --shell-command $cmd --working-directory $root --deadline-sec $deadline --output-max-bytes $maxBytes --result-file $supervisorResult --stdout-file $stdoutFile --stderr-file $stderrFile --work $work --task-id _integration --role merger --label verification --process-diagnostics 2>&1
         $rc = $LASTEXITCODE
         $reason = 'missing-result'
         if (Test-Path -LiteralPath $supervisorResult) { try { $reason = [string]((Get-Content -LiteralPath $supervisorResult -Raw) | ConvertFrom-Json).reason } catch { $reason = 'invalid-result' } }
