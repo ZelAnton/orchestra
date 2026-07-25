@@ -228,6 +228,75 @@ if ($offBudget.ExitCode -eq 0) {
     Assert-Equal 'off' $offData.sources.events_outbox 'projection exposes the outbox configuration'
 }
 
+# T-311: digest projects a time window from the deduplicated event stream, keeps estimated
+# usage separate, and reads current attention artifacts without mutating any of them.
+$digestWork=New-Fixture
+$digestLines=@(
+    (Event-Line d01 '2026-07-10T00:00:00Z' 'cohort.opened' B-digest),
+    (Event-Line d02 '2026-07-10T00:05:00Z' 'task.status_changed' B-digest T-901 @{from='слита';to='опубликована'}),
+    (Event-Line d03 '2026-07-10T00:06:00Z' 'task.status_changed' B-digest T-902 @{from='на ревью';to='эскалирована'}),
+    (Event-Line d04 '2026-07-10T00:07:00Z' 'task.status_changed' B-digest T-903 @{from='готова к слиянию';to='конфликт'}),
+    (Event-Line d05 '2026-07-10T00:08:00Z' 'task.status_changed' B-digest T-904 @{from='в работе';to='на ревью'}),
+    (Event-Line d06 '2026-07-10T00:09:00Z' 'task.status_changed' B-digest T-904 @{from='в работе';to='на ревью'}),
+    (Event-Line d07 '2026-07-10T00:10:00Z' 'usage.recorded' B-digest T-904 @{total_tokens=120;estimated=$false}),
+    (Event-Line d08 '2026-07-10T00:11:00Z' 'usage.recorded' B-digest T-904 @{total_tokens=30;estimated=$true}),
+    (Event-Line d09 '2026-07-10T00:12:00Z' 'cohort.closed' B-digest),
+    (Event-Line d10 '2026-07-11T00:00:00Z' 'task.status_changed' B-digest T-outside @{from='слита';to='опубликована'})
+)
+Write-Utf8 (Join-Path $digestWork 'events.jsonl') (($digestLines -join "`n")+"`n")
+Write-Utf8 (Join-Path $digestWork 'Tasks_Queue.md') @'
+# Очередь задач
+
+### [T-777] Needs a human — статус: эскалирована · причина=manual-review
+
+### [T-778] Normal task — статус: не начата
+'@
+$approvalDir=Join-Path $digestWork 'approvals'; New-Item -ItemType Directory -Force -Path $approvalDir | Out-Null
+Write-Utf8 (Join-Path $approvalDir 'apr-pending.json') '{"schema":"orchestra/approval@1","id":"apr-pending","deadline":"2099-01-01T00:00:00Z"}'
+Write-Utf8 (Join-Path $approvalDir 'apr-expired.json') '{"schema":"orchestra/approval@1","id":"apr-expired","deadline":"2000-01-01T00:00:00Z"}'
+Write-Utf8 (Join-Path $approvalDir 'apr-decided.json') '{"schema":"orchestra/approval@1","id":"apr-decided","decision":"approve"}'
+Write-Utf8 (Join-Path $approvalDir 'broken.json') 'not-json'
+$digestEventsBefore=[IO.File]::ReadAllText((Join-Path $digestWork 'events.jsonl'))
+$digestQueueBefore=[IO.File]::ReadAllText((Join-Path $digestWork 'Tasks_Queue.md'))
+$digestApprovalBefore=[IO.File]::ReadAllText((Join-Path $approvalDir 'apr-pending.json'))
+$digest=Invoke-Metrics @('digest','--work',$digestWork,'--since','2026-07-10T00:00:00Z','--until','2026-07-10T23:59:59Z','--json')
+Assert-Equal 0 $digest.ExitCode "digest JSON exits zero (stderr=$($digest.Err.Trim()))"
+if ($digest.ExitCode -eq 0) {
+    $digestData=$digest.Out | ConvertFrom-Json
+    Assert-Equal 'orchestra/metrics-digest@1' $digestData.schema 'digest has a versioned schema'
+    Assert-Equal '2026-07-10T00:00:00Z' ($digestData.period.since.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')) 'digest preserves explicit period start'
+    Assert-True (-not $digestData.period.default_last_24_hours) 'explicit digest window is not labelled as default'
+    Assert-Equal 1 @($digestData.activity.published_tasks).Count 'digest counts published tasks in period only'
+    Assert-Equal 'T-901' $digestData.activity.published_tasks[0] 'digest reports published task id'
+    Assert-Equal 1 @($digestData.activity.escalated_tasks).Count 'digest counts period escalations'
+    Assert-Equal 1 @($digestData.activity.quarantined_tasks).Count 'digest counts period quarantines'
+    Assert-Equal 1 @($digestData.activity.cohorts.opened).Count 'digest counts opened cohorts'
+    Assert-Equal 1 @($digestData.activity.cohorts.closed).Count 'digest counts closed cohorts'
+    Assert-Equal 2 $digestData.activity.review_cycles 'digest counts review cycles'
+    Assert-Equal 120 $digestData.activity.usage.actual_tokens 'digest spends actual tokens only in actual bucket'
+    Assert-Equal 30 $digestData.activity.usage.estimated_tokens 'digest keeps estimates separate'
+    Assert-Equal 'apr-pending' $digestData.attention.pending_approval_ids[0] 'digest exposes pending approval id'
+    Assert-Equal 'apr-expired' $digestData.attention.expired_approval_ids[0] 'digest exposes expired approval id'
+    Assert-Equal 1 @($digestData.attention.approval_errors).Count 'digest reports malformed approval artifact without reading it as pending'
+    Assert-Equal 'T-777' $digestData.attention.escalated_task_ids[0] 'digest exposes current queue escalation'
+}
+Assert-Equal $digestEventsBefore ([IO.File]::ReadAllText((Join-Path $digestWork 'events.jsonl'))) 'digest leaves events unchanged (read-only)'
+Assert-Equal $digestQueueBefore ([IO.File]::ReadAllText((Join-Path $digestWork 'Tasks_Queue.md'))) 'digest leaves queue unchanged (read-only)'
+Assert-Equal $digestApprovalBefore ([IO.File]::ReadAllText((Join-Path $approvalDir 'apr-pending.json'))) 'digest leaves approval unchanged (read-only)'
+Assert-True (-not (Test-Path (Join-Path $digestWork 'orchestrator.lock'))) 'digest never creates/acquires orchestrator.lock'
+$digestHuman=Invoke-Metrics @('digest','--work',$digestWork,'--since','2026-07-10T00:00:00Z','--until','2026-07-10T23:59:59Z')
+Assert-Equal 0 $digestHuman.ExitCode 'human-readable digest exits zero'
+Assert-Contains $digestHuman.Out '| Опубликовано задач | 1 |' 'human-readable digest contains published count'
+Assert-Contains $digestHuman.Out 'Pending approvals: 1 (apr-pending)' 'human-readable digest contains pending attention'
+$digestEmpty=New-Fixture
+$digestDefault=Invoke-Metrics @('digest','--work',$digestEmpty,'--json')
+Assert-Equal 0 $digestDefault.ExitCode 'default last-day digest on an empty work directory exits zero'
+if ($digestDefault.ExitCode -eq 0) { Assert-True (($digestDefault.Out | ConvertFrom-Json).period.default_last_24_hours) 'digest defaults to the last 24 hours' }
+$digestBadWindow=Invoke-Metrics @('digest','--work',$digestWork,'--since','2026-07-11T00:00:00Z','--until','2026-07-10T00:00:00Z')
+Assert-Equal 2 $digestBadWindow.ExitCode 'digest rejects reversed period'
+$digestUnknown=Invoke-Metrics @('digest','--work',$digestWork,'--last','1')
+Assert-Equal 2 $digestUnknown.ExitCode 'digest rejects aggregate-only options'
+
 $empty=New-Fixture; $emptyRun=Invoke-Metrics @('aggregate','--work',$empty,'--last','5')
 Assert-Equal 0 $emptyRun.ExitCode 'empty input is success'; Assert-Contains $emptyRun.Out 'Нет данных' 'empty input has explicit no-data output'
 Assert-Contains $emptyRun.Out 'events.jsonl отсутствует' 'missing event stream has an explicit diagnostic'

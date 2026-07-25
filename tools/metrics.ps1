@@ -9,6 +9,7 @@
     pwsh -File tools/metrics.ps1 aggregate --work /abs/.work --last 5
     pwsh -File tools/metrics.ps1 aggregate --work /abs/.work --since 2026-07-01
     pwsh -File tools/metrics.ps1 budget --work /abs/.work --batch-id B-20260725T120000Z --json
+    pwsh -File tools/metrics.ps1 digest --work /abs/.work --since 2026-07-24T00:00:00Z --until 2026-07-25T00:00:00Z
 .NOTES
     Exit codes: 0 success (including no data), 2 usage, 3 input read failure.
 #>
@@ -290,6 +291,150 @@ function Format-Duration {
 }
 function Format-Percent { param($Numerator, $Denominator) if ($Denominator -le 0) { return 'недоступно' }; return ([Math]::Round(100.0 * $Numerator / $Denominator, 2)).ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + '%' }
 
+function Format-UtcInstant {
+    param([DateTimeOffset]$Value)
+    return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-DigestInstant {
+    param([string]$Name, [string]$Raw)
+    $parsed = To-Time $Raw
+    if ($null -eq $parsed) { Fail 2 "--$Name must be an ISO-8601 timestamp" }
+    return $parsed
+}
+
+function Get-OpenApprovals {
+    param([string]$Work, [DateTimeOffset]$Now)
+    $pending = [Collections.Generic.List[string]]::new()
+    $expired = [Collections.Generic.List[string]]::new()
+    $errors = [Collections.Generic.List[string]]::new()
+    $dir = Join-Path $Work 'approvals'
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+        return [pscustomobject]@{ PendingIds=@(); ExpiredIds=@(); Errors=@() }
+    }
+    try { $files = @(Get-ChildItem -LiteralPath $dir -Filter '*.json' -File | Sort-Object Name) }
+    catch { Fail 3 "cannot read $dir ($($_.Exception.Message))" }
+    foreach ($file in $files) {
+        try { $value = [IO.File]::ReadAllText($file.FullName, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json }
+        catch { $errors.Add("$($file.Name): invalid JSON"); continue }
+        if ([string](Get-Prop $value 'schema') -ne 'orchestra/approval@1') { $errors.Add("$($file.Name): unsupported schema"); continue }
+        $id = [string](Get-Prop $value 'id')
+        if ([string]::IsNullOrWhiteSpace($id)) { $errors.Add("$($file.Name): missing id"); continue }
+        if ($file.BaseName -ne $id) { $errors.Add("$($file.Name): id does not match file name"); continue }
+        if (-not [string]::IsNullOrWhiteSpace([string](Get-Prop $value 'decision'))) { continue }
+        $deadlineRaw = [string](Get-Prop $value 'deadline')
+        $deadline = if ([string]::IsNullOrWhiteSpace($deadlineRaw)) { $null } else { To-Time $deadlineRaw }
+        if (-not [string]::IsNullOrWhiteSpace($deadlineRaw) -and $null -eq $deadline) { $errors.Add("$($file.Name): invalid deadline"); continue }
+        if ($null -ne $deadline -and $deadline -le $Now) { $expired.Add($id) } else { $pending.Add($id) }
+    }
+    return [pscustomobject]@{
+        PendingIds=@($pending | Sort-Object); ExpiredIds=@($expired | Sort-Object); Errors=@($errors | Sort-Object)
+    }
+}
+
+function Get-CurrentEscalations {
+    param([string]$Work)
+    $path = Join-Path $Work 'Tasks_Queue.md'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
+    try { $lines = Get-Content -LiteralPath $path -Encoding UTF8 }
+    catch { Fail 3 "cannot read $path ($($_.Exception.Message))" }
+    $ids = @{}
+    foreach ($line in $lines) {
+        $match = [regex]::Match([string]$line, '^###\s+\[(?<id>T-\d+)\].*?[—-]\s*статус:\s*(?<status>[^·\r\n]+)')
+        if (-not $match.Success) { continue }
+        $status = $match.Groups['status'].Value.Trim().ToLowerInvariant()
+        if ($status -in @('эскалирована', 'escalated')) { $ids[$match.Groups['id'].Value] = $true }
+    }
+    return @($ids.Keys | Sort-Object)
+}
+
+function Format-DigestIds {
+    param([object[]]$Ids)
+    $items = @($Ids | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($items.Count -eq 0) { return 'нет' }
+    return ($items -join ', ')
+}
+
+function Cmd-Digest {
+    $work = Require-Opt 'work'
+    foreach ($key in $opts.Keys) { if (@('work','since','until','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
+    if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
+
+    $now = [DateTimeOffset]::UtcNow
+    $end = if ($opts.ContainsKey('until')) { Get-DigestInstant 'until' ([string]$opts['until']) } else { $now }
+    $start = if ($opts.ContainsKey('since')) { Get-DigestInstant 'since' ([string]$opts['since']) } else { $end.AddHours(-24) }
+    if ($start -gt $end) { Fail 2 '--since must not be later than --until' }
+
+    $stream = Read-EventStream (Join-Path $work 'events.jsonl')
+    $published = @{}; $escalated = @{}; $quarantined = @{}
+    $cohortsOpened = @{}; $cohortsClosed = @{}
+    $reviewCycles = 0; $actualTokens = 0.0; $estimatedTokens = 0.0
+    $actualUsageEvents = 0; $estimatedUsageEvents = 0
+    foreach ($record in $stream.Events) {
+        $at = To-Time (Get-Prop $record 'occurred_at')
+        if ($null -eq $at -or $at -lt $start -or $at -gt $end) { continue }
+        $type = [string](Get-Prop $record 'type')
+        $batchId = [string](Get-Prop $record 'batch_id')
+        if ($type -eq 'cohort.opened' -and -not [string]::IsNullOrWhiteSpace($batchId)) { $cohortsOpened[$batchId] = $true }
+        if ($type -eq 'cohort.closed' -and -not [string]::IsNullOrWhiteSpace($batchId)) { $cohortsClosed[$batchId] = $true }
+        if ($type -eq 'task.status_changed') {
+            $taskId = [string](Get-Prop $record 'task_id')
+            $to = [string](Get-FirstProp (Get-Prop $record 'payload') @('to','status'))
+            $toLower = $to.Trim().ToLowerInvariant()
+            if ($toLower -in @('опубликована', 'published') -and $taskId) { $published[$taskId] = $true }
+            if ($toLower -in @('эскалирована', 'escalated') -and $taskId) { $escalated[$taskId] = $true }
+            if ($toLower -in @('конфликт', 'conflict', 'quarantined', 'quarantine') -and $taskId) { $quarantined[$taskId] = $true }
+            if ($toLower -match 'на ревью|in-review|reviewing|^review$') { $reviewCycles++ }
+        }
+        if ($type -eq 'usage.recorded') {
+            $usage = Get-EventUsage $record
+            if ($null -ne $usage.Total) {
+                if ($usage.Estimated) { $estimatedTokens += $usage.Total; $estimatedUsageEvents++ }
+                else { $actualTokens += $usage.Total; $actualUsageEvents++ }
+            }
+        }
+    }
+
+    $attention = Get-OpenApprovals -Work $work -Now $now
+    $currentEscalations = @(Get-CurrentEscalations $work)
+    $eventsStatus = if (-not $stream.Present) { 'missing' } elseif ($stream.Events.Count -eq 0) { 'empty' } else { 'ok' }
+    $result = [ordered]@{
+        status = 'ok'; schema = 'orchestra/metrics-digest@1'
+        period = [ordered]@{ since = Format-UtcInstant $start; until = Format-UtcInstant $end; default_last_24_hours = (-not $opts.ContainsKey('since')) }
+        activity = [ordered]@{
+            published_tasks = @($published.Keys | Sort-Object); escalated_tasks = @($escalated.Keys | Sort-Object); quarantined_tasks = @($quarantined.Keys | Sort-Object)
+            cohorts = [ordered]@{ opened = @($cohortsOpened.Keys | Sort-Object); closed = @($cohortsClosed.Keys | Sort-Object) }
+            review_cycles = $reviewCycles
+            usage = [ordered]@{ actual_tokens = $actualTokens; estimated_tokens = $estimatedTokens; actual_usage_events = $actualUsageEvents; estimated_usage_events = $estimatedUsageEvents }
+        }
+        attention = [ordered]@{
+            as_of = Format-UtcInstant $now
+            pending_approval_ids = $attention.PendingIds; expired_approval_ids = $attention.ExpiredIds; approval_errors = $attention.Errors
+            escalated_task_ids = $currentEscalations
+        }
+        sources = [ordered]@{ events_status=$eventsStatus; event_count=$stream.Events.Count; skipped_jsonl_lines=$stream.Invalid; queue_present=(Test-Path -LiteralPath (Join-Path $work 'Tasks_Queue.md') -PathType Leaf) }
+    }
+    if ([bool](Opt 'json' $false)) { Write-Output ($result | ConvertTo-Json -Depth 10 -Compress); return }
+
+    Write-Output "Orchestra digest — $(Format-UtcInstant $start) → $(Format-UtcInstant $end)"
+    Write-Output '| Сигнал | Значение |'; Write-Output '|---|---:|'
+    Write-Output "| Опубликовано задач | $($result.activity.published_tasks.Count) |"
+    Write-Output "| Эскалировано за период | $($result.activity.escalated_tasks.Count) |"
+    Write-Output "| Карантинов за период | $($result.activity.quarantined_tasks.Count) |"
+    Write-Output "| Когорты (opened / closed) | $($result.activity.cohorts.opened.Count) / $($result.activity.cohorts.closed.Count) |"
+    Write-Output "| Циклы ревью | $reviewCycles |"
+    Write-Output "| Actual tokens (usage.recorded) | $(Format-Number $actualTokens) |"
+    Write-Output "| Estimated tokens (not actual) | $(Format-Number $estimatedTokens) |"
+    Write-Output 'Требует внимания сейчас:'
+    Write-Output "- Pending approvals: $($attention.PendingIds.Count) ($(Format-DigestIds $attention.PendingIds))"
+    Write-Output "- Expired approvals: $($attention.ExpiredIds.Count) ($(Format-DigestIds $attention.ExpiredIds))"
+    Write-Output "- Escalated tasks in queue: $($currentEscalations.Count) ($(Format-DigestIds $currentEscalations))"
+    if ($attention.Errors.Count -gt 0) { Write-Output "- Approval artifacts with errors: $($attention.Errors.Count)" }
+    if ($eventsStatus -eq 'missing') { Write-Output 'Диагностика: events.jsonl отсутствует.' }
+    elseif ($eventsStatus -eq 'empty') { Write-Output 'Диагностика: events.jsonl пуст.' }
+    if ($stream.Invalid -gt 0) { Write-Output "Пропущено некорректных строк JSONL: $($stream.Invalid)" }
+}
+
 function Cmd-Aggregate {
     $work = Require-Opt 'work'
     if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
@@ -442,7 +587,8 @@ try {
     switch ($Command) {
         'aggregate' { Cmd-Aggregate }
         'budget' { Cmd-Budget }
-        default { Fail 2 "unknown command '$Command'. Valid: aggregate, budget" }
+        'digest' { Cmd-Digest }
+        default { Fail 2 "unknown command '$Command'. Valid: aggregate, budget, digest" }
     }
 } catch {
     exit (Resolve-CatchExit $_ 'METRICSERR' 'metrics' 'METRICS_DEBUG')
