@@ -1145,7 +1145,10 @@ function Cmd-InboxDrain {
             try {
                 $recPreds = @()
                 if ($rec.PSObject.Properties.Name -contains 'predecessors') {
-                    $recPreds = @($rec.predecessors | ForEach-Object {
+                    $tokens = @($rec.predecessors | Where-Object {
+                        $null -ne $_ -and ([string]$_).Trim() -ne ''
+                    })
+                    $recPreds = @($tokens | ForEach-Object {
                         $token = [string]$_
                         $match = [regex]::Match($token, '^T-0*(\d+)$')
                         if (-not $match.Success) {

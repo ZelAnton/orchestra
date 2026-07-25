@@ -454,6 +454,10 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
             @{ Name = '01-wrong-prefix.json'; Record = @{ kind = 'task'; title = 'Wrong Prefix'; body = 'bad'; predecessors = @('P-3') } }
             @{ Name = '02-no-digits.json'; Record = @{ kind = 'task'; title = 'No Digits'; body = 'bad'; predecessors = @('abc') } }
             @{ Name = '03-valid.json'; Record = @{ kind = 'task'; title = 'Strict Valid'; body = 'good'; predecessors = @('T-001', 'T-003') } }
+            @{ Name = '04-null.json'; Record = @{ kind = 'task'; title = 'Null Predecessors'; body = 'good'; predecessors = $null } }
+            @{ Name = '05-empty-string.json'; Record = @{ kind = 'task'; title = 'Empty String Predecessors'; body = 'good'; predecessors = '' } }
+            @{ Name = '06-empty-array.json'; Record = @{ kind = 'task'; title = 'Empty Array Predecessors'; body = 'good'; predecessors = @() } }
+            @{ Name = '07-bare-number.json'; Record = @{ kind = 'task'; title = 'Bare Number'; body = 'bad'; predecessors = @('3') } }
         )
         foreach ($record in $records) {
             $json = $record.Record | ConvertTo-Json -Depth 5
@@ -464,22 +468,29 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Equal 0 $r.ExitCode '[inbox-strict-preds] invalid tokens are quarantined without failing the drain'
         Assert-Match $r.Output "rejected: .*DEP:invalid predecessor 'P-3' \(expected T-NNN\)" '[inbox-strict-preds] wrong prefix is a DEP rejection'
         Assert-Match $r.Output "rejected: .*DEP:invalid predecessor 'abc' \(expected T-NNN\)" '[inbox-strict-preds] digitless token is a DEP rejection'
-        Assert-Match $r.Output 'added: T-004' '[inbox-strict-preds] valid record is still added'
+        Assert-Match $r.Output "rejected: .*DEP:invalid predecessor '3' \(expected T-NNN\)" '[inbox-strict-preds] bare number is a DEP rejection'
+        Assert-Match $r.Output 'added: T-004 T-005 T-006 T-007' '[inbox-strict-preds] valid and empty predecessor records are added'
 
         $queue = Read-Queue $W
-        Assert-Equal 4 (Get-QueueIds $W).Count '[inbox-strict-preds] rejected records do not consume task ids'
-        Assert-True ($queue -notmatch 'Wrong Prefix|No Digits') '[inbox-strict-preds] invalid records never reach the queue'
+        Assert-Equal 7 (Get-QueueIds $W).Count '[inbox-strict-preds] rejected records do not consume task ids'
+        Assert-True ($queue -notmatch 'Wrong Prefix|No Digits|Bare Number') '[inbox-strict-preds] invalid records never reach the queue'
         Assert-Match $queue '### \[T-004\] Strict Valid — статус: не начата' '[inbox-strict-preds] valid record keeps normal task creation'
         Assert-Match $queue 'Предпосылки: T-001, T-003' '[inbox-strict-preds] valid strict predecessors are preserved'
+        Assert-Match $queue '### \[T-005\] Null Predecessors — статус: не начата' '[inbox-strict-preds] null predecessors mean no predecessors'
+        Assert-Match $queue '### \[T-006\] Empty String Predecessors — статус: не начата' '[inbox-strict-preds] empty string predecessors mean no predecessors'
+        Assert-Match $queue '### \[T-007\] Empty Array Predecessors — статус: не начата' '[inbox-strict-preds] empty array predecessors mean no predecessors'
 
         $rejectedDir = Join-Path $inbox 'rejected'
         Assert-Equal 0 @(Get-ChildItem -LiteralPath $inbox -Filter '*.json' -File).Count '[inbox-strict-preds] hot inbox is fully drained'
-        Assert-Equal 2 @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.json' -File).Count '[inbox-strict-preds] both invalid records are quarantined'
+        $rejectedRecords = @(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.json' -File)
+        Assert-Equal 3 $rejectedRecords.Count '[inbox-strict-preds] all invalid records are quarantined'
+        Assert-True (-not ($rejectedRecords.Name -match '04-null|05-empty-string|06-empty-array')) '[inbox-strict-preds] empty predecessor records are not quarantined'
         $metadataText = (@(Get-ChildItem -LiteralPath $rejectedDir -Filter '*.metadata.txt' -File | ForEach-Object {
             [System.IO.File]::ReadAllText($_.FullName)
         }) -join "`n")
         Assert-Match $metadataText "Rejection reason: DEP:invalid predecessor 'P-3' \(expected T-NNN\)" '[inbox-strict-preds] wrong-prefix reason is audited'
         Assert-Match $metadataText "Rejection reason: DEP:invalid predecessor 'abc' \(expected T-NNN\)" '[inbox-strict-preds] digitless reason is audited'
+        Assert-Match $metadataText "Rejection reason: DEP:invalid predecessor '3' \(expected T-NNN\)" '[inbox-strict-preds] bare-number reason is audited'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
     # --- Scenario 12: concurrent writers, no lost update / no duplicate id --
