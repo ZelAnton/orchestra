@@ -1066,7 +1066,12 @@ codex-правилами выше (см. «Резолвинг раннеров `
   включённого enforceable-token-gate ниже.
 - **Токенный circuit-breaker когорты (T-309).** `COHORT_TOKEN_BUDGET: 0` отключён по
   умолчанию; при `>0` `tools/metrics.ps1 budget --batch-id <B-id>` dedup-ит
-  `usage.recorded` и считает только явное `estimated=false`. Перед каждым новым model call processor
+  `usage.recorded` и считает только явное `estimated=false`. Проекция сортирует события по
+  `occurred_at` и применяет действовавший в этот момент `task.captured` mapping, поэтому
+  delayed/batchless/stale-batch события одного повторно захваченного task_id не переходят в
+  последнюю когорту. UUIDv5 usage включает `batch_id`. Внутренний Claude `Agent(...)` без
+  provider token counts пишет `usage_availability=unavailable`, что делает telemetry
+  ненадёжной, а не нулевой. Перед каждым новым model call processor
   читает этот снимок и требует `status=ok` + `telemetry_reliable=true`: `actual >= limit` — это post-charge граница (без reservation), поэтому
   уже идущий вызов может пересечь лимит, но следующий не запускается. При лимите или
   unreadable/missing telemetry processor guarded-закрывает admission как

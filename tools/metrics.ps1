@@ -56,34 +56,70 @@ function Get-EventsOutbox {
     return 'on'
 }
 
+function Get-TemporallyAttributedEvents {
+    param($Events)
+
+    # The outbox is append-only, but append order is not event-time order: a delayed
+    # usage/status event may be written after the same task has already been recaptured by a
+    # later cohort. Project in occurred_at order and retain source order only as a stable
+    # tie-breaker. The active task -> batch mapping is updated by task.captured at that point
+    # in time. For task-scoped events that mapping is authoritative even when the envelope
+    # batch_id is absent or stale/wrong; an explicit batch_id remains the fallback before the
+    # first capture and for cohort-scoped events.
+    $sortable = New-Object Collections.Generic.List[object]
+    $sequence = 0
+    foreach ($event in $Events) {
+        [void]$sortable.Add([pscustomobject]@{
+                Event      = $event
+                OccurredAt = To-Time (Get-Prop $event 'occurred_at')
+                Sequence   = $sequence
+            })
+        $sequence++
+    }
+
+    $taskToBatch = @{}
+    $attributed = New-Object Collections.Generic.List[object]
+    $ordered = @($sortable | Sort-Object `
+            @{ Expression = { if ($null -eq $_.OccurredAt) { [DateTimeOffset]::MaxValue } else { $_.OccurredAt } } }, `
+            @{ Expression = { $_.Sequence } })
+    foreach ($item in $ordered) {
+        $event = $item.Event
+        $type = [string](Get-Prop $event 'type')
+        $taskId = [string](Get-Prop $event 'task_id')
+        $explicitBatchId = [string](Get-Prop $event 'batch_id')
+
+        if ($type -eq 'task.captured' -and $taskId -and $explicitBatchId) {
+            $taskToBatch[$taskId] = $explicitBatchId
+        }
+
+        $batchId = $explicitBatchId
+        if ($taskId -and $taskToBatch.ContainsKey($taskId)) {
+            $batchId = [string]$taskToBatch[$taskId]
+        }
+        [void]$attributed.Add([pscustomobject]@{
+                Event      = $event
+                BatchId    = $batchId
+                OccurredAt = $item.OccurredAt
+            })
+    }
+    return $attributed
+}
+
 function Get-BatchUsage {
     param($Events, [string]$BatchId)
     $actual = 0.0; $estimated = 0.0; $actualObserved = $false; $estimatedObserved = $false
     $actualEvents = 0; $estimatedEvents = 0; $actualComplete = $true
-    # Fallback task_id -> batch_id map (same source and shape as Apply-Events' own
-    # $taskToBatch): older/degraded `usage.recorded` events emitted by `supervisor.ps1
-    # observe` before it carried --batch-id (T-321) have NO batch_id in the envelope at
-    # all, so they would otherwise silently drop out of the COHORT_TOKEN_BUDGET gate's
-    # actual-spend total even though task.captured unambiguously ties task_id to a batch.
-    $taskToBatch = @{}
-    foreach ($record in $Events) {
-        if ([string](Get-Prop $record 'type') -ne 'task.captured') { continue }
-        $t = [string](Get-Prop $record 'task_id'); $b = [string](Get-Prop $record 'batch_id')
-        if ($t -and $b) { $taskToBatch[$t] = $b }
-    }
-    foreach ($record in $Events) {
+    foreach ($attributed in (Get-TemporallyAttributedEvents $Events)) {
+        $record = $attributed.Event
         if ([string](Get-Prop $record 'type') -ne 'usage.recorded') { continue }
-        $recordBatchId = [string](Get-Prop $record 'batch_id')
-        if ($recordBatchId -ne $BatchId) {
-            # Recover via task_id ONLY when the envelope's own batch_id is absent - mirrors
-            # Apply-Events' "-not $batchId -and taskToBatch.ContainsKey" fallback. An
-            # explicit, different batch_id on the event is trusted over a task_id-derived
-            # guess (the event's own recorded claim wins over inference).
-            if ($recordBatchId) { continue }
-            $recordTaskId = [string](Get-Prop $record 'task_id')
-            if (-not $recordTaskId -or -not $taskToBatch.ContainsKey($recordTaskId) -or $taskToBatch[$recordTaskId] -ne $BatchId) { continue }
-        }
+        if ([string]$attributed.BatchId -ne $BatchId) { continue }
         $payload = Get-Prop $record 'payload'
+        $availability = Get-Prop $payload 'usage_availability'
+        if ($null -ne $availability) {
+            $availabilityValue = [string]$availability
+            if ($availabilityValue -eq 'unavailable') { $actualComplete = $false; continue }
+            if ($availabilityValue -ne 'available') { $actualComplete = $false; continue }
+        }
         $estimatedRaw = Get-Prop $payload 'estimated'
         # An enabled safety gate must never silently classify an old/invalid usage shape as
         # exact. Only an explicit boolean `estimated=false` counts toward actual spending.
@@ -189,21 +225,14 @@ function Add-Usage {
 
 function Apply-Events {
     param([hashtable]$Batches, $Events)
-    $taskToBatch = @{}
-    foreach ($event in $Events) {
-        if ([string](Get-Prop $event 'type') -eq 'task.captured') {
-            $taskId = [string](Get-Prop $event 'task_id'); $batchId = [string](Get-Prop $event 'batch_id')
-            if ($taskId -and $batchId) { $taskToBatch[$taskId] = $batchId }
-        }
-    }
-    foreach ($event in $Events) {
+    foreach ($attributed in (Get-TemporallyAttributedEvents $Events)) {
+        $event = $attributed.Event
         $type = [string](Get-Prop $event 'type'); $payload = Get-Prop $event 'payload'
-        $taskId = [string](Get-Prop $event 'task_id'); $batchId = [string](Get-Prop $event 'batch_id')
-        if (-not $batchId -and $taskId -and $taskToBatch.ContainsKey($taskId)) { $batchId = $taskToBatch[$taskId] }
+        $taskId = [string](Get-Prop $event 'task_id'); $batchId = [string]$attributed.BatchId
         $batch = Get-Batch $Batches $batchId
         if ($null -eq $batch) { continue }
         $batch.SourceEvents = $true
-        $at = To-Time (Get-Prop $event 'occurred_at'); Set-Later $batch 'LastSeen' $at
+        $at = $attributed.OccurredAt; Set-Later $batch 'LastSeen' $at
         if ($type -eq 'cohort.opened') { Set-Earlier $batch 'Start' $at }
         if ($type -eq 'cohort.closed') { Set-Later $batch 'End' $at }
 

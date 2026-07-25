@@ -75,6 +75,7 @@
     pwsh -File tools/supervisor.ps1 run --file worker.ps1 --args-json '["--id","T-1"]' --deadline-sec 60 --result-file r.json
     pwsh -File tools/supervisor.ps1 supervise --exe git --args-json '["status"]' --max-attempts 2 --budget-file b.json --budget-sec 600 --checkpoint-file cp.json --work /abs/.work --owner OWN --task-id T-1
     pwsh -File tools/supervisor.ps1 observe --result-file r.json --stdout-file out.txt --task-id T-1 --role coder --source claude --batch-id B-1 --work /abs/.work --json
+    pwsh -File tools/supervisor.ps1 usage-unavailable --task-id T-1 --batch-id B-1 --role coder --mode full --attempt-number 1 --source claude --json
     pwsh -File tools/supervisor.ps1 budget --budget-file b.json --json
 #>
 
@@ -1186,6 +1187,7 @@ function Cmd-Observe {
             cache_creation_input_tokens = $usage.cache_creation_input_tokens
             total_tokens                = $usage.total_tokens
             estimated                   = $usage.estimated
+            usage_availability          = 'available'
         }
         $usageEventArgs = @(
             '--type', 'usage.recorded', '--task-id', $taskId, '--role', $role, '--mode', $mode,
@@ -1210,6 +1212,50 @@ function Cmd-Observe {
             usage_event_args    = $usageEventArgs
         }
         Write-Output ($out | ConvertTo-Json -Depth 8 -Compress)
+    } else {
+        Write-Output $journal
+    }
+}
+
+# ==========================================================================
+# usage-unavailable : create the non-sensitive usage.recorded marker emitted for an
+# internal Agent dispatch whose provider token counts cannot be observed. The caller
+# appends usage_event_args through tools/outbox.ps1, preserving supervisor's invariant
+# that it never mutates the outbox itself. This marker makes COHORT_TOKEN_BUDGET fail
+# closed instead of treating an unmetered model call as reliable zero usage.
+# ==========================================================================
+function Cmd-UsageUnavailable {
+    $taskId = Require-Opt 'task-id'
+    $batchId = Require-Opt 'batch-id'
+    $role = Require-Opt 'role'
+    $mode = Require-Opt 'mode'
+    $attemptNumber = [string](Require-Opt 'attempt-number')
+    $source = [string](Opt 'source' 'claude')
+
+    if ($batchId -notmatch '^B-\S+$') { Fail 2 '--batch-id must be a B-id' }
+    if ($attemptNumber -notmatch '^\d+$') { Fail 2 '--attempt-number must be a non-negative integer' }
+
+    $usagePayload = [ordered]@{
+        task_id           = $taskId
+        role              = $role
+        mode              = $mode
+        attempt_number    = [int64]$attemptNumber
+        source            = $source
+        usage_availability = 'unavailable'
+    }
+    $usageEventArgs = @(
+        '--type', 'usage.recorded', '--task-id', $taskId, '--batch-id', $batchId,
+        '--role', $role, '--mode', $mode, '--attempt-number', $attemptNumber,
+        '--source', $source, '--payload', ($usagePayload | ConvertTo-Json -Compress)
+    )
+    $journal = "supervisor: usage_unavailable source=$source task=$taskId batch=$batchId role=$role mode=$mode attempt=$attemptNumber"
+
+    if ([bool](Opt 'json' $false)) {
+        Write-Output ([ordered]@{
+                journal_line     = $journal
+                usage            = $usagePayload
+                usage_event_args = $usageEventArgs
+            } | ConvertTo-Json -Depth 6 -Compress)
     } else {
         Write-Output $journal
     }
@@ -1264,10 +1310,11 @@ if ($MyInvocation.InvocationName -ne '.') {
             'run'       { Cmd-Run }
             'supervise' { Cmd-Supervise }
             'observe'   { Cmd-Observe }
+            'usage-unavailable' { Cmd-UsageUnavailable }
             'budget'    { Cmd-Budget }
             'version'   { Cmd-Version }
             default {
-                Fail 2 "unknown command '$Command'. Valid: run, supervise, observe, budget, version"
+                Fail 2 "unknown command '$Command'. Valid: run, supervise, observe, usage-unavailable, budget, version"
             }
         }
     } catch {

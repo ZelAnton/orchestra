@@ -1225,6 +1225,17 @@ worktree/ветки задачи допиши `task.captured` (`task_id`, `batch
 ProcessKit-backend контейнирует launcher; независимо от этого launcher
 запрещает reuse .NET build workers во всём дочернем окружении.
 
+У внутреннего `Agent(...)` также нет доступного processor'у provider token count. Поэтому
+при `EVENTS_OUTBOX: on` **после успешного admission-снимка и непосредственно перед каждым**
+таким dispatch создай fail-closed marker командой
+`tools/supervisor.ps1 usage-unavailable --task-id <T-ID|_cohort|_integration> --batch-id
+"<B-id>" --role <роль> --mode <режим> --attempt-number <N> --source claude --json` и
+best-effort допиши выданные `usage_event_args` через `tools/outbox.ps1 append`. Номер
+1-based и replay-stable в пределах `(batch_id,task_id,role,mode)`; при resume уже
+существующий marker того же логического dispatch переиспользуй, а не создавай новый.
+`usage_availability="unavailable"` намеренно делает следующий token-budget snapshot
+`telemetry_unavailable`: внутренний вызов без provider-счётчиков нельзя считать нулевым.
+
 `tools/supervisor.ps1` (`run`/`supervise`) применяй к **реальным внешним процессам**:
 codex-runtime уже делает эквивалентную очистку сам, а coder/merger и ты для `SMOKE_CMD`,
 сборки, тестов и обязательных проверок запускаете команду через supervisor. Передавай каждому
@@ -1439,12 +1450,15 @@ processor-гейта после несентинельного возврата 
 (`source=codex`, те же `task_id`/`role`/`mode`/`attempt_number`, что и у `codex.attempt`, поля
 usage и флаг `estimated` — как есть из блока). Для **Claude**-исполнителя/фолбэка, если его
 вызов обёрнут `tools/supervisor.ps1` и `observe --stdout-file --batch-id "<B-id>"` вернул
-`usage_event_args` (`source=claude`) — так же best-effort допиши `usage.recorded` этими
-аргументами. `--batch-id` у `observe` передавай **всегда** (T-321): без него `usage.recorded`
-уходит без `batch_id` в envelope, и `tools/metrics.ps1 Get-BatchUsage` восстанавливает его
-только фолбэком через `task_id → batch_id` — надёжнее не полагаться на фолбэк, а нести
-`batch_id` сразу. Отсутствие usage — не ошибка (событие не пишется); сбор не меняет
-control-flow.
+   `usage_event_args` (`source=claude`) — так же best-effort допиши `usage.recorded` этими
+   аргументами. `--batch-id` у `observe` передавай **всегда** (T-321): без него `usage.recorded`
+   уходит без `batch_id` в envelope, и `tools/metrics.ps1 Get-BatchUsage` восстанавливает его
+   только фолбэком через `task_id → batch_id` — надёжнее не полагаться на фолбэк, а нести
+   `batch_id` сразу. Для внутреннего Claude `Agent(...)`, у которого transcript/provider usage
+   недоступен, **обязательно** допиши `usage.recorded` через `usage-unavailable` по правилу
+   раздела «Supervisor вызова исполнителя»; отсутствие счётчиков не является нулевым usage.
+   Сбор не меняет исход уже запущенного model call, но unavailable-marker fail-closed закрывает
+   admission перед следующим.
 
 ### Пер-таск ревью (тиринг: reviewer / reviewer_std)
 
@@ -2923,7 +2937,7 @@ crash-safe персистентного состояния ради того, ч
 | `task.captured` | worktree/ветка задачи созданы | Фаза 1.5 / 2.0 |
 | `task.status_changed` | любая смена `Статус` дескриптора (payload: `from`/`to`) | всюду, где ты меняешь `Статус` |
 | `codex.attempt` | логическая попытка coder/reviewer Codex завершилась | Фазы 2.2–2.8 |
-| `usage.recorded` | токен-usage одного модельного вызова (claude/codex), если usage доступен | Фазы 2.2–2.8 |
+| `usage.recorded` | токен-usage одного модельного вызова (claude/codex) либо unavailable-marker внутреннего Agent dispatch | Фазы 2.2–2.8 |
 
 Смены статуса, которые критерии называют отдельно, — это **тот же** `task.status_changed`
 с обогащённым payload, не отдельные типы:
@@ -2966,7 +2980,7 @@ crash-safe персистентного состояния ради того, ч
 | `task.captured` | `batch_id`, `task_id`, `attempt` | `attempt` = `попытка=N` из очереди (по умолчанию 1) |
 | `task.status_changed` | `task_id`, `from`, `to`, `attempt`, `round` | `from`→`to` — константа фазы; `attempt` = `попытка=N`; `round` = `Циклов-ревью: N` (по умолчанию 1) |
 | `codex.attempt` | `task_id`, `role`, `mode`, `attempt_number` | из telemetry-reservation `Codex-попытка` |
-| `usage.recorded` | `source`, `task_id`, `role`, `mode`, `attempt_number` | `source`=`claude`/`codex`; остальное — как у сопутствующего вызова (codex: та же reservation `Codex-попытка`; claude: `role`/attempt вызова) |
+| `usage.recorded` | `source`, `task_id`, `batch_id`, `role`, `mode`, `attempt_number` | `source`=`claude`/`codex`; `batch_id` = текущий `B-id`; остальное — как у сопутствующего вызова (codex: та же reservation `Codex-попытка`; claude: `role`/attempt вызова) |
 
 Каждая координата долговечно восстановима, поэтому replay после краша пересобирает тот же
 ключ **без** нового персистентного счётчика. Не подмешивай сырой глобальный generation в
@@ -3069,8 +3083,10 @@ crash-safe порядок дозаписи; сбой редактировани�
 Claude-исполнителя (headless `claude -p --output-format stream-json`) и Codex-адаптера
 (`codex exec`). Это **отдельный** тип рядом с `codex.attempt` (который несёт timing/RC/outcome
 и **не** меняется): usage добавляется **аддитивно**, а `usage.recorded` покрывает и Claude-, и
-Codex-вызовы, тогда как `codex.attempt` — только Codex. Эмитить **best-effort и только когда
-usage реально захвачен**; отсутствие usage — не ошибка, событие просто не пишется. В envelope
+ Codex-вызовы, тогда как `codex.attempt` — только Codex. Эмитить **best-effort**: когда
+ provider usage захвачен — с `usage_availability: "available"`; для внутреннего Claude
+ `Agent(...)`, где счётчики недоступны, — обязательный fail-closed marker
+ `usage_availability: "unavailable"` без вымышленных token-полей. В envelope
 обязательны `schema_version: 1`, `type: "usage.recorded"`, текущий `batch_id`, `task_id`,
 `actor`. Payload — строгий scalar-allowlist:
 
@@ -3087,7 +3103,8 @@ usage реально захвачен**; отсутствие usage — не о�
   "cache_read_input_tokens": 300,
   "cache_creation_input_tokens": 0,
   "total_tokens": 1950,
-  "estimated": false
+  "estimated": false,
+  "usage_availability": "available"
 }
 ```
 
@@ -3100,16 +3117,22 @@ usage реально захвачен**; отсутствие usage — не о�
   Claude или из `turn.completed`-usage `codex exec --json`); `true` — эвристическая оценка (когда
   точных данных нет). **Никогда** не смешивай estimated с actual (`plans/OBSERVABILITY_PLATFORM_PLAN.md`
   §8) — флаг переносится в событие как есть.
+- `usage_availability` — `available|unavailable`. `available` сопровождает реально
+  извлечённые provider-счётчики. `unavailable` — marker внутреннего `Agent(...)` без
+  доступных token counts; он не несёт `estimated`/token-полей и заставляет
+  `COHORT_TOKEN_BUDGET` считать телеметрию ненадёжной, а не нулевой.
 - **Откуда берёшь usage.** Codex: из результата `tools/codex-runtime.ps1 run` — он несёт готовый
   блок `usage` (actual из JSONL, иначе marked-estimate). Claude: из `tools/supervisor.ps1 observe
   --stdout-file <захват stream-json> --batch-id "<B-id>"` — он парсит usage финального
   `result`-события и отдаёт готовый `usage_event_args` (`--type usage.recorded … --batch-id
   <B-id>`). Передавай `--batch-id` в `observe` **всегда** (T-321), а не только когда под рукой —
   это то же поле, что несёт envelope самого события, и без него `usage.recorded` не попадает в
-  выборку `Get-BatchUsage` по прямому совпадению (только более слабым `task_id`-фолбэком). Оба
-  пути (Codex/Claude) — только неконфиденциальные целые счётчики, никогда сырой вывод/промпт.
+  прямую выборку и не может построить обязательный dedup-key. Внутренний Claude `Agent(...)`:
+  `tools/supervisor.ps1 usage-unavailable ... --batch-id "<B-id>" --json`, затем append его
+  `usage_event_args`. Все пути несут только неконфиденциальные scalar-поля, никогда сырой
+  вывод/промпт.
 - `event_id` — UUIDv5 от имени
-  `orchestra/usage.recorded/<source>/<task_id>/<role>/<mode>/<attempt_number>` (через
+  `orchestra/usage.recorded/<source>/<task_id>/<batch_id>/<role>/<mode>/<attempt_number>` (через
   `tools/outbox.ps1 event-id`/`append`). Дозапись — тем же best-effort `append`, что и
   `codex.attempt` (идемпотентна по `event_id`); сбой не роняет прогон.
 

@@ -469,12 +469,16 @@ function Ref-UuidV5 {
 #     ACTUAL vs ESTIMATED tokens by source.
 # =============================================================================
 {
-    # dedup key: source distinguishes a codex attempt from its Claude fallback for the
-    # SAME (task,role,mode,attempt); the id is a standard UUIDv5 over the canonical name.
-    $u1 = Outbox-Id @('--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
-    $u2 = Outbox-Id @('--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    # dedup key: source distinguishes a codex attempt from its Claude fallback, while
+    # batch_id distinguishes legitimate calls after the same task is recaptured.
+    $u1 = Outbox-Id @('--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--batch-id', 'B-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    $u2 = Outbox-Id @('--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-1', '--batch-id', 'B-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    $u3 = Outbox-Id @('--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--batch-id', 'B-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
     Assert-True ($u1 -ne $u2) 'usage.recorded source is a dedup-key coordinate (codex vs claude are distinct facts)'
-    Assert-Equal (Ref-UuidV5 'orchestra/usage.recorded/codex/T-1/coder/full/1') $u1 'usage.recorded event-id is standard UUIDv5 over its canonical name'
+    Assert-True ($u1 -ne $u3) 'usage.recorded batch_id prevents collisions when a task is recaptured'
+    Assert-Equal (Ref-UuidV5 'orchestra/usage.recorded/codex/T-1/B-1/coder/full/1') $u1 'usage.recorded event-id includes batch_id in its canonical UUIDv5 name'
+    $missingBatchId = Invoke-Outbox @('event-id', '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    Assert-Exit $missingBatchId 2 'usage.recorded event-id requires --batch-id'
 
     $dir = New-TempDir; $ev = New-EventsFile $dir
     $payload = '{"task_id":"T-1","role":"coder","mode":"full","attempt_number":1,"source":"codex","model":"default","input_tokens":1200,"output_tokens":450,"cache_read_input_tokens":300,"cache_creation_input_tokens":0,"total_tokens":1950,"estimated":false}'
@@ -485,22 +489,27 @@ function Ref-UuidV5 {
     Assert-Equal 1 (Line-Count $ev) 'usage.recorded replay leaves exactly one line'
 
     # non-allowlisted payload key rejected on write (privacy, like codex.attempt).
-    $bad = Invoke-Outbox @('append', '--events', $ev, '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"prompt":"secret","total_tokens":5}')
+    $bad = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"prompt":"secret","total_tokens":5}')
     Assert-Exit $bad 5 'usage.recorded non-allowlisted key rejected'
     Assert-Contains $bad.Err 'allowlist' 'usage.recorded rejection cites the privacy allowlist'
 
     # scalar-shape guard: non-integer token / non-boolean estimated rejected; null is allowed.
-    $nonInt = Invoke-Outbox @('append', '--events', $ev, '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"total_tokens":"lots"}')
+    $nonInt = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"total_tokens":"lots"}')
     Assert-Exit $nonInt 5 'usage.recorded non-integer token rejected'
-    $badEst = Invoke-Outbox @('append', '--events', $ev, '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"total_tokens":5,"estimated":"yes"}')
+    $badEst = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"total_tokens":5,"estimated":"yes"}')
     Assert-Exit $badEst 5 'usage.recorded non-boolean estimated rejected'
+    $badAvailability = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '2', '--payload', '{"usage_availability":"unknown"}')
+    Assert-Exit $badAvailability 5 'usage.recorded invalid usage_availability rejected'
+    Assert-Contains $badAvailability.Err 'available or unavailable' 'usage_availability validation reports accepted values'
+    $unavailable = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-2', '--role', 'coder', '--mode', 'full', '--attempt-number', '2', '--payload', '{"source":"claude","usage_availability":"unavailable"}')
+    Assert-Exit $unavailable 0 'usage.recorded unavailable marker appends'
     $nullTok = Invoke-Outbox @('append', '--events', $ev, '--batch-id', 'B-1', '--type', 'usage.recorded', '--source', 'claude', '--task-id', 'T-2', '--role', 'reviewer', '--mode', 'full', '--attempt-number', '1', '--payload', '{"source":"claude","input_tokens":null,"total_tokens":800,"estimated":true}')
     Assert-Exit $nullTok 0 'usage.recorded null token field ("unknown for this call") is allowed'
 
     # forward-lenient read: a usage.recorded line with a FUTURE unknown payload key reads valid
     # without rewrite (strict write still refuses it); an OLD codex.attempt line still reads too.
     $dir2 = New-TempDir; $ev2 = New-EventsFile $dir2
-    $fid = Outbox-Id @('--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-3', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
+    $fid = Outbox-Id @('--type', 'usage.recorded', '--source', 'codex', '--task-id', 'T-3', '--batch-id', 'B-1', '--role', 'coder', '--mode', 'full', '--attempt-number', '1')
     $futureLine = '{"schema_version":1,"event_id":"' + $fid + '","occurred_at":"2026-07-17T10:00:00Z","type":"usage.recorded","batch_id":"B-1","task_id":"T-3","actor":{"kind":"tool","name":"codex"},"payload":{"source":"codex","total_tokens":10,"estimated":false,"future_field":"x"}}'
     Write-File $ev2 ($futureLine + "`n")
     Append-Raw $ev2 ('{"schema_version":1,"event_id":"208af7d9-b848-4bd9-a215-3791e2b5c94d","occurred_at":"2026-07-17T10:00:01Z","type":"codex.attempt","task_id":"T-3","actor":{"kind":"tool","name":"codex"},"payload":{"role":"coder","attempt_number":1}}' + "`n")

@@ -155,7 +155,7 @@ $script:CodexAttemptKeys = @(
 $script:UsageRecordedKeys = @(
     'task_id', 'role', 'mode', 'attempt_number', 'source', 'model',
     'input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens',
-    'total_tokens', 'estimated'
+    'total_tokens', 'estimated', 'usage_availability'
 )
 # usage.recorded token/count fields that, WHEN PRESENT and non-null, must be non-negative
 # integers (a scalar-shape write guard; null = "unknown for this call", which stays allowed).
@@ -287,16 +287,18 @@ function Get-CanonicalName {
             # Per-model-call usage keyed by the CALL identity (T-248). `source` (claude|codex)
             # is a key coordinate so a codex attempt and its Claude fallback for the SAME
             # (task,role,mode,attempt) stay two distinct usage facts (the fallback is a separate
-            # model call), rather than colliding on one event_id. All coordinates are durably
-            # reconstructable (same reservation as codex.attempt for codex; the processor supplies
-            # role/attempt for a Claude call), so a crash/replay rebuilds the same id and dedups.
+            # model call), rather than colliding on one event_id. `batch_id` is also a required
+            # coordinate: task ids and their per-role attempt numbers can be reused after a
+            # recapture, and those calls are distinct budget facts. All coordinates are durably
+            # reconstructable, so a crash/replay rebuilds the same id and dedups.
             $src = Require-Opt 'source'
             $t = Require-Opt 'task-id'
+            $b = Require-Opt 'batch-id'
             $role = Require-Opt 'role'
             $mode = Require-Opt 'mode'
             $an = [string](Require-Opt 'attempt-number')
             if ($an -notmatch '^\d+$') { Fail 2 "--attempt-number must be a non-negative integer" }
-            return "orchestra/$Type/$src/$t/$role/$mode/$an"
+            return "orchestra/$Type/$src/$t/$b/$role/$mode/$an"
         }
         default { Fail 2 "unknown --type '$Type' (valid: $($script:KnownTypes -join ', '))" }
     }
@@ -471,6 +473,12 @@ function Test-Envelope {
             if (Has-Prop $payload 'estimated') {
                 $est = $payload.estimated
                 if ($null -ne $est -and $est -isnot [bool]) { return "usage.recorded payload key 'estimated' must be a boolean" }
+            }
+            if (Has-Prop $payload 'usage_availability') {
+                $availability = $payload.usage_availability
+                if ($availability -isnot [string] -or [string]$availability -notin @('available', 'unavailable')) {
+                    return "usage.recorded payload key 'usage_availability' must be available or unavailable"
+                }
             }
         }
     }

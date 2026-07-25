@@ -478,7 +478,8 @@ Delivery target: next_major
 граница, а не reservation: уже запущенный вызов может довести счётчик выше лимита, но новый
 model call после следующего read-only snapshot не стартует. Гейт принимает снимок только при
 `status=ok` и `sources.telemetry_reliable=true`: отсутствующий/повреждённый JSONL, `EVENTS_OUTBOX:
-off` или actual `usage.recorded` без явного булева `estimated=false` делают telemetry недоступной.
+off`, `usage_availability=unavailable` или actual `usage.recorded` без явного булева
+`estimated=false` делают telemetry недоступной.
 Тогда processor fail-closed так же, как при исчерпании: он защёлкивает приём этой причиной и
 эскалирует незавершённые задачи, а не угадывает расход или складывает estimate.
 
@@ -878,7 +879,7 @@ PowerShell 5.1), companion `queue-tx.ps1`/`state-tx.ps1`. Гейт эмисси�
 | `task.captured` | `task.captured/<batch_id>/<task_id>/a<attempt>` |
 | `task.status_changed` | `task.status_changed/<task_id>/<from>>​<to>/a<attempt>/r<round>` |
 | `codex.attempt` | `codex.attempt/<task_id>/<role>/<mode>/<attempt_number>` |
-| `usage.recorded` | `usage.recorded/<source>/<task_id>/<role>/<mode>/<attempt_number>` |
+| `usage.recorded` | `usage.recorded/<source>/<task_id>/<batch_id>/<role>/<mode>/<attempt_number>` |
 
 `codex.attempt` — исторический архетип этой схемы (его ключ не изменился). При отсутствии
 UUID-генератора (degraded без PowerShell) допустим fallback-id `evt-<occurred_at>-<суффикс>`;
@@ -897,7 +898,7 @@ UUID-генератора (degraded без PowerShell) допустим fallback
 и не превращается в ошибку). Отсутствие координаты **и** в явном CLI-флаге, **и** в `--payload`
 по-прежнему `Fail 2` (`exit 2`) — регрессии в обратную сторону нет. `codex.attempt`/
 `usage.recorded` фоллбэка не получили: их координаты (`task_id`/`role`/`mode`/`attempt_number`/
-`source`) уже несёт отслеживаемая telemetry-reservation `Codex-попытка` дескриптора задачи
+`source`/`batch_id`) уже несёт отслеживаемая telemetry-reservation `Codex-попытка` дескриптора задачи
 (единая для `codex.attempt` и парного `usage.recorded`) через выделенный crash-safe путь
 эмиссии, а не разовая ручная инструкция агента, как у `cohort.round_*`/`task.status_changed` —
 поэтому у них ниже риск той же ловушки «забыл продублировать флаг».
@@ -927,13 +928,17 @@ headless `claude -p --output-format stream-json` (usage из финальног�
 Codex-вызовы, а `usage.recorded` — и Claude, и Codex). Строгий scalar-allowlist payload:
 `task_id`, `role`, `mode`, `attempt_number`, `source` (`claude|codex`), `model`, `input_tokens`,
 `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `total_tokens`,
-`estimated`. Токен-поля — неотрицательные целые (либо `null` = «неизвестно для этого вызова»),
+`estimated`, `usage_availability` (`available|unavailable`). Токен-поля — неотрицательные
+целые (либо `null` = «неизвестно для этого вызова»),
 `estimated` — булев флаг: `true` помечает эвристическую (не точную) оценку, которую потребитель
-**никогда** не смешивает с actual-значениями (`plans/OBSERVABILITY_PLATFORM_PLAN.md` §8). Как и
-вся телеметрия, сбор usage **best-effort**: неразбираемый/отсутствующий вывод не меняет
-control-flow — событие просто не пишется. `source` входит в дедуп-ключ (§19.2), поэтому
+**никогда** не смешивает с actual-значениями (`plans/OBSERVABILITY_PLATFORM_PLAN.md` §8).
+Реально извлечённые provider-счётчики несут `usage_availability=available`; внутренний
+Claude `Agent(...)`, где provider token counts недоступны, эмитит marker
+`usage_availability=unavailable` без вымышленных token-полей. Marker делает telemetry
+ненадёжной для включённого budget-gate, а не превращается в нулевой расход. `source` и
+`batch_id` входят в дедуп-ключ (§19.2), поэтому
 codex-попытка и её Claude-fallback для одного `(task,role,mode,attempt)` — два самостоятельных
-факта, а не коллизия по одному `event_id`.
+факта, а повторный захват того же task_id в новой когорте не коллидирует со старым usage.
 
 `usage.recorded` — **валидный first-class known-тип** для writer'а и reader'а PowerShell
 (`tools/outbox.ps1`). Actual и estimated остаются раздельными, а admission-gate использует
@@ -946,7 +951,8 @@ codex-попытка и её Claude-fallback для одного `(task,role,mod
 (`event_id` UUID/`evt-`, `occurred_at` `…Z`, `batch_id`/`task_id`), известный `type`, `actor`,
 **никаких неизвестных полей верхнего уровня**, allowlist `codex.attempt`/`usage.recorded`
 (последний дополнительно проверяет scalar-форму: токен-поля — неотрицательные целые/`null`,
-`estimated` — булев), **никаких абсолютных путей** в payload (worktree — только в относительной
+`estimated` — булев, `usage_availability` — `available|unavailable`), **никаких абсолютных
+путей** в payload (worktree — только в относительной
 форме `.work/worktrees/<T-ID>`). Свободный
 текст `reason` проходит redaction (§18.4) **до** передачи в outbox. **Чтение снисходительно
 вперёд:** обязательные поля и форматы проверяются, но неизвестные будущие поля верхнего уровня и

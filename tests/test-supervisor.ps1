@@ -580,6 +580,7 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     Assert-Exit $ap 0 'outbox accepts the usage.recorded event args observe emits'
     Assert-NotContains (Read-File $ev) $secret 'the appended usage.recorded line holds no raw transcript text'
     Assert-Contains (Read-File $ev) '"batch_id":"B-42"' 'the appended usage.recorded line carries the batch_id from observe --batch-id'
+    Assert-Contains (Read-File $ev) '"usage_availability":"available"' 'observed provider counts are explicitly marked available'
 
     # No --stdout-file -> no usage surfaced (best-effort, absent input is a clean no-op).
     $obs2 = Invoke-Spv @('observe', '--result-file', $resFile, '--task-id', 'T-9', '--role', 'coder', '--json')
@@ -587,6 +588,35 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     $obs2Obj = $obs2.Out | ConvertFrom-Json
     Assert-True ($null -eq $obs2Obj.usage) 'observe(no usage): usage is null without a transcript'
     Assert-Equal 0 $obs2Obj.usage_event_args.Count 'observe(no usage): no usage.recorded args without a transcript'
+}.Invoke()
+
+# =============================================================================
+# 6c. T-321 R-04: internal Agent dispatch has no provider token transcript. The
+#     usage-unavailable command emits a durable marker instead of reliable zero.
+# =============================================================================
+{
+    $d = New-TempDir
+    $marker = Invoke-Spv @(
+        'usage-unavailable', '--task-id', 'T-40', '--batch-id', 'B-40',
+        '--role', 'reviewer', '--mode', 'full', '--attempt-number', '2',
+        '--source', 'claude', '--json')
+    Assert-Exit $marker 0 'usage-unavailable rc=0'
+    $markerObj = $marker.Out | ConvertFrom-Json
+    Assert-Equal 'unavailable' $markerObj.usage.usage_availability 'usage-unavailable surfaces the fail-closed marker'
+    $markerArgs = @($markerObj.usage_event_args | ForEach-Object { [string]$_ })
+    $batchIdx = [array]::IndexOf($markerArgs, '--batch-id')
+    Assert-True ($batchIdx -ge 0) 'usage-unavailable event args include required --batch-id'
+    if ($batchIdx -ge 0) { Assert-Equal 'B-40' $markerArgs[$batchIdx + 1] 'usage-unavailable preserves the batch identity' }
+
+    $ev = Join-Path $d 'events.jsonl'
+    $append = Invoke-Outbox (@('append', '--events', $ev) + $markerArgs)
+    Assert-Exit $append 0 'outbox accepts usage-unavailable event args'
+    Assert-Contains (Read-File $ev) '"usage_availability":"unavailable"' 'durable marker records unavailable usage'
+
+    $missingBatch = Invoke-Spv @(
+        'usage-unavailable', '--task-id', 'T-40', '--role', 'reviewer',
+        '--mode', 'full', '--attempt-number', '2', '--json')
+    Assert-Exit $missingBatch 2 'usage-unavailable requires --batch-id'
 }.Invoke()
 
 # =============================================================================
