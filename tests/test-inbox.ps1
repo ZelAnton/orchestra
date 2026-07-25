@@ -540,6 +540,22 @@ completed
     Assert-True ($null -ne $releasePathToPatch) 'locate the on-disk record for the unaudited-freeze release'
     if ($null -ne $releasePathToPatch) {
         $oldFormatRecord = $releasePathToPatch.Record
+        $oldFormatRecord.unaudited_projects = $null
+        Write-TestFile $releasePathToPatch.Path ($oldFormatRecord | ConvertTo-Json -Depth 14)
+        $nullUnauditedResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.0', '--resume', '--json')
+        Assert-Exit $nullUnauditedResume 5 'a release record with null unaudited_projects is rejected'
+
+        $oldFormatRecord.unaudited_projects = [string]$neverAudited.id
+        Write-TestFile $releasePathToPatch.Path ($oldFormatRecord | ConvertTo-Json -Depth 14)
+        $scalarUnauditedResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.0', '--resume', '--json')
+        Assert-Exit $scalarUnauditedResume 5 'a release record with scalar unaudited_projects is rejected'
+
+        $oldFormatRecord.unaudited_projects = [object[]]::new(0)
+        Write-TestFile $releasePathToPatch.Path ($oldFormatRecord | ConvertTo-Json -Depth 14)
+        $emptyUnauditedResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.0', '--resume', '--json')
+        Assert-Exit $emptyUnauditedResume 0 'a release record with an empty unaudited_projects array is accepted'
+        Assert-Equal 0 ([int](($emptyUnauditedResume.Out | ConvertFrom-Json).unaudited_count)) 'an empty unaudited_projects array stays empty'
+
         $oldFormatRecord.PSObject.Properties.Remove('unaudited_projects')
         Write-TestFile $releasePathToPatch.Path ($oldFormatRecord | ConvertTo-Json -Depth 14)
         $oldFormatResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.0', '--resume', '--json')

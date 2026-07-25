@@ -731,8 +731,14 @@ function Read-ReleaseRecord {
         $null = ConvertTo-OrchestraTimestampText $skip.skipped_at
     }
     # Tolerant default: records written before this diagnostic field existed still read cleanly,
-    # same forward-compatible pattern as skipped_targets above.
-    if ($null -eq $record.PSObject.Properties['unaudited_projects']) { $record | Add-Member -NotePropertyName unaudited_projects -NotePropertyValue @() }
+    # same forward-compatible pattern as skipped_targets above. Once present, the field must
+    # preserve its array shape so malformed records cannot erase or distort audit evidence.
+    $unauditedProperty = $record.PSObject.Properties['unaudited_projects']
+    if ($null -eq $unauditedProperty) {
+        $record | Add-Member -NotePropertyName unaudited_projects -NotePropertyValue @()
+    } elseif ($null -eq $unauditedProperty.Value -or $unauditedProperty.Value -isnot [array]) {
+        Fail 5 "release notification record has invalid unaudited project references: $ReleaseId"
+    }
     $unauditedIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($unauditedId in @($record.unaudited_projects)) {
         if ([string]$unauditedId -notmatch '^repo-[a-f0-9]{20}$' -or -not $unauditedIds.Add([string]$unauditedId)) {
@@ -780,7 +786,7 @@ function Cmd-Release {
     $lock = Get-InboxLockPath $root
     # The frozen audience (and the unaudited-projects evidence explaining its possible
     # incompleteness) is established exactly once, on the call that creates the record.
-    $isFreeze = -not (Test-Path -LiteralPath $releasePath -PathType Leaf)
+    $isFreeze = $false
     Acquire-Lock -LockPath $lock
     try {
         if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
@@ -806,6 +812,7 @@ function Cmd-Release {
             }
         } else {
             if ($resume) { Fail 4 "cannot resume release $version because no canonical release record exists" }
+            $isFreeze = $true
             $body = Get-TextOption -Name 'notes' -FileName 'notes-file' -Required
             $subject = [string](Opt 'subject' ("Release $($source.name) $version"))
             Assert-MessageText -Subject $subject -Body $body
