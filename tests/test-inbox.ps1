@@ -18,6 +18,7 @@ $script:RepoA = Join-Path $script:Root 'sender-repo'
 $script:RepoB = Join-Path $script:Root 'receiver-repo'
 $script:RepoC = Join-Path $script:Root 'unrelated-repo'
 $script:RepoD = Join-Path $script:Root 'retired-repo'
+$script:RepoE = Join-Path $script:Root 'never-audited-repo'
 $script:Registry = Join-Path $script:Root 'profile/projects.json'
 $script:RegistryTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\project-registry.ps1')).Path
 $script:InboxTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\inbox.ps1')).Path
@@ -484,6 +485,67 @@ completed
     Assert-Exit (Invoke-Registry @('resolve', '--project', ([string]$retired.id))) 4 'unregistered project no longer resolves'
     $receiverGraphAfterRetirement = (Invoke-Registry @('graph-show', '--root', $script:RepoB, '--json')).Out | ConvertFrom-Json
     Assert-Equal 0 (@($receiverGraphAfterRetirement.dependencies).Count) 'registry removal leaves no dangling dependency edge'
+
+    # --- T-318: a registered-but-never-audited project must not look independent by omission ---
+    $null = New-Item -ItemType Directory -Force -Path $script:RepoE
+    $eRegisterJson = Invoke-Registry @('register', '--root', $script:RepoE, '--name', 'NeverAudited', '--ensure-inbox', '--json')
+    Assert-Exit $eRegisterJson 0 'register a project that stays unaudited (graph_generation=0)'
+    $neverAudited = ($eRegisterJson.Out | ConvertFrom-Json).project
+    Assert-Equal 0 ([long]$neverAudited.graph_generation) 'freshly registered project starts unaudited'
+
+    $eRegisterHuman = Invoke-Registry @('register', '--root', $script:RepoE, '--name', 'NeverAudited', '--ensure-inbox')
+    Assert-Exit $eRegisterHuman 0 'repeat human-readable registration of an unaudited project'
+    Assert-True ($eRegisterHuman.Out -match 'dependency graph') 'register hints that an unaudited project has an empty dependency graph'
+
+    $aRegisterHuman = Invoke-Registry @('register', '--root', $script:RepoA, '--name', 'Sender', '--ensure-inbox')
+    Assert-Exit $aRegisterHuman 0 'repeat human-readable registration of an already-audited project'
+    Assert-True ($aRegisterHuman.Out -notmatch 'dependency graph') 'register prints no hint for an already-audited project'
+
+    Write-TestFile $releaseNotes 'A registered-but-never-audited project must not look independent by omission.'
+    $unauditedFreeze = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+    Assert-Exit $unauditedFreeze 0 'release freezing an incomplete audience still succeeds (non-blocking)'
+    $unauditedResult = $unauditedFreeze.Out | ConvertFrom-Json
+    Assert-Equal 1 ([int]$unauditedResult.unaudited_count) 'release surfaces exactly the one never-audited registered project'
+    Assert-Equal ([string]$neverAudited.id) ([string]$unauditedResult.unaudited_projects[0]) 'unaudited evidence identifies the never-audited project'
+
+    $unauditedFreezeHuman = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.1', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package')
+    Assert-Exit $unauditedFreezeHuman 0 'human-readable release with an incomplete audience still succeeds'
+    Assert-True ($unauditedFreezeHuman.Out -match 'never had their dependency graph audited') 'human-readable freeze call warns about the incomplete audience'
+    Assert-True ($unauditedFreezeHuman.Out -notmatch 'consumer') 'warning avoids over-claiming the unaudited project is a consumer'
+
+    $unauditedResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.1', '--resume')
+    Assert-Exit $unauditedResume 0 'resume of an unaudited-audience release still succeeds'
+    Assert-True ($unauditedResume.Out -notmatch 'never had their dependency graph audited') 'resume does not repeat the freeze-time warning'
+
+    $auditedGraphPath = Join-Path $script:Root 'never-audited-graph.json'
+    Write-TestFile $auditedGraphPath @'
+{
+  "schema": "orchestra/project-graph-snapshot@1",
+  "base_graph_generation": 0,
+  "products": ["nuget:NeverAudited.Package"],
+  "dependencies": []
+}
+'@
+    $neverAuditedSync = Invoke-Registry @('graph-sync', '--root', $script:RepoE, '--snapshot-file', $auditedGraphPath, '--json')
+    Assert-Exit $neverAuditedSync 0 'audit the previously unaudited project'
+    Assert-Equal 1 ([long](($neverAuditedSync.Out | ConvertFrom-Json).project.graph_generation)) 'a real content change advances graph_generation past zero'
+    Write-TestFile $releaseNotes 'A release where every registered project is already audited reports nothing extra.'
+    $fullyAuditedRelease = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.1.0', '--notes-file', $releaseNotes, '--product', 'nuget:Sender.Package', '--json')
+    Assert-Exit $fullyAuditedRelease 0 'release where every registered project is audited still succeeds'
+    Assert-Equal 0 ([int](($fullyAuditedRelease.Out | ConvertFrom-Json).unaudited_count)) 'a fully audited registry reports no unaudited projects'
+
+    $releasePathToPatch = @(Get-ChildItem -LiteralPath (Join-Path $script:RepoA '.inbox/releases') -File -Filter 'rel-*.json') |
+        ForEach-Object { [pscustomobject]@{ Path = $_.FullName; Record = ([System.IO.File]::ReadAllText($_.FullName) | ConvertFrom-Json) } } |
+        Where-Object { [string]$_.Record.version -eq '3.0.0' } | Select-Object -First 1
+    Assert-True ($null -ne $releasePathToPatch) 'locate the on-disk record for the unaudited-freeze release'
+    if ($null -ne $releasePathToPatch) {
+        $oldFormatRecord = $releasePathToPatch.Record
+        $oldFormatRecord.PSObject.Properties.Remove('unaudited_projects')
+        Write-TestFile $releasePathToPatch.Path ($oldFormatRecord | ConvertTo-Json -Depth 14)
+        $oldFormatResume = Invoke-Inbox @('release', '--root', $script:RepoA, '--version', '3.0.0', '--resume', '--json')
+        Assert-Exit $oldFormatResume 0 'reading a pre-existing release record without the new field does not fail'
+        Assert-Equal 0 ([int](($oldFormatResume.Out | ConvertFrom-Json).unaudited_count)) 'a record missing the field defaults to an empty unaudited evidence set'
+    }
 
     $emoji = [string][char]0xD83D + [string][char]0xDE00
     $longSubject = ('a' * 235) + $emoji

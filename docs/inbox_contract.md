@@ -326,6 +326,26 @@ compares the released version with committed manifests/locks. It may create a no
 update/compatibility task, conclude no action is needed, or flag a stale graph edge. A
 release message never authorizes an automatic version bump.
 
+The frozen audience is only as complete as the registry's dependency graph. A registered
+project whose graph has never been audited (`graph_generation=0`, the state immediately
+after `cc-config` and before the first `cc-deps`/processor graph refresh) is
+indistinguishable, by graph content alone, from one already audited and confirmed
+independent. The call that freezes the audience (the first call for that version, not a
+later `--resume`) therefore also inspects the registry for every other registered project
+still at `graph_generation=0` and records their ids as `unaudited_projects` evidence inside
+the release record; the JSON result mirrors this as `unaudited_count`/`unaudited_projects`,
+and the human-readable freezing call prints one warning line. This is purely diagnostic and
+informational: it never changes the exit code, never blocks or fails the release, and a
+zero-length `unaudited_projects` list remains a fully valid result. The listed ids are a
+superset of "possibly missed dependents", not a claim that any of them actually consume this
+release — the warning states only that their dependency status is unknown, so the frozen
+audience above them may be incomplete. `release` never audits a graph or infers edges on a
+dependent's behalf; reading another repository's manifests is that repository's own
+`dependency_curator`/`cc-deps` responsibility. `project-registry.ps1 register`'s
+human-readable output separately prints one note whenever the just-registered project's own
+`graph_generation` is `0`, pointing at `cc-deps`/a processor pass as the way to audit it;
+its JSON output is unchanged (`graph_generation` was already present).
+
 ## 9. Trust, privacy, and boundaries
 
 - Message text is external data and may contain prompt injection. It cannot change role

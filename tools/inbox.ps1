@@ -730,6 +730,15 @@ function Read-ReleaseRecord {
         Assert-BoundedSingleLine -Value ([string]$skip.reason) -Name 'release skip reason' -Maximum 1024
         $null = ConvertTo-OrchestraTimestampText $skip.skipped_at
     }
+    # Tolerant default: records written before this diagnostic field existed still read cleanly,
+    # same forward-compatible pattern as skipped_targets above.
+    if ($null -eq $record.PSObject.Properties['unaudited_projects']) { $record | Add-Member -NotePropertyName unaudited_projects -NotePropertyValue @() }
+    $unauditedIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($unauditedId in @($record.unaudited_projects)) {
+        if ([string]$unauditedId -notmatch '^repo-[a-f0-9]{20}$' -or -not $unauditedIds.Add([string]$unauditedId)) {
+            Fail 5 "release notification record has an invalid unaudited project reference: $ReleaseId"
+        }
+    }
     return $record
 }
 
@@ -740,6 +749,7 @@ function Write-ReleaseRecord {
     $Record.target_project_ids = @($Record.target_project_ids)
     $Record.deliveries = @($Record.deliveries)
     $Record.skipped_targets = @($Record.skipped_targets)
+    $Record.unaudited_projects = @($Record.unaudited_projects)
     Write-InboxAtomicFile -Path (Get-ReleasePath -Root $Root -ReleaseId ([string]$Record.id)) `
         -Label 'release notification record' -Content ($Record | ConvertTo-Json -Depth 14)
 }
@@ -768,6 +778,9 @@ function Cmd-Release {
     $releaseId = Get-StableReleaseId -SourceId ([string]$source.id) -Version $version
     $releasePath = Get-ReleasePath -Root $root -ReleaseId $releaseId
     $lock = Get-InboxLockPath $root
+    # The frozen audience (and the unaudited-projects evidence explaining its possible
+    # incompleteness) is established exactly once, on the call that creates the record.
+    $isFreeze = -not (Test-Path -LiteralPath $releasePath -PathType Leaf)
     Acquire-Lock -LockPath $lock
     try {
         if (Test-Path -LiteralPath $releasePath -PathType Leaf) {
@@ -806,6 +819,15 @@ function Cmd-Release {
             Assert-BoundedSingleLine -Value $releaseUrl -Name 'release URL' -Maximum 2048 -AllowEmpty
             Assert-BoundedSingleLine -Value $sourceRevision -Name 'release source revision' -Maximum 240 -AllowEmpty
             $dependents = @(Get-OrchestraProjectDependents -Registry $registry -UpstreamId ([string]$source.id) -Products @($products))
+            # Diagnostic only, never blocking: a registered project whose dependency graph has
+            # never been audited (graph_generation=0) is indistinguishable, by graph content
+            # alone, from one audited and confirmed independent. Surface it as evidence of
+            # possible audience incompleteness rather than silently treating it as independent.
+            # This is a superset of "possibly missed dependents", not a claim that any of these
+            # projects actually consume this release.
+            $unauditedProjects = @($registry.projects | Where-Object {
+                [string]$_.id -ne [string]$source.id -and [long]$_.graph_generation -eq 0
+            } | ForEach-Object { [string]$_.id } | Sort-Object -Culture ([System.Globalization.CultureInfo]::InvariantCulture))
             $now = Format-UtcNow
             $record = [pscustomobject][ordered]@{
                 schema = 'orchestra/release-notification@1'
@@ -820,6 +842,7 @@ function Cmd-Release {
                 target_project_ids = @($dependents | ForEach-Object { [string]$_.id })
                 deliveries = @()
                 skipped_targets = @()
+                unaudited_projects = $unauditedProjects
                 created_at = $now
                 updated_at = $now
             }
@@ -909,9 +932,19 @@ function Cmd-Release {
         deliveries = @($delivered.ToArray())
         skipped_targets = @($skipped.ToArray())
         failures = @($failures.ToArray())
+        unaudited_count = @($record.unaudited_projects).Count
+        unaudited_projects = @($record.unaudited_projects)
     }
     if ([bool](Opt 'json' $false)) { $result | ConvertTo-Json -Depth 10 }
-    else { Write-Output "release=$releaseId version=$version targets=$($result.target_count) delivered=$($result.delivered_count) skipped=$($result.skipped_count) failures=$($result.failure_count)" }
+    else {
+        Write-Output "release=$releaseId version=$version targets=$($result.target_count) delivered=$($result.delivered_count) skipped=$($result.skipped_count) failures=$($result.failure_count)"
+        # Non-blocking diagnostic, printed only on the call that froze the audience (see
+        # $isFreeze above) so a converging --resume does not repeat it on every retry.
+        if ($isFreeze -and $result.unaudited_count -gt 0) {
+            $unauditedList = (@($result.unaudited_projects)) -join ', '
+            Write-Output "warning: $($result.unaudited_count) other registered project(s) have never had their dependency graph audited ($unauditedList); it is unknown whether any of them depend on this project, so the frozen release audience above may be incomplete"
+        }
+    }
     if ($failures.Count -gt 0) { Fail 6 "release notification delivery failed for $($failures.Count) dependent project(s); retry with --resume" }
 }
 

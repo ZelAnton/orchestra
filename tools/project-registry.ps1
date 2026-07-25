@@ -30,6 +30,9 @@ function Write-ProjectResult {
     } else {
         Write-Output "registered id=$($Project.id) name=$($Project.name) root=$($Project.root)"
         Write-Output "registry=$RegistryPath"
+        if ([long]$Project.graph_generation -eq 0) {
+            Write-Output "note: this project's dependency graph is still empty; run cc-deps (or a processor pass) to audit it before relying on release fan-out completeness"
+        }
     }
 }
 
