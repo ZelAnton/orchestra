@@ -49,6 +49,17 @@ if ($onWindows) {
 
 $allFiles = Get-ChildItem -Path $PSScriptRoot -Filter 'test-*.ps1' | Sort-Object Name
 
+# These operator entry points are explicitly part of the launcher contract (T-312).
+# Discovery still runs every test file, but a deletion or rename of one of these tests must
+# fail the aggregate suite instead of silently narrowing its required coverage.
+$requiredLauncherTests = @('test-cc-metrics.ps1', 'test-cc-pause.ps1', 'test-cc-unpause.ps1')
+$presentNames = @($allFiles | ForEach-Object { $_.Name })
+$missingRequired = @($requiredLauncherTests | Where-Object { $_ -notin $presentNames })
+if ($missingRequired.Count -gt 0) {
+    Write-Host ('Required launcher test(s) missing: ' + ($missingRequired -join ', '))
+    exit 1
+}
+
 if ($allFiles.Count -eq 0) {
     Write-Host 'No test-*.ps1 files found.'
     exit 1
