@@ -214,6 +214,8 @@ Windows and macOS/Linux report identically), `cc-audit` and `cc-enhance` run
 cheap actionable check before the first planning wave, before rolling top-up, and after
 archiving completed tasks; no background poller is left running. See
 `docs/inbox_contract.md` for message fields, status transitions, routing and replies.
+For an interactive live view of an existing project, run `orchestra-tui` from this
+checkout; it shows the Overview and Decision Inbox without starting another processor.
 `cc-deps` forces an on-demand dependency-graph refresh; processor also runs it at the
 start of work and after publication. When the operator tells processor that version `X`
 was released and asks it to pull, verified release synchronization triggers an idempotent
@@ -233,6 +235,8 @@ notification to every registered dependent from that graph.
   `knowledge_curator` maintains at runtime when `KB: on`.
 - `docs/operations.md` — the operator's guide: running and monitoring a processor
   session, interpreting status/journal output, and handling escalations.
+- `tui/README.md` — build and operating guide for the interactive TUI, including its
+  deliberately narrow command surface.
 - `plans/` — development plans: `LOOP_ORCHESTRA_ROADMAP.md` (strategic direction
   and sequencing) and `OBSERVABILITY_PLATFORM_PLAN.md` (human-in-the-loop
   observability, control plane, and event architecture). Both describe proposed,

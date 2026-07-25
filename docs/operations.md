@@ -93,6 +93,33 @@ it never appears as an admission-close reason.
 If the selected root provider isn't running at all and you want a fuller live view (or to resume
 work), see §6 and `launchers/cc-resume.cmd`.
 
+### Live TUI
+
+`orchestra-tui` is the interactive complement to `cc-status` and `cc-journal`: use
+the launchers when a short text snapshot is enough, and use the TUI while supervising
+a live run or triaging several pending decisions. From the Orchestra checkout, point
+it at the target project's existing `.work` directory:
+
+```powershell
+cargo run --locked -p orchestra-tui -- --work C:\src\my-project\.work
+```
+
+The initial **Overview** screen projects current status and the event stream. Press
+`Tab` for **Decision Inbox**, which collects pending approvals, escalations,
+quarantined tasks, and blocked work; `r` reloads, and `q` quits. The tool is
+read-only by default and does not start the processor or take its lease. `p` writes
+and `u` removes the established `.work/PAUSE` kill switch, `s` reads lease status, and
+`x` opens a confirmation before the existing `state-tx.ps1 release --force`
+transaction. Force-release only after establishing that the processor is definitely
+dead. In the Decision Inbox, `a` approves and `d` rejects the selected pending
+approval; both require confirmation and use `policy.ps1`, never direct approval-file
+writes. Force-lock retains the `state-tx` transaction boundary; policy checks apply to
+the approval decisions.
+
+For build instructions, all arguments, navigation, and the exact mutation boundary,
+see [`tui/README.md`](../tui/README.md). `--all-projects` is available for a
+read-only registry hub when the operator needs to choose a registered project first.
+
 **Process leaks / hung build workers.** External build/test runs supervised by current
 agents leave durable (but local/gitignored) records under
 `.work/processes/<T-ID|_integration>/*.json`. They survive Phase-6 deletion of
