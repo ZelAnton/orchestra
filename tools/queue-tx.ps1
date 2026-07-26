@@ -822,6 +822,11 @@ function Invoke-ProposeProposal {
         }
         if ($explicitId -gt 0) {
             foreach ($p in $proposals) { if ($p.Id -eq $explicitId) { Fail 5 "invalid: explicit proposal id $(Format-PId $explicitId) already in the backlog" } }
+            foreach ($m in [regex]::Matches((Read-TextOrEmpty $paths.Done), 'P-0*(\d+)')) {
+                if ([int]$m.Groups[1].Value -eq $explicitId) {
+                    Fail 5 "invalid: explicit id $(Format-PId $explicitId) already exists in archive"
+                }
+            }
             $id = $explicitId
         } else {
             $id = (Get-MaxKnownPId $paths $proposals) + 1

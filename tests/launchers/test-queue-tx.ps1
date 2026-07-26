@@ -891,4 +891,29 @@ exit $rc
         Assert-Match $r.Output 'id=T-999' '[explicit-id-fresh] requested id is preserved'
         Assert-Match (Read-Queue $W) '### \[T-999\] Fresh explicit id' '[explicit-id-fresh] task entered the queue under the requested id'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 20f: explicit proposal id already present in archive --------
+    $W = New-Work
+    try {
+        $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Proposal to archive', '--body', 'x', '--id', 'P-703')
+        Assert-Equal 0 $r.ExitCode '[explicit-proposal-id-archive] proposal to archive was created'
+
+        $done = @(
+            '# Завершённые задачи', '',
+            '### [P-703] Proposal to archive — kind: proposal — status: rejected',
+            'Archived proposal'
+        ) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Done.md'), $done, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), "# Очередь задач$([Environment]::NewLine)", (New-Object System.Text.UTF8Encoding($false)))
+        Assert-True (-not ((Read-Queue $W) -match 'P-703')) '[explicit-proposal-id-archive] archived proposal exists only in archive'
+
+        $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Reuse archived proposal id', '--body', 'x', '--id', 'P-703')
+        Assert-Equal 5 $r.ExitCode '[explicit-proposal-id-archive] archived proposal id rejected with exit 5'
+        Assert-Match $r.Output 'explicit id P-703 already exists in archive' '[explicit-proposal-id-archive] rejection names the archive source'
+
+        $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Fresh proposal id', '--body', 'x', '--id', 'P-704')
+        Assert-Equal 0 $r.ExitCode '[explicit-proposal-id-fresh] unused explicit proposal id accepted'
+        Assert-Match $r.Output 'id=P-704' '[explicit-proposal-id-fresh] requested proposal id is preserved'
+        Assert-Match (Read-Queue $W) '### \[P-704\] Fresh proposal id' '[explicit-proposal-id-fresh] proposal entered the backlog under the requested id'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }
