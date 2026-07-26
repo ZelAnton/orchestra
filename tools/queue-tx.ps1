@@ -403,7 +403,7 @@ function Get-KnownTitles {
     $set = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($t in $QueueTasks) { [void]$set.Add((Normalize-Title $t.Title)) }
     $doneText = Read-TextOrEmpty $Paths.Done
-    foreach ($m in [regex]::Matches($doneText, '(?m)###\s+\[T-0*\d+\]\s*(.*?)\s*—\s*статус:')) {
+    foreach ($m in [regex]::Matches($doneText, '(?m)^\s*#{2,3}\s+\[T-0*\d+\]\s*(.*?)(?:\s*—\s*статус:.*)?$')) {
         [void]$set.Add((Normalize-Title $m.Groups[1].Value))
     }
     foreach ($m in [regex]::Matches($doneText, '(?m)^Исходная задача:\s*\[T-0*\d+\]\s*(.+)$')) {
