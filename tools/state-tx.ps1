@@ -55,6 +55,7 @@
       0   success
       2   usage / argument error
       3   generation mismatch (caller's --expected-generation is stale)
+      6   persistent control-plane I/O failure (for example, lease directory not removable)
       7   could not acquire the state-tx lock (timeout)
       8   illegal state transition (check-transition)
       10  lease held (a live lease is owned by someone else)
@@ -426,7 +427,14 @@ function Cmd-Release {
                 Fail 13 "refusing to release lease owned by '$($L.owner_id)' (you presented '$owner'); a takeover may have occurred"
             }
         }
-        Remove-Item -LiteralPath $paths.LockDir -Recurse -Force -ErrorAction SilentlyContinue
+        try {
+            Remove-Item -LiteralPath $paths.LockDir -Recurse -Force -ErrorAction Stop
+        } catch {
+            Fail 6 "could not release lease directory '$($paths.LockDir)': $($_.Exception.Message)"
+        }
+        if (Test-Path -LiteralPath $paths.LockDir) {
+            Fail 6 "could not release lease directory '$($paths.LockDir)': path still exists after removal"
+        }
         Write-Output 'released'
     } finally { Release-Lock $paths.TxLock }
 }

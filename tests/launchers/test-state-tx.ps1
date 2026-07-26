@@ -107,6 +107,22 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
         Assert-Equal 14 $r.ExitCode '[life] status after release is no-lease (14)'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 1b: release never reports success when the directory survives --
+    if ($IsWindows) {
+        $W = New-Work
+        try {
+            $owner = Get-Owner (Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--role', 'processor', '--ttl', '600'))
+            $leasePath = Join-Path $W 'orchestrator.lock/lease.json'
+            $held = [System.IO.File]::Open($leasePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            try {
+                $r = Run-Tool @('release', '--work', $W, '--owner', $owner)
+                Assert-Equal 6 $r.ExitCode '[release-io] sharing violation returns the persistent I/O exit code (6)'
+                Assert-Match $r.Output 'could not release lease directory' '[release-io] failure names the lease directory removal'
+                Assert-True (Test-Path -LiteralPath (Join-Path $W 'orchestrator.lock')) '[release-io] surviving lease directory is not reported as released'
+            } finally { $held.Dispose() }
+        } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
     # --- Scenario 2: owner-only heartbeat + release; late-cleanup-race guard --
     $W = New-Work
     try {

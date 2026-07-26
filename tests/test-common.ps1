@@ -26,7 +26,9 @@
       * (b) TOCTOU: a lock marked old but "recreated" between the age check and removal - with
         a new creation stamp, OR (NTFS tunneling) a preserved stamp but a different recorded
         PID - is NOT breakable; an unchanged old lock still IS (guard does not over-block).
-      * (c) fresh lock: a lock younger than the threshold is never broken; the waiter retries
+      * (c) release ownership: a stale former holder cannot remove a lock recreated by another
+        PID; the current owner still removes its own lock.
+      * (d) fresh lock: a lock younger than the threshold is never broken; the waiter retries
         until TimeoutMs and fails with rc=7 without disturbing the live lock.
 
 .EXAMPLE
@@ -152,7 +154,24 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
 }.Invoke()
 
 # =============================================================================
-# 4. Acquire-Lock end-to-end (c): a FRESH lock (younger than the threshold) is never broken;
+# 4. Release-Lock owner guard: a former holder must not remove a lock that was broken and
+#    recreated by another process. The current holder still releases normally.
+# =============================================================================
+{
+    $dir = New-TempDir
+    $p = New-LockPath $dir
+    Write-LockFile -Path $p -Content '99999' | Out-Null
+    Release-Lock $p 3>$null
+    Assert-True (Test-Path -LiteralPath $p) 'Release-Lock preserves a lock owned by another PID'
+    Assert-Equal '99999' (Read-LockContent $p) 'Release-Lock leaves the foreign owner identity unchanged'
+
+    Write-LockFile -Path $p -Content ([string]$PID) | Out-Null
+    Release-Lock $p
+    Assert-False (Test-Path -LiteralPath $p) 'Release-Lock removes a lock owned by this process'
+}.Invoke()
+
+# =============================================================================
+# 5. Acquire-Lock end-to-end (d): a FRESH lock (younger than the threshold) is never broken;
 #    the waiter retries until TimeoutMs and fails with rc=7, leaving the live lock intact.
 # =============================================================================
 {

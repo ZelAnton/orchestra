@@ -297,6 +297,27 @@ rm -rf /
 }.Invoke()
 
 # =============================================================================
+# 8b. Internal placeholder sentinels are never trusted when supplied by input.
+# =============================================================================
+{
+    $open = [char]0xE000
+    $close = [char]0xE001
+    $secret = "password=abc${open}def"
+    $j = Redact-Json $secret
+    Assert-Equal 1 ([int]$j.sentinel_chars_removed) 'input placeholder sentinel is counted and removed'
+    Assert-Contains $j.output '[redacted:assignment-secret:' 'sentinel injection cannot bypass secret redaction'
+    Assert-NotContains $j.output 'abcdef' 'sentinel-bearing secret does not survive normalization'
+
+    $spoof = "keep [redacted:email:12345678] and ${open}0${close} literal"
+    $once = Redact-Json $spoof
+    Assert-Equal 2 ([int]$once.sentinel_chars_removed) 'both spoofed placeholder delimiters are counted'
+    Assert-Contains $once.output '[redacted:email:12345678]' 'existing public marker remains idempotently protected'
+    Assert-Contains $once.output '0 literal' 'spoofed private placeholder is not restored as a reserved marker'
+    $twice = Redact-Json $once.output
+    Assert-Equal $once.output $twice.output 'sentinel sanitization preserves second-pass idempotency'
+}.Invoke()
+
+# =============================================================================
 # 9. project-specific patterns from .work/constraints.md ("## Redaction patterns").
 # =============================================================================
 {

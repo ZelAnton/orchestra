@@ -563,6 +563,7 @@ function Invoke-Pipeline {
         binary                = $false
         truncated             = $false
         control_chars_removed = 0
+        sentinel_chars_removed = 0
         defanged              = [bool]$Defang
         categories            = [ordered]@{}
         fingerprints          = @()
@@ -589,11 +590,16 @@ function Invoke-Pipeline {
     $report.scanned_bytes = $window.Bytes.Length
     $text = [System.Text.Encoding]::UTF8.GetString($window.Bytes)
 
-    # 3. normalize line endings to LF and strip C0 control chars (except tab/LF).
+    # 3. normalize line endings to LF and strip C0 control chars (except tab/LF). Private-use
+    #    U+E000/U+E001 are internal placeholder delimiters below, so untrusted input must never
+    #    carry them into marker protection or rule evaluation.
     $text = $text -replace "`r`n", "`n" -replace "`r", "`n"
     $before = $text.Length
     $text = [regex]::Replace($text, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '')
     $report.control_chars_removed = $before - $text.Length
+    $before = $text.Length
+    $text = [regex]::Replace($text, '[\uE000\uE001]', '')
+    $report.sentinel_chars_removed = $before - $text.Length
 
     # 3b. the budget in characters of this normalized window: everything from this source offset
     #     on is dropped in step 5. When the window itself was cut, the budget additionally backs
@@ -735,6 +741,7 @@ function Cmd-Wrap {
     if ($report.binary) { $flags.Add('binary') }
     if ($report.truncated) { $flags.Add('truncated') }
     if ($report.control_chars_removed -gt 0) { $flags.Add('control-stripped') }
+    if ($report.sentinel_chars_removed -gt 0) { $flags.Add('sentinel-stripped') }
     $flags.Add('defanged')
     if ($report.total_redactions -gt 0) { $flags.Add('redacted') }
     $flagStr = ($flags -join ',')

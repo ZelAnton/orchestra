@@ -201,10 +201,10 @@ function Read-LockSnapshot {
 # change in the gap - same creation stamp AND same recorded PID. If a new holder released and
 # recreated the lock between the two reads, its creation stamp differs (or, under NTFS
 # tunneling, the stamp can be preserved but the recorded PID differs), so we refuse to delete
-# the stranger's fresh lock. Residual (documented, irreducible without holder-side lease
-# renewal / a per-acquire nonce, i.e. caller changes out of this task's scope): PID reuse AND
-# creation-time tunneling AND identical content coinciding inside the sub-millisecond
-# confirm->Remove window - astronomically unlikely, not closable by path-based Remove-Item.
+# the stranger's fresh lock. Residual break-path risk: PID reuse AND creation-time tunneling
+# AND identical content coinciding inside the sub-millisecond confirm->Remove window.
+# Release-Lock independently checks the recorded PID before removal, so a stale former holder
+# cannot remove a lock that has already been recreated by a different live process.
 function Test-StaleLockBreakable {
     param($Decided, $Confirm, [int]$StaleMs)
     if ($null -eq $Decided -or $null -eq $Confirm) { return $false }
@@ -249,6 +249,12 @@ function Acquire-Lock {
 }
 function Release-Lock {
     param([string]$LockPath)
+    $snapshot = Read-LockSnapshot $LockPath
+    if ($null -eq $snapshot) { return }
+    if (-not [string]::Equals([string]$snapshot.Content, [string]$PID, [System.StringComparison]::Ordinal)) {
+        Write-Warning "refusing to release $($script:LockName) lock at $LockPath because it is owned by PID '$($snapshot.Content)', not this process ($PID)"
+        return
+    }
     Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
 }
 
