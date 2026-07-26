@@ -27,6 +27,7 @@
 
 $script:ToolPath = Join-Path $script:RepoRoot 'tools\state-tx.ps1'
 $script:PwshHost = 'powershell'
+$script:IsWindowsHost = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
 $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
 if ($pwshCmd) { $script:PwshHost = $pwshCmd.Source }
 
@@ -108,7 +109,7 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
     # --- Scenario 1b: release never reports success when the directory survives --
-    if ($IsWindows) {
+    if ($script:IsWindowsHost) {
         $W = New-Work
         try {
             $owner = Get-Owner (Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--role', 'processor', '--ttl', '600'))
