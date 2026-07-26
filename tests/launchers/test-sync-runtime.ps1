@@ -18,6 +18,8 @@
     - an empty-directory husk at a destination is healed into the mirrored file;
     - a journal left by a crashed run is recovered (rolled back) on the next run.
     - manifest and recovery-journal paths cannot escape their managed root.
+    - POSIX manifest identity is case-sensitive, so case-only renames prune the old spelling
+      in both Claude and Codex mirrors (Windows remains case-insensitive).
 
   Usage:
     pwsh -File tests/launchers/test-sync-runtime.ps1
@@ -178,6 +180,29 @@ Assert-FileText (Join-Path $dest 'agents\custom_local.md') "mine`n" 'prune: fore
 Assert-FileText (Join-Path $dest 'agents\coder.md') "coder-v1`n" 'prune: still-sourced agent kept'
 Assert-True (-not (Test-Path (Join-Path $codexDest 'agents\orchestra_reviewer.toml'))) 'prune: removed generated Codex role pruned from its own manifest'
 Assert-FileText (Join-Path $codexDest 'agents\custom_local.toml') "name = 'mine'`n" 'prune: foreign Codex custom agent untouched'
+
+# =============================================================================
+# 2b) POSIX case-only renames prune the old manifest spelling in both mirrors
+# =============================================================================
+$repoCase = $null
+$destCase = $null
+if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)) {
+    $repoCase = New-SyntheticRepo
+    $destCase = New-Root
+    $rCase0 = Invoke-Sync -Repo $repoCase -Dest $destCase -Glob '*.sh'
+    Assert-True ($rCase0.ExitCode -eq 0) 'case-rename: initial POSIX sync exits 0'
+
+    Rename-Item -LiteralPath (Join-Path $repoCase 'agents\coder.md') -NewName 'Coder.md'
+    Rename-Item -LiteralPath (Join-Path $repoCase 'codex\agents\orchestra_coder.toml') -NewName 'Orchestra_coder.toml'
+    $rCase1 = Invoke-Sync -Repo $repoCase -Dest $destCase -Glob '*.sh'
+    Assert-True ($rCase1.ExitCode -eq 0) "case-rename: renamed POSIX sync exits 0 (err=$($rCase1.Err.Trim()))"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destCase 'agents\coder.md'))) 'case-rename: old Claude path spelling is pruned'
+    Assert-FileText (Join-Path $destCase 'agents\Coder.md') "coder-v1`n" 'case-rename: new Claude path spelling is published'
+    $codexCaseDest = Join-Path $destCase '.codex'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $codexCaseDest 'agents\orchestra_coder.toml'))) 'case-rename: old Codex path spelling is pruned'
+    Assert-FileText (Join-Path $codexCaseDest 'agents\Orchestra_coder.toml') "name = 'orchestra_coder'`n" 'case-rename: new Codex path spelling is published'
+}
 
 # =============================================================================
 # 3) Mid-publish failure rolls back to the exact prior state
@@ -358,8 +383,8 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $destE 'scripts\cc-sync.cmd
 # =============================================================================
 # Report + cleanup
 # =============================================================================
-foreach ($d in @($repo, $dest, $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS, $repoE, $destE)) {
-    Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+foreach ($d in @($repo, $dest, $repoCase, $destCase, $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS, $repoE, $destE)) {
+    if ($d) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
 
@@ -368,5 +393,5 @@ if ($script:Failures.Count -gt 0) {
     foreach ($f in $script:Failures) { Write-Host "  $f" }
     exit 1
 }
-Write-Host 'OK - tools/sync-runtime.ps1 behaves per contract (clean mirror, stale pruning, rollback, dir-heal, crash recovery, CMD byte guard).'
+Write-Host 'OK - tools/sync-runtime.ps1 behaves per contract (clean mirror, case-aware stale pruning, rollback, dir-heal, crash recovery, CMD byte guard).'
 exit 0

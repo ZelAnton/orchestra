@@ -75,6 +75,7 @@ $ErrorActionPreference = 'Stop'
 # RuntimeInformation probe works on every supported host.
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
+$script:PathComparer = if ($script:OnWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
 
 function Write-SyncInfo { param([string]$Message) if (-not $Quiet) { Write-Host $Message } }
 function Write-SyncWarn { param([string]$Message) Write-Host $Message }
@@ -132,8 +133,8 @@ function Test-PathWithinRoot {
         $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
         $pathFull = [System.IO.Path]::GetFullPath($Path)
         $prefix = $rootFull + [System.IO.Path]::DirectorySeparatorChar
-        $comparison = if ($script:OnWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
-        return $pathFull.StartsWith($prefix, $comparison)
+        return $pathFull.Length -ge $prefix.Length -and
+            $script:PathComparer.Equals($pathFull.Substring(0, $prefix.Length), $prefix)
     } catch {
         return $false
     }
@@ -164,7 +165,7 @@ function Read-Manifest {
     # A missing or unparsable manifest yields an EMPTY set: on a first run (or after
     # a corrupted manifest) nothing is ever purged - deletions only ever target
     # files this tool provably wrote before.
-    $result = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $result = [System.Collections.Generic.HashSet[string]]::new($script:PathComparer)
     if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $result }
     try {
         $raw = [System.IO.File]::ReadAllText($ManifestPath)
@@ -547,7 +548,7 @@ try {
 } catch {
     Stop-Sync 1 $_.Exception.Message
 }
-$newManaged = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$newManaged = [System.Collections.Generic.HashSet[string]]::new($script:PathComparer)
 foreach ($p in $pairs) { [void]$newManaged.Add([System.IO.Path]::GetFullPath($p.Dest)) }
 
 $tx = New-TxContext -Root $DestinationRoot
@@ -589,7 +590,7 @@ Invoke-JournalRecovery -Root $CodexDestinationRoot
 $codexManifestPath = Join-Path $CodexDestinationRoot '.orchestra-agent-sync-manifest.json'
 $codexPrevious = Read-Manifest -ManifestPath $codexManifestPath -Root $CodexDestinationRoot
 $codexPairs = Get-CodexManagedPairs -Repo $RepoRoot -Dest $CodexDestinationRoot
-$codexManaged = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+$codexManaged = [System.Collections.Generic.HashSet[string]]::new($script:PathComparer)
 foreach ($p in $codexPairs) { [void]$codexManaged.Add([System.IO.Path]::GetFullPath($p.Dest)) }
 $codexTx = New-TxContext -Root $CodexDestinationRoot
 New-Item -ItemType Directory -Force -Path $codexTx.Stage | Out-Null

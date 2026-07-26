@@ -389,9 +389,13 @@ function Get-MaxKnownPId {
     return $max
 }
 function Get-KnownProposalTitles {
-    param($QueueProposals)
+    param($Paths, $QueueProposals)
     $set = New-Object 'System.Collections.Generic.HashSet[string]'
     foreach ($p in $QueueProposals) { [void]$set.Add((Normalize-Title $p.Title)) }
+    $doneText = Read-TextOrEmpty $Paths.Done
+    foreach ($m in [regex]::Matches($doneText, '(?m)^\s*#{2,3}\s+\[P-0*\d+\]\s*(.*?)(?:\s*—\s*kind:\s*proposal\s*—\s*status:.*)?$')) {
+        [void]$set.Add((Normalize-Title $m.Groups[1].Value))
+    }
     return ,$set
 }
 function Normalize-Title {
@@ -815,7 +819,7 @@ function Invoke-ProposeProposal {
         Assert-ExpectedGeneration $paths
         $state = Read-QueueState $paths
         $proposals = Get-StateProposals $state
-        $known = Get-KnownProposalTitles $proposals
+        $known = Get-KnownProposalTitles $paths $proposals
         $normTitle = Normalize-Title $title
         if (-not $force -and $known.Contains($normTitle)) {
             Fail 4 "duplicate: a proposal titled '$title' already exists in the backlog"
@@ -1107,7 +1111,7 @@ function Cmd-InboxDrain {
             $stateTasks0 = Get-StateTasks $state
             $known = Get-KnownTitles $paths $stateTasks0
             $maxId = [ref](Get-MaxKnownId $paths $stateTasks0)
-            $knownP = Get-KnownProposalTitles (Get-StateProposals $state)
+            $knownP = Get-KnownProposalTitles $paths (Get-StateProposals $state)
             $maxPId = [ref](Get-MaxKnownPId $paths (Get-StateProposals $state))
         } catch {
             Fail 5 "cannot read queue state for inbox drain: $($_.Exception.Message)"

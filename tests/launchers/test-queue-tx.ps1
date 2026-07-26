@@ -729,6 +729,27 @@ exit $rc
         Assert-Match $q 'Причина: not needed' '[proposal-reclassify] latest reason kept'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 15b: archived proposal titles participate in both dedup paths --
+    $W = New-Work
+    try {
+        $done = @(
+            '# Завершённые задачи', '',
+            '### [P-777] Archived proposal title — kind: proposal — status: rejected',
+            'Archived proposal'
+        ) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Done.md'), $done, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'archived   proposal TITLE', '--body', 'duplicate')
+        Assert-Equal 4 $r.ExitCode '[proposal-archive-dup] direct propose rejects normalized archived title'
+        Assert-Match $r.Output 'duplicate' '[proposal-archive-dup] direct rejection names duplicate semantics'
+
+        Run-Tool @('inbox-add', '--work', $W, '--kind', 'proposal', '--title', 'Archived proposal title', '--body', 'duplicate') | Out-Null
+        $r = Run-Tool @('inbox-drain', '--work', $W)
+        Assert-Equal 0 $r.ExitCode '[proposal-archive-dup] inbox drain succeeds while skipping archived duplicate'
+        Assert-Match $r.Output 'duplicate proposal' '[proposal-archive-dup] inbox result records duplicate proposal skip'
+        Assert-True (-not ((Read-Queue $W) -match '### \[P-')) '[proposal-archive-dup] archived duplicate never re-enters proposal lane'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 16: a proposal is never a blocking/unblocking predecessor --
     # A P-id in a task's `Предпосылки:` line forms no graph edge, so the task is
     # ready and the graph is valid (proposals never gate tasks - task T-245).

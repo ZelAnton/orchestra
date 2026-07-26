@@ -141,7 +141,9 @@ workspace, коммитит результаты листовых агентов
   `orchestra_*.toml` в `$CODEX_HOME/agents` с отдельным manifest. Чужие custom agents не
   удаляются. Пути из обоих manifest/journal считаются недоверенными: stale-pruning и crash
   recovery принимают только canonical descendants соответствующего destination root;
-  traversal и внешние absolute paths игнорируются. `cc-doctor` проверяет выбранный provider
+  traversal и внешние absolute paths игнорируются. И containment, и manifest sets используют
+  один платформенный comparer: OrdinalIgnoreCase на Windows, Ordinal на POSIX, поэтому
+  case-only rename на POSIX удаляет старое написание в Claude и Codex mirrors. `cc-doctor` проверяет выбранный provider
   и полноту пакета.
 
 ### Реализация и ревью
@@ -1024,6 +1026,8 @@ codex-правилами выше (см. «Резолвинг раннеров `
   безопасную конкурентную постановку задач несколькими популяторами без lost update и без
   повторного `T-NNN`. Lifecycle `--id` принимает только полный anchored `T-NNN`/`P-NNN`
   токен; не возвращайте substring-разбор, который молча превращает `XT-12` в T-012.
+  Proposal normalized-title dedup читает и backlog, и `[P-NNN]`-заголовки архива — те же
+  источники, что P-ID нумерация; direct propose и inbox-drain должны оставаться симметричны.
   Ручной read-modify-write очереди в обход интерфейса не вводите.
 - Per-task изменения изолированы; пересечение conflict domains запрещает общий батч.
 - Processor выбирает VCS jj-first один раз, механически проверяет точный root каждого
