@@ -478,9 +478,17 @@ Delivery target: next_major
 граница, а не reservation: уже запущенный вызов может довести счётчик выше лимита, но новый
 model call после следующего read-only snapshot не стартует. Гейт принимает снимок только при
 `status=ok` и `sources.telemetry_reliable=true`: отсутствующий/повреждённый JSONL, `EVENTS_OUTBOX:
-off` или actual `usage.recorded` без явного булева `estimated=false` делают telemetry недоступной.
-Тогда processor fail-closed так же, как при исчерпании: он защёлкивает приём этой причиной и
-эскалирует незавершённые задачи, а не угадывает расход или складывает estimate.
+off` или actual `usage.recorded` без явного булева `estimated=false` всегда делают telemetry
+недоступной. `usage_availability=unavailable` (внутренний Claude `Agent(...)`-dispatch без
+доступного provider token count) делает её недоступной, только пока `COHORT_TOKEN_BUDGET_STRICT:
+true` — по умолчанию (`false`) такой маркер считается отдельно
+(`sources.unmetered_usage_events`) и остаётся видимым, но не блокирующим undercount, а
+enforcement продолжается по метрируемой части (T-321 R-07: строгий режим в противном случае
+защёлкивает приём когорты уже на первом раунде, т.к. canonical Claude-processor диспетчирует
+все non-Codex роли, включая planner, через `Agent(...)`).
+Когда telemetry недоступна, processor fail-closed так же, как при исчерпании: он защёлкивает
+приём этой причиной и эскалирует незавершённые задачи, а не угадывает расход или складывает
+estimate.
 
 ### 13.3. Состояние интеграции/публикации/очистки (`integration`)
 
@@ -848,7 +856,10 @@ PowerShell 5.1), companion `queue-tx.ps1`/`state-tx.ps1`. Гейт эмисси�
 внутри). Обязательные поля конверта: `schema_version` (целое, сейчас `1`), `event_id` (см. 19.2),
 `occurred_at` (ISO-8601 UTC, оканчивается на `Z`), `type` (из набора 19.3), `actor`
 (`{ "kind": "agent"|"human"|"tool", "name": "<роль>" }`), `payload` (объект). Опциональные:
-`batch_id` (`^B-`), `task_id` (`^T-\d`), `payload_version` (целое ≥1, по умолчанию `1`).
+`batch_id` (`^B-`), `task_id` (`^T-\d` или один из двух зарезервированных псевдо-id
+`_cohort`/`_integration` — для факта, у которого нет отдельной задачи, например `usage.recorded`
+для внутреннего `Agent(...)`-dispatch planner/merger/full_reviewer, см. §19.3), `payload_version`
+(целое ≥1, по умолчанию `1`).
 `schema_version` растёт только при несовместимом изменении конверта; `payload` версионируется
 отдельно через `payload_version`. **Старые строки никогда не переписываются и не мигрируются
 задним числом**; новые поля добавляются как опциональные.
@@ -878,7 +889,7 @@ PowerShell 5.1), companion `queue-tx.ps1`/`state-tx.ps1`. Гейт эмисси�
 | `task.captured` | `task.captured/<batch_id>/<task_id>/a<attempt>` |
 | `task.status_changed` | `task.status_changed/<task_id>/<from>>​<to>/a<attempt>/r<round>` |
 | `codex.attempt` | `codex.attempt/<task_id>/<role>/<mode>/<attempt_number>` |
-| `usage.recorded` | `usage.recorded/<source>/<task_id>/<role>/<mode>/<attempt_number>` |
+| `usage.recorded` | `usage.recorded/<source>/<task_id>/<batch_id>/<role>/<mode>/<attempt_number>` |
 
 `codex.attempt` — исторический архетип этой схемы (его ключ не изменился). При отсутствии
 UUID-генератора (degraded без PowerShell) допустим fallback-id `evt-<occurred_at>-<суффикс>`;
@@ -897,7 +908,7 @@ UUID-генератора (degraded без PowerShell) допустим fallback
 и не превращается в ошибку). Отсутствие координаты **и** в явном CLI-флаге, **и** в `--payload`
 по-прежнему `Fail 2` (`exit 2`) — регрессии в обратную сторону нет. `codex.attempt`/
 `usage.recorded` фоллбэка не получили: их координаты (`task_id`/`role`/`mode`/`attempt_number`/
-`source`) уже несёт отслеживаемая telemetry-reservation `Codex-попытка` дескриптора задачи
+`source`/`batch_id`) уже несёт отслеживаемая telemetry-reservation `Codex-попытка` дескриптора задачи
 (единая для `codex.attempt` и парного `usage.recorded`) через выделенный crash-safe путь
 эмиссии, а не разовая ручная инструкция агента, как у `cohort.round_*`/`task.status_changed` —
 поэтому у них ниже риск той же ловушки «забыл продублировать флаг».
@@ -927,13 +938,20 @@ headless `claude -p --output-format stream-json` (usage из финальног�
 Codex-вызовы, а `usage.recorded` — и Claude, и Codex). Строгий scalar-allowlist payload:
 `task_id`, `role`, `mode`, `attempt_number`, `source` (`claude|codex`), `model`, `input_tokens`,
 `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `total_tokens`,
-`estimated`. Токен-поля — неотрицательные целые (либо `null` = «неизвестно для этого вызова»),
+`estimated`, `usage_availability` (`available|unavailable`). Токен-поля — неотрицательные
+целые (либо `null` = «неизвестно для этого вызова»),
 `estimated` — булев флаг: `true` помечает эвристическую (не точную) оценку, которую потребитель
-**никогда** не смешивает с actual-значениями (`plans/OBSERVABILITY_PLATFORM_PLAN.md` §8). Как и
-вся телеметрия, сбор usage **best-effort**: неразбираемый/отсутствующий вывод не меняет
-control-flow — событие просто не пишется. `source` входит в дедуп-ключ (§19.2), поэтому
+**никогда** не смешивает с actual-значениями (`plans/OBSERVABILITY_PLATFORM_PLAN.md` §8).
+Реально извлечённые provider-счётчики несут `usage_availability=available`; внутренний
+Claude `Agent(...)`, где provider token counts недоступны, эмитит marker
+`usage_availability=unavailable` без вымышленных token-полей — он никогда не превращается в
+нулевой расход. По умолчанию (`COHORT_TOKEN_BUDGET_STRICT: false`) marker виден отдельным
+счётчиком `sources.unmetered_usage_events`, сохраняет `telemetry_reliable=true` и не закрывает
+admission; только явный strict-режим (`COHORT_TOKEN_BUDGET_STRICT: true`) делает такой marker
+fail-closed причиной `telemetry_unavailable` (см. §13.2). `source` и
+`batch_id` входят в дедуп-ключ (§19.2), поэтому
 codex-попытка и её Claude-fallback для одного `(task,role,mode,attempt)` — два самостоятельных
-факта, а не коллизия по одному `event_id`.
+факта, а повторный захват того же task_id в новой когорте не коллидирует со старым usage.
 
 `usage.recorded` — **валидный first-class known-тип** для writer'а и reader'а PowerShell
 (`tools/outbox.ps1`). Actual и estimated остаются раздельными, а admission-gate использует
@@ -946,7 +964,8 @@ codex-попытка и её Claude-fallback для одного `(task,role,mod
 (`event_id` UUID/`evt-`, `occurred_at` `…Z`, `batch_id`/`task_id`), известный `type`, `actor`,
 **никаких неизвестных полей верхнего уровня**, allowlist `codex.attempt`/`usage.recorded`
 (последний дополнительно проверяет scalar-форму: токен-поля — неотрицательные целые/`null`,
-`estimated` — булев), **никаких абсолютных путей** в payload (worktree — только в относительной
+`estimated` — булев, `usage_availability` — `available|unavailable`), **никаких абсолютных
+путей** в payload (worktree — только в относительной
 форме `.work/worktrees/<T-ID>`). Свободный
 текст `reason` проходит redaction (§18.4) **до** передачи в outbox. **Чтение снисходительно
 вперёд:** обязательные поля и форматы проверяются, но неизвестные будущие поля верхнего уровня и

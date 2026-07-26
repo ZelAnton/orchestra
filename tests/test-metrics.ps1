@@ -219,6 +219,80 @@ if ($unknownUsageBudget.ExitCode -eq 0) {
     Assert-Equal $null $unknownUsageData.token_budget.actual_tokens 'unknown actual-shape is not counted toward the spending gate'
 }
 
+# T-321 R-01/R-02: the same task is recaptured in B-9. Events are intentionally appended
+# out of occurred_at order to model delayed delivery. Both a missing batch_id and an
+# explicit-but-wrong batch_id must follow the task.captured mapping active at event time;
+# the latest global mapping must not steal B-8's delayed events.
+$recaptureWork=New-Fixture
+$recaptureLines=@(
+    (Event-Line tr-o8 '2026-07-05T00:00:00Z' 'cohort.opened' B-8),
+    (Event-Line tr-c8 '2026-07-05T00:10:00Z' 'task.captured' B-8 T-20),
+    (Event-Line tr-o9 '2026-07-06T00:00:00Z' 'cohort.opened' B-9),
+    (Event-Line tr-c9 '2026-07-06T00:10:00Z' 'task.captured' B-9 T-20),
+    (Event-Line tr-u8a '2026-07-05T01:00:00Z' 'usage.recorded' '' T-20 @{total_tokens=444;estimated=$false}),
+    (Event-Line tr-u8b '2026-07-05T02:00:00Z' 'usage.recorded' B-WRONG T-20 @{total_tokens=555;estimated=$false}),
+    (Event-Line tr-v8 '2026-07-05T03:00:00Z' 'task.status_changed' B-WRONG T-20 @{from='на ревью';to='verified'}),
+    (Event-Line tr-u9 '2026-07-06T01:00:00Z' 'usage.recorded' B-8 T-20 @{total_tokens=333;estimated=$false})
+)
+Write-Utf8 (Join-Path $recaptureWork 'events.jsonl') (($recaptureLines -join "`n")+"`n")
+Write-Utf8 (Join-Path $recaptureWork 'config.md') 'COHORT_TOKEN_BUDGET: 10000'
+$b8Budget=Invoke-Metrics @('budget','--work',$recaptureWork,'--batch-id','B-8','--json')
+Assert-Equal 0 $b8Budget.ExitCode 'temporally attributed B-8 budget projection exits zero'
+if ($b8Budget.ExitCode -eq 0) {
+    $b8Data=$b8Budget.Out|ConvertFrom-Json
+    Assert-Equal 'ok' $b8Data.status 'recovered B-8 events retain reliable telemetry'
+    Assert-Equal 999 $b8Data.token_budget.actual_tokens 'batchless and wrong-explicit delayed events are charged to the B-8 capture active at their timestamps'
+}
+$b9Budget=Invoke-Metrics @('budget','--work',$recaptureWork,'--batch-id','B-9','--json')
+Assert-Equal 0 $b9Budget.ExitCode 'temporally attributed B-9 budget projection exits zero'
+if ($b9Budget.ExitCode -eq 0) {
+    $b9Data=$b9Budget.Out|ConvertFrom-Json
+    Assert-Equal 333 $b9Data.token_budget.actual_tokens 'a stale explicit B-8 id after recapture is recovered to the active B-9 mapping'
+}
+$recaptureAggregate=Invoke-Metrics @('aggregate','--work',$recaptureWork,'--last','2','--json')
+Assert-Equal 0 $recaptureAggregate.ExitCode 'Apply-Events temporal recapture projection exits zero'
+if ($recaptureAggregate.ExitCode -eq 0) {
+    $recaptureData=$recaptureAggregate.Out|ConvertFrom-Json
+    Assert-Equal 10200000 $recaptureData.lead_time_queue_to_verified_ms.average 'delayed completion is attributed to B-8 rather than the latest B-9 capture'
+}
+
+# T-321 R-07: a durable unavailable marker is COUNTED SEPARATELY from corrupted telemetry.
+# Default posture (COHORT_TOKEN_BUDGET_STRICT unset/false): the marker alone does not fail
+# the enabled gate closed - it is a visible, accepted undercount, and enforcement keeps
+# working on the metered part. Strict posture (COHORT_TOKEN_BUDGET_STRICT: true) restores
+# the original R-04 fail-closed behavior.
+$unavailableWork=New-Fixture
+$unavailableLines=@(
+    (Event-Line ua-c '2026-07-07T00:00:00Z' 'task.captured' B-10 T-30),
+    (Event-Line ua-u '2026-07-07T00:01:00Z' 'usage.recorded' B-10 T-30 @{source='claude';usage_availability='unavailable'}),
+    (Event-Line ua-u2 '2026-07-07T00:02:00Z' 'usage.recorded' B-10 T-30 @{source='claude';total_tokens=250;estimated=$false})
+)
+Write-Utf8 (Join-Path $unavailableWork 'events.jsonl') (($unavailableLines -join "`n")+"`n")
+Write-Utf8 (Join-Path $unavailableWork 'config.md') 'COHORT_TOKEN_BUDGET: 10000'
+$unavailableBudget=Invoke-Metrics @('budget','--work',$unavailableWork,'--batch-id','B-10','--json')
+Assert-Equal 0 $unavailableBudget.ExitCode 'unavailable-marker budget projection exits zero'
+if ($unavailableBudget.ExitCode -eq 0) {
+    $unavailableData=$unavailableBudget.Out|ConvertFrom-Json
+    Assert-Equal 'ok' $unavailableData.status 'default posture: an unmetered event alone does not fail the gate closed'
+    Assert-True $unavailableData.sources.telemetry_reliable 'default posture: unmetered marker does not make telemetry unreliable'
+    Assert-Equal 1 $unavailableData.sources.unmetered_usage_events 'unmetered event is counted and surfaced separately'
+    Assert-Equal $false $unavailableData.sources.cohort_token_budget_strict 'strict posture defaults to false'
+    Assert-Equal 250 $unavailableData.token_budget.actual_tokens 'enforcement continues on the metered part (accepted, visible undercount)'
+}
+
+$strictWork=New-Fixture
+Write-Utf8 (Join-Path $strictWork 'events.jsonl') (($unavailableLines -join "`n")+"`n")
+Write-Utf8 (Join-Path $strictWork 'config.md') "COHORT_TOKEN_BUDGET: 10000`nCOHORT_TOKEN_BUDGET_STRICT: true"
+$strictBudget=Invoke-Metrics @('budget','--work',$strictWork,'--batch-id','B-10','--json')
+Assert-Equal 0 $strictBudget.ExitCode 'strict-posture budget projection exits zero'
+if ($strictBudget.ExitCode -eq 0) {
+    $strictData=$strictBudget.Out|ConvertFrom-Json
+    Assert-Equal 'telemetry_unavailable' $strictData.status 'COHORT_TOKEN_BUDGET_STRICT: true restores the original fail-closed posture'
+    Assert-Equal $false $strictData.sources.telemetry_reliable 'strict posture: unmetered marker explicitly makes telemetry unreliable'
+    Assert-Equal $true $strictData.sources.cohort_token_budget_strict 'projection exposes the strict-posture configuration'
+    Assert-Equal $null $strictData.token_budget.actual_tokens 'strict posture: unmetered internal Agent dispatch is never treated as zero'
+}
+
 Write-Utf8 (Join-Path $estWork 'config.md') "COHORT_TOKEN_BUDGET: 1000`nEVENTS_OUTBOX: off"
 $offBudget=Invoke-Metrics @('budget','--work',$estWork,'--batch-id','B-4','--json')
 Assert-Equal 0 $offBudget.ExitCode 'disabled outbox budget projection exits zero'

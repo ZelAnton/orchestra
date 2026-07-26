@@ -127,7 +127,7 @@ function Get-Generation {
     if (-not (Test-Path -LiteralPath $StatePath)) { return 0 }
     try {
         $obj = (Read-TextOrEmpty $StatePath) | ConvertFrom-Json
-        if ($obj -and ($obj.PSObject.Properties.Name -contains 'generation')) { return [int]$obj.generation }
+        if ($obj -and $obj.PSObject.Properties['generation']) { return [int]$obj.generation }
     } catch { }
     return 0
 }
@@ -1119,10 +1119,27 @@ function Cmd-InboxDrain {
                 }
                 continue
             }
+            # K-048: `.PSObject.Properties.Name -contains '<name>'` throws under StrictMode when
+            # $rec has zero properties (e.g. a valid-but-empty inbox record '{}'); the indexer
+            # form `.PSObject.Properties['<name>']` is safe on any object, including zero-prop
+            # ones. A record with no non-empty 'title' is quarantined the same way an unreadable
+            # JSON record is, below, rather than allowed to reach direct `$rec.title` access
+            # (itself unsafe under StrictMode when the property is absent).
+            $recTitleProp = $rec.PSObject.Properties['title']
+            if ($null -eq $recTitleProp -or [string]::IsNullOrWhiteSpace([string]$recTitleProp.Value)) {
+                $reason = 'record is missing a non-empty "title" field'
+                try {
+                    $moved = Move-InboxRecordToRejected $paths $e $reason
+                    [void]$rejected.Add("$($e.Name) -> $($moved.RecordName): $reason")
+                } catch {
+                    [void]$processingErrors.Add("$($e.Name): could not quarantine invalid record: $($_.Exception.Message)")
+                }
+                continue
+            }
             $recKind = 'task'
-            if (($rec.PSObject.Properties.Name -contains 'kind') -and $rec.kind) { $recKind = ([string]$rec.kind).Trim().ToLowerInvariant() }
+            if ($rec.PSObject.Properties['kind'] -and $rec.kind) { $recKind = ([string]$rec.kind).Trim().ToLowerInvariant() }
             $recBody = ''
-            if ($rec.PSObject.Properties.Name -contains 'body') { $recBody = [string]$rec.body }
+            if ($rec.PSObject.Properties['body']) { $recBody = [string]$rec.body }
 
             if ($recKind -eq 'proposal') {
                 # Proposal-lane record: title-dedup only, no dependency graph, cannot fail with
@@ -1130,8 +1147,8 @@ function Cmd-InboxDrain {
                 $normTitle = Normalize-Title ([string]$rec.title)
                 if ($knownP.Contains($normTitle)) { [void]$skipped.Add("$($e.Name): duplicate proposal"); [void]$consume.Add($e.FullName); continue }
                 $recSource = ''; $recTarget = ''
-                if ($rec.PSObject.Properties.Name -contains 'source') { $recSource = [string]$rec.source }
-                if ($rec.PSObject.Properties.Name -contains 'suggested_target') { $recTarget = [string]$rec.suggested_target }
+                if ($rec.PSObject.Properties['source']) { $recSource = [string]$rec.source }
+                if ($rec.PSObject.Properties['suggested_target']) { $recTarget = [string]$rec.suggested_target }
                 $maxPId.Value = $maxPId.Value + 1
                 $np = New-ProposalBlock -Id $maxPId.Value -Title ([string]$rec.title) -Body $recBody -Source $recSource -SuggestedTarget $recTarget
                 $state.Records = @($state.Records) + @($np)
@@ -1144,7 +1161,7 @@ function Cmd-InboxDrain {
             $maxIdBefore = [int]$maxId.Value
             try {
                 $recPreds = @()
-                if ($rec.PSObject.Properties.Name -contains 'predecessors') {
+                if ($rec.PSObject.Properties['predecessors']) {
                     $tokens = @($rec.predecessors | Where-Object {
                         $null -ne $_ -and ([string]$_).Trim() -ne ''
                     })

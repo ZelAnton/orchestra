@@ -1225,6 +1225,21 @@ worktree/ветки задачи допиши `task.captured` (`task_id`, `batch
 ProcessKit-backend контейнирует launcher; независимо от этого launcher
 запрещает reuse .NET build workers во всём дочернем окружении.
 
+У внутреннего `Agent(...)` также нет доступного processor'у provider token count. Поэтому
+при `EVENTS_OUTBOX: on` **после успешного admission-снимка и непосредственно перед каждым**
+таким dispatch создай unavailable-marker командой
+`tools/supervisor.ps1 usage-unavailable --task-id <T-ID|_cohort|_integration> --batch-id
+"<B-id>" --role <роль> --mode <режим> --attempt-number <N> --source claude --json` и
+best-effort допиши выданные `usage_event_args` через `tools/outbox.ps1 append`. Номер
+1-based и replay-stable в пределах `(batch_id,task_id,role,mode)`; при resume уже
+существующий marker того же логического dispatch переиспользуй, а не создавай новый.
+При `COHORT_TOKEN_BUDGET_STRICT: false` (по умолчанию)
+`usage_availability="unavailable"` увеличивает только `sources.unmetered_usage_events`,
+не портит `telemetry_reliable` и не закрывает admission; внутренний вызов без
+provider-счётчиков при этом остаётся видимым как unmetered, а не считается нулевым.
+Только при явном `COHORT_TOKEN_BUDGET_STRICT: true` marker делает следующий
+token-budget snapshot `telemetry_unavailable` и включает fail-closed поведение.
+
 `tools/supervisor.ps1` (`run`/`supervise`) применяй к **реальным внешним процессам**:
 codex-runtime уже делает эквивалентную очистку сам, а coder/merger и ты для `SMOKE_CMD`,
 сборки, тестов и обязательных проверок запускаете команду через supervisor. Передавай каждому
@@ -1279,6 +1294,16 @@ pwsh -File <resolved metrics.ps1> budget --work "$WORK" --batch-id "<B-id>" --js
 Это post-charge ceiling, не reservation: один уже запущенный вызов может пересечь лимит, но
 после durable записи этого usage следующий model call не стартует. Не создавай отдельный
 poller и не читай JSONL вручную.
+
+`sources.unmetered_usage_events` в снимке считает `usage_availability=unavailable`-маркеры
+(внутренний Claude `Agent(...)`, см. «Supervisor вызова исполнителя») **отдельно** от
+`telemetry_reliable`: по умолчанию (`COHORT_TOKEN_BUDGET_STRICT: false`) их наличие само по
+себе **не** переводит снимок в `telemetry_unavailable` — это видимый, но не блокирующий
+undercount, enforcement продолжается по метрируемой части. При явном
+`COHORT_TOKEN_BUDGET_STRICT: true` любой такой маркер, как и раньше, делает снимок батча
+`telemetry_unavailable` (fail-closed) — осознанно более строгий режим, который обычно
+защёлкивает приём когорты уже на первом раунде (canonical Claude-processor диспетчирует все
+non-Codex роли, включая planner, через `Agent(...)`).
 
 Если `exhausted=true`, либо при включённом лимите снимок нельзя надёжно получить
 (`status=telemetry_unavailable`, `events_status=missing`, `skipped_jsonl_lines>0`/ошибка
@@ -1436,11 +1461,23 @@ reservation: зафиксируй `ended_at`, вычисли `duration_ms`, во
 processor-гейта после несентинельного возврата — `failed` с его машинным классом.
    **Событие (`EVENTS_OUTBOX: on`):** если результат `tools/codex-runtime.ps1 run` нёс блок
 `usage` (per-call токены; см. «`usage.recorded`»), допиши **best-effort** `usage.recorded`
-(`source=codex`, те же `task_id`/`role`/`mode`/`attempt_number`, что и у `codex.attempt`, поля
+(`source=codex`, те же `task_id`/`role`/`mode`/`attempt_number`, что и у `codex.attempt`, **и
+`--batch-id "<B-id>"` текущей когорты** — T-321: `batch_id` обязательная координата
+dedup-ключа `usage.recorded`, без неё `tools/outbox.ps1 append` откажет с `rc=2`, поля
 usage и флаг `estimated` — как есть из блока). Для **Claude**-исполнителя/фолбэка, если его
-вызов обёрнут `tools/supervisor.ps1` и `observe --stdout-file` вернул `usage_event_args`
-(`source=claude`) — так же best-effort допиши `usage.recorded` этими аргументами. Отсутствие
-usage — не ошибка (событие не пишется); сбор не меняет control-flow.
+вызов обёрнут `tools/supervisor.ps1` и `observe --stdout-file --batch-id "<B-id>"` вернул
+   `usage_event_args` (`source=claude`) — так же best-effort допиши `usage.recorded` этими
+   аргументами. `--batch-id` у `observe` передавай **всегда** (T-321): без него `usage.recorded`
+   уходит без `batch_id` в envelope — с захваченным usage `observe` сам откажет `rc=2` (та же
+   обязательная координата), а не выдаст аргументы, которые `outbox` затем best-effort потеряет
+   молча. Для внутреннего Claude `Agent(...)`, у которого transcript/provider usage
+   недоступен, **обязательно** допиши `usage.recorded` через `usage-unavailable` по правилу
+   раздела «Supervisor вызова исполнителя»; отсутствие счётчиков не является нулевым usage.
+   Сбор не меняет исход уже запущенного model call. По умолчанию
+   (`COHORT_TOKEN_BUDGET_STRICT: false`) unavailable-marker лишь увеличивает
+   `sources.unmetered_usage_events` и не закрывает admission; только при явном
+   `COHORT_TOKEN_BUDGET_STRICT: true` он делает telemetry ненадёжной и fail-closed закрывает
+   admission перед следующим вызовом.
 
 ### Пер-таск ревью (тиринг: reviewer / reviewer_std)
 
@@ -2919,7 +2956,7 @@ crash-safe персистентного состояния ради того, ч
 | `task.captured` | worktree/ветка задачи созданы | Фаза 1.5 / 2.0 |
 | `task.status_changed` | любая смена `Статус` дескриптора (payload: `from`/`to`) | всюду, где ты меняешь `Статус` |
 | `codex.attempt` | логическая попытка coder/reviewer Codex завершилась | Фазы 2.2–2.8 |
-| `usage.recorded` | токен-usage одного модельного вызова (claude/codex), если usage доступен | Фазы 2.2–2.8 |
+| `usage.recorded` | токен-usage одного модельного вызова (claude/codex) либо unavailable-marker внутреннего Agent dispatch | Фазы 2.2–2.8 |
 
 Смены статуса, которые критерии называют отдельно, — это **тот же** `task.status_changed`
 с обогащённым payload, не отдельные типы:
@@ -2962,7 +2999,7 @@ crash-safe персистентного состояния ради того, ч
 | `task.captured` | `batch_id`, `task_id`, `attempt` | `attempt` = `попытка=N` из очереди (по умолчанию 1) |
 | `task.status_changed` | `task_id`, `from`, `to`, `attempt`, `round` | `from`→`to` — константа фазы; `attempt` = `попытка=N`; `round` = `Циклов-ревью: N` (по умолчанию 1) |
 | `codex.attempt` | `task_id`, `role`, `mode`, `attempt_number` | из telemetry-reservation `Codex-попытка` |
-| `usage.recorded` | `source`, `task_id`, `role`, `mode`, `attempt_number` | `source`=`claude`/`codex`; остальное — как у сопутствующего вызова (codex: та же reservation `Codex-попытка`; claude: `role`/attempt вызова) |
+| `usage.recorded` | `source`, `task_id`, `batch_id`, `role`, `mode`, `attempt_number` | `source`=`claude`/`codex`; `batch_id` = текущий `B-id`; остальное — как у сопутствующего вызова (codex: та же reservation `Codex-попытка`; claude: `role`/attempt вызова) |
 
 Каждая координата долговечно восстановима, поэтому replay после краша пересобирает тот же
 ключ **без** нового персистентного счётчика. Не подмешивай сырой глобальный generation в
@@ -3065,8 +3102,13 @@ crash-safe порядок дозаписи; сбой редактировани�
 Claude-исполнителя (headless `claude -p --output-format stream-json`) и Codex-адаптера
 (`codex exec`). Это **отдельный** тип рядом с `codex.attempt` (который несёт timing/RC/outcome
 и **не** меняется): usage добавляется **аддитивно**, а `usage.recorded` покрывает и Claude-, и
-Codex-вызовы, тогда как `codex.attempt` — только Codex. Эмитить **best-effort и только когда
-usage реально захвачен**; отсутствие usage — не ошибка, событие просто не пишется. В envelope
+ Codex-вызовы, тогда как `codex.attempt` — только Codex. Эмитить **best-effort**: когда
+ provider usage захвачен — с `usage_availability: "available"`; для внутреннего Claude
+ `Agent(...)`, где счётчики недоступны, — обязательный marker
+ `usage_availability: "unavailable"` без вымышленных token-полей. По умолчанию
+ (`COHORT_TOKEN_BUDGET_STRICT: false`) это неблокирующий счётчик в
+ `sources.unmetered_usage_events`; fail-closed marker он становится только при явном
+ `COHORT_TOKEN_BUDGET_STRICT: true`. В envelope
 обязательны `schema_version: 1`, `type: "usage.recorded"`, текущий `batch_id`, `task_id`,
 `actor`. Payload — строгий scalar-allowlist:
 
@@ -3083,7 +3125,8 @@ usage реально захвачен**; отсутствие usage — не о�
   "cache_read_input_tokens": 300,
   "cache_creation_input_tokens": 0,
   "total_tokens": 1950,
-  "estimated": false
+  "estimated": false,
+  "usage_availability": "available"
 }
 ```
 
@@ -3096,13 +3139,26 @@ usage реально захвачен**; отсутствие usage — не о�
   Claude или из `turn.completed`-usage `codex exec --json`); `true` — эвристическая оценка (когда
   точных данных нет). **Никогда** не смешивай estimated с actual (`plans/OBSERVABILITY_PLATFORM_PLAN.md`
   §8) — флаг переносится в событие как есть.
+- `usage_availability` — `available|unavailable`. `available` сопровождает реально
+  извлечённые provider-счётчики. `unavailable` — marker внутреннего `Agent(...)` без
+  доступных token counts и не несёт `estimated`/token-полей. По умолчанию
+  (`COHORT_TOKEN_BUDGET_STRICT: false`) `COHORT_TOKEN_BUDGET` учитывает его только в
+  `sources.unmetered_usage_events`, сохраняя `telemetry_reliable=true`; лишь при явном
+  `COHORT_TOKEN_BUDGET_STRICT: true` marker делает телеметрию ненадёжной и включает
+  fail-closed поведение. Ни в одном режиме marker не считается нулевым usage.
 - **Откуда берёшь usage.** Codex: из результата `tools/codex-runtime.ps1 run` — он несёт готовый
   блок `usage` (actual из JSONL, иначе marked-estimate). Claude: из `tools/supervisor.ps1 observe
-  --stdout-file <захват stream-json>` — он парсит usage финального `result`-события и отдаёт
-  готовый `usage_event_args` (`--type usage.recorded …`). Оба пути — только неконфиденциальные
-  целые счётчики, никогда сырой вывод/промпт.
+  --stdout-file <захват stream-json> --batch-id "<B-id>"` — он парсит usage финального
+  `result`-события и отдаёт готовый `usage_event_args` (`--type usage.recorded … --batch-id
+  <B-id>`). Передавай `--batch-id` в `observe` **всегда** (T-321), а не только когда под рукой —
+  `batch_id` входит в обязательный dedup-key `usage.recorded`; при захваченном usage без
+  `--batch-id` `observe` сам откажет `rc=2` вместо того, чтобы выдать аргументы, которые
+  `tools/outbox.ps1 append` затем best-effort отклонит и молча потеряет факт. Внутренний Claude `Agent(...)`:
+  `tools/supervisor.ps1 usage-unavailable ... --batch-id "<B-id>" --json`, затем append его
+  `usage_event_args`. Все пути несут только неконфиденциальные scalar-поля, никогда сырой
+  вывод/промпт.
 - `event_id` — UUIDv5 от имени
-  `orchestra/usage.recorded/<source>/<task_id>/<role>/<mode>/<attempt_number>` (через
+  `orchestra/usage.recorded/<source>/<task_id>/<batch_id>/<role>/<mode>/<attempt_number>` (через
   `tools/outbox.ps1 event-id`/`append`). Дозапись — тем же best-effort `append`, что и
   `codex.attempt` (идемпотентна по `event_id`); сбой не роняет прогон.
 

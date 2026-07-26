@@ -74,7 +74,8 @@
 .EXAMPLE
     pwsh -File tools/supervisor.ps1 run --file worker.ps1 --args-json '["--id","T-1"]' --deadline-sec 60 --result-file r.json
     pwsh -File tools/supervisor.ps1 supervise --exe git --args-json '["status"]' --max-attempts 2 --budget-file b.json --budget-sec 600 --checkpoint-file cp.json --work /abs/.work --owner OWN --task-id T-1
-    pwsh -File tools/supervisor.ps1 observe --result-file r.json --stdout-file out.txt --task-id T-1 --role coder --source claude --work /abs/.work --json
+    pwsh -File tools/supervisor.ps1 observe --result-file r.json --stdout-file out.txt --task-id T-1 --role coder --source claude --batch-id B-1 --work /abs/.work --json
+    pwsh -File tools/supervisor.ps1 usage-unavailable --task-id T-1 --batch-id B-1 --role coder --mode full --attempt-number 1 --source claude --json
     pwsh -File tools/supervisor.ps1 budget --budget-file b.json --json
 #>
 
@@ -1136,6 +1137,7 @@ function Cmd-Observe {
     $role = [string](Opt 'role' 'coder')
     $mode = [string](Opt 'mode' 'full')
     $source = [string](Opt 'source' 'claude')
+    $batchId = [string](Opt 'batch-id' '')
     $budgetMs = if (Has-Prop $v 'budget_remaining_ms') { [int]$v.budget_remaining_ms } else { -1 }
 
     # T-248: best-effort claude usage from the captured stream-json transcript (--stdout-file,
@@ -1167,11 +1169,22 @@ function Cmd-Observe {
                 outcome_reason = $safeReason
             } | ConvertTo-Json -Compress)
     )
+    if ($batchId) { $eventArgs += @('--batch-id', $batchId) }
 
     # usage.recorded event args (T-248) - only when usage was actually captured. Scalar
     # allowlist only; the processor supplies the identity coordinates for the dedup key.
     $usageEventArgs = @()
     if ($null -ne $usage) {
+        # T-321 R-06: `usage.recorded`'s canonical name (tools/outbox.ps1 Get-CanonicalName)
+        # has required `batch_id` since this task made it a dedup-key coordinate. Threading
+        # --batch-id here CONDITIONALLY (only `if ($batchId)`) used to mean a caller that forgot
+        # the flag got a usage_event_args set outbox is guaranteed to reject (rc=2) on the
+        # best-effort `append` - a silent, unrecoverable loss of the captured usage fact (no
+        # payload fallback exists for this coordinate, unlike --wave/--from/--to, T-261). Fail
+        # loudly here instead, at the point the caller can still notice and retry, rather than
+        # losing the fact silently downstream.
+        if (-not $batchId) { Fail 2 '--batch-id is required once usage was captured (usage.recorded requires batch_id)' }
+        if ($batchId -notmatch '^B-\S+$') { Fail 2 '--batch-id must be a B-id' }
         $usagePayload = [ordered]@{
             task_id                     = $taskId
             role                        = $role
@@ -1184,10 +1197,11 @@ function Cmd-Observe {
             cache_creation_input_tokens = $usage.cache_creation_input_tokens
             total_tokens                = $usage.total_tokens
             estimated                   = $usage.estimated
+            usage_availability          = 'available'
         }
         $usageEventArgs = @(
             '--type', 'usage.recorded', '--task-id', $taskId, '--role', $role, '--mode', $mode,
-            '--attempt-number', "$attempts", '--source', $source,
+            '--attempt-number', "$attempts", '--source', $source, '--batch-id', $batchId,
             '--payload', ($usagePayload | ConvertTo-Json -Compress)
         )
     }
@@ -1207,6 +1221,57 @@ function Cmd-Observe {
             usage_event_args    = $usageEventArgs
         }
         Write-Output ($out | ConvertTo-Json -Depth 8 -Compress)
+    } else {
+        Write-Output $journal
+    }
+}
+
+# ==========================================================================
+# usage-unavailable : create the non-sensitive usage.recorded marker emitted for an
+# internal Agent dispatch whose provider token counts cannot be observed. The caller
+# appends usage_event_args through tools/outbox.ps1, preserving supervisor's invariant
+# that it never mutates the outbox itself. This marker keeps COHORT_TOKEN_BUDGET from ever
+# treating an unmetered model call as reliable zero usage - tools/metrics.ps1 Get-BatchUsage
+# counts it separately from corrupted telemetry, and COHORT_TOKEN_BUDGET_STRICT (default
+# false, T-321 R-07) decides whether its mere presence alone fails the whole batch closed.
+# ==========================================================================
+function Cmd-UsageUnavailable {
+    $taskId = Require-Opt 'task-id'
+    $batchId = Require-Opt 'batch-id'
+    $role = Require-Opt 'role'
+    $mode = Require-Opt 'mode'
+    $attemptNumber = [string](Require-Opt 'attempt-number')
+    $source = [string](Opt 'source' 'claude')
+
+    if ($batchId -notmatch '^B-\S+$') { Fail 2 '--batch-id must be a B-id' }
+    if ($attemptNumber -notmatch '^\d+$') { Fail 2 '--attempt-number must be a non-negative integer' }
+    # T-321 R-05: validate against the SAME shape tools/outbox.ps1 accepts for the envelope
+    # `task_id` field (a real T-id, or one of the two reserved cohort/integration-scoped
+    # pseudo-ids) so a caller gets an explicit, immediate `Fail 2` instead of usage_event_args
+    # that outbox is guaranteed to reject on the best-effort dozapis.
+    if ($taskId -notmatch '^(T-\d|_cohort|_integration)') { Fail 2 "--task-id must be a T-id, '_cohort' or '_integration'" }
+
+    $usagePayload = [ordered]@{
+        task_id           = $taskId
+        role              = $role
+        mode              = $mode
+        attempt_number    = [int64]$attemptNumber
+        source            = $source
+        usage_availability = 'unavailable'
+    }
+    $usageEventArgs = @(
+        '--type', 'usage.recorded', '--task-id', $taskId, '--batch-id', $batchId,
+        '--role', $role, '--mode', $mode, '--attempt-number', $attemptNumber,
+        '--source', $source, '--payload', ($usagePayload | ConvertTo-Json -Compress)
+    )
+    $journal = "supervisor: usage_unavailable source=$source task=$taskId batch=$batchId role=$role mode=$mode attempt=$attemptNumber"
+
+    if ([bool](Opt 'json' $false)) {
+        Write-Output ([ordered]@{
+                journal_line     = $journal
+                usage            = $usagePayload
+                usage_event_args = $usageEventArgs
+            } | ConvertTo-Json -Depth 6 -Compress)
     } else {
         Write-Output $journal
     }
@@ -1261,10 +1326,11 @@ if ($MyInvocation.InvocationName -ne '.') {
             'run'       { Cmd-Run }
             'supervise' { Cmd-Supervise }
             'observe'   { Cmd-Observe }
+            'usage-unavailable' { Cmd-UsageUnavailable }
             'budget'    { Cmd-Budget }
             'version'   { Cmd-Version }
             default {
-                Fail 2 "unknown command '$Command'. Valid: run, supervise, observe, budget, version"
+                Fail 2 "unknown command '$Command'. Valid: run, supervise, observe, usage-unavailable, budget, version"
             }
         }
     } catch {

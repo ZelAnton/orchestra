@@ -72,6 +72,10 @@ QUARANTINE_MAX_ATTEMPTS: 3
 # CALL_OUTPUT_MAX_BYTES: 1048576 # предел объёма захватываемого вывода вызова (байт)
 # COHORT_BUDGET_SEC: 0           # общий бюджет стенных часов когорты (сек); 0 = без лимита
 # COHORT_TOKEN_BUDGET: 0         # фактические токены моделей на когорту; 0 = без лимита
+# COHORT_TOKEN_BUDGET_STRICT: false # true — любой unmetered-маркер (внутренний Claude
+                                 #   Agent(...), см. COHORT_TOKEN_BUDGET) сам по себе делает
+                                 #   телеметрию батча ненадёжной (fail-closed); по умолчанию
+                                 #   false — undercount видимый, но не блокирующий
 # SMOKE_CMD: npm test   # пример; по умолчанию smoke не запускается
 # VERIFICATION_MODE: disabled    # auto | required | disabled; по умолчанию (ключ не
                                  #   задан) — disabled: неконфигурированный проект не
@@ -139,6 +143,7 @@ REVIEWER_TIERING: true
 | `CALL_OUTPUT_MAX_BYTES` | 1048576 |
 | `COHORT_BUDGET_SEC` | 0 (без лимита) |
 | `COHORT_TOKEN_BUDGET` | 0 (без лимита) |
+| `COHORT_TOKEN_BUDGET_STRICT` | false |
 | `SMOKE_CMD` | не задано (smoke не запускается) |
 | `VERIFICATION_MODE` | disabled |
 | `VERIFICATION_COMMANDS` | не задано (`SMOKE_CMD` используется как fallback) |
@@ -224,7 +229,18 @@ REVIEWER_TIERING: true
   `tools/metrics.ps1 budget --work .work --batch-id <B-id> --json` показывает actual/estimated
   расход, остаток и exhausted; перед использованием processor требует `status=ok` и
   `sources.telemetry_reliable=true` (иначе fail-closed). Это read-only снимок, не reservation
-  и не предсказание стоимости.
+  и не предсказание стоимости. Внутренний Claude `Agent(...)`-dispatch (planner/coder/reviewer/
+  merger/full_reviewer/curators — весь нативный путь без Codex) не даёт processor'у доступного
+  provider token count; такой вызов несёт durable-маркер `usage_availability=unavailable`
+  вместо того, чтобы выглядеть надёжным нулём (см. `agents/processor.md`, «Supervisor вызова
+  исполнителя»). `COHORT_TOKEN_BUDGET_STRICT` (по умолчанию `false`) решает, что это значит для
+  гейта: `false` — unmetered-вызовы считаются отдельно (`sources.unmetered_usage_events`) и не
+  портят `telemetry_reliable`, гейт продолжает enforcement по метрируемой части (видимый, но не
+  блокирующий undercount); `true` — любой такой маркер, как и раньше, сам по себе делает снимок
+  батча `telemetry_unavailable` (fail-closed), включая планового planner-вызова в начале раунда —
+  осознанный, более строгий, но self-limiting выбор (см. T-321 R-07: canonical Claude-processor
+  диспетчирует все non-Codex роли через `Agent(...)`, поэтому строгий режим обычно защёлкивает
+  приём когорты уже на первом раунде).
 - `SMOKE_CMD` — команда быстрой проверки сборки/тестов, которую использует
   merger после каждого слияния и coder — при самопроверке. Для финального
   pre-push гейта это обратно совместимый fallback: если `VERIFICATION_COMMANDS`
