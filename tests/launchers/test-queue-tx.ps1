@@ -297,6 +297,47 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Equal 5 $r.ExitCode '[propose-dep] missing predecessor rejected at propose time'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 7c: direct predecessor tokens require exact T-NNN syntax --
+    $W = New-Work
+    try {
+        Propose $W 'Direct Strict Base One' 'one' | Out-Null
+        Propose $W 'Direct Strict Base Two' 'two' | Out-Null
+        Propose $W 'Direct Strict Base Three' 'three' | Out-Null
+
+        $r = Run-Tool @('propose', '--kind', 'task', '--work', $W, '--title', 'Direct Wrong Prefix', '--body', 'bad', '--predecessors', 'P-3')
+        Assert-Equal 5 $r.ExitCode '[propose-strict-preds] wrong prefix exits 5'
+        Assert-Match $r.Output "invalid predecessor 'P-3' \(expected T-NNN\)" '[propose-strict-preds] wrong prefix names the invalid token'
+
+        $r = Run-Tool @('propose', '--kind', 'task', '--work', $W, '--title', 'Direct No Digits', '--body', 'bad', '--predecessors', 'abc')
+        Assert-Equal 5 $r.ExitCode '[propose-strict-preds] digitless token exits 5'
+        Assert-Match $r.Output "invalid predecessor 'abc' \(expected T-NNN\)" '[propose-strict-preds] digitless rejection names the invalid token'
+
+        $r = Run-Tool @('propose', '--kind', 'task', '--work', $W, '--title', 'Direct Bare Number', '--body', 'bad', '--predecessors', '3')
+        Assert-Equal 5 $r.ExitCode '[propose-strict-preds] bare number exits 5'
+        Assert-Match $r.Output "invalid predecessor '3' \(expected T-NNN\)" '[propose-strict-preds] bare-number rejection names the invalid token'
+
+        $r = Run-Tool @('propose', '--kind', 'task', '--work', $W, '--title', 'Direct Trailing Letter', '--body', 'bad', '--predecessors', 'T-4a')
+        Assert-Equal 5 $r.ExitCode '[propose-strict-preds] trailing letter exits 5'
+        Assert-Match $r.Output "invalid predecessor 'T-4a' \(expected T-NNN\)" '[propose-strict-preds] anchored validation rejects a trailing letter'
+
+        $r = Run-Tool @('propose', '--kind', 'task', '--work', $W, '--title', 'Direct Valid Multiple', '--body', 'good', '--predecessors', 'T-001,T-003')
+        Assert-Equal 0 $r.ExitCode '[propose-strict-preds] valid multiple predecessors create a task'
+
+        $r = Run-Tool @('propose', '--kind', 'task', '--work', $W, '--title', 'Direct Empty Predecessors', '--body', 'good', '--predecessors', '')
+        Assert-Equal 0 $r.ExitCode '[propose-strict-preds] empty predecessor string creates a task'
+
+        $r = Run-Tool @('propose', '--kind', 'task', '--work', $W, '--title', 'Direct Missing Predecessors', '--body', 'good')
+        Assert-Equal 0 $r.ExitCode '[propose-strict-preds] missing predecessor flag creates a task'
+
+        $queue = Read-Queue $W
+        Assert-Equal 6 (Get-QueueIds $W).Count '[propose-strict-preds] invalid tokens do not create tasks'
+        Assert-Match $queue '### \[T-004\] Direct Valid Multiple — статус: не начата' '[propose-strict-preds] valid multiple task is created'
+        Assert-Match $queue 'Предпосылки: T-001, T-003' '[propose-strict-preds] valid multiple predecessors are preserved'
+        Assert-Match $queue '### \[T-005\] Direct Empty Predecessors — статус: не начата' '[propose-strict-preds] empty predecessor task is created'
+        Assert-Match $queue '### \[T-006\] Direct Missing Predecessors — статус: не начата' '[propose-strict-preds] missing predecessor task is created'
+        Assert-Equal 1 ([regex]::Matches($queue, 'Предпосылки:').Count) '[propose-strict-preds] empty and missing predecessor inputs add no prerequisites'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 8: capture + quarantine return preserving the graph -------
     $W = New-Work
     try {

@@ -673,8 +673,16 @@ function Get-BodyArg {
 function Get-PredecessorsArg {
     $raw = [string](Opt 'predecessors' '')
     $ids = New-Object System.Collections.Generic.List[int]
-    if ($raw) { foreach ($m in [regex]::Matches($raw, 'T-0*(\d+)')) { [void]$ids.Add([int]$m.Groups[1].Value) } }
-    return @($ids.ToArray())
+    foreach ($part in $raw.Split(',')) {
+        $token = $part.Trim()
+        if (-not $token) { continue }
+        $match = [regex]::Match($token, '^T-0*(\d+)$')
+        if (-not $match.Success) {
+            Fail 5 "DEP:invalid predecessor '$token' (expected T-NNN)"
+        }
+        [void]$ids.Add([int]$match.Groups[1].Value)
+    }
+    return @($ids.ToArray() | Sort-Object)
 }
 function Parse-IdArg {
     $raw = Require-Opt 'id'
