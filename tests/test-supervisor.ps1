@@ -299,7 +299,12 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     # spawn failure (nonexistent exe) is a crash, not an error.
     $spawn = Invoke-Spv @('run', '--exe', (Join-Path $d 'no-such-binary-xyz.exe'), '--json')
     Assert-Exit $spawn 5 'spawn failure -> crash exit 5'
-    Assert-Equal 'crash' (($spawn.Out | ConvertFrom-Json).reason) 'spawn-failure reason is crash'
+    $spawnObj = $spawn.Out | ConvertFrom-Json
+    Assert-Equal 'crash' $spawnObj.reason 'spawn-failure reason is crash'
+    Assert-Equal 0 $spawnObj.descendant_count_before_cleanup 'spawn-failure reports zero descendants before cleanup'
+    Assert-Equal 0 $spawnObj.survivor_count_after_cleanup 'spawn-failure reports zero survivors after cleanup'
+    Assert-Equal 0 $spawnObj.temporal_candidate_count 'spawn-failure reports zero temporal candidates'
+    Assert-Equal 0 $spawnObj.temporal_candidate_count_after_cleanup 'spawn-failure reports zero temporal candidates after cleanup'
 }.Invoke()
 
 # =============================================================================
@@ -447,6 +452,10 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
         $fixtureChildId = if (@($spawnedProcesses).Count -eq 2) { $spawnedProcesses[1].Id } else { -1 }
         $observedBeforeCleanupIds = @((@($diagObj.descendants_before_cleanup) + @($diagObj.temporal_candidates)) | ForEach-Object { [int]$_.pid })
         Assert-True ($observedBeforeCleanupIds -contains $fixtureChildId) 'diagnostics records the fixture background descendant as lineage or temporal evidence before cleanup'
+        Assert-Equal (@($diagObj.descendants_before_cleanup).Count) $o.descendant_count_before_cleanup 'successful verdict counts descendants before cleanup'
+        Assert-Equal (@($diagObj.survivors_after_cleanup).Count) $o.survivor_count_after_cleanup 'successful verdict counts survivors after cleanup'
+        Assert-Equal (@($diagObj.temporal_candidates).Count) $o.temporal_candidate_count 'successful verdict counts temporal candidates'
+        Assert-Equal (@($diagObj.temporal_candidates_after_cleanup).Count) $o.temporal_candidate_count_after_cleanup 'successful verdict counts temporal candidates after cleanup'
         Assert-Equal 0 (@($diagObj.survivors_after_cleanup).Count) 'diagnostics records no survivor after cleanup'
         Assert-True (-not (Test-Path -LiteralPath $marker)) 'normal-success grandchild was reaped before writing its marker'
     } finally {
@@ -735,9 +744,34 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     $r2 = Invoke-Spv @('supervise', '--file', $w, '--args-json', (ArgsJson @('--code', '0')),
         '--max-attempts', '1', '--budget-file', $budget, '--json')
     Assert-Exit $r2 7 'an exhausted cohort budget -> reason=budget (exit 7), child not run'
-    Assert-Equal 'budget' (($r2.Out | ConvertFrom-Json).reason) 'budget reason'
+    $budgetObj = $r2.Out | ConvertFrom-Json
+    Assert-Equal 'budget' $budgetObj.reason 'budget reason'
+    Assert-Equal 0 $budgetObj.descendant_count_before_cleanup 'exhausted budget reports zero descendants before cleanup'
+    Assert-Equal 0 $budgetObj.survivor_count_after_cleanup 'exhausted budget reports zero survivors after cleanup'
+    Assert-Equal 0 $budgetObj.temporal_candidate_count 'exhausted budget reports zero temporal candidates'
+    Assert-Equal 0 $budgetObj.temporal_candidate_count_after_cleanup 'exhausted budget reports zero temporal candidates after cleanup'
     $bs = Invoke-Spv @('budget', '--budget-file', $budget, '--json')
     Assert-True ([bool](($bs.Out | ConvertFrom-Json).exhausted)) 'budget reports exhausted'
+
+    # A positive sub-second remainder takes the second budget-result branch: the call
+    # cannot receive a nonzero whole-second deadline, so it is not started.
+    $smallBudget = Join-Path $d 'small-budget.json'
+    Write-File $smallBudget (([ordered]@{
+        schema = 'orchestra/cohort-budget@1'
+        budget_sec = 1
+        consumed_ms = 1
+        started_at = [DateTime]::UtcNow.ToString('o')
+        batch_id = ''
+        owner_id = ''
+    } | ConvertTo-Json -Compress))
+    $r3 = Invoke-Spv @('supervise', '--file', $w, '--args-json', (ArgsJson @('--code', '0')),
+        '--max-attempts', '1', '--budget-file', $smallBudget, '--json')
+    Assert-Exit $r3 7 'a sub-second cohort budget -> reason=budget (exit 7), child not run'
+    $smallBudgetObj = $r3.Out | ConvertFrom-Json
+    Assert-Equal 0 $smallBudgetObj.descendant_count_before_cleanup 'sub-second budget reports zero descendants before cleanup'
+    Assert-Equal 0 $smallBudgetObj.survivor_count_after_cleanup 'sub-second budget reports zero survivors after cleanup'
+    Assert-Equal 0 $smallBudgetObj.temporal_candidate_count 'sub-second budget reports zero temporal candidates'
+    Assert-Equal 0 $smallBudgetObj.temporal_candidate_count_after_cleanup 'sub-second budget reports zero temporal candidates after cleanup'
 }.Invoke()
 
 # =============================================================================

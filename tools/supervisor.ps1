@@ -99,6 +99,12 @@ $opts = $parsed.Opts
 
 function Has-Prop { param($Obj, [string]$Name) return ($null -ne $Obj -and $null -ne $Obj.PSObject.Properties[$Name]) }
 function Get-Prop { param($Obj, [string]$Name) if (Has-Prop $Obj $Name) { return $Obj.$Name } else { return $null } }
+function Get-PropCount {
+    param($Obj, [string]$Name)
+    $value = Get-Prop $Obj $Name
+    if ($null -eq $value) { return 0 }
+    return @($value).Count
+}
 
 # --------------------------------------------------------------------------
 # Reason -> exit-code contract (single source of truth).
@@ -843,10 +849,10 @@ function New-Verdict {
         processkit_run_id = [string](Get-Prop $Res 'processkit_run_id')
         processkit_mechanism = [string](Get-Prop $Res 'processkit_mechanism')
         processkit_abrupt_cleanup = [string](Get-Prop $Res 'processkit_abrupt_cleanup')
-        descendant_count_before_cleanup = @((Get-Prop $Res 'descendants_before_cleanup')).Count
-        survivor_count_after_cleanup = @((Get-Prop $Res 'survivors_after_cleanup')).Count
-        temporal_candidate_count = @((Get-Prop $Res 'temporal_candidates')).Count
-        temporal_candidate_count_after_cleanup = @((Get-Prop $Res 'temporal_candidates_after_cleanup')).Count
+        descendant_count_before_cleanup = Get-PropCount $Res 'descendants_before_cleanup'
+        survivor_count_after_cleanup = Get-PropCount $Res 'survivors_after_cleanup'
+        temporal_candidate_count = Get-PropCount $Res 'temporal_candidates'
+        temporal_candidate_count_after_cleanup = Get-PropCount $Res 'temporal_candidates_after_cleanup'
         occurred_at      = (Format-UtcNow)
     }
     if ($BudgetRemainingMs -ge 0) { $v['budget_remaining_ms'] = $BudgetRemainingMs }
