@@ -47,3 +47,8 @@ Test role boundaries: file ownership, VCS permissions, status transitions, retry
 ## Commit & Pull Request Guidelines
 
 History uses short, imperative subjects such as `Add orchestrator agent configs and CLI launchers`. Keep commits focused. Pull requests should name affected roles, changed invariants, compatibility impact, and validation. Link issues and include terminal output for launcher changes.
+
+### Task identifiers
+
+Do not include task numbers or task identifiers (for example, `T-123` or
+`#123`) in either the commit subject or the commit body.
