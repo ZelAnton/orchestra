@@ -1078,9 +1078,10 @@ codex-правилами выше (см. «Резолвинг раннеров `
   `usage_availability=unavailable`, который никогда не превращается в нулевой расход, но что он
   значит для гейта — управляет `COHORT_TOKEN_BUDGET_STRICT` (по умолчанию `false`, T-321 R-07):
   `false` — unmetered-события считаются отдельно (`sources.unmetered_usage_events`) и не портят
-  `telemetry_reliable`, enforcement продолжается по метрируемой части (видимый, но не
-  блокирующий undercount); `true` — восстанавливает исходный fail-closed режим, где **любой**
-  такой маркер сам по себе делает снимок батча `telemetry_unavailable` — но т.к.
+  `telemetry_reliable`, admission не закрывается, а enforcement продолжается по метрируемой
+  части (видимый, но не блокирующий undercount); `true` — восстанавливает исходный fail-closed
+  режим, где **любой** такой маркер сам по себе делает снимок батча
+  `telemetry_unavailable` — но т.к.
   canonical Claude-processor диспетчирует все non-Codex роли (включая planner) через
   `Agent(...)`, strict-режим обычно защёлкивает приём когорты уже на первом раунде, поэтому это
   осознанный, более строгий opt-in, а не новое поведение по умолчанию. Перед каждым новым model

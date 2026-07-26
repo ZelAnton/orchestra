@@ -1227,14 +1227,18 @@ ProcessKit-backend контейнирует launcher; независимо от 
 
 У внутреннего `Agent(...)` также нет доступного processor'у provider token count. Поэтому
 при `EVENTS_OUTBOX: on` **после успешного admission-снимка и непосредственно перед каждым**
-таким dispatch создай fail-closed marker командой
+таким dispatch создай unavailable-marker командой
 `tools/supervisor.ps1 usage-unavailable --task-id <T-ID|_cohort|_integration> --batch-id
 "<B-id>" --role <роль> --mode <режим> --attempt-number <N> --source claude --json` и
 best-effort допиши выданные `usage_event_args` через `tools/outbox.ps1 append`. Номер
 1-based и replay-stable в пределах `(batch_id,task_id,role,mode)`; при resume уже
 существующий marker того же логического dispatch переиспользуй, а не создавай новый.
-`usage_availability="unavailable"` намеренно делает следующий token-budget snapshot
-`telemetry_unavailable`: внутренний вызов без provider-счётчиков нельзя считать нулевым.
+При `COHORT_TOKEN_BUDGET_STRICT: false` (по умолчанию)
+`usage_availability="unavailable"` увеличивает только `sources.unmetered_usage_events`,
+не портит `telemetry_reliable` и не закрывает admission; внутренний вызов без
+provider-счётчиков при этом остаётся видимым как unmetered, а не считается нулевым.
+Только при явном `COHORT_TOKEN_BUDGET_STRICT: true` marker делает следующий
+token-budget snapshot `telemetry_unavailable` и включает fail-closed поведение.
 
 `tools/supervisor.ps1` (`run`/`supervise`) применяй к **реальным внешним процессам**:
 codex-runtime уже делает эквивалентную очистку сам, а coder/merger и ты для `SMOKE_CMD`,
@@ -1469,8 +1473,11 @@ usage и флаг `estimated` — как есть из блока). Для **Cla
    молча. Для внутреннего Claude `Agent(...)`, у которого transcript/provider usage
    недоступен, **обязательно** допиши `usage.recorded` через `usage-unavailable` по правилу
    раздела «Supervisor вызова исполнителя»; отсутствие счётчиков не является нулевым usage.
-   Сбор не меняет исход уже запущенного model call, но unavailable-marker fail-closed закрывает
-   admission перед следующим.
+   Сбор не меняет исход уже запущенного model call. По умолчанию
+   (`COHORT_TOKEN_BUDGET_STRICT: false`) unavailable-marker лишь увеличивает
+   `sources.unmetered_usage_events` и не закрывает admission; только при явном
+   `COHORT_TOKEN_BUDGET_STRICT: true` он делает telemetry ненадёжной и fail-closed закрывает
+   admission перед следующим вызовом.
 
 ### Пер-таск ревью (тиринг: reviewer / reviewer_std)
 
@@ -3131,8 +3138,11 @@ Claude-исполнителя (headless `claude -p --output-format stream-json`)
   §8) — флаг переносится в событие как есть.
 - `usage_availability` — `available|unavailable`. `available` сопровождает реально
   извлечённые provider-счётчики. `unavailable` — marker внутреннего `Agent(...)` без
-  доступных token counts; он не несёт `estimated`/token-полей и заставляет
-  `COHORT_TOKEN_BUDGET` считать телеметрию ненадёжной, а не нулевой.
+  доступных token counts и не несёт `estimated`/token-полей. По умолчанию
+  (`COHORT_TOKEN_BUDGET_STRICT: false`) `COHORT_TOKEN_BUDGET` учитывает его только в
+  `sources.unmetered_usage_events`, сохраняя `telemetry_reliable=true`; лишь при явном
+  `COHORT_TOKEN_BUDGET_STRICT: true` marker делает телеметрию ненадёжной и включает
+  fail-closed поведение. Ни в одном режиме marker не считается нулевым usage.
 - **Откуда берёшь usage.** Codex: из результата `tools/codex-runtime.ps1 run` — он несёт готовый
   блок `usage` (actual из JSONL, иначе marked-estimate). Claude: из `tools/supervisor.ps1 observe
   --stdout-file <захват stream-json> --batch-id "<B-id>"` — он парсит usage финального

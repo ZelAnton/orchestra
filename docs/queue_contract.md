@@ -945,8 +945,10 @@ Codex-вызовы, а `usage.recorded` — и Claude, и Codex). Строгий
 Реально извлечённые provider-счётчики несут `usage_availability=available`; внутренний
 Claude `Agent(...)`, где provider token counts недоступны, эмитит marker
 `usage_availability=unavailable` без вымышленных token-полей — он никогда не превращается в
-нулевой расход. Что именно это значит для включённого budget-gate — управляется
-`COHORT_TOKEN_BUDGET_STRICT` (см. §13.2). `source` и
+нулевой расход. По умолчанию (`COHORT_TOKEN_BUDGET_STRICT: false`) marker виден отдельным
+счётчиком `sources.unmetered_usage_events`, сохраняет `telemetry_reliable=true` и не закрывает
+admission; только явный strict-режим (`COHORT_TOKEN_BUDGET_STRICT: true`) делает такой marker
+fail-closed причиной `telemetry_unavailable` (см. §13.2). `source` и
 `batch_id` входят в дедуп-ключ (§19.2), поэтому
 codex-попытка и её Claude-fallback для одного `(task,role,mode,attempt)` — два самостоятельных
 факта, а повторный захват того же task_id в новой когорте не коллидирует со старым usage.
