@@ -37,8 +37,8 @@
       * observe: emits a non-sensitive journal line + codex.attempt event args that the
         real tools/outbox.ps1 accepts.
       * Optional released ProcessKit CLI integration: when ORCHESTRA_PROCESSKIT_TEST_CLI
-        is set, mediated stdin reaches the child through run:--stdin-file without
-        degrading kernel containment or leaving the staging file behind.
+        is set, mediated stdin reaches the child through run:--stdin-file and 0.3.0's
+        bounded capture path keeps flooding output out of the supervisor's memory.
 
 .EXAMPLE
     pwsh -File tests/test-supervisor.ps1
@@ -233,7 +233,7 @@ try { $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2
 finally { $sha.Dispose() }
 Write-Output "LEN=$($bytes.Length);SHA=$hash"
 '@
-            $payload = ('processkit-022-input|' + ('x' * (256KB)))
+            $payload = ('processkit-030-input|' + ('x' * (256KB)))
             Write-File $stdinSource $payload
             $expectedHash = [System.Security.Cryptography.SHA256]::Create()
             try { $expectedHashText = -join ($expectedHash.ComputeHash($script:Utf8.GetBytes($payload)) | ForEach-Object { $_.ToString('x2') }) }
@@ -250,6 +250,27 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
             Assert-Equal $expectedCapture ((Read-File $capture).TrimEnd("`r", "`n")) 'released CLI delivers the exact large stdin payload without runner-pipe deadlock'
             $staging = Join-Path ([System.IO.Path]::GetTempPath()) (([string]$verdict.processkit_run_id) + '.stdin')
             Assert-True (-not (Test-Path -LiteralPath $staging)) 'mediated-stdin staging file is removed after the call'
+
+            $boundedCaptureSurfaces = @('run:--capture-dir', 'run:--capture-max-bytes', 'run:--no-echo')
+            $supportsBoundedCapture = @($boundedCaptureSurfaces | Where-Object { @($contract.surface) -notcontains $_ }).Count -eq 0
+            if ($supportsBoundedCapture) {
+                $floodWorker = Join-Path $d 'capture-worker.ps1'
+                $floodOutput = Join-Path $d 'capture.out'
+                $floodResult = Join-Path $d 'capture-result.json'
+                Write-File $floodWorker "1..1000 | ForEach-Object { Write-Output ('z' * 63) }"
+                $flood = Invoke-Spv -ToolArgs @(
+                    'run', '--file', $floodWorker, '--output-max-bytes', '256',
+                    '--stdout-file', $floodOutput, '--result-file', $floodResult, '--json'
+                ) -EnvironmentOverrides @{ CC_PROCESSKIT_CLI = $realCli }
+                Assert-Exit $flood 0 'released CLI bounded-capture call succeeds'
+                $floodVerdict = Read-File $floodResult | ConvertFrom-Json
+                Assert-Equal 'processkit-bounded' ([string]$floodVerdict.output_capture) '0.3.0 capture surfaces select the bounded ProcessKit path'
+                Assert-True ([bool]$floodVerdict.output_truncated) 'bounded ProcessKit capture reports truncation'
+                Assert-True ([int64]$floodVerdict.output_bytes -gt 256) 'bounded ProcessKit capture preserves the full produced byte count'
+                Assert-True ($script:Utf8.GetByteCount((Read-File $floodOutput)) -le 256) 'bounded ProcessKit capture retains at most the requested transient bytes'
+                $captureDir = Join-Path ([System.IO.Path]::GetTempPath()) (([string]$floodVerdict.processkit_run_id) + '.capture')
+                Assert-True (-not (Test-Path -LiteralPath $captureDir)) 'bounded ProcessKit capture directory is removed after the call'
+            }
         }
     }
 }.Invoke()

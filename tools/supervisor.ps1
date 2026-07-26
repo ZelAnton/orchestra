@@ -395,6 +395,7 @@ function Read-ProcessKitLifecycle {
     param([string]$Path)
     $terminal = $null
     $started = $null
+    $captured = $null
     [object[]]$members = @()
     if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
         foreach ($line in @(Get-Content -LiteralPath $Path -Encoding utf8 -ErrorAction SilentlyContinue)) {
@@ -403,11 +404,34 @@ function Read-ProcessKitLifecycle {
             switch ([string]$pkEvent.event) {
                 'run_started' { $started = $pkEvent }
                 'members_snapshot' { $members = @($pkEvent.members) }
+                'output_captured' { $captured = $pkEvent }
                 'runner_exit' { $terminal = $pkEvent }
             }
         }
     }
-    return [pscustomobject]@{ Terminal = $terminal; Started = $started; Members = $members }
+    return [pscustomobject]@{ Terminal = $terminal; Started = $started; Members = $members; Captured = $captured }
+}
+
+function Read-ProcessKitCaptureText {
+    param([string]$Directory, [string]$Name)
+    if (-not $Directory) { return [pscustomobject]@{ Text = ''; Failed = $true } }
+    $path = Join-Path $Directory $Name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        return [pscustomobject]@{ Text = ''; Failed = $true }
+    }
+    try { return [pscustomobject]@{ Text = [System.IO.File]::ReadAllText($path, $script:Utf8); Failed = $false } }
+    catch { return [pscustomobject]@{ Text = ''; Failed = $true } }
+}
+
+function Remove-ProcessKitCapture {
+    param([string]$Directory)
+    if (-not $Directory) { return }
+    foreach ($name in @('stdout.log', 'stderr.log')) {
+        Remove-Item -LiteralPath (Join-Path $Directory $name) -Force -ErrorAction SilentlyContinue
+    }
+    # The CLI owns exactly these two files. Remove the directory only when it is empty;
+    # never recurse through a path supplied by another component.
+    Remove-Item -LiteralPath $Directory -Force -ErrorAction SilentlyContinue
 }
 
 function Invoke-ProcessKitHardStop {
@@ -500,6 +524,11 @@ function Invoke-SupervisedCall {
     $processkitEvents = ''
     $processkitRunId = ''
     $processkitStdinFile = ''
+    $processkitCaptureDir = ''
+    $processkitSupportsBoundedCapture = ($processkitBackend.Kind -eq 'cli' -and
+        @($processkitBackend.Surfaces) -contains 'run:--capture-dir' -and
+        @($processkitBackend.Surfaces) -contains 'run:--capture-max-bytes' -and
+        @($processkitBackend.Surfaces) -contains 'run:--no-echo')
     # `setsid missing-target` itself starts successfully and reports 127 after its exec
     # fails. Preserve the supervisor contract that an unresolvable executable is a spawn
     # crash by skipping the wrapper in that case, so Process.Start surfaces the native
@@ -528,6 +557,11 @@ function Invoke-SupervisedCall {
         $launchArgs = @('run', '--run-id', $processkitRunId, '--cwd', $childCwd,
             '--jsonl', $processkitEvents, '--create-no-window')
         if ($processkitStdinFile) { $launchArgs += @('--stdin-file', $processkitStdinFile) }
+        if ($processkitSupportsBoundedCapture -and $OutputMaxBytes -gt 0) {
+            $processkitCaptureDir = Join-Path ([System.IO.Path]::GetTempPath()) ($processkitRunId + '.capture')
+            $launchArgs += @('--capture-dir', $processkitCaptureDir,
+                '--capture-max-bytes', ([string]$OutputMaxBytes), '--no-echo')
+        }
         $launchArgs += @('--', $FilePath) + @($CallArgs)
     } elseif ($processkitPython) {
         # ProcessKit owns a race-free kernel container for this individual call
@@ -590,6 +624,7 @@ function Invoke-SupervisedCall {
             processkit_events_file = $processkitEvents; processkit_run_id = $processkitRunId
         }
         if ($processkitStdinFile) { Remove-Item -LiteralPath $processkitStdinFile -Force -ErrorAction SilentlyContinue }
+        Remove-ProcessKitCapture -Directory $processkitCaptureDir
         if (-not $diagEnabled -and $processkitEvents) { Remove-Item -LiteralPath $processkitEvents -Force -ErrorAction SilentlyContinue }
         return $spawnResult
     }
@@ -663,31 +698,47 @@ function Invoke-SupervisedCall {
     }
     $sw.Stop()
 
+    $lifecycle = if ($processkitCli) { Read-ProcessKitLifecycle -Path $processkitEvents } else { $null }
+
     # Bounded collection: a descendant that survived the teardown above can keep the child's pipe
     # write end open, so these ReadToEndAsync tasks may never complete. Wait at most a shared
     # grace, then degrade to what was captured and flag the shortfall - never an unbounded
     # GetResult() that would let a fired deadline/cancel silently become an infinite block.
     $collected = Receive-BoundedStreamText $outTask $errTask $script:StreamCollectGraceMs
-    $stdoutFull = [string]$collected.Stdout
-    $stderrFull = [string]$collected.Stderr
-    $outputCollectionTimedOut = [bool]$collected.TimedOut
+    $stdoutCapture = if ($processkitCaptureDir) { Read-ProcessKitCaptureText -Directory $processkitCaptureDir -Name 'stdout.log' } else { $null }
+    $stderrCapture = if ($processkitCaptureDir) { Read-ProcessKitCaptureText -Directory $processkitCaptureDir -Name 'stderr.log' } else { $null }
+    $stdoutFull = if ($null -ne $stdoutCapture) { [string]$stdoutCapture.Text } else { [string]$collected.Stdout }
+    $stderrFull = if ($null -ne $stderrCapture) { [string]$stderrCapture.Text } else { [string]$collected.Stderr }
+    $captureEvent = if ($null -ne $lifecycle) { $lifecycle.Captured } else { $null }
+    $captureWriteError = ($null -ne $captureEvent -and
+        ([bool]$captureEvent.stdout.write_error -or [bool]$captureEvent.stderr.write_error))
+    $captureUnavailable = ($processkitCaptureDir -and $null -ne $lifecycle.Started -and
+        ($null -eq $captureEvent -or [bool]$stdoutCapture.Failed -or [bool]$stderrCapture.Failed))
+    $outputCollectionTimedOut = ([bool]$collected.TimedOut -or $captureWriteError -or $captureUnavailable)
     $outRes = Get-CappedText $stdoutFull $OutputMaxBytes
     $errRes = Get-CappedText $stderrFull $OutputMaxBytes
     $stdout = $outRes.Text
     $stderr = $errRes.Text
-    $totalBytes = [int]($outRes.TotalBytes + $errRes.TotalBytes)
-    $truncated = ($outRes.Truncated -or $errRes.Truncated)
-    # sha over the FULL captured bytes (an integrity fingerprint of what the call produced,
-    # independent of the display truncation) - a non-sensitive scalar for the durable record.
+    $totalBytes = if ($processkitCaptureDir -and $null -ne $captureEvent) {
+        [int64]$captureEvent.stdout.bytes + [int64]$captureEvent.stderr.bytes
+    } else {
+        [int64]$outRes.TotalBytes + [int64]$errRes.TotalBytes
+    }
+    $truncated = if ($processkitCaptureDir -and $null -ne $captureEvent) {
+        [bool]$captureEvent.stdout.truncated -or [bool]$captureEvent.stderr.truncated -or $captureWriteError -or $captureUnavailable
+    } else {
+        $outRes.Truncated -or $errRes.Truncated
+    }
+    # The digest covers exactly the transient text retained for review. For complete streams
+    # this is the full output; when ProcessKit bounded capture truncates a stream, the explicit
+    # output_truncated flag prevents consumers from mistaking this prefix digest for a full one.
     $sha = Sha256Hex ($script:Utf8.GetBytes($stdoutFull + $stderrFull))
 
     $rc = $null
     try { $rc = $proc.ExitCode } catch { $rc = $null }
     $runnerFailureSource = ''
     $processkitRootPid = $null
-    $lifecycle = $null
     if ($processkitCli) {
-        $lifecycle = Read-ProcessKitLifecycle -Path $processkitEvents
         if ($null -ne $lifecycle.Started -and $null -ne $lifecycle.Started.root_pid) {
             $processkitRootPid = [int]$lifecycle.Started.root_pid
         }
@@ -739,6 +790,7 @@ function Invoke-SupervisedCall {
         duration_ms = [int]$sw.Elapsed.TotalMilliseconds; output_bytes = $totalBytes
         output_truncated = $truncated; output_collection_timed_out = $outputCollectionTimedOut
         output_sha256 = $sha; stdout = $stdout; stderr = $stderr
+        output_capture = if ($processkitCaptureDir) { 'processkit-bounded' } else { 'supervisor-memory' }
         outcome_reason = $outcomeReason; pid = if ($null -ne $processkitRootPid) { $processkitRootPid } else { $procId }; cleanup_attempted = $true
         containment = $containmentKind; containment_runner_pid = $procId
         containment_degraded_reason = $containmentDegradedReason
@@ -749,6 +801,7 @@ function Invoke-SupervisedCall {
         temporal_candidates = $temporalCandidates; temporal_candidates_after_cleanup = $temporalAfter
     }
     if ($processkitStdinFile) { Remove-Item -LiteralPath $processkitStdinFile -Force -ErrorAction SilentlyContinue }
+    Remove-ProcessKitCapture -Directory $processkitCaptureDir
     if (-not $diagEnabled -and $processkitEvents) { Remove-Item -LiteralPath $processkitEvents -Force -ErrorAction SilentlyContinue }
     return $result
 }
@@ -840,6 +893,7 @@ function New-Verdict {
         output_truncated = $Res.output_truncated
         output_collection_timed_out = [bool](Get-Prop $Res 'output_collection_timed_out')
         output_sha256    = $Res.output_sha256
+        output_capture   = [string](Get-Prop $Res 'output_capture')
         outcome_reason   = $Res.outcome_reason
         root_pid         = $Res.pid
         cleanup_attempted = [bool](Get-Prop $Res 'cleanup_attempted')

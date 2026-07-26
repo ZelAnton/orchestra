@@ -442,7 +442,7 @@ scope, поэтому полный путь, записанный в систе�
 JSONL каждой корневой сессии сохраняется в `.work/processes/_processor/*.processkit.jsonl`:
 там есть `run_id`, реальный root PID, механизм (`job_object`/`cgroup_v2`/`process_group`),
 members/cleanup и terminal `runner_exit`. Живые runs адресуются штатными
-`processkit-cli list/inspect/cancel/kill`; сырой argv по умолчанию не пишется.
+`processkit-cli list/inspect/cancel/kill/wait`; сырой argv по умолчанию не пишется.
 
 `CC_PROCESSKIT_PYTHON` остаётся deprecated-совместимым fallback: точный Python executable с
 `import processkit` используется лишь когда standalone CLI отключён/не найден. Без обоих
@@ -453,12 +453,17 @@ container. Supervisor читает terminal JSONL, поэтому runner `spawn_
 не смешивается с настоящим child exit code из полосы 100–119, а при deadline/cancel сначала
 адресно вызывает `kill --run-id`, затем применяет старый PID/PGID fallback. Поле verdict
 `containment` показывает `processkit-cli`/`processkit-python`/`process-group`/`pid-tree`.
-`processkit-cli 0.2.2` предоставляет `run:--stdin-file` и `run:--inherit-stdio`. Поэтому
+`processkit-cli 0.3.0` предоставляет `run:--stdin-file` и `run:--inherit-stdio`. Поэтому
 supervisor с непустым `--stdin-text`/`--stdin-file` сохраняет ввод во временный UTF-8 файл,
 передаёт CLI только путь и удаляет файл после завершения вызова; leaf-команда остаётся в container.
 Интерактивный Claude root наследует console stdio и также остаётся contained. Для старого
 CLI без этих probe surfaces сохраняются прежние безопасные fallback: PID/PGID для mediated
 stdin и direct console-attached root вместо молчаливой потери ввода/TTY.
+При положительном `--output-max-bytes` supervisor feature-gated использует поверхности 0.3.0
+`run:--capture-dir`, `run:--capture-max-bytes` и `run:--no-echo`: stdout/stderr ограничиваются
+на стороне ProcessKit во время исполнения, полный produced byte count берётся из JSONL, а
+временный capture удаляется после построения verdict. Если хотя бы одной поверхности нет или
+лимит равен `0`, сохраняется прежний совместимый in-memory путь.
 
 Матрица устойчивости этого пути — `tools/harness.ps1` (полный жизненный цикл когорты для
 git и jj с fault injection после каждого критического перехода): быстрый срез

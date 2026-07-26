@@ -806,13 +806,23 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
   он сначала адресно вызывает `processkit-cli kill --run-id`, затем оставляет прежний
   PID/PGID cleanup как защитный fallback. ProcessKit JSONL переносится рядом с process-
   diagnostics JSON и сохраняет redacted lifecycle/mechanism/cleanup evidence.
-  CLI 0.2.2 имеет `run:--stdin-file`: при непустом supervisor `--stdin-text`/`--stdin-file`
+  CLI 0.3.0 имеет `run:--stdin-file`: при непустом supervisor `--stdin-text`/`--stdin-file`
   runtime создаёт случайный временный UTF-8 файл, передаёт только путь и удаляет файл после
   завершения вызова, сохраняя kernel containment. Для интерактивного root `run:--inherit-stdio`
   наследует stdin/stdout/stderr с terminal semantics. Старые CLI без surfaces по-прежнему
   безопасно деградируют: mediated input — на Python/PID-PGID с
   `containment_degraded_reason=processkit-cli-no-mediated-stdin`, Claude root — на direct
   console-attached запуск; Codex root и обычные leaf-команды используют CLI.
+  Тот же capability-gate использует 0.3.0 `run:--capture-dir` +
+  `run:--capture-max-bytes` + `run:--no-echo`: при положительном supervisor
+  `--output-max-bytes` raw stdout/stderr ограничиваются в ProcessKit pump во время вызова,
+  полный счётчик produced bytes читается из `output_captured`, а временный capture удаляется
+  после построения transient output/verdict. Это устраняет прежнее неограниченное
+  `ReadToEndAsync`-накопление перед постфактум-обрезкой; неполный surface или явный лимит `0`
+  сохраняют старый совместимый путь. `run --detach`/`wait` сознательно не меняют foreground-
+  семантику launchers: они полезны только адаптеру, который перестал быть родителем runner.
+  Resource caps 0.3.0 не включаются глобальным default, потому что fail-fast `limit_hit` на
+  macOS и Linux без enforceable cgroup превратил бы переносимую verification-команду в отказ.
   Если target executable не резолвится, supervisor не прячет native spawn failure за
   `setsid` exit 127 и одинаково классифицирует его как `crash` на всех ОС.
 - Windows-лаунчеры `cc-processor.cmd`/`cc-resume.cmd` вычисляют корень проекта через
