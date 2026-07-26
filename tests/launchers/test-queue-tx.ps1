@@ -116,6 +116,29 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Equal 1 (Get-QueueIds $W).Count '[dedup] only one task remains in the queue'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 2b: archive-title dedup accepts both normative H2/H3 shapes
+    # and does not require the historical status suffix.
+    $W = New-Work
+    try {
+        $done = @(
+            '# Завершённые задачи', '',
+            '### [T-084] Make policy an executable configuration boundary',
+            'done', '',
+            '## [T-085] Preserve archive heading compatibility — статус: завершена',
+            'done'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Done.md'), $done, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'make   policy an executable configuration boundary', '--body', 'x')
+        Assert-Equal 4 $r.ExitCode '[archive-title-dedup] statusless H3 duplicate rejected with exit 4'
+        Assert-Match $r.Output 'duplicate:' '[archive-title-dedup] statusless H3 rejection reports duplicate'
+
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'preserve archive heading compatibility', '--body', 'x')
+        Assert-Equal 4 $r.ExitCode '[archive-title-dedup] H2-with-status duplicate rejected with exit 4'
+        Assert-Match $r.Output 'duplicate:' '[archive-title-dedup] H2-with-status rejection reports duplicate'
+        Assert-Equal 0 (Get-QueueIds $W).Count '[archive-title-dedup] rejected archive duplicates never enter the queue'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 3: predecessor chain readiness (A <- B <- C) --------------
     $W = New-Work
     try {
