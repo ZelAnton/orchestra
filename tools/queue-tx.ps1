@@ -689,16 +689,16 @@ function Parse-IdArg {
     # Explicit guard: the T-task lifecycle commands (capture/return/escalate/archive/ready)
     # never operate on a proposal. A P-NNN id is refused with a pointed message instead of a
     # generic parse error, so a proposal can never be captured/executed via a T-command.
-    if ($raw -match 'P-0*\d+') {
+    if ($raw -match '^P-0*\d+$') {
         Fail 2 "invalid --id: $raw is a proposal (kind: proposal); proposals are not executable tasks (use classify-proposal / list-proposals)"
     }
-    $m = [regex]::Match($raw, 'T-0*(\d+)')
+    $m = [regex]::Match($raw, '^T-0*(\d+)$')
     if (-not $m.Success) { Fail 2 "invalid --id: $raw" }
     return [int]$m.Groups[1].Value
 }
 function Parse-ProposalIdArg {
     $raw = Require-Opt 'id'
-    $m = [regex]::Match($raw, 'P-0*(\d+)')
+    $m = [regex]::Match($raw, '^P-0*(\d+)$')
     if (-not $m.Success) { Fail 2 "invalid --id: $raw (expected a proposal id P-NNN)" }
     return [int]$m.Groups[1].Value
 }

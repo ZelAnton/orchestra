@@ -223,6 +223,23 @@ function Read-Lease {
         if (-not (Lease-HasProp $obj $f)) { return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $obj; Error = "missing field '$f'" } }
     }
     try { [void](Parse-Utc $obj.heartbeat) } catch { return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $obj; Error = 'unparseable heartbeat timestamp' } }
+    $ttl = 0.0
+    if (-not [double]::TryParse([string]$obj.ttl_seconds, [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$ttl) -or
+        [double]::IsNaN($ttl) -or [double]::IsInfinity($ttl) -or $ttl -le 0) {
+        return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $obj; Error = "invalid field 'ttl_seconds' (expected a finite number greater than zero)" }
+    }
+    if ((Lease-HasProp $obj 'pid') -and $null -ne $obj.pid) {
+        $pidValue = 0
+        if (-not [int]::TryParse([string]$obj.pid, [System.Globalization.NumberStyles]::Integer,
+                [System.Globalization.CultureInfo]::InvariantCulture, [ref]$pidValue) -or $pidValue -le 0) {
+            return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $obj; Error = "invalid field 'pid' (expected a positive integer or null)" }
+        }
+    }
+    if ((Lease-HasProp $obj 'pid_started') -and $null -ne $obj.pid_started) {
+        try { [void](Parse-Utc $obj.pid_started) }
+        catch { return [pscustomobject]@{ Present = $true; Valid = $false; Legacy = $false; Lease = $obj; Error = "invalid field 'pid_started' (expected a UTC timestamp or null)" } }
+    }
     return [pscustomobject]@{ Present = $true; Valid = $true; Legacy = $false; Lease = $obj; Error = $null }
 }
 function Write-Lease {

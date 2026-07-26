@@ -327,6 +327,46 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
         Assert-True ($null -ne (Read-Lease $W)) '[empty-lease] a valid lease exists after the forced acquire'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 10c: malformed liveness fields are structured corruption (18) --
+    $W = New-Work
+    try {
+        $lockDir = Join-Path $W 'orchestrator.lock'
+        New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+        $leasePath = Join-Path $lockDir 'lease.json'
+        $now = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+        $base = [ordered]@{
+            role = 'processor'; owner_id = 'owner'; root = $ROOT; host = [Environment]::MachineName
+            heartbeat = $now; ttl_seconds = 600; generation = 1; pid = $null; pid_started = $null
+        }
+        foreach ($case in @(
+                @{ Field = 'ttl_seconds'; Value = 'not-a-number' },
+                @{ Field = 'ttl_seconds'; Value = 0 },
+                @{ Field = 'pid'; Value = '12.5' },
+                @{ Field = 'pid'; Value = '' },
+                @{ Field = 'pid_started'; Value = 'not-a-timestamp' },
+                @{ Field = 'pid_started'; Value = '' })) {
+            $record = [ordered]@{}
+            foreach ($key in $base.Keys) { $record[$key] = $base[$key] }
+            $record[$case.Field] = $case.Value
+            [System.IO.File]::WriteAllText($leasePath, ($record | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+            $r = Run-Tool @('status', '--work', $W)
+            Assert-Equal 18 $r.ExitCode "[corrupt-fields] invalid $($case.Field) reports corrupt lease (18)"
+            Assert-Match $r.Output $case.Field "[corrupt-fields] diagnostic names invalid field $($case.Field)"
+        }
+
+        $base.ttl_seconds = 'still-invalid'
+        [System.IO.File]::WriteAllText($leasePath, ($base | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+        foreach ($command in @(
+                @('verify', '--work', $W),
+                @('acquire', '--work', $W, '--root', $ROOT),
+                @('takeover', '--work', $W, '--root', $ROOT),
+                @('heartbeat', '--work', $W, '--owner', 'owner'))) {
+            $r = Run-Tool $command
+            Assert-Equal 18 $r.ExitCode "[corrupt-fields] $($command[0]) maps invalid ttl_seconds to code 18"
+            Assert-Match $r.Output 'ttl_seconds' "[corrupt-fields] $($command[0]) names the invalid field"
+        }
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 11: transition validation ---------------------------------
     $W = New-Work
     try {

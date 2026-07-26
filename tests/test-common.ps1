@@ -195,6 +195,24 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
 }.Invoke()
 
 # =============================================================================
+# 6. Persistent non-contention I/O failures surface immediately with their real diagnostic.
+# =============================================================================
+{
+    $dir = New-TempDir
+    $missingParent = Join-Path $dir 'parent-does-not-exist'
+    $p = Join-Path $missingParent 'lock'
+    $message = ''
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try { Acquire-Lock -LockPath $p -TimeoutMs 30000 -StaleMs 60000 }
+    catch { $message = [string]$_.Exception.Message }
+    $sw.Stop()
+    Assert-True ($message.Length -gt 0) 'Acquire-Lock surfaces the underlying missing-parent I/O exception'
+    Assert-False ($message -match 'held by another writer') 'missing parent is not misreported as lock contention'
+    Assert-True ($sw.ElapsedMilliseconds -lt 1000) 'persistent missing-parent failure returns quickly instead of waiting for the lock timeout'
+    Assert-False (Test-Path -LiteralPath $p) 'failed Acquire-Lock does not materialize a lock file'
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in $script:TempDirs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }

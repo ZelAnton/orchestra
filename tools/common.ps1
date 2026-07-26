@@ -224,13 +224,30 @@ function Test-StaleLockBreakable {
 function Acquire-Lock {
     param([string]$LockPath, [int]$TimeoutMs = 30000, [int]$StaleMs = 300000)
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    $missingLockFailures = 0
     while ($true) {
         try {
             $fs = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
             try { $b = [System.Text.Encoding]::ASCII.GetBytes("$PID"); $fs.Write($b, 0, $b.Length) } finally { $fs.Dispose() }
             return
         } catch {
-            if (Test-Path -LiteralPath $LockPath) {
+            $failure = $_
+            $exception = $failure.Exception
+            $isIoFailure = ($exception -is [System.IO.IOException]) -or ($exception.InnerException -is [System.IO.IOException])
+            $lockExists = [bool](Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue)
+            # Only CreateNew's expected "file already exists" IOException is contention.
+            # A loser can observe the holder release between Open and Test-Path, so allow one
+            # short retry for an absent file; a repeated absent-file IOException is persistent
+            # path/I/O failure and must surface its real diagnostic instead of spinning 30 s.
+            if (-not $isIoFailure) { throw $failure }
+            if (-not $lockExists) {
+                $missingLockFailures++
+                if ($missingLockFailures -ge 2) { throw $failure }
+                Start-Sleep -Milliseconds 10
+                continue
+            }
+            $missingLockFailures = 0
+            if ($lockExists) {
                 $decided = Read-LockSnapshot $LockPath
                 if ($null -ne $decided -and $decided.AgeMs -gt $StaleMs) {
                     # Re-read the lock's identity immediately before deleting it, so a lock a

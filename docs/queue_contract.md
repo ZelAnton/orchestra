@@ -290,6 +290,10 @@ disabled», а зеркальный путь **нельзя** пересобир
   provenance, **без изменения исходного текста**. `converted` требует `--tasks` с уже
   существующими `T-ID` (код 5, если задача не найдена).
 
+Lifecycle `--id` разбирается как **полный** токен: только `^T-0*\d+$` для task-команд и
+`^P-0*\d+$` для `classify-proposal`. Префиксы, суффиксы и вхождения вида `XT-12`/`TP-12`
+являются usage error, а не неявной ссылкой на T-012/P-012.
+
 **Кто чем пользуется.** Популяторы (§0) — `allocate-id`, `propose`/`inbox-add`;
 `planner` — `ready`/`validate-deps` при выборе кандидатов (предложения `P-NNN` в кандидаты
 **не берёт** — §20); `processor` — `capture`/`return`/`escalate`/`archive` и `inbox-drain`
@@ -656,7 +660,9 @@ crash-recovery Фазы 0 из `agents/processor.md`, без `--continue`), а �
 под собственным коротким атомарным локом `.work/state-tx.lock` (отдельным от
 `.work/orchestrator.lock` и `.work/queue-tx.lock`), чтение состояния под этим локом, crash-
 safe запись; повреждённая или противоречивая аренда **останавливает** операцию с точной
-диагностикой, а не молча перезаписывается.
+диагностикой, а не молча перезаписывается. `Read-Lease` валидирует не только наличие полей и
+`heartbeat`, но и finite positive `ttl_seconds`, positive integer/null `pid` и parseable/null
+`pid_started`; любая порча этих компонентов единообразно даёт код 18 до liveness-логики.
 
 Операции (полное описание и коды выхода — в шапке `tools/state-tx.ps1`):
 

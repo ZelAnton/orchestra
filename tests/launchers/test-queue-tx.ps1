@@ -916,4 +916,29 @@ exit $rc
         Assert-Match $r.Output 'id=P-704' '[explicit-proposal-id-fresh] requested proposal id is preserved'
         Assert-Match (Read-Queue $W) '### \[P-704\] Fresh proposal id' '[explicit-proposal-id-fresh] proposal entered the backlog under the requested id'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 21: lifecycle --id parsers accept only the complete token --
+    $W = New-Work
+    try {
+        Propose -Work $W -Title 'Parser task' | Out-Null
+        Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Parser proposal', '--body', 'x') | Out-Null
+
+        foreach ($bad in @('T-001suffix', 'XT-001', 'foo-T-001', 'TP-001')) {
+            $r = Run-Tool @('ready', '--work', $W, '--id', $bad)
+            Assert-Equal 2 $r.ExitCode "[anchored-task-id] '$bad' is rejected as a malformed complete token"
+            Assert-Match $r.Output "invalid --id: $([regex]::Escape($bad))" "[anchored-task-id] diagnostic preserves '$bad'"
+            Assert-True (-not ($r.Output -match 'is a proposal')) "[anchored-task-id] '$bad' does not trigger the proposal-only guard"
+        }
+        $r = Run-Tool @('ready', '--work', $W, '--id', 'P-001')
+        Assert-Equal 2 $r.ExitCode '[anchored-task-id] exact proposal id is rejected by a task lifecycle command'
+        Assert-Match $r.Output 'P-001 is a proposal' '[anchored-task-id] exact proposal id retains the pointed diagnostic'
+
+        foreach ($bad in @('P-001suffix', 'XP-001', 'foo-P-001')) {
+            $r = Run-Tool @('classify-proposal', '--work', $W, '--id', $bad, '--outcome', 'rejected')
+            Assert-Equal 2 $r.ExitCode "[anchored-proposal-id] '$bad' is rejected as a malformed complete token"
+            Assert-Match $r.Output 'expected a proposal id P-NNN' "[anchored-proposal-id] '$bad' reports the expected form"
+        }
+        $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'rejected')
+        Assert-Equal 0 $r.ExitCode '[anchored-proposal-id] exact proposal token remains accepted'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }
