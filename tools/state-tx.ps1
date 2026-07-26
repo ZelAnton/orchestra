@@ -152,7 +152,10 @@ function Get-ProcStart {
         return [pscustomobject]@{ Exists = $false; Start = $null }
     }
 }
-function Lease-HasProp { param($Lease, [string]$Name) return ($Lease.PSObject.Properties.Name -contains $Name) }
+# K-048: the indexer form `.PSObject.Properties[$Name]` is safe on any object, including a
+# zero-property lease record (e.g. a lease.json parsed from '{}'); the `.Name -contains`
+# form throws under StrictMode in exactly that case.
+function Lease-HasProp { param($Lease, [string]$Name) return ($null -ne $Lease.PSObject.Properties[$Name]) }
 function Get-Liveness {
     param($Lease, [datetime]$Now)
     $hbAge = ($Now - (Parse-Utc $Lease.heartbeat)).TotalSeconds

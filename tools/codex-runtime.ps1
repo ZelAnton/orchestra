@@ -858,7 +858,9 @@ function Get-WorkingCopyStatus {
 function Read-UsageField {
     param($UsageObj, [string[]]$Names)
     foreach ($n in $Names) {
-        if ($UsageObj.PSObject.Properties.Name -contains $n) {
+        # K-048: indexer form is safe even when $UsageObj has zero properties (e.g. a
+        # 'usage': {} event); `.Name -contains` throws under StrictMode in that case.
+        if ($UsageObj.PSObject.Properties[$n]) {
             $v = $UsageObj.$n
             if ($null -ne $v -and ([string]$v -match '^\d+$')) { return [int]$v }
         }
@@ -879,8 +881,10 @@ function Get-CodexUsage {
         try { $ev = $t | ConvertFrom-Json } catch { continue }
         if ($null -eq $ev) { continue }
         $u = $null
-        if ($ev.PSObject.Properties.Name -contains 'usage') { $u = $ev.usage }
-        elseif ($ev.PSObject.Properties.Name -contains 'token_usage') { $u = $ev.token_usage }
+        # K-048: indexer form is safe even when $ev has zero properties (e.g. a bare '{}'
+        # JSONL line); `.Name -contains` throws under StrictMode in that case.
+        if ($ev.PSObject.Properties['usage']) { $u = $ev.usage }
+        elseif ($ev.PSObject.Properties['token_usage']) { $u = $ev.token_usage }
         if ($null -eq $u -or $u -isnot [System.Management.Automation.PSCustomObject]) { continue }
         $found = $true
         $inTok += (Read-UsageField $u @('input_tokens', 'prompt_tokens', 'input'))

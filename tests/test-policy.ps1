@@ -137,7 +137,7 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 38 $schema.config.Count 'schema has 38 config keys'
+    Assert-Equal 39 $schema.config.Count 'schema has 39 config keys'
 
     # T-095: the publish-gate tuning keys and the CI-required-checks policy section exist.
     foreach ($k in @('COHORT_TOKEN_BUDGET', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD')) {

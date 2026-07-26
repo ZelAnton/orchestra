@@ -551,7 +551,7 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
         '{"type":"assistant","message":{"role":"assistant"}}' + "`n" +
         ('{"type":"result","subtype":"success","is_error":false,"result":"done ' + $secret + '","usage":{"input_tokens":3000,"output_tokens":800,"cache_read_input_tokens":1500,"cache_creation_input_tokens":200}}')
     )
-    $obs = Invoke-Spv @('observe', '--result-file', $resFile, '--stdout-file', $stdoutFile, '--task-id', 'T-9', '--role', 'coder', '--mode', 'full', '--source', 'claude', '--json')
+    $obs = Invoke-Spv @('observe', '--result-file', $resFile, '--stdout-file', $stdoutFile, '--task-id', 'T-9', '--role', 'coder', '--mode', 'full', '--source', 'claude', '--batch-id', 'B-42', '--json')
     Assert-Exit $obs 0 'observe(usage) rc=0'
     Assert-NotContains $obs.Out $secret 'observe(usage) never emits the raw transcript text'
     $obsObj = $obs.Out | ConvertFrom-Json
@@ -562,12 +562,25 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
         Assert-Equal 5500 $obsObj.usage.total_tokens 'observe(usage): total sums input+output+cache'
     }
     Assert-True ($obsObj.usage_event_args.Count -gt 0) 'observe(usage) emits usage.recorded event args'
+    # T-321: --batch-id, when given to `observe`, must be threaded into BOTH the
+    # codex.attempt event args and the usage.recorded event args - not just carried
+    # separately by the caller - so the durable envelope's own batch_id is never absent.
+    $eventArgsList = @($obsObj.event_args | ForEach-Object { [string]$_ })
+    $usageArgsList = @($obsObj.usage_event_args | ForEach-Object { [string]$_ })
+    $eventBatchIdx = [array]::IndexOf($eventArgsList, '--batch-id')
+    Assert-True ($eventBatchIdx -ge 0) 'observe(--batch-id) threads --batch-id into codex.attempt event_args'
+    if ($eventBatchIdx -ge 0) { Assert-Equal 'B-42' $eventArgsList[$eventBatchIdx + 1] 'observe(--batch-id) event_args carries the given batch id' }
+    $usageBatchIdx = [array]::IndexOf($usageArgsList, '--batch-id')
+    Assert-True ($usageBatchIdx -ge 0) 'observe(--batch-id) threads --batch-id into usage_event_args'
+    if ($usageBatchIdx -ge 0) { Assert-Equal 'B-42' $usageArgsList[$usageBatchIdx + 1] 'observe(--batch-id) usage_event_args carries the given batch id' }
     # the usage.recorded args observe emits must be accepted by the REAL outbox tool.
     $ev = Join-Path $d 'events.jsonl'
-    $usageArgs = @('append', '--events', $ev, '--batch-id', 'B-1') + @($obsObj.usage_event_args | ForEach-Object { [string]$_ })
+    $usageArgs = @('append', '--events', $ev) + $usageArgsList
     $ap = Invoke-Outbox $usageArgs
     Assert-Exit $ap 0 'outbox accepts the usage.recorded event args observe emits'
     Assert-NotContains (Read-File $ev) $secret 'the appended usage.recorded line holds no raw transcript text'
+    Assert-Contains (Read-File $ev) '"batch_id":"B-42"' 'the appended usage.recorded line carries the batch_id from observe --batch-id'
+    Assert-Contains (Read-File $ev) '"usage_availability":"available"' 'observed provider counts are explicitly marked available'
 
     # No --stdout-file -> no usage surfaced (best-effort, absent input is a clean no-op).
     $obs2 = Invoke-Spv @('observe', '--result-file', $resFile, '--task-id', 'T-9', '--role', 'coder', '--json')
@@ -575,6 +588,74 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     $obs2Obj = $obs2.Out | ConvertFrom-Json
     Assert-True ($null -eq $obs2Obj.usage) 'observe(no usage): usage is null without a transcript'
     Assert-Equal 0 $obs2Obj.usage_event_args.Count 'observe(no usage): no usage.recorded args without a transcript'
+}.Invoke()
+
+# =============================================================================
+# 6c. T-321 R-04: internal Agent dispatch has no provider token transcript. The
+#     usage-unavailable command emits a durable marker instead of reliable zero.
+# =============================================================================
+{
+    $d = New-TempDir
+    $marker = Invoke-Spv @(
+        'usage-unavailable', '--task-id', 'T-40', '--batch-id', 'B-40',
+        '--role', 'reviewer', '--mode', 'full', '--attempt-number', '2',
+        '--source', 'claude', '--json')
+    Assert-Exit $marker 0 'usage-unavailable rc=0'
+    $markerObj = $marker.Out | ConvertFrom-Json
+    Assert-Equal 'unavailable' $markerObj.usage.usage_availability 'usage-unavailable surfaces the fail-closed marker'
+    $markerArgs = @($markerObj.usage_event_args | ForEach-Object { [string]$_ })
+    $batchIdx = [array]::IndexOf($markerArgs, '--batch-id')
+    Assert-True ($batchIdx -ge 0) 'usage-unavailable event args include required --batch-id'
+    if ($batchIdx -ge 0) { Assert-Equal 'B-40' $markerArgs[$batchIdx + 1] 'usage-unavailable preserves the batch identity' }
+
+    $ev = Join-Path $d 'events.jsonl'
+    $append = Invoke-Outbox (@('append', '--events', $ev) + $markerArgs)
+    Assert-Exit $append 0 'outbox accepts usage-unavailable event args'
+    Assert-Contains (Read-File $ev) '"usage_availability":"unavailable"' 'durable marker records unavailable usage'
+
+    $missingBatch = Invoke-Spv @(
+        'usage-unavailable', '--task-id', 'T-40', '--role', 'reviewer',
+        '--mode', 'full', '--attempt-number', '2', '--json')
+    Assert-Exit $missingBatch 2 'usage-unavailable requires --batch-id'
+
+    # T-321 R-05: a cohort/integration-scoped internal Agent(...) dispatch (planner, merger,
+    # full_reviewer) has no per-task identity - usage-unavailable must accept the reserved
+    # pseudo task ids, and outbox.ps1 append must accept the resulting event args.
+    foreach ($pseudoId in @('_cohort', '_integration')) {
+        $pseudoMarker = Invoke-Spv @(
+            'usage-unavailable', '--task-id', $pseudoId, '--batch-id', 'B-40',
+            '--role', 'planner', '--mode', 'full', '--attempt-number', '1',
+            '--source', 'claude', '--json')
+        Assert-Exit $pseudoMarker 0 "usage-unavailable accepts --task-id $pseudoId"
+        if ($pseudoMarker.ExitCode -eq 0) {
+            $pseudoMarkerObj = $pseudoMarker.Out | ConvertFrom-Json
+            $pseudoMarkerArgs = @($pseudoMarkerObj.usage_event_args | ForEach-Object { [string]$_ })
+            $evPseudo = Join-Path $d "events-$pseudoId.jsonl"
+            $appendPseudo = Invoke-Outbox (@('append', '--events', $evPseudo) + $pseudoMarkerArgs)
+            Assert-Exit $appendPseudo 0 "outbox accepts usage-unavailable event args for $pseudoId"
+        }
+    }
+    $badPseudo = Invoke-Spv @(
+        'usage-unavailable', '--task-id', '_bogus', '--batch-id', 'B-40',
+        '--role', 'planner', '--mode', 'full', '--attempt-number', '1', '--json')
+    Assert-Exit $badPseudo 2 'usage-unavailable rejects an unrecognized pseudo task-id up front'
+}.Invoke()
+
+# =============================================================================
+# 6d. T-321 R-06: observe must fail loudly (rc=2) rather than silently emit
+#     usage_event_args that outbox is guaranteed to reject once usage is captured but
+#     --batch-id is absent - usage.recorded's batch_id is now a required dedup coordinate.
+# =============================================================================
+{
+    $d = New-TempDir
+    $resFile = Join-Path $d 'result.json'
+    Write-File $resFile '{"reason":"ok","exit_code":0,"timed_out":false,"cancelled":false,"duration_ms":1234,"attempts":1,"output_bytes":42,"output_truncated":false,"output_sha256":"ab","outcome_reason":"exit code 0","occurred_at":"2026-07-17T10:00:00Z"}'
+    $stdoutFile = Join-Path $d 'out.txt'
+    Write-File $stdoutFile (
+        '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":10,"output_tokens":5}}'
+    )
+    $obsNoBatch = Invoke-Spv @('observe', '--result-file', $resFile, '--stdout-file', $stdoutFile, '--task-id', 'T-9', '--role', 'coder', '--mode', 'full', '--source', 'claude', '--json')
+    Assert-Exit $obsNoBatch 2 'observe(usage captured, no --batch-id) fails loudly instead of emitting a doomed usage_event_args'
 }.Invoke()
 
 # =============================================================================

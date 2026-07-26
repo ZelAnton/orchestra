@@ -1173,6 +1173,7 @@ function Stop-GcIfAlive {
 # 16. T-248: per-call token usage capture in `run`.
 #   (a) ACTUAL usage parsed from a `codex exec --json` turn.completed usage event.
 #   (b) ESTIMATE (chars/4, marked estimated) when the run carried no structured usage.
+#   (c) EMPTY OBJECTS do not crash usage parsing under StrictMode (K-048).
 # =============================================================================
 {
     # (a) ACTUAL: the fake emits a JSONL stream whose turn.completed carries a usage object.
@@ -1211,6 +1212,36 @@ function Stop-GcIfAlive {
         Assert-Equal 5 $r2.Json.usage.input_tokens 'usage(estimate): input estimated chars/4 from the prompt'
         Assert-Equal 4 $r2.Json.usage.output_tokens 'usage(estimate): output estimated chars/4 from the -o message'
         Assert-Equal 9 $r2.Json.usage.total_tokens 'usage(estimate): total is the sum of the estimated components'
+    }
+
+    # (c) K-048 regression: zero-property JSON events must not throw under StrictMode
+    # in tools/codex-runtime.ps1 Read-UsageField / Get-CodexUsage.
+    $fake3 = New-FakeCodex
+    $promptFile3 = New-TempFile
+    [System.IO.File]::WriteAllText($promptFile3, 'implement the thing', $script:Utf8)
+    $r3 = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake3, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', $promptFile3, '--emit-json'
+    ) -EnvVars @{ FAKE_CODEX_STDOUT = '{}'; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $r3.ExitCode 'usage(empty-event): a bare zero-property event does not crash the run'
+    Assert-True ($null -ne $r3.Json -and $null -ne $r3.Json.usage) 'usage(empty-event): result falls back to a usage block'
+    if ($r3.Json -and $r3.Json.usage) {
+        Assert-Equal $true $r3.Json.usage.estimated 'usage(empty-event): no structured usage is handled by the estimate fallback'
+        Assert-Equal 5 $r3.Json.usage.input_tokens 'usage(empty-event): fallback estimates prompt chars/4'
+    }
+
+    $fake4 = New-FakeCodex
+    $r4 = Invoke-Runtime -RuntimeArgs @(
+        'run', '--codex-cmd', $fake4, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
+        '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', $promptFile3, '--emit-json'
+    ) -EnvVars @{ FAKE_CODEX_STDOUT = '{"type":"turn.completed","usage":{}}'; FAKE_CODEX_EXIT = '0' }
+    Assert-Equal 0 $r4.ExitCode 'usage(empty-usage): a zero-property nested usage object does not crash the run'
+    Assert-True ($null -ne $r4.Json -and $null -ne $r4.Json.usage) 'usage(empty-usage): result still carries a usage block'
+    if ($r4.Json -and $r4.Json.usage) {
+        Assert-Equal $false $r4.Json.usage.estimated 'usage(empty-usage): an empty provider usage object remains actual usage'
+        Assert-Equal 0 $r4.Json.usage.input_tokens 'usage(empty-usage): missing input fields contribute zero'
+        Assert-Equal 0 $r4.Json.usage.output_tokens 'usage(empty-usage): missing output fields contribute zero'
+        Assert-Equal 0 $r4.Json.usage.total_tokens 'usage(empty-usage): empty usage totals zero'
     }
 }.Invoke()
 
