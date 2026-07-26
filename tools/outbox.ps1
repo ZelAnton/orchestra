@@ -434,7 +434,10 @@ function Test-Envelope {
     }
     if ($script:KnownTypes -notcontains [string]$Obj.type) { return "unknown type '$($Obj.type)'" }
     if (Has-Prop $Obj 'batch_id') { if ([string]$Obj.batch_id -notmatch '^B-') { return "batch_id '$($Obj.batch_id)' does not look like a B-id" } }
-    if (Has-Prop $Obj 'task_id') { if ([string]$Obj.task_id -notmatch '^T-\d') { return "task_id '$($Obj.task_id)' does not look like a T-id" } }
+    # T-321 R-05: a cohort/integration-scoped fact (e.g. an internal Agent(...) dispatch for
+    # planner/merger/full_reviewer, which has no per-task identity) legitimately carries one of
+    # the two reserved pseudo task ids instead of a real `T-<n>`; both forms are allowed here.
+    if (Has-Prop $Obj 'task_id') { if ([string]$Obj.task_id -notmatch '^(T-\d|_cohort|_integration)') { return "task_id '$($Obj.task_id)' does not look like a T-id, '_cohort' or '_integration'" } }
     if (Has-Prop $Obj 'payload_version') {
         $pv = $Obj.payload_version
         if (-not ($pv -is [int] -or $pv -is [long] -or ([string]$pv -match '^\d+$')) -or [int]$pv -lt 1) { return "payload_version must be a positive integer" }

@@ -364,6 +364,14 @@ function Ref-UuidV5 {
     $bid = Invoke-Outbox @('append', '--events', $ev, '--json-line', '{"schema_version":1,"event_id":"11111111-1111-1111-1111-111111111111","occurred_at":"2026-07-10T11:00:00Z","type":"task.status_changed","task_id":"nope","actor":{"kind":"agent","name":"processor"},"payload":{}}')
     Assert-Exit $bid 5 'malformed task_id rejected'
 
+    # T-321 R-05: the two reserved cohort/integration-scoped pseudo task ids ARE accepted
+    # (a usage.recorded unavailable-marker for planner/merger/full_reviewer dispatch carries
+    # one of these instead of a real T-id, since there is no per-task identity for it).
+    $cohortId = Invoke-Outbox @('append', '--events', $ev, '--json-line', '{"schema_version":1,"event_id":"22222222-2222-2222-2222-222222222222","occurred_at":"2026-07-10T11:00:00Z","type":"usage.recorded","batch_id":"B-1","task_id":"_cohort","actor":{"kind":"tool","name":"supervisor"},"payload":{"task_id":"_cohort","role":"planner","mode":"full","attempt_number":1,"source":"claude","usage_availability":"unavailable"}}')
+    Assert-Exit $cohortId 0 '_cohort is an accepted task_id form'
+    $integrationId = Invoke-Outbox @('append', '--events', $ev, '--json-line', '{"schema_version":1,"event_id":"33333333-3333-3333-3333-333333333333","occurred_at":"2026-07-10T11:00:01Z","type":"usage.recorded","batch_id":"B-1","task_id":"_integration","actor":{"kind":"tool","name":"supervisor"},"payload":{"task_id":"_integration","role":"merger","mode":"full","attempt_number":1,"source":"claude","usage_availability":"unavailable"}}')
+    Assert-Exit $integrationId 0 '_integration is an accepted task_id form'
+
     # codex.attempt non-allowlisted payload key (privacy) (rc=5)
     $cx = Invoke-Outbox @('append', '--events', $ev, '--task-id', 'T-1', '--type', 'codex.attempt', '--role', 'coder', '--mode', 'full', '--attempt-number', '1', '--payload', '{"role":"coder","mode":"full","attempt_number":1,"outcome":"success","prompt":"secret"}')
     Assert-Exit $cx 5 'codex.attempt non-allowlisted key rejected'

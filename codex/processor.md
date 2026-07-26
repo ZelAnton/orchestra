@@ -1291,6 +1291,16 @@ pwsh -File <resolved metrics.ps1> budget --work "$WORK" --batch-id "<B-id>" --js
 после durable записи этого usage следующий model call не стартует. Не создавай отдельный
 poller и не читай JSONL вручную.
 
+`sources.unmetered_usage_events` в снимке считает `usage_availability=unavailable`-маркеры
+(внутренний Claude `Agent(...)`, см. «Supervisor вызова исполнителя») **отдельно** от
+`telemetry_reliable`: по умолчанию (`COHORT_TOKEN_BUDGET_STRICT: false`) их наличие само по
+себе **не** переводит снимок в `telemetry_unavailable` — это видимый, но не блокирующий
+undercount, enforcement продолжается по метрируемой части. При явном
+`COHORT_TOKEN_BUDGET_STRICT: true` любой такой маркер, как и раньше, делает снимок батча
+`telemetry_unavailable` (fail-closed) — осознанно более строгий режим, который обычно
+защёлкивает приём когорты уже на первом раунде (canonical Claude-processor диспетчирует все
+non-Codex роли, включая planner, через `Agent(...)`).
+
 Если `exhausted=true`, либо при включённом лимите снимок нельзя надёжно получить
 (`status=telemetry_unavailable`, `events_status=missing`, `skipped_jsonl_lines>0`/ошибка
 чтения, включая `EVENTS_OUTBOX: off`), **не** запускай
@@ -1447,14 +1457,16 @@ reservation: зафиксируй `ended_at`, вычисли `duration_ms`, во
 processor-гейта после несентинельного возврата — `failed` с его машинным классом.
    **Событие (`EVENTS_OUTBOX: on`):** если результат `tools/codex-runtime.ps1 run` нёс блок
 `usage` (per-call токены; см. «`usage.recorded`»), допиши **best-effort** `usage.recorded`
-(`source=codex`, те же `task_id`/`role`/`mode`/`attempt_number`, что и у `codex.attempt`, поля
+(`source=codex`, те же `task_id`/`role`/`mode`/`attempt_number`, что и у `codex.attempt`, **и
+`--batch-id "<B-id>"` текущей когорты** — T-321: `batch_id` обязательная координата
+dedup-ключа `usage.recorded`, без неё `tools/outbox.ps1 append` откажет с `rc=2`, поля
 usage и флаг `estimated` — как есть из блока). Для **Claude**-исполнителя/фолбэка, если его
 вызов обёрнут `tools/supervisor.ps1` и `observe --stdout-file --batch-id "<B-id>"` вернул
    `usage_event_args` (`source=claude`) — так же best-effort допиши `usage.recorded` этими
    аргументами. `--batch-id` у `observe` передавай **всегда** (T-321): без него `usage.recorded`
-   уходит без `batch_id` в envelope, и `tools/metrics.ps1 Get-BatchUsage` восстанавливает его
-   только фолбэком через `task_id → batch_id` — надёжнее не полагаться на фолбэк, а нести
-   `batch_id` сразу. Для внутреннего Claude `Agent(...)`, у которого transcript/provider usage
+   уходит без `batch_id` в envelope — с захваченным usage `observe` сам откажет `rc=2` (та же
+   обязательная координата), а не выдаст аргументы, которые `outbox` затем best-effort потеряет
+   молча. Для внутреннего Claude `Agent(...)`, у которого transcript/provider usage
    недоступен, **обязательно** допиши `usage.recorded` через `usage-unavailable` по правилу
    раздела «Supervisor вызова исполнителя»; отсутствие счётчиков не является нулевым usage.
    Сбор не меняет исход уже запущенного model call, но unavailable-marker fail-closed закрывает
@@ -3126,8 +3138,9 @@ Claude-исполнителя (headless `claude -p --output-format stream-json`)
   --stdout-file <захват stream-json> --batch-id "<B-id>"` — он парсит usage финального
   `result`-события и отдаёт готовый `usage_event_args` (`--type usage.recorded … --batch-id
   <B-id>`). Передавай `--batch-id` в `observe` **всегда** (T-321), а не только когда под рукой —
-  это то же поле, что несёт envelope самого события, и без него `usage.recorded` не попадает в
-  прямую выборку и не может построить обязательный dedup-key. Внутренний Claude `Agent(...)`:
+  `batch_id` входит в обязательный dedup-key `usage.recorded`; при захваченном usage без
+  `--batch-id` `observe` сам откажет `rc=2` вместо того, чтобы выдать аргументы, которые
+  `tools/outbox.ps1 append` затем best-effort отклонит и молча потеряет факт. Внутренний Claude `Agent(...)`:
   `tools/supervisor.ps1 usage-unavailable ... --batch-id "<B-id>" --json`, затем append его
   `usage_event_args`. Все пути несут только неконфиденциальные scalar-поля, никогда сырой
   вывод/промпт.

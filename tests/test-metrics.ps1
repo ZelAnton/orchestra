@@ -256,11 +256,16 @@ if ($recaptureAggregate.ExitCode -eq 0) {
     Assert-Equal 10200000 $recaptureData.lead_time_queue_to_verified_ms.average 'delayed completion is attributed to B-8 rather than the latest B-9 capture'
 }
 
-# R-04: a durable unavailable marker makes the enabled gate fail closed.
+# T-321 R-07: a durable unavailable marker is COUNTED SEPARATELY from corrupted telemetry.
+# Default posture (COHORT_TOKEN_BUDGET_STRICT unset/false): the marker alone does not fail
+# the enabled gate closed - it is a visible, accepted undercount, and enforcement keeps
+# working on the metered part. Strict posture (COHORT_TOKEN_BUDGET_STRICT: true) restores
+# the original R-04 fail-closed behavior.
 $unavailableWork=New-Fixture
 $unavailableLines=@(
     (Event-Line ua-c '2026-07-07T00:00:00Z' 'task.captured' B-10 T-30),
-    (Event-Line ua-u '2026-07-07T00:01:00Z' 'usage.recorded' B-10 T-30 @{source='claude';usage_availability='unavailable'})
+    (Event-Line ua-u '2026-07-07T00:01:00Z' 'usage.recorded' B-10 T-30 @{source='claude';usage_availability='unavailable'}),
+    (Event-Line ua-u2 '2026-07-07T00:02:00Z' 'usage.recorded' B-10 T-30 @{source='claude';total_tokens=250;estimated=$false})
 )
 Write-Utf8 (Join-Path $unavailableWork 'events.jsonl') (($unavailableLines -join "`n")+"`n")
 Write-Utf8 (Join-Path $unavailableWork 'config.md') 'COHORT_TOKEN_BUDGET: 10000'
@@ -268,9 +273,24 @@ $unavailableBudget=Invoke-Metrics @('budget','--work',$unavailableWork,'--batch-
 Assert-Equal 0 $unavailableBudget.ExitCode 'unavailable-marker budget projection exits zero'
 if ($unavailableBudget.ExitCode -eq 0) {
     $unavailableData=$unavailableBudget.Out|ConvertFrom-Json
-    Assert-Equal 'telemetry_unavailable' $unavailableData.status 'usage_availability=unavailable fails the budget gate closed'
-    Assert-Equal $false $unavailableData.sources.telemetry_reliable 'unavailable marker explicitly makes telemetry unreliable'
-    Assert-Equal $null $unavailableData.token_budget.actual_tokens 'unmetered internal Agent dispatch is never treated as zero'
+    Assert-Equal 'ok' $unavailableData.status 'default posture: an unmetered event alone does not fail the gate closed'
+    Assert-True $unavailableData.sources.telemetry_reliable 'default posture: unmetered marker does not make telemetry unreliable'
+    Assert-Equal 1 $unavailableData.sources.unmetered_usage_events 'unmetered event is counted and surfaced separately'
+    Assert-Equal $false $unavailableData.sources.cohort_token_budget_strict 'strict posture defaults to false'
+    Assert-Equal 250 $unavailableData.token_budget.actual_tokens 'enforcement continues on the metered part (accepted, visible undercount)'
+}
+
+$strictWork=New-Fixture
+Write-Utf8 (Join-Path $strictWork 'events.jsonl') (($unavailableLines -join "`n")+"`n")
+Write-Utf8 (Join-Path $strictWork 'config.md') "COHORT_TOKEN_BUDGET: 10000`nCOHORT_TOKEN_BUDGET_STRICT: true"
+$strictBudget=Invoke-Metrics @('budget','--work',$strictWork,'--batch-id','B-10','--json')
+Assert-Equal 0 $strictBudget.ExitCode 'strict-posture budget projection exits zero'
+if ($strictBudget.ExitCode -eq 0) {
+    $strictData=$strictBudget.Out|ConvertFrom-Json
+    Assert-Equal 'telemetry_unavailable' $strictData.status 'COHORT_TOKEN_BUDGET_STRICT: true restores the original fail-closed posture'
+    Assert-Equal $false $strictData.sources.telemetry_reliable 'strict posture: unmetered marker explicitly makes telemetry unreliable'
+    Assert-Equal $true $strictData.sources.cohort_token_budget_strict 'projection exposes the strict-posture configuration'
+    Assert-Equal $null $strictData.token_budget.actual_tokens 'strict posture: unmetered internal Agent dispatch is never treated as zero'
 }
 
 Write-Utf8 (Join-Path $estWork 'config.md') "COHORT_TOKEN_BUDGET: 1000`nEVENTS_OUTBOX: off"

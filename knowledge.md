@@ -1069,15 +1069,27 @@ codex-правилами выше (см. «Резолвинг раннеров `
   `usage.recorded` и считает только явное `estimated=false`. Проекция сортирует события по
   `occurred_at` и применяет действовавший в этот момент `task.captured` mapping, поэтому
   delayed/batchless/stale-batch события одного повторно захваченного task_id не переходят в
-  последнюю когорту. UUIDv5 usage включает `batch_id`. Внутренний Claude `Agent(...)` без
-  provider token counts пишет `usage_availability=unavailable`, что делает telemetry
-  ненадёжной, а не нулевой. Перед каждым новым model call processor
-  читает этот снимок и требует `status=ok` + `telemetry_reliable=true`: `actual >= limit` — это post-charge граница (без reservation), поэтому
-  уже идущий вызов может пересечь лимит, но следующий не запускается. При лимите или
-  unreadable/missing telemetry processor guarded-закрывает admission как
-  `COHORT_TOKEN_BUDGET`, эскалирует незавершённые задачи без retry/quarantine и фиксирует
-  actual/limit/remaining безопасными scalar-полями; estimated остаётся отдельной наблюдаемой
-  величиной.
+  последнюю когорту. UUIDv5 usage включает `batch_id` — обязательную координату дедуп-ключа
+  (T-321): `tools/supervisor.ps1 observe` требует `--batch-id`, как только usage реально
+  захвачен (rc=2 без него, вместо тихой best-effort потери события на дозаписи), а
+  `tools/outbox.ps1` write-валидация envelope принимает `task_id` формы `T-<n>` **и** два
+  зарезервированных псевдо-id `_cohort`/`_integration` (для фактов уровня когорты/интеграции
+  без отдельной задачи). Внутренний Claude `Agent(...)` без provider token counts пишет
+  `usage_availability=unavailable`, который никогда не превращается в нулевой расход, но что он
+  значит для гейта — управляет `COHORT_TOKEN_BUDGET_STRICT` (по умолчанию `false`, T-321 R-07):
+  `false` — unmetered-события считаются отдельно (`sources.unmetered_usage_events`) и не портят
+  `telemetry_reliable`, enforcement продолжается по метрируемой части (видимый, но не
+  блокирующий undercount); `true` — восстанавливает исходный fail-closed режим, где **любой**
+  такой маркер сам по себе делает снимок батча `telemetry_unavailable` — но т.к.
+  canonical Claude-processor диспетчирует все non-Codex роли (включая planner) через
+  `Agent(...)`, strict-режим обычно защёлкивает приём когорты уже на первом раунде, поэтому это
+  осознанный, более строгий opt-in, а не новое поведение по умолчанию. Перед каждым новым model
+  call processor читает этот снимок и требует `status=ok` + `telemetry_reliable=true`: `actual
+  >= limit` — это post-charge граница (без reservation), поэтому уже идущий вызов может
+  пересечь лимит, но следующий не запускается. При лимите или unreadable/missing telemetry
+  processor guarded-закрывает admission как `COHORT_TOKEN_BUDGET`, эскалирует незавершённые
+  задачи без retry/quarantine и фиксирует actual/limit/remaining безопасными scalar-полями;
+  estimated остаётся отдельной наблюдаемой величиной.
 - **Каждый init-коммит нового jj workspace должен быть описан немедленно, не
   реактивно.** `jj workspace add -r <rev>` создаёт пустой рабочекопийный коммит без
   описания; ничто не описывает его автоматически позже (merger описывает только

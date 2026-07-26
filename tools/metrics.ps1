@@ -41,6 +41,33 @@ function Get-CohortTokenBudget {
     return [int64]0
 }
 
+# T-321 R-07: `usage_availability=unavailable` is a deliberate marker for a model call whose
+# provider token count is structurally unobservable (the internal Claude `Agent(...)` dispatch
+# path, see agents/processor.md "Supervisor вызова исполнителя") - not telemetry corruption.
+# Because processor writes this marker before EVERY such dispatch (planner included) whenever
+# EVENTS_OUTBOX is on, treating its mere presence as always fatal to telemetry_reliable means an
+# enabled COHORT_TOKEN_BUDGET becomes permanently unusable after the cohort's very first internal
+# dispatch (not an edge case - the common path). Default posture (false): an unmetered event is
+# counted separately (Get-BatchUsage's UnmeteredEvents / Cmd-Budget's sources.unmetered_usage_events)
+# and reported for visibility, but the gate keeps enforcing on the metered part - an accepted,
+# VISIBLE undercount rather than a silent one. COHORT_TOKEN_BUDGET_STRICT: true restores the
+# original fail-closed posture (any unmetered event makes the whole batch's telemetry unreliable)
+# for an operator who explicitly opts into that stronger, but self-limiting, guarantee.
+function Get-CohortTokenBudgetStrict {
+    param([string]$Work)
+    $config = Join-Path $Work 'config.md'
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return $false }
+    $rx = '^\s*COHORT_TOKEN_BUDGET_STRICT\s*:\s*([^#]*?)\s*(?:#.*)?$'
+    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
+        $match = [regex]::Match([string]$line, $rx)
+        if (-not $match.Success) { continue }
+        $value = $match.Groups[1].Value.Trim().ToLowerInvariant()
+        if ($value -notin @('true', 'false')) { Fail 2 "COHORT_TOKEN_BUDGET_STRICT in config.md must be true or false" }
+        return ($value -eq 'true')
+    }
+    return $false
+}
+
 function Get-EventsOutbox {
     param([string]$Work)
     $config = Join-Path $Work 'config.md'
@@ -108,7 +135,7 @@ function Get-TemporallyAttributedEvents {
 function Get-BatchUsage {
     param($Events, [string]$BatchId)
     $actual = 0.0; $estimated = 0.0; $actualObserved = $false; $estimatedObserved = $false
-    $actualEvents = 0; $estimatedEvents = 0; $actualComplete = $true
+    $actualEvents = 0; $estimatedEvents = 0; $actualComplete = $true; $unmeteredEvents = 0
     foreach ($attributed in (Get-TemporallyAttributedEvents $Events)) {
         $record = $attributed.Event
         if ([string](Get-Prop $record 'type') -ne 'usage.recorded') { continue }
@@ -117,7 +144,13 @@ function Get-BatchUsage {
         $availability = Get-Prop $payload 'usage_availability'
         if ($null -ne $availability) {
             $availabilityValue = [string]$availability
-            if ($availabilityValue -eq 'unavailable') { $actualComplete = $false; continue }
+            # T-321 R-07: a well-formed `unavailable` marker is a DELIBERATE "this call's usage
+            # is structurally unobservable" fact, not corrupted/unexpected telemetry shape -
+            # count it separately (UnmeteredEvents) rather than folding it into ActualComplete.
+            # Cmd-Budget decides, via COHORT_TOKEN_BUDGET_STRICT, whether any unmetered event
+            # alone still fails the whole batch's telemetry closed. Any OTHER unrecognized
+            # `usage_availability` value remains treated as corruption (ActualComplete=$false).
+            if ($availabilityValue -eq 'unavailable') { $unmeteredEvents++; continue }
             if ($availabilityValue -ne 'available') { $actualComplete = $false; continue }
         }
         $estimatedRaw = Get-Prop $payload 'estimated'
@@ -138,6 +171,7 @@ function Get-BatchUsage {
     return [pscustomobject]@{
         ActualTokens=$actual; ActualObserved=$actualObserved; ActualComplete=$actualComplete; ActualEvents=$actualEvents
         EstimatedTokens=$estimated; EstimatedObserved=$estimatedObserved; EstimatedEvents=$estimatedEvents
+        UnmeteredEvents=$unmeteredEvents
     }
 }
 
@@ -606,14 +640,19 @@ function Cmd-Budget {
     $stream = Read-EventStream (Join-Path $work 'events.jsonl')
     $budget = Get-CohortTokenBudget $work
     $outbox = Get-EventsOutbox $work
+    $strictUnmetered = Get-CohortTokenBudgetStrict $work
     $usage = Get-BatchUsage -Events $stream.Events -BatchId $batchId
-    $telemetryReliable = [bool]$stream.Present -and $stream.Invalid -eq 0 -and $outbox -eq 'on' -and $usage.ActualComplete
+    # T-321 R-07: an unmetered ("unavailable") event, by itself, only fails the whole batch's
+    # telemetry closed under the operator's explicit COHORT_TOKEN_BUDGET_STRICT opt-in; by
+    # default it is a visible, accepted undercount (sources.unmetered_usage_events) with
+    # enforcement continuing on the metered part - see Get-CohortTokenBudgetStrict.
+    $telemetryReliable = [bool]$stream.Present -and $stream.Invalid -eq 0 -and $outbox -eq 'on' -and $usage.ActualComplete -and (-not $strictUnmetered -or $usage.UnmeteredEvents -eq 0)
     $view = New-TokenBudgetView -Budget $budget -BatchId $batchId -Usage $usage -TelemetryReliable $telemetryReliable -AssumeZeroActual $telemetryReliable
     $result = [ordered]@{
         status = if ($budget -eq 0) { 'disabled' } elseif ($telemetryReliable) { 'ok' } else { 'telemetry_unavailable' }
         schema = 'orchestra/cohort-token-budget@1'
         token_budget = $view
-        sources = [ordered]@{ events_status=if (-not $stream.Present) { 'missing' } elseif ($stream.Events.Count -eq 0) { 'empty' } else { 'ok' }; events_outbox=$outbox; telemetry_reliable=$telemetryReliable; event_count=$stream.Events.Count; skipped_jsonl_lines=$stream.Invalid }
+        sources = [ordered]@{ events_status=if (-not $stream.Present) { 'missing' } elseif ($stream.Events.Count -eq 0) { 'empty' } else { 'ok' }; events_outbox=$outbox; telemetry_reliable=$telemetryReliable; event_count=$stream.Events.Count; skipped_jsonl_lines=$stream.Invalid; unmetered_usage_events=$usage.UnmeteredEvents; cohort_token_budget_strict=$strictUnmetered }
     }
     if ([bool](Opt 'json' $false)) { Write-Output ($result | ConvertTo-Json -Depth 8 -Compress); return }
     $actual = if ($null -eq $view.actual_tokens) { 'unavailable' } else { Format-Number $view.actual_tokens }

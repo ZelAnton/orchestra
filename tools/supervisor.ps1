@@ -1175,6 +1175,16 @@ function Cmd-Observe {
     # allowlist only; the processor supplies the identity coordinates for the dedup key.
     $usageEventArgs = @()
     if ($null -ne $usage) {
+        # T-321 R-06: `usage.recorded`'s canonical name (tools/outbox.ps1 Get-CanonicalName)
+        # has required `batch_id` since this task made it a dedup-key coordinate. Threading
+        # --batch-id here CONDITIONALLY (only `if ($batchId)`) used to mean a caller that forgot
+        # the flag got a usage_event_args set outbox is guaranteed to reject (rc=2) on the
+        # best-effort `append` - a silent, unrecoverable loss of the captured usage fact (no
+        # payload fallback exists for this coordinate, unlike --wave/--from/--to, T-261). Fail
+        # loudly here instead, at the point the caller can still notice and retry, rather than
+        # losing the fact silently downstream.
+        if (-not $batchId) { Fail 2 '--batch-id is required once usage was captured (usage.recorded requires batch_id)' }
+        if ($batchId -notmatch '^B-\S+$') { Fail 2 '--batch-id must be a B-id' }
         $usagePayload = [ordered]@{
             task_id                     = $taskId
             role                        = $role
@@ -1191,10 +1201,9 @@ function Cmd-Observe {
         }
         $usageEventArgs = @(
             '--type', 'usage.recorded', '--task-id', $taskId, '--role', $role, '--mode', $mode,
-            '--attempt-number', "$attempts", '--source', $source,
+            '--attempt-number', "$attempts", '--source', $source, '--batch-id', $batchId,
             '--payload', ($usagePayload | ConvertTo-Json -Compress)
         )
-        if ($batchId) { $usageEventArgs += @('--batch-id', $batchId) }
     }
 
     if ([bool](Opt 'json' $false)) {
@@ -1221,8 +1230,10 @@ function Cmd-Observe {
 # usage-unavailable : create the non-sensitive usage.recorded marker emitted for an
 # internal Agent dispatch whose provider token counts cannot be observed. The caller
 # appends usage_event_args through tools/outbox.ps1, preserving supervisor's invariant
-# that it never mutates the outbox itself. This marker makes COHORT_TOKEN_BUDGET fail
-# closed instead of treating an unmetered model call as reliable zero usage.
+# that it never mutates the outbox itself. This marker keeps COHORT_TOKEN_BUDGET from ever
+# treating an unmetered model call as reliable zero usage - tools/metrics.ps1 Get-BatchUsage
+# counts it separately from corrupted telemetry, and COHORT_TOKEN_BUDGET_STRICT (default
+# false, T-321 R-07) decides whether its mere presence alone fails the whole batch closed.
 # ==========================================================================
 function Cmd-UsageUnavailable {
     $taskId = Require-Opt 'task-id'
@@ -1234,6 +1245,11 @@ function Cmd-UsageUnavailable {
 
     if ($batchId -notmatch '^B-\S+$') { Fail 2 '--batch-id must be a B-id' }
     if ($attemptNumber -notmatch '^\d+$') { Fail 2 '--attempt-number must be a non-negative integer' }
+    # T-321 R-05: validate against the SAME shape tools/outbox.ps1 accepts for the envelope
+    # `task_id` field (a real T-id, or one of the two reserved cohort/integration-scoped
+    # pseudo-ids) so a caller gets an explicit, immediate `Fail 2` instead of usage_event_args
+    # that outbox is guaranteed to reject on the best-effort dozapis.
+    if ($taskId -notmatch '^(T-\d|_cohort|_integration)') { Fail 2 "--task-id must be a T-id, '_cohort' or '_integration'" }
 
     $usagePayload = [ordered]@{
         task_id           = $taskId

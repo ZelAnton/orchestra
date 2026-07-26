@@ -617,6 +617,45 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
         'usage-unavailable', '--task-id', 'T-40', '--role', 'reviewer',
         '--mode', 'full', '--attempt-number', '2', '--json')
     Assert-Exit $missingBatch 2 'usage-unavailable requires --batch-id'
+
+    # T-321 R-05: a cohort/integration-scoped internal Agent(...) dispatch (planner, merger,
+    # full_reviewer) has no per-task identity - usage-unavailable must accept the reserved
+    # pseudo task ids, and outbox.ps1 append must accept the resulting event args.
+    foreach ($pseudoId in @('_cohort', '_integration')) {
+        $pseudoMarker = Invoke-Spv @(
+            'usage-unavailable', '--task-id', $pseudoId, '--batch-id', 'B-40',
+            '--role', 'planner', '--mode', 'full', '--attempt-number', '1',
+            '--source', 'claude', '--json')
+        Assert-Exit $pseudoMarker 0 "usage-unavailable accepts --task-id $pseudoId"
+        if ($pseudoMarker.ExitCode -eq 0) {
+            $pseudoMarkerObj = $pseudoMarker.Out | ConvertFrom-Json
+            $pseudoMarkerArgs = @($pseudoMarkerObj.usage_event_args | ForEach-Object { [string]$_ })
+            $evPseudo = Join-Path $d "events-$pseudoId.jsonl"
+            $appendPseudo = Invoke-Outbox (@('append', '--events', $evPseudo) + $pseudoMarkerArgs)
+            Assert-Exit $appendPseudo 0 "outbox accepts usage-unavailable event args for $pseudoId"
+        }
+    }
+    $badPseudo = Invoke-Spv @(
+        'usage-unavailable', '--task-id', '_bogus', '--batch-id', 'B-40',
+        '--role', 'planner', '--mode', 'full', '--attempt-number', '1', '--json')
+    Assert-Exit $badPseudo 2 'usage-unavailable rejects an unrecognized pseudo task-id up front'
+}.Invoke()
+
+# =============================================================================
+# 6d. T-321 R-06: observe must fail loudly (rc=2) rather than silently emit
+#     usage_event_args that outbox is guaranteed to reject once usage is captured but
+#     --batch-id is absent - usage.recorded's batch_id is now a required dedup coordinate.
+# =============================================================================
+{
+    $d = New-TempDir
+    $resFile = Join-Path $d 'result.json'
+    Write-File $resFile '{"reason":"ok","exit_code":0,"timed_out":false,"cancelled":false,"duration_ms":1234,"attempts":1,"output_bytes":42,"output_truncated":false,"output_sha256":"ab","outcome_reason":"exit code 0","occurred_at":"2026-07-17T10:00:00Z"}'
+    $stdoutFile = Join-Path $d 'out.txt'
+    Write-File $stdoutFile (
+        '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":10,"output_tokens":5}}'
+    )
+    $obsNoBatch = Invoke-Spv @('observe', '--result-file', $resFile, '--stdout-file', $stdoutFile, '--task-id', 'T-9', '--role', 'coder', '--mode', 'full', '--source', 'claude', '--json')
+    Assert-Exit $obsNoBatch 2 'observe(usage captured, no --batch-id) fails loudly instead of emitting a doomed usage_event_args'
 }.Invoke()
 
 # =============================================================================

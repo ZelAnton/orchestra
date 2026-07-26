@@ -478,10 +478,17 @@ Delivery target: next_major
 граница, а не reservation: уже запущенный вызов может довести счётчик выше лимита, но новый
 model call после следующего read-only snapshot не стартует. Гейт принимает снимок только при
 `status=ok` и `sources.telemetry_reliable=true`: отсутствующий/повреждённый JSONL, `EVENTS_OUTBOX:
-off`, `usage_availability=unavailable` или actual `usage.recorded` без явного булева
-`estimated=false` делают telemetry недоступной.
-Тогда processor fail-closed так же, как при исчерпании: он защёлкивает приём этой причиной и
-эскалирует незавершённые задачи, а не угадывает расход или складывает estimate.
+off` или actual `usage.recorded` без явного булева `estimated=false` всегда делают telemetry
+недоступной. `usage_availability=unavailable` (внутренний Claude `Agent(...)`-dispatch без
+доступного provider token count) делает её недоступной, только пока `COHORT_TOKEN_BUDGET_STRICT:
+true` — по умолчанию (`false`) такой маркер считается отдельно
+(`sources.unmetered_usage_events`) и остаётся видимым, но не блокирующим undercount, а
+enforcement продолжается по метрируемой части (T-321 R-07: строгий режим в противном случае
+защёлкивает приём когорты уже на первом раунде, т.к. canonical Claude-processor диспетчирует
+все non-Codex роли, включая planner, через `Agent(...)`).
+Когда telemetry недоступна, processor fail-closed так же, как при исчерпании: он защёлкивает
+приём этой причиной и эскалирует незавершённые задачи, а не угадывает расход или складывает
+estimate.
 
 ### 13.3. Состояние интеграции/публикации/очистки (`integration`)
 
@@ -849,7 +856,10 @@ PowerShell 5.1), companion `queue-tx.ps1`/`state-tx.ps1`. Гейт эмисси�
 внутри). Обязательные поля конверта: `schema_version` (целое, сейчас `1`), `event_id` (см. 19.2),
 `occurred_at` (ISO-8601 UTC, оканчивается на `Z`), `type` (из набора 19.3), `actor`
 (`{ "kind": "agent"|"human"|"tool", "name": "<роль>" }`), `payload` (объект). Опциональные:
-`batch_id` (`^B-`), `task_id` (`^T-\d`), `payload_version` (целое ≥1, по умолчанию `1`).
+`batch_id` (`^B-`), `task_id` (`^T-\d` или один из двух зарезервированных псевдо-id
+`_cohort`/`_integration` — для факта, у которого нет отдельной задачи, например `usage.recorded`
+для внутреннего `Agent(...)`-dispatch planner/merger/full_reviewer, см. §19.3), `payload_version`
+(целое ≥1, по умолчанию `1`).
 `schema_version` растёт только при несовместимом изменении конверта; `payload` версионируется
 отдельно через `payload_version`. **Старые строки никогда не переписываются и не мигрируются
 задним числом**; новые поля добавляются как опциональные.
@@ -934,8 +944,9 @@ Codex-вызовы, а `usage.recorded` — и Claude, и Codex). Строгий
 **никогда** не смешивает с actual-значениями (`plans/OBSERVABILITY_PLATFORM_PLAN.md` §8).
 Реально извлечённые provider-счётчики несут `usage_availability=available`; внутренний
 Claude `Agent(...)`, где provider token counts недоступны, эмитит marker
-`usage_availability=unavailable` без вымышленных token-полей. Marker делает telemetry
-ненадёжной для включённого budget-gate, а не превращается в нулевой расход. `source` и
+`usage_availability=unavailable` без вымышленных token-полей — он никогда не превращается в
+нулевой расход. Что именно это значит для включённого budget-gate — управляется
+`COHORT_TOKEN_BUDGET_STRICT` (см. §13.2). `source` и
 `batch_id` входят в дедуп-ключ (§19.2), поэтому
 codex-попытка и её Claude-fallback для одного `(task,role,mode,attempt)` — два самостоятельных
 факта, а повторный захват того же task_id в новой когорте не коллидирует со старым usage.
