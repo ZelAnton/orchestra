@@ -3104,8 +3104,11 @@ Claude-исполнителя (headless `claude -p --output-format stream-json`)
 и **не** меняется): usage добавляется **аддитивно**, а `usage.recorded` покрывает и Claude-, и
  Codex-вызовы, тогда как `codex.attempt` — только Codex. Эмитить **best-effort**: когда
  provider usage захвачен — с `usage_availability: "available"`; для внутреннего Claude
- `Agent(...)`, где счётчики недоступны, — обязательный fail-closed marker
- `usage_availability: "unavailable"` без вымышленных token-полей. В envelope
+ `Agent(...)`, где счётчики недоступны, — обязательный marker
+ `usage_availability: "unavailable"` без вымышленных token-полей. По умолчанию
+ (`COHORT_TOKEN_BUDGET_STRICT: false`) это неблокирующий счётчик в
+ `sources.unmetered_usage_events`; fail-closed marker он становится только при явном
+ `COHORT_TOKEN_BUDGET_STRICT: true`. В envelope
 обязательны `schema_version: 1`, `type: "usage.recorded"`, текущий `batch_id`, `task_id`,
 `actor`. Payload — строгий scalar-allowlist:
 
