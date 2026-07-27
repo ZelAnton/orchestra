@@ -42,6 +42,17 @@
 
 Set-StrictMode -Version Latest
 
+# Shared task-archive telemetry vocabulary. Writer validation and both metrics projections
+# consume these exact sets so executor classification/completeness cannot drift across tools.
+$script:TaskTelemetryModelOperations = @(
+    'planning', 'coding', 'review', 'review_fix', 'merge', 'integration_review',
+    'integration_fix', 'ci_fix', 'knowledge_curate'
+)
+$script:TaskTelemetryNonModelOperations = @('verification', 'publish', 'ci_wait')
+$script:TaskTelemetryCoreOperations = @(
+    'planning', 'coding', 'review', 'merge', 'integration_review', 'verification', 'publish'
+)
+
 # --------------------------------------------------------------------------
 # Property helpers - the single canonical copy (was independently duplicated in
 # tools/outbox.ps1 and tools/metrics.ps1). K-048: under Set-StrictMode -Version Latest,

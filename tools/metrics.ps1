@@ -10,6 +10,7 @@
     pwsh -File tools/metrics.ps1 aggregate --work /abs/.work --since 2026-07-01
     pwsh -File tools/metrics.ps1 budget --work /abs/.work --batch-id B-20260725T120000Z --json
     pwsh -File tools/metrics.ps1 digest --work /abs/.work --since 2026-07-24T00:00:00Z --until 2026-07-25T00:00:00Z
+    pwsh -File tools/metrics.ps1 task --work /abs/.work --task-id T-123 --batch-id B-20260725T120000Z
 .NOTES
     Exit codes: 0 success (including no data), 2 usage, 3 input read failure.
 #>
@@ -366,11 +367,37 @@ function Format-Number { param($Value) if ($null -eq $Value) { return 'недо�
 function Format-Duration {
     param($Milliseconds)
     if ($null -eq $Milliseconds) { return 'недоступно' }
-    $span = [TimeSpan]::FromMilliseconds([double]$Milliseconds)
+    try { $span = [TimeSpan]::FromMilliseconds([double]$Milliseconds) }
+    catch { return 'за пределами TimeSpan' }
     if ($span.TotalDays -ge 1) { return $span.TotalDays.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + ' д' }
     if ($span.TotalHours -ge 1) { return $span.TotalHours.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + ' ч' }
     if ($span.TotalMinutes -ge 1) { return $span.TotalMinutes.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + ' мин' }
     return $span.TotalSeconds.ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + ' с'
+}
+function Format-DurationExact {
+    param($Milliseconds)
+    if ($null -eq $Milliseconds) { return 'недоступно' }
+    return "$(Format-Duration $Milliseconds) ($(Format-Number $Milliseconds) ms)"
+}
+function To-NonNegativeInt64 {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    $parsed = [int64]0
+    if ([int64]::TryParse([string]$Value, [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -and $parsed -ge 0) {
+        return $parsed
+    }
+    return $null
+}
+function To-TaskUtcTime {
+    param($Value)
+    if ($Value -is [DateTimeOffset]) { return ([DateTimeOffset]$Value).ToUniversalTime() }
+    if ($Value -is [datetime]) {
+        $date = [datetime]$Value
+        if ($date.Kind -eq [DateTimeKind]::Unspecified) { $date = [datetime]::SpecifyKind($date, [DateTimeKind]::Utc) }
+        return ([DateTimeOffset]$date).ToUniversalTime()
+    }
+    return (To-Time $Value)
 }
 function Format-Percent { param($Numerator, $Denominator) if ($Denominator -le 0) { return 'недоступно' }; return ([Math]::Round(100.0 * $Numerator / $Denominator, 2)).ToString('0.##', [Globalization.CultureInfo]::InvariantCulture) + '%' }
 
@@ -516,6 +543,222 @@ function Cmd-Digest {
     if ($eventsStatus -eq 'missing') { Write-Output 'Диагностика: events.jsonl отсутствует.' }
     elseif ($eventsStatus -eq 'empty') { Write-Output 'Диагностика: events.jsonl пуст.' }
     if ($stream.Invalid -gt 0) { Write-Output "Пропущено некорректных строк JSONL: $($stream.Invalid)" }
+}
+
+# Build the immutable per-task telemetry block appended to Tasks_Done.md. Timing comes from
+# operation.completed; model usage remains the existing usage.recorded fact and is joined by
+# the replay-stable call coordinates. Shared cohort/integration calls are represented once per
+# affected task and divided by shared_task_count, so summing task totals approximates the call
+# cost to archive precision instead of multiplying it by the cohort size.
+function Get-TaskExecutionMetrics {
+    param([string]$Work, [string]$TaskId, [string]$BatchId)
+
+    $eventsOutbox = Get-EventsOutbox $Work
+    $stream = Read-EventStream (Join-Path $Work 'events.jsonl')
+    $attributed = @(Get-TemporallyAttributedEvents $stream.Events)
+    $captured = $null; $done = $null
+    $operationEvents = New-Object Collections.Generic.List[object]
+    $usageEvents = New-Object Collections.Generic.List[object]
+
+    foreach ($item in $attributed) {
+        $record = $item.Event; $type = [string](Get-Prop $record 'type')
+        # operation.completed has a strict, canonical batch coordinate in its UUIDv5 key.
+        # Trust that explicit value so a planning fact emitted before a recaptured task's new
+        # task.captured event cannot inherit the task's previous cohort mapping.
+        $effectiveBatchId = if ($type -eq 'operation.completed') { [string](Get-Prop $record 'batch_id') } else { [string]$item.BatchId }
+        if ($effectiveBatchId -ne $BatchId) { continue }
+        $eventTask = [string](Get-Prop $record 'task_id')
+        if ($type -eq 'task.captured' -and $eventTask -eq $TaskId) {
+            if ($null -eq $captured -or $item.OccurredAt -lt $captured) { $captured = $item.OccurredAt }
+        } elseif ($type -eq 'task.status_changed' -and $eventTask -eq $TaskId) {
+            $to = [string](Get-Prop (Get-Prop $record 'payload') 'to')
+            if ($to.ToLowerInvariant() -match '^(выполнена|done)$') {
+                if ($null -eq $done -or $item.OccurredAt -gt $done) { $done = $item.OccurredAt }
+            }
+        } elseif ($type -eq 'operation.completed' -and $eventTask -eq $TaskId) {
+            [void]$operationEvents.Add($item)
+        } elseif ($type -eq 'usage.recorded') {
+            [void]$usageEvents.Add($item)
+        }
+    }
+
+    $operations = New-Object Collections.Generic.List[object]
+    $reasons = New-Object Collections.Generic.List[string]
+    if ($eventsOutbox -eq 'off') { [void]$reasons.Add('EVENTS_OUTBOX=off') }
+    if (-not $stream.Present) { [void]$reasons.Add('events.jsonl отсутствует') }
+    if ($stream.Invalid -gt 0) { [void]$reasons.Add("пропущено некорректных строк JSONL: $($stream.Invalid)") }
+    if ($operationEvents.Count -eq 0) { [void]$reasons.Add('operation.completed отсутствуют') }
+
+    $actualTotal = 0.0; $estimatedTotal = 0.0
+    $actualObserved = $false; $estimatedObserved = $false
+    $allocatedDurationTotal = 0.0; $unmeteredOperations = 0; $modelOperations = 0
+    $seenModelCallKeys = New-Object 'Collections.Generic.HashSet[string]'
+    $observedOperationNames = New-Object 'Collections.Generic.HashSet[string]'
+    $sequence = 0
+    foreach ($item in @($operationEvents | Sort-Object `
+            @{ Expression = { To-Time (Get-Prop (Get-Prop $_.Event 'payload') 'started_at') } }, `
+            @{ Expression = { [string](Get-Prop (Get-Prop $_.Event 'payload') 'operation') } })) {
+        $record = $item.Event; $payload = Get-Prop $record 'payload'; $sequence++
+        $operation = [string](Get-Prop $payload 'operation')
+        $role = [string](Get-Prop $payload 'role'); $mode = [string](Get-Prop $payload 'mode')
+        $attempt = To-NonNegativeInt64 (Get-Prop $payload 'attempt_number')
+        $duration = To-NonNegativeInt64 (Get-Prop $payload 'duration_ms')
+        $sharedCount = To-NonNegativeInt64 (Get-Prop $payload 'shared_task_count')
+        $scope = [string](Get-Prop $payload 'scope'); $executorKind = [string](Get-Prop $payload 'executor_kind')
+        $outcome = [string](Get-Prop $payload 'outcome')
+        $startedValue = Get-Prop $payload 'started_at'; $endedValue = Get-Prop $payload 'ended_at'
+        $startedTyped = ($startedValue -is [datetime] -or $startedValue -is [DateTimeOffset])
+        $endedTyped = ($endedValue -is [datetime] -or $endedValue -is [DateTimeOffset])
+        $startedAt = To-TaskUtcTime $startedValue; $endedAt = To-TaskUtcTime $endedValue
+        $startedRaw = if ($startedTyped -and $null -ne $startedAt) { $startedAt.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture) } else { [string]$startedValue }
+        $endedRaw = if ($endedTyped -and $null -ne $endedAt) { $endedAt.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture) } else { [string]$endedValue }
+        $invalidOperation = (
+            $operation -notmatch '^[a-z][a-z0-9._-]*$' -or
+            $role -notmatch '^[a-z][a-z0-9._-]*$' -or
+            $mode -notmatch '^[a-z][a-z0-9._-]*$' -or
+            $null -eq $attempt -or $attempt -lt 1 -or
+            $null -eq $duration -or
+            $null -eq $sharedCount -or $sharedCount -lt 1 -or
+            $scope -notin @('task','cohort','integration') -or
+            $executorKind -notin @('model','tool','external') -or
+            $outcome -notin @('success','fallback','failed','cancelled','timeout','skipped') -or
+            ($scope -eq 'task' -and $sharedCount -ne 1) -or
+            ($operation -in $script:TaskTelemetryModelOperations -and $executorKind -ne 'model') -or
+            ($operation -in $script:TaskTelemetryNonModelOperations -and $executorKind -eq 'model') -or
+            (-not $startedTyped -and $startedRaw -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$') -or
+            (-not $endedTyped -and $endedRaw -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$') -or
+            $null -eq $startedAt -or $null -eq $endedAt -or $endedAt -lt $startedAt
+        )
+        if ($invalidOperation) {
+            [void]$reasons.Add("повреждённая operation.completed для строки $sequence")
+            continue
+        }
+        $allocatedDuration = [Math]::Round($duration / $sharedCount, 2)
+        $allocatedDurationTotal += $allocatedDuration
+        [void]$observedOperationNames.Add($operation)
+        $usageTaskId = if ($scope -eq 'cohort') { '_cohort' } elseif ($scope -eq 'integration') { '_integration' } else { $TaskId }
+        $modelCallKey = "$scope|$role|$mode|$([int64]$attempt)"
+        $expectsUsage = ($executorKind -eq 'model' -and $outcome -ne 'skipped')
+        $duplicateModelCall = ($expectsUsage -and -not $seenModelCallKeys.Add($modelCallKey))
+        $actual = 0.0; $estimated = 0.0; $actualHere = $false; $estimatedHere = $false; $unavailable = 0; $matched = 0
+        $sourceSet = New-Object 'Collections.Generic.HashSet[string]'
+
+        if ($executorKind -eq 'model') {
+            $modelOperations++
+            if ($expectsUsage -and -not $duplicateModelCall) {
+                foreach ($usageItem in $usageEvents) {
+                    $usageEvent = $usageItem.Event; $usagePayload = Get-Prop $usageEvent 'payload'
+                    if ([string](Get-Prop $usageEvent 'task_id') -ne $usageTaskId -or
+                        [string](Get-Prop $usagePayload 'role') -ne $role -or
+                        [string](Get-Prop $usagePayload 'mode') -ne $mode -or
+                        (To-NonNegativeInt64 (Get-Prop $usagePayload 'attempt_number')) -ne $attempt) { continue }
+                    $matched++
+                    $source = [string](Get-Prop $usagePayload 'source'); if ($source) { [void]$sourceSet.Add($source) }
+                    if ([string](Get-Prop $usagePayload 'usage_availability') -eq 'unavailable') { $unavailable++; continue }
+                    $usage = Get-EventUsage $usageEvent
+                    if ($null -eq $usage.Total) { continue }
+                    if ($usage.Estimated) { $estimated += $usage.Total; $estimatedHere = $true }
+                    else { $actual += $usage.Total; $actualHere = $true }
+                }
+            }
+        }
+
+        $usageStatus = 'not_applicable'
+        if ($expectsUsage) {
+            if ($duplicateModelCall) { $usageStatus = 'ambiguous' }
+            elseif ($matched -eq 0) { $usageStatus = 'missing' }
+            elseif ($unavailable -gt 0 -and ($actualHere -or $estimatedHere)) { $usageStatus = 'partial' }
+            elseif ($unavailable -gt 0) { $usageStatus = 'unavailable' }
+            elseif ($actualHere -or $estimatedHere) { $usageStatus = 'available' }
+            else { $usageStatus = 'missing' }
+            if ($usageStatus -ne 'available') {
+                $unmeteredOperations++
+                [void]$reasons.Add("usage ${usageStatus}: $operation/$role/$mode/$([int64]$attempt)")
+            }
+        }
+
+        $allocatedActual = if ($actualHere) { [Math]::Round($actual / $sharedCount, 2) } else { $null }
+        $allocatedEstimated = if ($estimatedHere) { [Math]::Round($estimated / $sharedCount, 2) } else { $null }
+        if ($null -ne $allocatedActual) { $actualTotal += $allocatedActual; $actualObserved = $true }
+        if ($null -ne $allocatedEstimated) { $estimatedTotal += $allocatedEstimated; $estimatedObserved = $true }
+        [void]$operations.Add([ordered]@{
+            sequence=$sequence; operation=$operation; role=$role; mode=$mode; iteration=[int64]$attempt
+            scope=$scope; shared_task_count=[int64]$sharedCount; executor_kind=$executorKind
+            started_at=$startedRaw; ended_at=$endedRaw
+            duration_ms=[int64]$duration; allocated_duration_ms=$allocatedDuration
+            outcome=$outcome
+            usage=[ordered]@{
+                status=$usageStatus; actual_tokens=$allocatedActual; estimated_tokens=$allocatedEstimated
+                unavailable_events=$unavailable; matched_events=$matched; sources=@($sourceSet | Sort-Object)
+            }
+        })
+    }
+
+    # A published task always crosses these pipeline stages (possibly with outcome=skipped for
+    # an exempt tool gate). Missing core facts therefore mean instrumentation is incomplete,
+    # even when every model operation that happened to be recorded has matching usage.
+    foreach ($requiredOperation in $script:TaskTelemetryCoreOperations) {
+        if (-not $observedOperationNames.Contains($requiredOperation)) {
+            [void]$reasons.Add("обязательная операция отсутствует: $requiredOperation")
+        }
+    }
+
+    $leadTime = if ($null -ne $captured -and $null -ne $done -and $done -ge $captured) { [Math]::Round(($done - $captured).TotalMilliseconds, 2) } else { $null }
+    if ($null -eq $leadTime) { [void]$reasons.Add('lead time capture→done недоступен') }
+    $uniqueReasons = @($reasons | Select-Object -Unique)
+    $status = if ($operations.Count -eq 0) { 'no_data' } elseif ($uniqueReasons.Count -gt 0) { 'partial' } else { 'ok' }
+    # PowerShell 7 can throw "Argument types do not match" when @() directly wraps a
+    # Generic.List[object] inside a hashtable literal; enumerate it through the pipeline.
+    $operationArray = @($operations | ForEach-Object { $_ })
+    return [ordered]@{
+        schema='orchestra/task-execution-metrics@1'; status=$status; task_id=$TaskId; batch_id=$BatchId
+        totals=[ordered]@{
+            lead_time_ms=$leadTime; operation_time_ms=if ($operations.Count -gt 0) { [Math]::Round($allocatedDurationTotal, 2) } else { $null }
+            actual_tokens=if ($actualObserved) { [Math]::Round($actualTotal, 2) } else { $null }
+            estimated_tokens=if ($estimatedObserved) { [Math]::Round($estimatedTotal, 2) } else { $null }
+            operation_count=$operations.Count; model_operation_count=$modelOperations; unmetered_operation_count=$unmeteredOperations
+        }
+        operations=$operationArray
+        completeness=[ordered]@{ complete=($status -eq 'ok'); reasons=$uniqueReasons }
+        sources=[ordered]@{
+            events_outbox=$eventsOutbox
+            events_status=if (-not $stream.Present) { 'missing' } elseif ($stream.Events.Count -eq 0) { 'empty' } else { 'ok' }
+            event_count=$stream.Events.Count
+            skipped_jsonl_lines=$stream.Invalid
+        }
+    }
+}
+
+function Format-TaskExecutionMetrics {
+    param($Metrics)
+    $totals = $Metrics.totals
+    Write-Output '#### Метрики выполнения'
+    Write-Output "<!-- orchestra/task-execution-metrics@1 task_id=$($Metrics.task_id) batch_id=$($Metrics.batch_id) status=$($Metrics.status) -->"
+    Write-Output ("- Полное время задачи (capture → done): " + (Format-DurationExact $totals.lead_time_ms) + ".")
+    Write-Output ("- Сумма операций с распределением общих затрат: " + (Format-DurationExact $totals.operation_time_ms) + "; операций: $($totals.operation_count).")
+    Write-Output ("- Токены: actual=" + (Format-Number $totals.actual_tokens) + "; estimated=" + (Format-Number $totals.estimated_tokens) + "; операций без полного token usage: $($totals.unmetered_operation_count).")
+    $reasonText = if ($Metrics.completeness.reasons.Count -gt 0) { $Metrics.completeness.reasons -join '; ' } else { 'все ожидаемые данные присутствуют' }
+    Write-Output "- Полнота телеметрии: $($Metrics.status) — $reasonText."
+    Write-Output ''
+    Write-Output '| # | Операция | Итерация | Scope / доля | Роль / режим | Время | В зачёт задачи | Actual tokens | Estimated tokens | Usage | Результат |'
+    Write-Output '|---:|---|---:|---|---|---:|---:|---:|---:|---|---|'
+    foreach ($op in $Metrics.operations) {
+        $share = if ([int64]$op.shared_task_count -gt 1) { "$($op.scope) · 1/$($op.shared_task_count)" } else { [string]$op.scope }
+        $actual = if ($null -eq $op.usage.actual_tokens) { '—' } else { Format-Number $op.usage.actual_tokens }
+        $estimated = if ($null -eq $op.usage.estimated_tokens) { '—' } else { Format-Number $op.usage.estimated_tokens }
+        Write-Output "| $($op.sequence) | $($op.operation) | $($op.iteration) | $share | $($op.role) / $($op.mode) | $(Format-DurationExact $op.duration_ms) | $(Format-DurationExact $op.allocated_duration_ms) | $actual | $estimated | $($op.usage.status) | $($op.outcome) |"
+    }
+}
+
+function Cmd-Task {
+    $work = Require-Opt 'work'; $taskId = Require-Opt 'task-id'; $batchId = Require-Opt 'batch-id'
+    foreach ($key in $opts.Keys) { if (@('work','task-id','batch-id','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
+    if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
+    if ($taskId -notmatch '^T-\d+$') { Fail 2 '--task-id must be a T-id' }
+    if ($batchId -notmatch '^B-[A-Za-z0-9._-]+$') { Fail 2 '--batch-id must be a safe B-id token' }
+    $metrics = Get-TaskExecutionMetrics -Work $work -TaskId $taskId -BatchId $batchId
+    if ([bool](Opt 'json' $false)) { Write-Output ($metrics | ConvertTo-Json -Depth 12 -Compress) }
+    else { Format-TaskExecutionMetrics $metrics }
 }
 
 function Cmd-Aggregate {
@@ -676,7 +919,8 @@ try {
         'aggregate' { Cmd-Aggregate }
         'budget' { Cmd-Budget }
         'digest' { Cmd-Digest }
-        default { Fail 2 "unknown command '$Command'. Valid: aggregate, budget, digest" }
+        'task' { Cmd-Task }
+        default { Fail 2 "unknown command '$Command'. Valid: aggregate, budget, digest, task" }
     }
 } catch {
     exit (Resolve-CatchExit $_ 'METRICSERR' 'metrics' 'METRICS_DEBUG')

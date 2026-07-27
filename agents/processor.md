@@ -892,7 +892,11 @@ bookmark сверх BASE), **не** на существовании ветки: 
      архивируй — оставь дескриптор, продолжение пойдёт через 0.4. (Учёт Фазы 6 делает
      только для `опубликована` — статуса, проставляемого лишь после того, как публикация
      закреплена: ff-вливание в main **и** push, либо ff при `PUSH:false`/без remote.)
-   - `Статус: опубликована` → доведи учёт (Фаза 6.1).
+    - `Статус: опубликована` → доведи учёт (Фаза 6.1).
+    - `Статус: выполнена`, но каталог/дескриптор задачи ещё существует → краш внутри
+      Фазы 6.1 после terminal transition: не повторяй CI-гейт/переход статуса; войди в
+      recovery-ветку 6.1, проверь/восстанови цельную секцию задачи в `Tasks_Done.md`, затем
+      доведи форензику и очистку.
    - Дескриптор без плана/ветки и без метки очереди (сирота из самого раннего краха,
      до Фазы 1.5) → удали, задача снова захватываема.
 
@@ -1246,6 +1250,71 @@ Supervisor не мутирует очередь, аренду или outbox; о�
 --process-diagnostics`; stdout/stderr сохраняй только в транзиентные task-local файлы и читай
 их после возврата при ошибке. Устойчивость всего пути покрыта `tools/harness.ps1`
 (git+jj, fault injection после каждого критического перехода).
+
+### Пер-операционная телеметрия задач
+
+При `EVENTS_OUTBOX: on` измеряй **каждую итерацию** существенной операции от момента
+непосредственно перед запуском до окончательного исхода и best-effort дописывай
+`operation.completed` в `.work/events.jsonl`. Обязательный core для опубликованной задачи:
+`planning`, `coding`, `review`, `merge`, `integration_review`, `verification`, `publish`.
+Дополнительно фиксируй **каждую реально случившуюся итерацию** `review_fix`,
+`integration_fix`, `ci_wait`, `ci_fix`, `knowledge_curate` и других существенных стадий;
+не случившуюся условную стадию не выдумывай (явный gate-verdict `skipped` допустим). Не
+сворачивай повторные вызовы одной роли в одну строку: каждая попытка/итерация получает свой
+1-based `attempt_number`, replay-stable в
+пределах `(batch_id, usage_task_id, role, mode)`. Тот же номер и те же `role`/`mode`
+используй у парного `usage.recorded`; повторный resume уже завершённую итерацию не эмитит
+заново.
+
+Цепочка provider-adapter → fallback для **одной логической итерации роли** остаётся одной
+`operation.completed`: её границы охватывают всю цепочку, `outcome=fallback`, а несколько
+`usage.recorded` разных `source` с тем же tuple суммируются внутри этой строки. Не эмить
+вторую operation на каждый provider source — это задвоит duration/tokens. Только новый
+логический retry получает следующий `attempt_number`.
+
+Payload строго scalar-only: `operation`, `role`, `mode`, `attempt_number`, `scope`
+(`task|cohort|integration`), `executor_kind` (`model|tool|external`), `started_at`, `ended_at`
+(ISO-8601 UTC), `duration_ms`, `outcome`
+(`success|fallback|failed|cancelled|timeout|skipped`), `shared_task_count`. Не клади туда
+prompt, diff, пути, названия задач или диагностический текст. `duration_ms` — фактически
+затраченное elapsed-время: бери монотонную длительность из supervisor/provider-result, когда
+она доступна; для внутреннего `Agent(...)` зафиксируй UTC непосредственно до и после dispatch
+и вычисли дельту. `started_at`/`ended_at` задают границы для анализа lead time, но writer не
+требует их арифметического совпадения с монотонным `duration_ms` (wall clock может
+скорректироваться).
+
+Материализуй событие **на каждую затронутую реальную задачу** (`task_id=T-ID`; псевдо-id в
+`operation.completed` запрещены):
+
+- task-local coding/review/fix: `scope=task`, `shared_task_count=1`; matching
+  `usage.recorded.task_id` — тот же `T-ID`;
+- один planning-вызов на принятую когорту: после того как известен точный список принятых
+  задач **и записаны их новые `task.captured`**, по одной записи на каждую из них с
+  `scope=cohort` и одинаковым `shared_task_count=N`; matching usage остаётся на `_cohort`;
+- один merge/integration-review/integration-fix/verification/publish/CI/knowledge-curator
+  вызов на батч: по
+  одной записи на каждую реально участвующую задачу с `scope=integration` и одинаковым
+  `shared_task_count=N`; matching usage модельного вызова остаётся на `_integration`.
+
+Так полный elapsed общего вызова не приписывается каждой задаче целиком: архивная проекция
+делит его длительность и matching usage на `N`, и сумма по задачам отражает стоимость вызова
+с точностью архивного округления, не умножая её на размер когорты. Для
+`executor_kind=tool|external` токены неприменимы и остаются `N/A`, а не `0`.
+Для model operation с `outcome=skipped` вызов не стартовал, поэтому usage также `N/A`;
+timeout/cancelled/failed могли потратить токены и требуют обычного usage/явного пропуска.
+Если model usage недоступен или append события не удался, не выдумывай значение и не блокируй
+pipeline: архив явно покажет `partial/no_data`. Учёт задачи заканчивается переходом в
+`выполнена`; post-archive обслуживание (dependency/inbox finalize) остаётся
+batch-level затратой в журнале/outbox и в сумму задачи не входит.
+
+Канонический append (координаты ключа можно передать флагами либо теми же полями payload;
+если переданы оба варианта, они обязаны совпасть):
+
+```text
+pwsh -File tools/outbox.ps1 append --work "$WORK" --owner "<owner-id аренды>" \
+  --type operation.completed --batch-id "<B-id>" --task-id "<T-ID>" \
+  --payload '<strict-scalar-json>'
+```
 
 ### Токенный budget когорты (`COHORT_TOKEN_BUDGET`)
 
@@ -2248,8 +2317,10 @@ outcome digest: <кратко — причины падений CI и их фи�
 не существовать или уже быть удалены прерванным проходом): не прерывайся на «нет такого
 worktree/ветки», продолжай.
 
-6.1. **Опубликованные** (`Статус: опубликована`, по одной, ключ `[T-ID]`).
-**Гейт подтверждённого CI (обязателен, в т.ч. на resume-пути 0.3→6.1).** Если в политике
+6.1. **Опубликованные и terminal-recovery** (`Статус: опубликована`; либо `выполнена` при
+ещё существующем дескрипторе после краша, по одной, ключ `[T-ID]`).
+**Гейт подтверждённого CI (обязателен для `опубликована`, в т.ч. на resume-пути
+0.3→6.1; terminal-recovery уже прошёл его).** Если в политике
 `.work/constraints.md` задан непустой набор «Обязательные CI-проверки публикации» и push
 выполнялся (`CI_WATCH`≠`false`, `PUSH`≠`false`) — **прежде чем архивировать**, переподтверди
 гейт против сохранённого в `integration_state.md` SHA: пересобери прогоны для этого SHA и
@@ -2260,14 +2331,43 @@ worktree/ветки», продолжай.
 (6.5) и полем `ci` в `.work/events.jsonl` — вернись к циклу Фазы 5.4. Это тот же fail-closed
 инвариант, что и в 5.4: пока required CI не подтверждён полностью, задача **не** переходит в
 `выполнена` и её артефакты **не** удаляются. Пустой набор/`CI_WATCH:false`/`PUSH:false` —
-гейт не применяется (деградация без ошибок), архивируй как обычно. Подтверждено → executor
+гейт не применяется (деградация без ошибок), архивируй как обычно. В обычной ветке
+`Статус: опубликована` подтверждено → executor
 удаляет `[T-ID]` из очереди (механически — операция `archive` транзакционного
 интерфейса, `queue-tx archive --id <T-ID>`, идемпотентная; см. `docs/queue_contract.md`,
 §9); **гард перехода** (`check-transition --kind task --from published --to done`, затем CAS
 поколения — см. «Гард переходов и поколения состояния») → `Статус: выполнена`
 (**Событие (`EVENTS_OUTBOX: on`):**
 допиши `task.status_changed` `from: "опубликована"`, `to: "выполнена"` в
-`.work/events.jsonl` — до удаления каталога задачи ниже); добавь дескриптор в `Tasks_Done.md`.
+`.work/events.jsonl` — до удаления каталога задачи ниже).
+В terminal-recovery `Статус: выполнена` queue archive, CI-гейт и transition уже успешно
+прошли — не повторяй их. Но append события мог быть crash-окном: перед проекцией best-effort
+повтори **тот же** детерминированный `task.status_changed published→done`; outbox дедупит уже
+существующий UUID, а отсутствующий факт восстановится. Затем переходи к проекции/repair ниже.
+
+Затем, пока дескриптор и outbox ещё доступны, выполни read-only проекцию:
+
+```text
+pwsh -File <resolved metrics.ps1> task --work "$WORK" --task-id "<T-ID>" --batch-id "<B-id>"
+```
+
+Она возвращает нормативный блок `#### Метрики выполнения` со stable schema-marker
+`orchestra/task-execution-metrics@1`, полным временем `capture → done`, каждой итерацией
+операций, распределённой долей общих затрат и actual/estimated/unavailable token usage.
+Собери **в памяти** один архивный блок: полный дескриптор задачи, затем ровно один такой блок
+метрик, и только после успешного построения допиши их в `Tasks_Done.md` одной логической
+операцией. Не вычисляй метрики вручную и не подменяй `недоступно` нулём. Если команда метрик
+завершилась ошибкой, архивацию не блокируй: добавь вместо её вывода минимальный блок с тем же
+schema-marker, `status=error` и текстом «метрики недоступны» без сырых диагностик/путей.
+
+Архивация replay-safe: перед append проверь секцию именно заголовка `[T-ID]` в
+`Tasks_Done.md`. Заголовок + schema-marker в той же секции → запись полна, ничего не добавляй.
+Заголовка нет → добавь весь подготовленный блок. Заголовок есть, marker отсутствует **и текущий
+task-дескриптор ещё жив** → это crash-residue текущей архивации: не дописывай метрики отдельно,
+а одной атомарной заменой пересобери всю секцию из живого дескриптора + свежего блока метрик.
+Старую архивную секцию без marker и без живого дескриптора считай legacy и не переписывай
+задним числом. После успешного append/repair повторная проверка обязана увидеть ровно один
+заголовок и один marker этой задачи; иначе останови очистку и сохрани descriptor для resume.
 **Сохранение ENV_LIMIT-форензики (аддитивно, best-effort, до удаления каталога).** Пока
 каталог задачи ещё цел, проверь `.work/events.jsonl` на записи `type: "codex.attempt"` этого
 `task_id`, дедуплицированные по `event_id` (см. «`codex.attempt`: схема и идемпотентность»):
@@ -2903,7 +3003,9 @@ crash-recovery: ни один переход фазы/статуса не зав
   за зафиксированный факт. Для lifecycle-событий и смен статуса, которые ведёшь ты, —
   `processor`; если содержательную работу выполнил делегат (слияние — `merger`;
   реализацию можно указать в payload), назови его в `actor.name` либо в payload.
-- `payload` — произвольные поля по типу (эскизы ниже); свободная форма, версионируется.
+- `payload` — поля по типу (эскизы ниже); `codex.attempt`, `usage.recorded` и
+  `operation.completed` имеют строгий scalar-allowlist, остальные payload свободны и
+  версионируются.
 
 **Осознанно опущены из мульти-репо драфта §5** (не нужны локально): `repository_id`
 (репозиторий один — писатель всегда этот `.work/`) и `sequence` (в одном append-only
@@ -2927,7 +3029,8 @@ crash-safe персистентного состояния ради того, ч
 | `task.captured` | worktree/ветка задачи созданы | Фаза 1.5 / 2.0 |
 | `task.status_changed` | любая смена `Статус` дескриптора (payload: `from`/`to`) | всюду, где ты меняешь `Статус` |
 | `codex.attempt` | логическая попытка coder/reviewer Codex завершилась | Фазы 2.2–2.8 |
-| `usage.recorded` | токен-usage одного модельного вызова (claude/codex) либо unavailable-marker внутреннего Agent dispatch | Фазы 2.2–2.8 |
+| `usage.recorded` | токен-usage одного модельного вызова (claude/codex) либо unavailable-marker внутреннего Agent dispatch | все модельные вызовы до архивации |
+| `operation.completed` | завершённая итерация операции, материализованная на каждую затронутую реальную задачу | planning и Фазы 2–6.1 |
 
 Смены статуса, которые критерии называют отдельно, — это **тот же** `task.status_changed`
 с обогащённым payload, не отдельные типы:
@@ -2957,6 +3060,7 @@ crash-safe персистентного состояния ради того, ч
 - `cohort.closed`: `{ "merged": N, "quarantined": N, "escalated": N }`
 - `task.captured`: `{ "level": "coder|coder_fast|coder_deep", "branch": "task/T-…", "worktree": ".work/worktrees/T-…", "domain": "<глобы>", "wave": K }`
 - `task.status_changed`: `{ "from": "<статус>", "to": "<статус>", "reason": "<опц.>", "attempt": <опц.>, "merged_sha": "<опц.>", "merged_by": "<опц.>" }`
+- `operation.completed`: `{ "operation": "coding", "role": "coder", "mode": "full", "attempt_number": 1, "scope": "task", "executor_kind": "model", "started_at": "<UTC>", "ended_at": "<UTC>", "duration_ms": 122000, "outcome": "success", "shared_task_count": 1 }`
 
 ## Координаты стабильного дедуп-ключа (по типам)
 
@@ -2971,6 +3075,7 @@ crash-safe персистентного состояния ради того, ч
 | `task.status_changed` | `task_id`, `from`, `to`, `attempt`, `round` | `from`→`to` — константа фазы; `attempt` = `попытка=N`; `round` = `Циклов-ревью: N` (по умолчанию 1) |
 | `codex.attempt` | `task_id`, `role`, `mode`, `attempt_number` | из telemetry-reservation `Codex-попытка` |
 | `usage.recorded` | `source`, `task_id`, `batch_id`, `role`, `mode`, `attempt_number` | `source`=`claude`/`codex`; `batch_id` = текущий `B-id`; остальное — как у сопутствующего вызова (codex: та же reservation `Codex-попытка`; claude: `role`/attempt вызова) |
+| `operation.completed` | `batch_id`, реальный `task_id`, `operation`, `role`, `mode`, `attempt_number` | из того же replay-stable вызова; для общих операций одна и та же попытка материализуется отдельно на каждый T-ID |
 
 Каждая координата долговечно восстановима, поэтому replay после краша пересобирает тот же
 ключ **без** нового персистентного счётчика. Не подмешивай сырой глобальный generation в
@@ -2981,7 +3086,23 @@ crash-safe персистентного состояния ради того, ч
 фазы) — это неотрицательные целые, а не чувствительный текст. `codex.attempt.duration_ms` уже
 несёт длительность критического вызова. Проекцию длительностей критического пути транзакции
 (round wall-time, `codex.attempt`, `task.captured`→`выполнена`) даёт `tools/outbox.ps1 metrics`
-— из timestamps и целых длительностей, без чувствительных данных.
+— из timestamps и целых длительностей, без чувствительных данных. Нормативный пер-задачный
+спайн — строгий `operation.completed`; `tools/metrics.ps1 task` соединяет его с
+`usage.recorded` и строит immutable-блок для `Tasks_Done.md`.
+
+## `operation.completed`: длительность операции задачи
+
+Это один завершённый вызов/ожидание из раздела «Пер-операционная телеметрия задач», а не
+агрегат. Envelope всегда несёт текущий `batch_id` и **реальный** `task_id=T-ID`. Payload —
+строгий scalar-allowlist: `operation`, `role`, `mode`, `attempt_number`, `scope`,
+`executor_kind`, `started_at`, `ended_at`, `duration_ms`, `outcome`, `shared_task_count`.
+Для `scope=task` доля всегда `1`; для `cohort|integration` одинаковая запись материализуется
+на каждый затронутый T-ID с общим `shared_task_count=N`. Matching token fact не копируется:
+он остаётся на T-ID/`_cohort`/`_integration` согласно scope и связывается по
+`(batch_id, role, mode, attempt_number)`. Event id:
+`orchestra/operation.completed/<batch_id>/<task_id>/<operation>/<role>/<mode>/<attempt_number>`.
+Append best-effort и replay-idempotent; отсутствие/недоступность остаётся видимым в архивной
+проекции и не заменяется нулём.
 
 ## `codex.attempt`: схема и идемпотентность
 

@@ -543,7 +543,42 @@ function Ref-UuidV5 {
 }.Invoke()
 
 # =============================================================================
-# 13. Coordinate payload-fallback (T-261): a CLI flag that is ALSO always present
+# 13. operation.completed: replay-stable identity, scalar privacy contract and
+#     explicit shared-operation allocation metadata for Tasks_Done metrics.
+# =============================================================================
+{
+    $payload = '{"operation":"coding","role":"coder","mode":"full","attempt_number":1,"scope":"task","executor_kind":"model","started_at":"2026-07-27T10:00:00Z","ended_at":"2026-07-27T10:01:00Z","duration_ms":60000,"outcome":"success","shared_task_count":1}'
+    $id = Outbox-Id @('--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-70', '--payload', $payload)
+    Assert-Equal (Ref-UuidV5 'orchestra/operation.completed/B-op/T-70/coding/coder/full/1') $id 'operation.completed canonical id carries call and task coordinates'
+    $dir = New-TempDir; $ev = New-EventsFile $dir
+    $ok = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-70', '--payload', $payload)
+    Assert-Exit $ok 0 'operation.completed appends'
+    $replay = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-70', '--payload', $payload)
+    Assert-Contains $replay.Out 'skipped-duplicate' 'operation.completed replay is idempotent'
+    Assert-Equal 1 (Line-Count $ev) 'operation.completed replay leaves one line'
+
+    # Keep all event-id coordinates present so this assertion reaches strict payload
+    # validation rather than correctly failing earlier in canonical-name construction.
+    $missingPayload = '{"operation":"review","role":"reviewer","mode":"full","attempt_number":1}'
+    $missing = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-71', '--payload', $missingPayload)
+    Assert-Exit $missing 5 'operation.completed requires the complete timing tuple'
+    Assert-Contains $missing.Err 'is required' 'missing timing tuple reports the absent required field'
+    $secret = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-71', '--payload', ($payload.TrimEnd('}') + ',"prompt":"secret"}'))
+    Assert-Exit $secret 5 'operation.completed rejects non-allowlisted sensitive fields'
+    $mismatch = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-71', '--operation', 'review', '--payload', $payload)
+    Assert-Exit $mismatch 5 'operation.completed rejects a key coordinate that disagrees with payload'
+    $badShare = $payload.Replace('"shared_task_count":1', '"shared_task_count":2')
+    $badTaskShare = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-72', '--payload', $badShare)
+    Assert-Exit $badTaskShare 5 'task-scoped operation cannot divide itself across tasks'
+    $badExecutor = $payload.Replace('"executor_kind":"model"', '"executor_kind":"tool"')
+    $badExecutorRun = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', 'T-72', '--payload', $badExecutor)
+    Assert-Exit $badExecutorRun 5 'known model operation rejects a non-model executor kind'
+    $pseudo = Invoke-Outbox @('append', '--events', $ev, '--type', 'operation.completed', '--batch-id', 'B-op', '--task-id', '_integration', '--payload', $payload)
+    Assert-Exit $pseudo 5 'operation.completed is materialized per real task, never under a pseudo id'
+}.Invoke()
+
+# =============================================================================
+# 14. Coordinate payload-fallback (T-261): a CLI flag that is ALSO always present
 #     in the type's documented --payload (--wave for cohort.round_started/closed,
 #     --from/--to for task.status_changed) may be omitted from the CLI and read
 #     from --payload instead - fixing the "outbox: missing required option --wave"

@@ -371,6 +371,88 @@ Assert-Equal 2 $digestBadWindow.ExitCode 'digest rejects reversed period'
 $digestUnknown=Invoke-Metrics @('digest','--work',$digestWork,'--last','1')
 Assert-Equal 2 $digestUnknown.ExitCode 'digest rejects aggregate-only options'
 
+# Per-task archive projection: task-scoped calls count fully, shared integration calls are
+# allocated by shared_task_count, tool operations carry time but no token expectation, and an
+# explicit unavailable marker remains visible instead of becoming zero tokens.
+$taskWork=New-Fixture
+$taskLines=@(
+    (Event-Line tm-c '2026-07-12T10:00:00Z' 'task.captured' B-task T-500),
+    (Event-Line tm-o1 '2026-07-12T10:01:00Z' 'operation.completed' B-task T-500 @{operation='coding';role='coder';mode='full';attempt_number=1;scope='task';executor_kind='model';started_at='2026-07-12T10:00:00Z';ended_at='2026-07-12T10:01:00Z';duration_ms=60000;outcome='success';shared_task_count=1}),
+    (Event-Line tm-u1 '2026-07-12T10:01:01Z' 'usage.recorded' B-task T-500 @{role='coder';mode='full';attempt_number=1;source='codex';total_tokens=900;estimated=$false;usage_availability='available'}),
+    (Event-Line tm-u1b '2026-07-12T10:01:02Z' 'usage.recorded' B-task T-500 @{role='coder';mode='full';attempt_number=1;source='claude';total_tokens=100;estimated=$false;usage_availability='available'}),
+    (Event-Line tm-o2 '2026-07-12T10:02:00Z' 'operation.completed' B-task T-500 @{operation='review';role='reviewer';mode='full';attempt_number=1;scope='task';executor_kind='model';started_at='2026-07-12T10:01:30Z';ended_at='2026-07-12T10:02:00Z';duration_ms=30000;outcome='success';shared_task_count=1}),
+    (Event-Line tm-u2 '2026-07-12T10:02:01Z' 'usage.recorded' B-task T-500 @{role='reviewer';mode='full';attempt_number=1;source='claude';usage_availability='unavailable'}),
+    (Event-Line tm-o3 '2026-07-12T10:04:00Z' 'operation.completed' B-task T-500 @{operation='merge';role='merger';mode='full';attempt_number=1;scope='integration';executor_kind='model';started_at='2026-07-12T10:02:00Z';ended_at='2026-07-12T10:04:00Z';duration_ms=120000;outcome='success';shared_task_count=2}),
+    (Event-Line tm-u3 '2026-07-12T10:04:01Z' 'usage.recorded' B-task _integration @{role='merger';mode='full';attempt_number=1;source='codex';total_tokens=400;estimated=$false;usage_availability='available'}),
+    (Event-Line tm-o4 '2026-07-12T10:07:00Z' 'operation.completed' B-task T-500 @{operation='ci_wait';role='ci';mode='wait';attempt_number=1;scope='integration';executor_kind='external';started_at='2026-07-12T10:04:00Z';ended_at='2026-07-12T10:07:00Z';duration_ms=180000;outcome='success';shared_task_count=2}),
+    (Event-Line tm-bad '2026-07-12T10:08:00Z' 'operation.completed' B-task T-500 @{operation='publish';role='processor';mode='full';attempt_number=1;scope='unknown';executor_kind='tool';started_at='2026-07-12T10:07:00Z';ended_at='2026-07-12T10:08:00Z';duration_ms=-1;outcome='success';shared_task_count=1}),
+    (Event-Line tm-skip '2026-07-12T10:09:00Z' 'operation.completed' B-task T-500 @{operation='ci_fix';role='coder';mode='ci_fix';attempt_number=1;scope='integration';executor_kind='model';started_at='2026-07-12T10:09:00Z';ended_at='2026-07-12T10:09:00Z';duration_ms=0;outcome='skipped';shared_task_count=2}),
+    (Event-Line tm-d '2026-07-12T10:10:00Z' 'task.status_changed' B-task T-500 @{from='опубликована';to='выполнена'})
+)
+Write-Utf8 (Join-Path $taskWork 'events.jsonl') (($taskLines -join "`n")+"`n")
+$taskEventsBefore=[IO.File]::ReadAllText((Join-Path $taskWork 'events.jsonl'))
+$taskRun=Invoke-Metrics @('task','--work',$taskWork,'--task-id','T-500','--batch-id','B-task','--json')
+Assert-Equal 0 $taskRun.ExitCode "task metrics JSON exits zero (stderr=$($taskRun.Err.Trim()))"
+if ($taskRun.ExitCode -eq 0) {
+    $taskData=$taskRun.Out | ConvertFrom-Json
+    Assert-Equal 'orchestra/task-execution-metrics@1' $taskData.schema 'task metrics has a versioned schema'
+    Assert-Equal 'partial' $taskData.status 'unavailable reviewer usage makes completeness explicitly partial'
+    Assert-Equal 600000 $taskData.totals.lead_time_ms 'task lead time is capture to done wall time'
+    Assert-Equal 240000 $taskData.totals.operation_time_ms 'task total sums full task work and allocated shared work'
+    Assert-Equal 1200 $taskData.totals.actual_tokens 'task tokens sum provider+fallback coding usage plus half shared merge usage'
+    Assert-Equal 5 $taskData.totals.operation_count 'every valid recorded operation iteration is retained'
+    Assert-Equal 1 $taskData.totals.unmetered_operation_count 'unavailable reviewer usage is counted, not zeroed'
+    Assert-Contains ($taskData.completeness.reasons -join ';') 'повреждённая operation.completed' 'malformed operation facts are skipped and reported, not trusted'
+    Assert-Equal 60000 $taskData.operations[2].allocated_duration_ms 'shared merge time is divided between two tasks'
+    Assert-Equal 200 $taskData.operations[2].usage.actual_tokens 'shared merge tokens are divided between two tasks'
+    Assert-Equal 'not_applicable' $taskData.operations[3].usage.status 'external CI wait has no token expectation'
+    Assert-Equal 'not_applicable' $taskData.operations[4].usage.status 'skipped model operation has no token expectation'
+}
+$taskMarkdown=Invoke-Metrics @('task','--work',$taskWork,'--task-id','T-500','--batch-id','B-task')
+Assert-Equal 0 $taskMarkdown.ExitCode 'task metrics Markdown exits zero'
+Assert-Contains $taskMarkdown.Out '<!-- orchestra/task-execution-metrics@1 task_id=T-500 batch_id=B-task status=partial -->' 'archive block carries a stable schema marker'
+Assert-Contains $taskMarkdown.Out '| merge | 1 | integration · 1/2 |' 'archive table exposes shared-operation allocation'
+Assert-Contains $taskMarkdown.Out 'actual=1200' 'archive summary exposes allocated actual token total'
+Assert-Contains $taskMarkdown.Out '4 мин (240000 ms)' 'archive summary preserves exact allocated milliseconds'
+Assert-Contains $taskMarkdown.Out '1 мин (60000 ms)' 'archive rows preserve exact operation milliseconds'
+Assert-Equal $taskEventsBefore ([IO.File]::ReadAllText((Join-Path $taskWork 'events.jsonl'))) 'task projection leaves the event stream unchanged'
+Assert-True (-not (Test-Path (Join-Path $taskWork 'orchestrator.lock'))) 'task projection never creates/acquires orchestrator.lock'
+$taskNoData=Invoke-Metrics @('task','--work',$taskWork,'--task-id','T-999','--batch-id','B-task','--json')
+Assert-Equal 0 $taskNoData.ExitCode 'task metrics missing telemetry is an explicit non-blocking projection'
+if ($taskNoData.ExitCode -eq 0) { Assert-Equal 'no_data' (($taskNoData.Out|ConvertFrom-Json).status) 'missing task telemetry is never fabricated as zero' }
+$taskOffWork=New-Fixture
+Write-Utf8 (Join-Path $taskOffWork 'config.md') "EVENTS_OUTBOX: off`n"
+$taskOff=Invoke-Metrics @('task','--work',$taskOffWork,'--task-id','T-1','--batch-id','B-off','--json')
+Assert-Equal 0 $taskOff.ExitCode 'disabled outbox remains a non-blocking task projection'
+if ($taskOff.ExitCode -eq 0) {
+    $taskOffData=$taskOff.Out|ConvertFrom-Json
+    Assert-Equal 'no_data' $taskOffData.status 'disabled outbox never fabricates task metrics'
+    Assert-Equal 'off' $taskOffData.sources.events_outbox 'task projection records that EVENTS_OUTBOX is disabled'
+    Assert-Contains ($taskOffData.completeness.reasons -join ';') 'EVENTS_OUTBOX=off' 'disabled outbox is an explicit completeness reason'
+}
+$ambiguousWork=New-Fixture
+$ambiguousLines=@(
+    (Event-Line am-old '2026-07-12T09:00:00Z' 'task.captured' B-old T-2),
+    (Event-Line am-plan '2026-07-13T09:59:00Z' 'operation.completed' B-amb T-2 @{operation='planning';role='planner';mode='full';attempt_number=1;scope='cohort';executor_kind='model';started_at='2026-07-13T09:58:00Z';ended_at='2026-07-13T09:59:00Z';duration_ms=60000;outcome='success';shared_task_count=1}),
+    (Event-Line am-plan-u '2026-07-13T09:59:01Z' 'usage.recorded' B-amb _cohort @{role='planner';mode='full';attempt_number=1;source='codex';total_tokens=50;estimated=$false;usage_availability='available'}),
+    (Event-Line am-c '2026-07-13T10:00:00Z' 'task.captured' B-amb T-2),
+    (Event-Line am-o1 '2026-07-13T10:01:00Z' 'operation.completed' B-amb T-2 @{operation='coding';role='coder';mode='full';attempt_number=1;scope='task';executor_kind='model';started_at='2026-07-13T10:00:00Z';ended_at='2026-07-13T10:01:00Z';duration_ms=60000;outcome='success';shared_task_count=1}),
+    (Event-Line am-u1 '2026-07-13T10:01:01Z' 'usage.recorded' B-amb T-2 @{role='coder';mode='full';attempt_number=1;source='codex';total_tokens=100;estimated=$false;usage_availability='available'}),
+    (Event-Line am-o2 '2026-07-13T10:02:00Z' 'operation.completed' B-amb T-2 @{operation='review_fix';role='coder';mode='full';attempt_number=1;scope='task';executor_kind='model';started_at='2026-07-13T10:01:00Z';ended_at='2026-07-13T10:02:00Z';duration_ms=60000;outcome='success';shared_task_count=1}),
+    (Event-Line am-d '2026-07-13T10:03:00Z' 'task.status_changed' B-amb T-2 @{from='опубликована';to='выполнена'})
+)
+Write-Utf8 (Join-Path $ambiguousWork 'events.jsonl') (($ambiguousLines -join "`n")+"`n")
+$ambiguous=Invoke-Metrics @('task','--work',$ambiguousWork,'--task-id','T-2','--batch-id','B-amb','--json')
+Assert-Equal 0 $ambiguous.ExitCode 'ambiguous model tuple remains a non-blocking projection'
+if ($ambiguous.ExitCode -eq 0) {
+    $ambiguousData=$ambiguous.Out|ConvertFrom-Json
+    Assert-Equal 150 $ambiguousData.totals.actual_tokens 'recapture planning usage counts once and ambiguous duplicate tuple does not double-count'
+    $ambiguousFix=@($ambiguousData.operations|Where-Object operation -eq 'review_fix')
+    Assert-Equal 'ambiguous' $ambiguousFix[0].usage.status 'second model operation with the same call tuple is explicit'
+    Assert-True (@($ambiguousData.operations|Where-Object operation -eq 'planning').Count -eq 1) 'recapture keeps strict planning operation in its explicit new batch'
+    Assert-Equal 'partial' $ambiguousData.status 'ambiguous call identity makes task telemetry partial'
+}
+
 $empty=New-Fixture; $emptyRun=Invoke-Metrics @('aggregate','--work',$empty,'--last','5')
 Assert-Equal 0 $emptyRun.ExitCode 'empty input is success'; Assert-Contains $emptyRun.Out 'Нет данных' 'empty input has explicit no-data output'
 Assert-Contains $emptyRun.Out 'events.jsonl отсутствует' 'missing event stream has an explicit diagnostic'
@@ -391,5 +473,5 @@ Assert-Contains $positional.Err "metrics: unexpected argument 'unexpected'" 'une
 
 foreach ($dir in $script:Dirs) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 if ($script:Failures.Count -gt 0) { $script:Failures | ForEach-Object { Write-Host $_ -ForegroundColor Red }; exit 1 }
-Write-Host 'PASS - metrics aggregation, fallback, filtering, usage errors, lenient JSONL, empty input and read-only contract'
+Write-Host 'PASS - metrics aggregation, per-task archive telemetry, fallback, filtering, usage errors, lenient JSONL, empty input and read-only contract'
 exit 0

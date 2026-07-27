@@ -137,7 +137,8 @@ $script:KnownActorKinds = @('agent', 'human', 'tool')
 $script:KnownTypes = @(
     'cohort.opened', 'cohort.round_started', 'cohort.round_closed', 'cohort.admission_closed',
     'cohort.join_started', 'cohort.published', 'cohort.closed',
-    'task.captured', 'task.status_changed', 'codex.attempt', 'usage.recorded'
+    'task.captured', 'task.status_changed', 'codex.attempt', 'usage.recorded',
+    'operation.completed'
 )
 # codex.attempt payload is a strict scalar allowlist (privacy: no prompt/diff/paths/secrets).
 $script:CodexAttemptKeys = @(
@@ -163,6 +164,19 @@ $script:UsageIntKeys = @(
     'attempt_number', 'input_tokens', 'output_tokens', 'cache_read_input_tokens',
     'cache_creation_input_tokens', 'total_tokens'
 )
+# operation.completed is the task-archive timing spine. It is deliberately scalar-only:
+# no prompts, paths, task titles or arbitrary diagnostics enter the durable event stream.
+# A shared cohort/integration dispatch is emitted once per affected real task with the same
+# duration and `shared_task_count`; consumers allocate duration and matching usage by that
+# divisor instead of double-counting the whole dispatch for every task.
+$script:OperationCompletedKeys = @(
+    'operation', 'role', 'mode', 'attempt_number', 'scope', 'executor_kind', 'started_at', 'ended_at',
+    'duration_ms', 'outcome', 'shared_task_count'
+)
+$script:OperationIntKeys = @('attempt_number', 'duration_ms', 'shared_task_count')
+$script:OperationScopes = @('task', 'cohort', 'integration')
+$script:OperationExecutorKinds = @('model', 'tool', 'external')
+$script:OperationOutcomes = @('success', 'fallback', 'failed', 'cancelled', 'timeout', 'skipped')
 $script:UuidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 # The pre-T-089 no-generator fallback id shape (kept read-compatible so old lines validate).
 $script:EvtFallbackRegex = '^evt-[0-9A-Za-z:_.\-]+$'
@@ -299,6 +313,15 @@ function Get-CanonicalName {
             $an = [string](Require-Opt 'attempt-number')
             if ($an -notmatch '^\d+$') { Fail 2 "--attempt-number must be a non-negative integer" }
             return "orchestra/$Type/$src/$t/$b/$role/$mode/$an"
+        }
+        '^operation\.completed$' {
+            $b = Require-Opt 'batch-id'
+            $t = Require-Opt 'task-id'
+            $operation = Get-CoordFallback -FlagName 'operation' -PayloadField 'operation' -Payload $Payload -Pattern '^[a-z][a-z0-9._-]*$' -PatternMsg "--operation (or --payload field 'operation') must be a lowercase operation token"
+            $role = Get-CoordFallback -FlagName 'role' -PayloadField 'role' -Payload $Payload -Pattern '^[a-z][a-z0-9._-]*$' -PatternMsg "--role (or --payload field 'role') must be a lowercase role token"
+            $mode = Get-CoordFallback -FlagName 'mode' -PayloadField 'mode' -Payload $Payload -Pattern '^[a-z][a-z0-9._-]*$' -PatternMsg "--mode (or --payload field 'mode') must be a lowercase mode token"
+            $an = Get-CoordFallback -FlagName 'attempt-number' -PayloadField 'attempt_number' -Payload $Payload -Pattern '^[1-9]\d*$' -PatternMsg "--attempt-number (or --payload field 'attempt_number') must be a positive integer"
+            return "orchestra/$Type/$b/$t/$operation/$role/$mode/$an"
         }
         default { Fail 2 "unknown --type '$Type' (valid: $($script:KnownTypes -join ', '))" }
     }
@@ -484,6 +507,50 @@ function Test-Envelope {
                 }
             }
         }
+        if ([string]$Obj.type -eq 'operation.completed') {
+            if ([string](Get-Prop $Obj 'task_id') -notmatch '^T-\d+$') {
+                return 'operation.completed requires a real T-id in task_id'
+            }
+            foreach ($prop in $payload.PSObject.Properties) {
+                $k = [string]$prop.Name
+                if ($script:OperationCompletedKeys -notcontains $k) { return "operation.completed payload key '$k' is not in the privacy allowlist" }
+            }
+            foreach ($k in $script:OperationCompletedKeys) {
+                if (-not (Has-Prop $payload $k)) { return "operation.completed payload key '$k' is required" }
+            }
+            foreach ($k in $script:OperationIntKeys) {
+                $val = Get-Prop $payload $k
+                if ([string]$val -notmatch '^\d+$') { return "operation.completed payload key '$k' must be a non-negative integer" }
+                try { [void][int64]$val } catch { return "operation.completed payload key '$k' is out of range" }
+            }
+            if ([int64]$payload.attempt_number -lt 1) { return 'operation.completed attempt_number must be positive' }
+            if ([int64]$payload.shared_task_count -lt 1) { return 'operation.completed shared_task_count must be positive' }
+            foreach ($k in @('operation', 'role', 'mode')) {
+                if ([string](Get-Prop $payload $k) -notmatch '^[a-z][a-z0-9._-]*$') { return "operation.completed payload key '$k' must be a lowercase token" }
+            }
+            if ([string]$payload.scope -notin $script:OperationScopes) { return "operation.completed scope must be one of $($script:OperationScopes -join '/')" }
+            if ([string]$payload.executor_kind -notin $script:OperationExecutorKinds) { return "operation.completed executor_kind must be one of $($script:OperationExecutorKinds -join '/')" }
+            if ([string]$payload.outcome -notin $script:OperationOutcomes) { return "operation.completed outcome must be one of $($script:OperationOutcomes -join '/')" }
+            if ([string]$payload.scope -eq 'task' -and [int64]$payload.shared_task_count -ne 1) { return 'operation.completed task scope requires shared_task_count=1' }
+            $operationName = [string]$payload.operation; $executorKind = [string]$payload.executor_kind
+            if ($operationName -in $script:TaskTelemetryModelOperations -and $executorKind -ne 'model') {
+                return "operation.completed '$operationName' requires executor_kind=model"
+            }
+            if ($operationName -in $script:TaskTelemetryNonModelOperations -and $executorKind -eq 'model') {
+                return "operation.completed '$operationName' cannot use executor_kind=model"
+            }
+            foreach ($k in @('started_at', 'ended_at')) {
+                $stamp = Get-Prop $payload $k
+                if ($stamp -isnot [datetime] -and $stamp -isnot [System.DateTimeOffset] -and [string]$stamp -notmatch $script:IsoUtcRegex) {
+                    return "operation.completed payload key '$k' must be ISO-8601 UTC"
+                }
+            }
+            try {
+                $started = [DateTimeOffset]::Parse([string]$payload.started_at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)
+                $ended = [DateTimeOffset]::Parse([string]$payload.ended_at, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal)
+                if ($ended -lt $started) { return 'operation.completed ended_at precedes started_at' }
+            } catch { return 'operation.completed timestamps are invalid' }
+        }
     }
     return $null
 }
@@ -651,6 +718,20 @@ function Build-EventLine {
     # Same parsed/cached payload the event-id computation below (Cmd-Append) already used
     # for its coordinate fallback - parsed exactly once per invocation (Get-ParsedPayload).
     $payload = Get-ParsedPayload
+    # operation.completed projects its key coordinates back into an immutable task archive.
+    # Unlike legacy wave/from/to fallback, silently allowing an explicit flag to disagree
+    # with the strict payload would make the event_id describe one call while metrics display
+    # another. Reject that ambiguity before serializing the line.
+    if ($type -eq 'operation.completed') {
+        foreach ($pair in @(
+                @('operation','operation'), @('role','role'), @('mode','mode'),
+                @('attempt-number','attempt_number'))) {
+            $flag = [string]$pair[0]; $field = [string]$pair[1]
+            if ($opts.ContainsKey($flag) -and [string]$opts[$flag] -ne [string](Get-Prop $payload $field)) {
+                Fail 5 "--$flag disagrees with operation.completed payload field '$field'"
+            }
+        }
+    }
 
     $rec = [ordered]@{ schema_version = $script:SchemaVersion; event_id = $EventId; occurred_at = $occurred; type = $type }
     if ($opts.ContainsKey('batch-id') -and $opts['batch-id']) { $rec['batch_id'] = [string]$opts['batch-id'] }

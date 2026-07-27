@@ -206,8 +206,9 @@ platform-specific skip:
 - [`tests/launchers/run-all.ps1`](../tests/launchers/run-all.ps1) protects launcher behavior
   and the sync, Doctor, generator, queue, and state runtimes; POSIX runs only tests marked
   `# ci:posix`.
-- [`tests/test-metrics.ps1`](../tests/test-metrics.ps1) protects read-only aggregation,
-  selection, tolerant event parsing, and the no-lock/no-write invariant.
+- [`tests/test-metrics.ps1`](../tests/test-metrics.ps1) protects read-only aggregation and
+  per-task archive projection, shared-cost allocation, tolerant event parsing, and the
+  no-lock/no-write invariant.
 - [`tests/test-supervisor.ps1`](../tests/test-supervisor.ps1) protects deadlines,
   cancellation, process-tree cleanup, output limits, retry classification, and budgets.
 - [`tests/test-notify.ps1`](../tests/test-notify.ps1) protects the optional `NOTIFY_CMD`:

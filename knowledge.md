@@ -321,6 +321,25 @@ Processor и merger формируют описательные англоязы
   `orchestrator.lock`; обёртки — `cc-metrics.cmd`/`.sh` (чекаут `tools/metrics.ps1` либо
   зеркальная sibling-копия от `cc-sync`). Детерминированный тест — `tests/test-metrics.ps1`,
   явно подключённый к job `validate` в `.github/workflows/ci.yml` (K-007).
+- **Пер-задачная архивная проекция.** `tools/metrics.ps1 task --work <.work> --task-id
+  <T-ID> --batch-id <B-id>` соединяет строгие `operation.completed` с `usage.recorded` по
+  replay-stable координатам вызова и строит блок `orchestra/task-execution-metrics@1` для
+  `Tasks_Done.md`: lead time, каждую итерацию, полную/распределённую длительность (включая
+  точные `ms`) и раздельные
+  actual/estimated/unavailable токены. Общие cohort/integration вызовы материализуются на
+  каждую затронутую задачу, но делятся на `shared_task_count`, поэтому сумма архивных итогов
+  отражает стоимость вызова с точностью округления, не умножая её на размер когорты.
+  `EVENTS_OUTBOX:off`, битые/пропущенные события и
+  недоступный provider usage сохраняются как `partial|no_data|error`/`недоступно`, не нули.
+  Processor строит дескриптор+метрики до удаления task-артефактов и добавляет их одной
+  replay-safe архивной записью. Crash-residue «заголовок есть, marker нет, живой descriptor
+  остался» пересобирается заменой всей секции; terminal `выполнена` с живым descriptor имеет
+  явный resume-маршрут и idempotent re-emit `published→done` перед проекцией. Старые записи
+  без живого descriptor не переписываются.
+  Для `operation.completed` её explicit `batch_id` авторитетен (он входит в UUIDv5), поэтому
+  planning recaptured-задачи не наследует прошлый batch до нового `task.captured`.
+  Общий vocabulary model/non-model/core операций живёт в `tools/events-common.ps1`; writer
+  `outbox.ps1` и consumer `metrics.ps1` используют одни и те же наборы без копий.
 - **Статический gate PowerShell-слоя (T-253).** `tools/lint-powershell.ps1` запускает
   PSScriptAnalyzer с корневым `PSScriptAnalyzerSettings.psd1` для всех `tools/*.ps1`,
   рекурсивно `tests/**/*.ps1` и корневых генераторов `generate-*.ps1`. Профиль явно
@@ -980,7 +999,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.inbox/releases/<rel-id>.json` | канонический аудит release fan-out (`orchestra/release-notification@1`): immutable version/notes/products, замороженные target ids и crash-recoverable delivery ids; пишет только `tools/inbox.ps1 release` |
 | `.inbox/inbox.lock` | краткоживущий атомарный лок создания/перехода message records; держит только `tools/inbox.ps1` |
 | `.work/Tasks_Queue.md` | входная очередь; новые задачи имеют ID `T-NNN`; мутируется только через транзакционный интерфейс `tools/queue-tx.ps1` |
-| `.work/Tasks_Done.md` | архив завершённых задач; источник «предпосылка завершена» для readiness-резолвера. Старый PowerShell runtime читает только заголовки, но принимает реально существующие варианты `## [T-NNN]`, `### [T-NNN]` и legacy `# Активная задача T-NNN`; упоминание ID в теле завершением не считается |
+| `.work/Tasks_Done.md` | архив завершённых задач; источник «предпосылка завершена» для readiness-резолвера. Новая запись содержит полный дескриптор и один immutable-блок `orchestra/task-execution-metrics@1` (операции/итерации, длительности, actual/estimated/unavailable tokens, полнота); исторические записи без блока не мигрируются. Старый PowerShell runtime читает только заголовки, но принимает реально существующие варианты `## [T-NNN]`, `### [T-NNN]` и legacy `# Активная задача T-NNN`; упоминание ID в теле завершением не считается |
 | `.work/queue_state.json` | счётчик поколения очереди (generation/CAS) транзакционного интерфейса `tools/queue-tx.ps1`; см. `docs/queue_contract.md`, §10 |
 | `.work/queue-tx.lock` | краткоживущий атомарный лок мутации очереди (отдельный от `orchestrator.lock`); держит `queue-tx.ps1` на время одной транзакции |
 | `.work/queue_inbox/` | горячие, ещё не обработанные предложения популяторов, поданные при активном `orchestrator.lock` (`queue-tx inbox-add`); processor вливает их `inbox-drain` на границе когорты (`docs/queue_contract.md`, §7/§9) |
@@ -1012,7 +1031,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/verification.json` | атомарное SHA-bound evidence обязательного pre-push verification-гейта (`tools/verification.ps1`): точные команды и их supervisor-verdict, полный `verified_head`, fingerprint текущего профиля, итог `pass`/`failed`/`blocked`/`exempt`; `check` отвергает crash-residue `running`, смену профиля и старую вершину |
 | `.work/status.md` | текущий обзор processor |
 | `.work/journal.md` | постоянный журнал завершённых прогонов; read-only fallback для отсутствующих в событиях полей `tools/metrics.ps1` |
-| `.work/events.jsonl` | append-only машинный event-outbox; пишет только processor (одна JSON-строка на событие) при `EVENTS_OUTBOX:on` через транзакционный интерфейс `tools/outbox.ps1` (валидация конверта/payload, детерминированный `event_id`-дедуп-ключ, отказ с rc=5 для многострочного raw-ввода `--json-line`/`--stdin`, игнорирование whitespace-only строк, ремонт оборванного хвоста, single-writer); основной источник read-only агрегатора `tools/metrics.ps1`; машинный контракт для будущей платформы наблюдаемости (`docs/queue_contract.md`, §19); не привязан к одной когорте, переживает очистку Фазы 6, никогда не переписывается/не усекается; Markdown-артефакты остаются источником истины для человека |
+| `.work/events.jsonl` | append-only машинный event-outbox; пишет только processor (одна JSON-строка на событие) при `EVENTS_OUTBOX:on` через транзакционный интерфейс `tools/outbox.ps1` (валидация конверта/payload, детерминированный `event_id`-дедуп-ключ, строгие scalar-only `operation.completed` как timing spine архива, отказ с rc=5 для многострочного raw-ввода `--json-line`/`--stdin`, игнорирование whitespace-only строк, ремонт оборванного хвоста, single-writer); основной источник read-only агрегатора/пер-задачной проекции `tools/metrics.ps1`; машинный контракт для будущей платформы наблюдаемости (`docs/queue_contract.md`, §19); не привязан к одной когорте, переживает очистку Фазы 6, никогда не переписывается/не усекается; Markdown-артефакты остаются источником истины для человека |
 | `.work/outbox-tx.lock` | краткоживущий атомарный лок дозаписи event-outbox (отдельный от `orchestrator.lock`/`queue-tx.lock`/`state-tx.lock`); держит `tools/outbox.ps1` на время одной дозаписи; обеспечивает single-writer инвариант `events.jsonl` |
 | `.work/events_cursor.json` | курсор референсного потребителя outbox (`tools/outbox.ps1 read`): byte-offset + доставленные `event_id` для дедупа; ведёт потребитель/тесты, не processor |
 | `.work/approvals/<apr-id>.json` | персистентный одноразовый запрос на человеческое подтверждение (T-095): subject (task/batch), причина (human-review/force-lock/policy-bypass), diff-фингерпринт затронутых путей, снапшот применённой политики, срок действия и решение; ведёт `tools/policy.ps1 approval-request`; approve/reject оператора потребляют ID ровно один раз; `approval-status` сверяет свежесть (истекает при смене кода/политики или к дедлайну — fail-closed). Системный operator pre-grant `ORCHESTRA_AUTO_APPROVE=on` автоматически потребляет только свежий pending-запрос с `decided_by=system-env:ORCHESTRA_AUTO_APPROVE`, не отменяя audit/fingerprint/policy checks; `off`/unset сохраняет ручной gate, invalid fail-closed. |
@@ -1094,6 +1113,13 @@ codex-правилами выше (см. «Резолвинг раннеров `
   `status.md` показывает дедуплицированный running total текущей когорты, `journal.md` —
   итог батча; сбои этой наблюдательной телеметрии никогда не меняют control-flow, кроме
   включённого enforceable-token-gate ниже.
+- Каждая существенная операция до перехода задачи в `выполнена` завершает scalar-only
+  `operation.completed` на каждый затронутый реальный T-ID. Task-local scope имеет долю 1;
+  cohort/integration scope хранит `shared_task_count=N` и использует matching usage под
+  `_cohort`/`_integration`. Номер попытки, роль и режим совпадают с `usage.recorded`; append
+  replay-idempotent. Pre-archive `knowledge_curator` входит как общая операция;
+  post-archive dependency/inbox finalize остаются batch-level затратой и в итог задачи не
+  входят.
 - **Токенный circuit-breaker когорты (T-309).** `COHORT_TOKEN_BUDGET: 0` отключён по
   умолчанию; при `>0` `tools/metrics.ps1 budget --batch-id <B-id>` dedup-ит
   `usage.recorded` и считает только явное `estimated=false`. Проекция сортирует события по

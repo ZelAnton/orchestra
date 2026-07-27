@@ -466,6 +466,19 @@ Delivery target: next_major
 (`merged`) от «уже в main» (`published`): краш в окне интеграции/публикации не заархивирует
 неопубликованную работу (см. `agents/processor.md`, «Дескриптор и его статус»).
 
+**Метрики новой архивной записи.** Начиная с версии схемы
+`orchestra/task-execution-metrics@1`, processor добавляет сразу после полного дескриптора
+ровно один блок `#### Метрики выполнения`: lead time `capture → done`, каждую итерацию
+операций, её полную и распределённую длительность, actual/estimated token usage и явную
+полноту данных. Длительности показываются человекочитаемо и точным `ms`, чтобы архив можно
+было агрегировать без потери точности. Дескриптор + блок строятся до удаления task-артефактов и добавляются как одна
+логическая архивная запись; resume проверяет заголовок `[T-ID]` и не дублирует ни одну часть.
+Если после краша заголовок уже есть, marker отсутствует и task-дескриптор ещё жив, processor
+атомарно пересобирает всю секцию из descriptor+metrics; marker в той же секции доказывает
+полноту. Terminal-recovery также idempotent re-emit'ит `published→done`, если crash произошёл
+между status-write и append события. Исторические записи без живого дескриптора не мигрируются. Отсутствующая/отключённая телеметрия
+отмечается `partial|no_data|error` и `недоступно`, никогда не подменяется нулём.
+
 ### 13.2. Состояние приёма когорты (`cohort`)
 
 | Каноническое | Markdown (`cohort_state.md`, `Приём:`) |
@@ -897,6 +910,7 @@ PowerShell 5.1), companion `queue-tx.ps1`/`state-tx.ps1`. Гейт эмисси�
 | `task.status_changed` | `task.status_changed/<task_id>/<from>>​<to>/a<attempt>/r<round>` |
 | `codex.attempt` | `codex.attempt/<task_id>/<role>/<mode>/<attempt_number>` |
 | `usage.recorded` | `usage.recorded/<source>/<task_id>/<batch_id>/<role>/<mode>/<attempt_number>` |
+| `operation.completed` | `operation.completed/<batch_id>/<task_id>/<operation>/<role>/<mode>/<attempt_number>` |
 
 `codex.attempt` — исторический архетип этой схемы (его ключ не изменился). При отсутствии
 UUID-генератора (degraded без PowerShell) допустим fallback-id `evt-<occurred_at>-<суффикс>`;
@@ -912,9 +926,13 @@ UUID-генератора (degraded без PowerShell) допустим fallback
 Явно переданный CLI-флаг, если он есть, остаётся **приоритетным** источником координаты — даже
 если он расходится со значением того же поля в `--payload` (намеренно: считается, что
 вызывающий мог осознанно передать иное значение поверх payload; расхождение не проверяется
-и не превращается в ошибку). Отсутствие координаты **и** в явном CLI-флаге, **и** в `--payload`
-по-прежнему `Fail 2` (`exit 2`) — регрессии в обратную сторону нет. `codex.attempt`/
-`usage.recorded` фоллбэка не получили: их координаты (`task_id`/`role`/`mode`/`attempt_number`/
+и не превращается в ошибку). Это legacy-правило относится только к перечисленным
+`cohort.round_*`/`task.status_changed`: строгие ключевые координаты `operation.completed`
+при одновременной передаче флага и payload обязаны совпасть, иначе append отклоняется.
+Отсутствие координаты **и** в явном CLI-флаге, **и** в `--payload`
+по-прежнему `Fail 2` (`exit 2`) — регрессии в обратную сторону нет.
+`codex.attempt`/`usage.recorded` фоллбэка не получили: их координаты
+(`task_id`/`role`/`mode`/`attempt_number`/
 `source`/`batch_id`) уже несёт отслеживаемая telemetry-reservation `Codex-попытка` дескриптора задачи
 (единая для `codex.attempt` и парного `usage.recorded`) через выделенный crash-safe путь
 эмиссии, а не разовая ручная инструкция агента, как у `cohort.round_*`/`task.status_changed` —
@@ -924,14 +942,15 @@ UUID-генератора (degraded без PowerShell) допустим fallback
 
 Типы namespaced: `cohort.*` (`opened`, `round_started`, `round_closed`, `admission_closed`,
 `join_started`, `published`, `closed`), `task.*` (`captured`, `status_changed`), `codex.attempt`,
-`usage.recorded`.
+`usage.recorded`, `operation.completed`.
 Смены статуса — это `task.status_changed` с `from`/`to` в payload (не отдельные типы). Ранняя
 эскалация по **стагнации** цикла ревью (детектор `STAGNATION_LIMIT`, `agents/processor.md` 2.8)
 использует **этот же** `task.status_changed` (`to: эскалирована`), лишь неся в `reason` причину
 стагнации, отличимую от исчерпания счётчика циклов — **нового типа события для стагнации не
 вводится**; батч-уровневые стагнации F-цикла/CI-фикса (5.2/5.4) фиксируются в `journal.md`/полем
 `ci` события `cohort.published`. `payload` —
-свободная форма по типу, **кроме** `codex.attempt` и `usage.recorded`: у них строгий
+свободная форма по типу, **кроме** `codex.attempt`, `usage.recorded` и
+`operation.completed`: у них строгий
 scalar-allowlist полей. У `codex.attempt` — (`task_id`, `role`, `mode`, `attempt_number`,
 `started_at`, `ended_at`, `duration_ms`, `effective_*`, `exit_code`, `outcome`,
 `outcome_reason`). Фазовые метрики длительности несут опциональный целочисленный `duration_ms`
@@ -965,13 +984,45 @@ codex-попытка и её Claude-fallback для одного `(task,role,mod
 только явное `estimated=false`. НИКОГДА не «исправляй» расхождение удалением строк или
 ослаблением writer-allowlist.
 
+`operation.completed` фиксирует одну завершённую итерацию существенной операции. Payload:
+`operation`, `role`, `mode`, `attempt_number`, `scope` (`task|cohort|integration`),
+`executor_kind` (`model|tool|external`), `started_at`, `ended_at`, `duration_ms`, `outcome`
+(`success|fallback|failed|cancelled|timeout|skipped`), `shared_task_count`. Все поля обязательны,
+только scalars; `task_id` envelope обязан быть реальным `T-ID`. `attempt_number` 1-based и
+replay-stable для логического вызова. Task-local операция несёт `scope=task` и
+`shared_task_count=1`; общий вызов материализуется по одной записи на каждый затронутый T-ID с
+одинаковыми длительностью и `shared_task_count=N`. Потребитель делит duration и matching usage
+на `N`, поэтому сумма пер-задачных итогов не умножает стоимость общего вызова. `duration_ms` —
+авторитетный elapsed (по возможности монотонный); UTC timestamps задают границы и не обязаны
+арифметически совпадать с ним при коррекции wall clock. Matching `usage.recorded` определяется
+по `batch_id/role/mode/attempt_number` и task scope (`T-ID`, `_cohort`, `_integration`). Для
+`tool|external` токены неприменимы; для неполного model usage результат явно partial, не zero.
+У model operation с `outcome=skipped` вызов не стартовал, поэтому usage также `not_applicable`;
+timeout/cancelled/failed могли успеть потратить токены и требуют обычного usage/явного пропуска.
+Известные role-вызовы (`planning`, coding/review/fixes, merge/integration review,
+`knowledge_curate`) требуют `executor_kind=model`; `verification`/`publish`/`ci_wait` не могут
+маскироваться как model. Writer отклоняет неверную пару, consumer считает ручную порчу partial.
+Provider-adapter и его fallback в рамках одной логической итерации дают **одну** operation с
+общей длительностью; несколько usage разных `source` того же tuple суммируются в ней. Две model
+operation с одинаковыми `scope/role/mode/attempt_number` неоднозначны: потребитель не считает
+matching usage второй раз и помечает строку `ambiguous`/общую полноту `partial`.
+`batch_id` operation входит в её UUIDv5 и авторитетен для пер-задачной проекции даже до нового
+`task.captured` при recapture; canonical processor всё равно материализует planning-строки
+после новых capture-событий.
+Полнота `ok` дополнительно требует core-операции `planning`, `coding`, `review`, `merge`,
+`integration_review`, `verification`, `publish`; отсутствующая core-строка делает проекцию
+`partial`. Условные стадии/фиксы отражаются только когда запускались (или были осознанно
+зафиксированы как `skipped`).
+
 ### 19.4. Валидация при записи и при чтении
 
 **Запись строгая:** конверт и payload проверяются до дозаписи — обязательные поля, форматы
 (`event_id` UUID/`evt-`, `occurred_at` `…Z`, `batch_id`/`task_id`), известный `type`, `actor`,
-**никаких неизвестных полей верхнего уровня**, allowlist `codex.attempt`/`usage.recorded`
-(последний дополнительно проверяет scalar-форму: токен-поля — неотрицательные целые/`null`,
-`estimated` — булев, `usage_availability` — `available|unavailable`), **никаких абсолютных
+**никаких неизвестных полей верхнего уровня**, allowlist
+`codex.attempt`/`usage.recorded`/`operation.completed`
+(для usage токен-поля — неотрицательные целые/`null`, `estimated` — булев,
+`usage_availability` — `available|unavailable`; для operation обязательны enum/token/timestamp,
+неотрицательные integer и согласованные scope/share), **никаких абсолютных
 путей** в payload (worktree — только в относительной
 форме `.work/worktrees/<T-ID>`). Свободный
 текст `reason` проходит redaction (§18.4) **до** передачи в outbox. **Чтение снисходительно
@@ -1019,8 +1070,11 @@ Durable-outbox пишет только держатель `orchestrator.lock` (p
 новые уникальные события; оборванный хвост никогда не выдаётся) и `tools/outbox.ps1 metrics`
 (проекция фазовых/критического-пути длительностей из timestamps и целых длительностей, плюс
 агрегат usage-токенов по `usage.recorded` — actual и estimated **раздельными** бакетами и с
-разбивкой по `source`, T-248). Кросс-когортный операционный срез (в т.ч. токены на завершённую
-задачу) даёт `tools/metrics.ps1 aggregate`.
+разбивкой по `source`, T-248). Кросс-когортный операционный срез даёт
+`tools/metrics.ps1 aggregate`; immutable-проекцию одной завершённой задачи для
+`Tasks_Done.md` — `tools/metrics.ps1 task --work <.work> --task-id <T-ID> --batch-id <B-id>`.
+Последняя соединяет `operation.completed` с `usage.recorded`, распределяет общие вызовы и
+явно сохраняет status полноты/причины пропусков.
 
 ## 20. Лейн предложений `P-NNN` (kind: proposal)
 
