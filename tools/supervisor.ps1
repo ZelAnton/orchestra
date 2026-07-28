@@ -813,7 +813,7 @@ function Save-CallArtifacts {
     param(
         $Res,
         [int]$Attempt = 1,
-        [int]$BudgetRemainingMs = -1,
+        [long]$BudgetRemainingMs = -1,
         [int]$TotalDurationMs = -1,
         [string]$Checkpoint = ''
     )
@@ -881,7 +881,7 @@ function Save-ProcessDiagnostics {
 }
 # The DURABLE verdict: scalars only, NO raw stdout/stderr (privacy).
 function New-Verdict {
-    param($Res, [int]$Attempt = 1, [int]$BudgetRemainingMs = -1)
+    param($Res, [int]$Attempt = 1, [long]$BudgetRemainingMs = -1)
     $v = [ordered]@{
         reason           = $Res.reason
         exit_code        = $Res.exit_code
@@ -979,18 +979,18 @@ function Init-Budget {
 function Get-BudgetRemainingMs {
     param($Budget)
     if ($null -eq $Budget) { return -1 }
-    $bs = [int](Get-Prop $Budget 'budget_sec')
+    $bs = [long](Get-Prop $Budget 'budget_sec')
     if ($bs -le 0) { return [int]::MaxValue }   # 0 = unlimited
-    $consumed = [int](Get-Prop $Budget 'consumed_ms')
+    $consumed = [long](Get-Prop $Budget 'consumed_ms')
     return ([int64]$bs * 1000 - $consumed)
 }
 function Consume-Budget {
     param([string]$Path, $Budget, [int]$DeltaMs)
     if ($null -eq $Budget) { return }
-    $consumed = [int](Get-Prop $Budget 'consumed_ms') + $DeltaMs
+    $consumed = [long](Get-Prop $Budget 'consumed_ms') + $DeltaMs
     $rec = [ordered]@{
         schema      = 'orchestra/cohort-budget@1'
-        budget_sec  = [int](Get-Prop $Budget 'budget_sec')
+        budget_sec  = [long](Get-Prop $Budget 'budget_sec')
         consumed_ms = $consumed
         started_at  = [string](Get-Prop $Budget 'started_at')
         batch_id    = [string](Get-Prop $Budget 'batch_id')
@@ -1063,7 +1063,7 @@ function Cmd-Supervise {
         # Trim this call's deadline to what the cohort budget still allows.
         $callDeadline = $co.Deadline
         if ($null -ne $budget) {
-            $remainingSec = [int][math]::Floor((Get-BudgetRemainingMs $budget) / 1000.0)
+            $remainingSec = [long][math]::Floor((Get-BudgetRemainingMs $budget) / 1000.0)
             if ($remainingSec -le 0) { break }
             if ($callDeadline -le 0 -or $remainingSec -lt $callDeadline) { $callDeadline = $remainingSec }
         }
@@ -1089,7 +1089,7 @@ function Cmd-Supervise {
         $attempt = 0
     }
 
-    $budgetRemaining = if ($null -ne $budget) { [int][math]::Max(0, (Get-BudgetRemainingMs $budget)) } else { -1 }
+    $budgetRemaining = if ($null -ne $budget) { [math]::Max([long]0, [long](Get-BudgetRemainingMs $budget)) } else { -1 }
     $cp = $null
     if ($res.reason -in @('cancelled', 'timeout', 'crash')) { $cp = Write-Checkpoint $res $attempt }
     $checkpointName = if ($cp) { Split-Path -Leaf $cp } else { '' }
@@ -1352,8 +1352,8 @@ function Cmd-Budget {
     $remOut = if ($remaining -eq [int]::MaxValue) { -1 } else { $remaining }   # -1 signals unlimited
     if ([bool](Opt 'json' $false)) {
         $out = [ordered]@{
-            budget_sec         = [int](Get-Prop $b 'budget_sec')
-            consumed_ms        = [int](Get-Prop $b 'consumed_ms')
+            budget_sec         = [long](Get-Prop $b 'budget_sec')
+            consumed_ms        = [long](Get-Prop $b 'consumed_ms')
             remaining_ms       = $remOut
             exhausted          = ($remaining -le 0)
             started_at         = [string](Get-Prop $b 'started_at')
@@ -1361,7 +1361,7 @@ function Cmd-Budget {
         }
         Write-Output ($out | ConvertTo-Json -Compress)
     } else {
-        Write-Output "budget: budget_sec=$([int](Get-Prop $b 'budget_sec')) consumed_ms=$([int](Get-Prop $b 'consumed_ms')) remaining_ms=$remOut exhausted=$($remaining -le 0)"
+        Write-Output "budget: budget_sec=$([long](Get-Prop $b 'budget_sec')) consumed_ms=$([long](Get-Prop $b 'consumed_ms')) remaining_ms=$remOut exhausted=$($remaining -le 0)"
     }
 }
 

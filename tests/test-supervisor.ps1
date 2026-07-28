@@ -793,6 +793,39 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     Assert-Equal 0 $smallBudgetObj.survivor_count_after_cleanup 'sub-second budget reports zero survivors after cleanup'
     Assert-Equal 0 $smallBudgetObj.temporal_candidate_count 'sub-second budget reports zero temporal candidates'
     Assert-Equal 0 $smallBudgetObj.temporal_candidate_count_after_cleanup 'sub-second budget reports zero temporal candidates after cleanup'
+
+    # Exercise a budget above ~2.1 million seconds with consumed and remaining
+    # milliseconds above Int32.MaxValue. An explicit short per-call deadline keeps the
+    # worker run finite without narrowing the cohort data.
+    $largeBudget = Join-Path $d 'large-budget.json'
+    Write-File $largeBudget (([ordered]@{
+        schema = 'orchestra/cohort-budget@1'
+        budget_sec = [long]5000000
+        consumed_ms = [long]2147483648
+        started_at = [DateTime]::UtcNow.ToString('o')
+        batch_id = ''
+        owner_id = ''
+    } | ConvertTo-Json -Compress))
+    $r4 = Invoke-Spv @('supervise', '--file', $w, '--args-json', (ArgsJson @('--code', '0')),
+        '--deadline-sec', '30', '--max-attempts', '1', '--budget-file', $largeBudget, '--json')
+    Assert-Exit $r4 0 'supervise accepts Int64 cohort budget fields'
+    $largeBudgetVerdict = $r4.Out | ConvertFrom-Json
+    $largeBudgetAfter = Read-File $largeBudget | ConvertFrom-Json
+    $expectedRemaining = ([long]$largeBudgetAfter.budget_sec * 1000) - [long]$largeBudgetAfter.consumed_ms
+    Assert-Equal ([long]5000000) ([long]$largeBudgetAfter.budget_sec) 'Consume-Budget preserves a multi-million-second budget'
+    Assert-True ([long]$largeBudgetAfter.consumed_ms -ge [long]2147483648) 'Consume-Budget preserves consumed_ms beyond Int32'
+    Assert-True ([long]$largeBudgetVerdict.budget_remaining_ms -gt [int]::MaxValue) 'supervise reports remaining milliseconds beyond Int32'
+    Assert-Equal $expectedRemaining ([long]$largeBudgetVerdict.budget_remaining_ms) 'supervise reports the exact Int64 remaining budget'
+
+    $largeBudgetJson = Invoke-Spv @('budget', '--budget-file', $largeBudget, '--json')
+    Assert-Exit $largeBudgetJson 0 'budget JSON inspection accepts Int64 cohort budget fields'
+    $largeBudgetObj = $largeBudgetJson.Out | ConvertFrom-Json
+    Assert-Equal ([long]$largeBudgetAfter.consumed_ms) ([long]$largeBudgetObj.consumed_ms) 'budget JSON preserves consumed_ms beyond Int32'
+    Assert-Equal $expectedRemaining ([long]$largeBudgetObj.remaining_ms) 'budget JSON reports the exact Int64 remaining budget'
+
+    $largeBudgetText = Invoke-Spv @('budget', '--budget-file', $largeBudget)
+    Assert-Exit $largeBudgetText 0 'budget text inspection accepts Int64 cohort budget fields'
+    Assert-Contains $largeBudgetText.Out "consumed_ms=$([long]$largeBudgetAfter.consumed_ms)" 'budget text preserves consumed_ms beyond Int32'
 }.Invoke()
 
 # =============================================================================
