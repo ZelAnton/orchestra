@@ -126,6 +126,7 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 # T-240). Dot-sourced like tools/policy-schema.ps1 just above.
 . (Join-Path $PSScriptRoot 'common.ps1')
 $script:ErrPrefix = 'PLCERR'  # coded-error tag decoded by the catch dispatcher
+$script:LockName = 'approvals' # label in the Acquire-Lock failure message
 
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...  (repeatable keys collect)
@@ -794,6 +795,41 @@ function Get-ApprovalDir {
     else { Fail 2 "provide --work <.work dir> or --dir <approvals dir>" }
     return (Join-Path $work 'approvals')
 }
+function Get-ApprovalLockPath {
+    $dir = Get-ApprovalDir
+    if (-not (Test-Path -LiteralPath $dir)) {
+        [void][System.IO.Directory]::CreateDirectory($dir)
+    }
+    return (Join-Path $dir 'approvals.lock')
+}
+
+# Acquire through the shared primitive. The optional test signal is emitted only after an
+# atomic CreateNew probe has actually observed the approval lock as contended. Regression
+# tests use this handshake to place two real decision processes behind the same held lock
+# before releasing them; normal invocations do not set the environment variable.
+function Acquire-ApprovalLock {
+    param([string]$LockPath)
+    $waitSignal = [Environment]::GetEnvironmentVariable('POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL')
+    if ($waitSignal) {
+        $probe = $null
+        try {
+            $probe = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        } catch [System.IO.IOException] {
+            $signalDir = Split-Path -Parent $waitSignal
+            if ($signalDir -and -not (Test-Path -LiteralPath $signalDir)) {
+                [void][System.IO.Directory]::CreateDirectory($signalDir)
+            }
+            [System.IO.File]::WriteAllText($waitSignal, 'contended', (New-Object System.Text.UTF8Encoding($false)))
+        } finally {
+            if ($null -ne $probe) {
+                $probe.Dispose()
+                Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    Acquire-Lock $LockPath
+}
+
 function Write-JsonAtomic {
     param([string]$Path, $Obj)
     $dir = Split-Path -Parent $Path
@@ -889,77 +925,89 @@ function Cmd-ApprovalRequest {
     $ph = Resolve-PolicyHash
     $id = 'apr-' + (Get-Sha256Hex "$subject|$reason|$fp|$ph").Substring(0, 32)
 
-    $existing = Read-ApprovalById $id
-    if ($null -ne $existing) {
-        # Idempotent: the SAME request already exists (open OR decided). Never recreate it -
-        # a resume of the same gate reuses the same one-time id and its decision, if any.
-        $state = 'existing'
-        if ($autoApprove -and (JProp $existing 'decision') -eq '') {
-            $now = Get-ApprovalNow
-            $deadline = JProp $existing 'deadline'
-            $pastDeadline = $false
-            if ($deadline -ne '') {
-                try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { $pastDeadline = $true }
+    $lock = Get-ApprovalLockPath
+    Acquire-ApprovalLock $lock
+    try {
+        $existing = Read-ApprovalById $id
+        if ($null -ne $existing) {
+            # Idempotent: the SAME request already exists (open OR decided). Never recreate it -
+            # a resume of the same gate reuses the same one-time id and its decision, if any.
+            $state = 'existing'
+            if ($autoApprove -and (JProp $existing 'decision') -eq '') {
+                $now = Get-ApprovalNow
+                $deadline = JProp $existing 'deadline'
+                $pastDeadline = $false
+                if ($deadline -ne '') {
+                    try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { $pastDeadline = $true }
+                }
+                if (-not $pastDeadline) {
+                    Set-SystemAutoApproval $existing $now
+                    Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $existing
+                    $state = 'existing-auto-approved'
+                }
             }
-            if (-not $pastDeadline) {
-                Set-SystemAutoApproval $existing $now
-                Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $existing
-                $state = 'existing-auto-approved'
-            }
+            Emit-Approval $existing $state
+            return
         }
-        Emit-Approval $existing $state
-        return
+        $now = Get-ApprovalNow
+        $deadlineSec = if ($opts.ContainsKey('deadline-sec') -and [string]$opts['deadline-sec'] -match '^\d+$') { [int]$opts['deadline-sec'] } else { Get-ConfigInt 'APPROVAL_DEADLINE_SEC' 86400 }
+        $rec = [ordered]@{
+            schema      = 'orchestra/approval@1'
+            id          = $id
+            subject     = $subject
+            task        = [string](Opt 'task' '')
+            batch       = [string](Opt 'batch' '')
+            reason      = $reason
+            fingerprint = $fp
+            policy_hash = $ph
+            created_at  = (Format-Utc $now)
+            deadline    = (Format-Utc ($now.AddSeconds($deadlineSec)))
+            decision    = ''
+            decided_by  = ''
+            decided_at  = ''
+            note        = ''
+        }
+        $state = 'created'
+        if ($autoApprove) {
+            Set-SystemAutoApproval $rec $now
+            $state = 'created-auto-approved'
+        }
+        Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
+        Emit-Approval ([pscustomobject]$rec) $state
+    } finally {
+        Release-Lock $lock
     }
-    $now = Get-ApprovalNow
-    $deadlineSec = if ($opts.ContainsKey('deadline-sec') -and [string]$opts['deadline-sec'] -match '^\d+$') { [int]$opts['deadline-sec'] } else { Get-ConfigInt 'APPROVAL_DEADLINE_SEC' 86400 }
-    $rec = [ordered]@{
-        schema      = 'orchestra/approval@1'
-        id          = $id
-        subject     = $subject
-        task        = [string](Opt 'task' '')
-        batch       = [string](Opt 'batch' '')
-        reason      = $reason
-        fingerprint = $fp
-        policy_hash = $ph
-        created_at  = (Format-Utc $now)
-        deadline    = (Format-Utc ($now.AddSeconds($deadlineSec)))
-        decision    = ''
-        decided_by  = ''
-        decided_at  = ''
-        note        = ''
-    }
-    $state = 'created'
-    if ($autoApprove) {
-        Set-SystemAutoApproval $rec $now
-        $state = 'created-auto-approved'
-    }
-    Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
-    Emit-Approval ([pscustomobject]$rec) $state
 }
 
 function Cmd-ApprovalDecide {
     param([string]$Decision)
     $id = Require-Opt 'id'
     $by = Require-Opt 'by'
-    $rec = Read-ApprovalById $id
-    if ($null -eq $rec) { Fail 2 "no approval request with id '$id'" }
-    $prior = JProp $rec 'decision'
-    if ($prior -ne '') {
-        Fail 11 "approval id '$id' is already $prior by '$(JProp $rec 'decided_by')' at $(JProp $rec 'decided_at') - a one-time id cannot be decided twice"
+    $lock = Get-ApprovalLockPath
+    Acquire-ApprovalLock $lock
+    try {
+        $rec = Read-ApprovalById $id
+        if ($null -eq $rec) { Fail 2 "no approval request with id '$id'" }
+        $prior = JProp $rec 'decision'
+        if ($prior -ne '') {
+            Fail 11 "approval id '$id' is already $prior by '$(JProp $rec 'decided_by')' at $(JProp $rec 'decided_at') - a one-time id cannot be decided twice"
+        }
+        $now = Get-ApprovalNow
+        $deadline = JProp $rec 'deadline'
+        if ($deadline -ne '') {
+            try { $dl = [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime } catch { $dl = [DateTime]::MaxValue }
+            if ($now -gt $dl) { Fail 11 "approval id '$id' expired at $deadline (no answer by the deadline is a fail-closed rejection); issue a fresh request" }
+        }
+        $rec.decision = $Decision
+        $rec.decided_by = $by
+        $rec.decided_at = (Format-Utc $now)
+        $rec.note = [string](Opt 'note' '')
+        Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
+        Emit-Approval $rec "decided-$Decision"
+        if ($Decision -eq 'reject') { Fail 11 "approval id '$id' rejected by '$by'" }
+    } finally {
+        Release-Lock $lock
     }
-    $now = Get-ApprovalNow
-    $deadline = JProp $rec 'deadline'
-    if ($deadline -ne '') {
-        try { $dl = [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime } catch { $dl = [DateTime]::MaxValue }
-        if ($now -gt $dl) { Fail 11 "approval id '$id' expired at $deadline (no answer by the deadline is a fail-closed rejection); issue a fresh request" }
-    }
-    $rec.decision = $Decision
-    $rec.decided_by = $by
-    $rec.decided_at = (Format-Utc $now)
-    $rec.note = [string](Opt 'note' '')
-    Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
-    Emit-Approval $rec "decided-$Decision"
-    if ($Decision -eq 'reject') { Fail 11 "approval id '$id' rejected by '$by'" }
 }
 
 function Cmd-ApprovalStatus {
@@ -978,40 +1026,49 @@ function Cmd-ApprovalStatus {
         $curPh = Resolve-PolicyHash
         $id = 'apr-' + (Get-Sha256Hex "$subject|$reason|$curFp|$curPh").Substring(0, 32)
     }
-    $rec = Read-ApprovalById $id
-    if ($null -eq $rec) {
-        Write-ApprovalStatus 'none' $id $null $false $false
-        Say "NONE no approval request '$id' on file - one must be requested (fail-closed: not approved)"
-        Fail 11 "no approval request '$id'"
+    $lock = ''
+    if ($autoApprove) {
+        $lock = Get-ApprovalLockPath
+        Acquire-ApprovalLock $lock
     }
-    # Freshness inputs: recompute the CURRENT fingerprint/policy when the caller supplied the
-    # inputs to derive them (or take the explicit --fingerprint/--policy-hash). If an input is
-    # absent the corresponding current value stays '' = freshness UNKNOWN for that dimension -
-    # NOT "assume fresh". Below, the approve branch REFUSES to report `approved` while either
-    # value is unknown (fail-closed), so a bare `--id` query can never pass off an unchecked
-    # approval as still valid. For a still-open or rejected request an unknown value stays inert
-    # (an unknown '' below reads as "no evidence it changed", never a manufactured stale verdict):
-    # such requests are non-approvals regardless, so freshness inputs are not forced on them.
-    if ($curFp -eq '') { if ($opts.ContainsKey('fingerprint') -or $opts.ContainsKey('paths-from') -or $opts.ContainsKey('path')) { $curFp = Resolve-Fingerprint } }
-    if ($curPh -eq '') { if ($opts.ContainsKey('policy-hash') -or $opts.ContainsKey('policy') -or $opts.ContainsKey('work')) { $curPh = Resolve-PolicyHash } }
-    $storedFp = JProp $rec 'fingerprint'
-    $storedPh = JProp $rec 'policy_hash'
-    $fpFresh = ($curFp -eq '' -or [string]::Equals($curFp, $storedFp, [System.StringComparison]::OrdinalIgnoreCase))
-    $phFresh = ($curPh -eq '' -or [string]::Equals($curPh, $storedPh, [System.StringComparison]::OrdinalIgnoreCase))
-    $fresh = ($fpFresh -and $phFresh)
-    $decision = JProp $rec 'decision'
-    $now = Get-ApprovalNow
-    $deadline = JProp $rec 'deadline'
-    $pastDeadline = $false
-    if ($deadline -ne '') { try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { } }
+    try {
+        $rec = Read-ApprovalById $id
+        if ($null -eq $rec) {
+            Write-ApprovalStatus 'none' $id $null $false $false
+            Say "NONE no approval request '$id' on file - one must be requested (fail-closed: not approved)"
+            Fail 11 "no approval request '$id'"
+        }
+        # Freshness inputs: recompute the CURRENT fingerprint/policy when the caller supplied the
+        # inputs to derive them (or take the explicit --fingerprint/--policy-hash). If an input is
+        # absent the corresponding current value stays '' = freshness UNKNOWN for that dimension -
+        # NOT "assume fresh". Below, the approve branch REFUSES to report `approved` while either
+        # value is unknown (fail-closed), so a bare `--id` query can never pass off an unchecked
+        # approval as still valid. For a still-open or rejected request an unknown value stays inert
+        # (an unknown '' below reads as "no evidence it changed", never a manufactured stale verdict):
+        # such requests are non-approvals regardless, so freshness inputs are not forced on them.
+        if ($curFp -eq '') { if ($opts.ContainsKey('fingerprint') -or $opts.ContainsKey('paths-from') -or $opts.ContainsKey('path')) { $curFp = Resolve-Fingerprint } }
+        if ($curPh -eq '') { if ($opts.ContainsKey('policy-hash') -or $opts.ContainsKey('policy') -or $opts.ContainsKey('work')) { $curPh = Resolve-PolicyHash } }
+        $storedFp = JProp $rec 'fingerprint'
+        $storedPh = JProp $rec 'policy_hash'
+        $fpFresh = ($curFp -eq '' -or [string]::Equals($curFp, $storedFp, [System.StringComparison]::OrdinalIgnoreCase))
+        $phFresh = ($curPh -eq '' -or [string]::Equals($curPh, $storedPh, [System.StringComparison]::OrdinalIgnoreCase))
+        $fresh = ($fpFresh -and $phFresh)
+        $decision = JProp $rec 'decision'
+        $now = Get-ApprovalNow
+        $deadline = JProp $rec 'deadline'
+        $pastDeadline = $false
+        if ($deadline -ne '') { try { $pastDeadline = ($now -gt [System.DateTimeOffset]::Parse($deadline, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal).UtcDateTime) } catch { } }
 
-    # A status-only crash recovery may not repeat approval-request first. Consume a still-live
-    # pending request here too, but only after the caller supplied BOTH freshness inputs and
-    # they matched. Rejected, expired, stale and already-consumed records remain terminal.
-    if ($autoApprove -and $decision -eq '' -and $curFp -ne '' -and $curPh -ne '' -and $fresh -and -not $pastDeadline) {
-        Set-SystemAutoApproval $rec $now
-        Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
-        $decision = 'approve'
+        # A status-only crash recovery may not repeat approval-request first. Consume a still-live
+        # pending request here too, but only after the caller supplied BOTH freshness inputs and
+        # they matched. Rejected, expired, stale and already-consumed records remain terminal.
+        if ($autoApprove -and $decision -eq '' -and $curFp -ne '' -and $curPh -ne '' -and $fresh -and -not $pastDeadline) {
+            Set-SystemAutoApproval $rec $now
+            Write-JsonAtomic (Join-Path (Get-ApprovalDir) ($id + '.json')) $rec
+            $decision = 'approve'
+        }
+    } finally {
+        if ($lock -ne '') { Release-Lock $lock }
     }
 
     if ($decision -eq 'approve') {
