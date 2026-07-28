@@ -962,4 +962,61 @@ exit $rc
         $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'rejected')
         Assert-Equal 0 $r.ExitCode '[anchored-proposal-id] exact proposal token remains accepted'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 22: explicit `propose --kind proposal --id` is anchored -----
+    # (task T-338): a stray prefix/suffix must not be silently swallowed into a
+    # valid id by an unanchored regex.
+    $W = New-Work
+    try {
+        foreach ($bad in @('TP-005x', 'P-1 garbage', 'P-001suffix', 'XP-001')) {
+            $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', "Bad id $bad", '--body', 'x', '--id', $bad)
+            Assert-Equal 2 $r.ExitCode "[proposal-explicit-id-anchored] '$bad' rejected with exit 2"
+            Assert-Match $r.Output 'invalid --id for --kind proposal' "[proposal-explicit-id-anchored] '$bad' reports the expected proposal id form"
+        }
+        Assert-Equal 0 (Get-QueueIds $W).Count '[proposal-explicit-id-anchored] no malformed id created a queue task'
+        Assert-True (-not ((Read-Queue $W) -match 'kind: proposal')) '[proposal-explicit-id-anchored] no proposal record was created either'
+
+        $r = Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Good id proposal', '--body', 'x', '--id', 'P-050')
+        Assert-Equal 0 $r.ExitCode '[proposal-explicit-id-anchored] well-formed --id still accepted'
+        Assert-Match $r.Output 'id=P-050' '[proposal-explicit-id-anchored] requested id preserved'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 23: `classify-proposal --tasks` is validated per-token ------
+    # (task T-338): each comma-separated token must be a complete T-NNN id, not
+    # merely contain one, mirroring Get-PredecessorsArg/Cmd-InboxDrain.
+    $W = New-Work
+    try {
+        Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Needs conversion', '--body', 'x') | Out-Null   # P-001
+        Propose $W 'Created task one' 'x' | Out-Null   # T-001
+        Propose $W 'Created task two' 'x' | Out-Null   # T-002
+
+        foreach ($bad in @('TT-123abc', 'foo', 'T-001,bogus')) {
+            $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'converted', '--tasks', $bad)
+            Assert-Equal 2 $r.ExitCode "[classify-tasks-anchored] '$bad' rejected as an invalid --tasks token"
+            Assert-Match $r.Output 'invalid --tasks token' "[classify-tasks-anchored] '$bad' names the invalid-token diagnostic"
+        }
+        Assert-Match (Read-Queue $W) 'status: proposed' '[classify-tasks-anchored] proposal remains unconverted after rejected attempts'
+
+        $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'converted', '--tasks', 'T-001,T-002')
+        Assert-Equal 0 $r.ExitCode '[classify-tasks-anchored] valid comma-separated list accepted'
+        Assert-Match (Read-Queue $W) 'Converted: T-001, T-002' '[classify-tasks-anchored] both valid tasks recorded'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 24: --tasks stays optional for outcomes that do not require it
+    # (task T-338 / K-049,K-073,K-082): tightened per-token validation must not
+    # regress the legitimate empty/absent --tasks case for non-'converted' outcomes.
+    $W = New-Work
+    try {
+        Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Deferred idea', '--body', 'x') | Out-Null   # P-001
+        $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'deferred', '--tasks', 'not-a-task')
+        Assert-Equal 2 $r.ExitCode '[classify-tasks-not-required] non-empty malformed --tasks is still rejected for a non-converted outcome'
+        Assert-Match (Read-Queue $W) 'status: proposed' '[classify-tasks-not-required] malformed optional --tasks does not classify the proposal'
+
+        $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-001', '--outcome', 'deferred')
+        Assert-Equal 0 $r.ExitCode '[classify-tasks-not-required] deferred outcome with no --tasks still succeeds'
+
+        Run-Tool @('propose', '--work', $W, '--kind', 'proposal', '--title', 'Rejected idea', '--body', 'x') | Out-Null   # P-002
+        $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-002', '--outcome', 'rejected', '--tasks', '')
+        Assert-Equal 0 $r.ExitCode '[classify-tasks-not-required] rejected outcome with an empty --tasks value still succeeds'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }

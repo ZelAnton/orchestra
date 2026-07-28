@@ -809,7 +809,7 @@ function Invoke-ProposeProposal {
     $force = [bool](Opt 'force' $false)
     $explicitId = 0
     if ($opts.ContainsKey('id')) {
-        $m = [regex]::Match([string]$opts['id'], 'P-0*(\d+)')
+        $m = [regex]::Match([string]$opts['id'], '^P-0*(\d+)$')
         if (-not $m.Success) { Fail 2 "invalid --id for --kind proposal: expected P-NNN, got $([string]$opts['id'])" }
         $explicitId = [int]$m.Groups[1].Value
     }
@@ -856,6 +856,14 @@ function Cmd-ClassifyProposal {
     }
     $reason = [string](Opt 'reason' '')
     $tasksRaw = [string](Opt 'tasks' '')
+    $taskIds = New-Object System.Collections.Generic.List[int]
+    foreach ($part in $tasksRaw.Split(',')) {
+        $token = $part.Trim()
+        if (-not $token) { continue }
+        $tm = [regex]::Match($token, '^T-0*(\d+)$')
+        if (-not $tm.Success) { Fail 2 "invalid --tasks token '$token' (expected T-NNN)" }
+        [void]$taskIds.Add([int]$tm.Groups[1].Value)
+    }
 
     Acquire-Lock $paths.Lock
     try {
@@ -863,8 +871,6 @@ function Cmd-ClassifyProposal {
         $state = Read-QueueState $paths
         $p = Get-ProposalOrFail $state $id
         if ($outcome -eq 'converted') {
-            $taskIds = New-Object System.Collections.Generic.List[int]
-            foreach ($tm in [regex]::Matches($tasksRaw, 'T-0*(\d+)')) { [void]$taskIds.Add([int]$tm.Groups[1].Value) }
             if ($taskIds.Count -eq 0) { Fail 2 "outcome 'converted' requires --tasks `"T-a,T-b`" naming the created task id(s)" }
             $queueTaskIds = New-Object 'System.Collections.Generic.HashSet[int]'
             foreach ($t in (Get-StateTasks $state)) { [void]$queueTaskIds.Add($t.Id) }
