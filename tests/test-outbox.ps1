@@ -460,6 +460,21 @@ function Ref-UuidV5 {
     Assert-Equal 30000 $obj.round_durations[0].duration_ms 'metrics reports round wall-time (30s)'
     Assert-Equal 300000 $obj.critical_paths[0].critical_path_ms 'metrics reports captured->done critical path (5min)'
     Assert-NotContains $m.Out 'secret' 'metrics carries no sensitive text'
+
+    # A 31-day interval is greater than Int32.MaxValue milliseconds. Both timestamp-
+    # derived metric paths must preserve it as Int64 instead of terminating metrics with
+    # an OverflowException.
+    $longDir = New-TempDir; $longEvents = New-EventsFile $longDir
+    Invoke-Outbox @('append', '--events', $longEvents, '--batch-id', 'B-long', '--task-id', 'T-2147483648', '--type', 'task.captured', '--attempt', '1', '--occurred-at', '2026-01-01T00:00:00.000Z', '--payload', '{"level":"coder"}') | Out-Null
+    Invoke-Outbox @('append', '--events', $longEvents, '--batch-id', 'B-long', '--type', 'cohort.round_started', '--wave', '1', '--occurred-at', '2026-01-01T00:00:00.000Z', '--payload', '{"wave":1}') | Out-Null
+    Invoke-Outbox @('append', '--events', $longEvents, '--batch-id', 'B-long', '--type', 'cohort.round_closed', '--wave', '1', '--occurred-at', '2026-02-01T00:00:00.000Z', '--payload', '{"wave":1}') | Out-Null
+    Invoke-Outbox @('append', '--events', $longEvents, '--task-id', 'T-2147483648', '--type', 'task.status_changed', '--from', 'опубликована', '--to', 'выполнена', '--attempt', '1', '--round', '1', '--occurred-at', '2026-02-01T00:00:00.000Z', '--payload', '{"from":"опубликована","to":"выполнена"}') | Out-Null
+
+    $longMetrics = Invoke-Outbox @('metrics', '--events', $longEvents, '--json')
+    Assert-Exit $longMetrics 0 'metrics accepts timestamp intervals beyond Int32.MaxValue ms'
+    $longObj = $longMetrics.Out | ConvertFrom-Json
+    Assert-Equal ([long]2678400000) ([long]$longObj.round_durations[0].duration_ms) 'metrics preserves a 31-day round duration as Int64 milliseconds'
+    Assert-Equal ([long]2678400000) ([long]$longObj.critical_paths[0].critical_path_ms) 'metrics preserves a 31-day critical path as Int64 milliseconds'
 }.Invoke()
 
 # =============================================================================
