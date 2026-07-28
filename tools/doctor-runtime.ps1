@@ -89,6 +89,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 # $IsWindows does not exist under 5.1; the RuntimeInformation probe works everywhere.
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
+$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
 
 if (-not $ProjectRoot) { $ProjectRoot = (Get-Location).Path }
 if (-not $RepoRoot)    { $RepoRoot = Split-Path -Parent $PSScriptRoot }
@@ -222,9 +223,13 @@ if ($provider -ne 'codex') {
 } elseif (-not (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
     Write-Host 'FAIL Codex processor runtime missing beside cc-doctor; run cc-sync from the Orchestra checkout'
 } else {
-    & pwsh -NoProfile -File $nativeRuntime check -Root $ProjectRoot
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host ('FAIL Codex-native processor preflight exited ' + $LASTEXITCODE + '; run cc-sync and codex login, then retry')
+    $nativeArgs = @('-NoProfile')
+    if ($script:OnWindows) { $nativeArgs += @('-ExecutionPolicy', 'Bypass') }
+    $nativeArgs += @('-File', $nativeRuntime, 'check', '-Root', $ProjectRoot)
+    & $script:PsExe @nativeArgs
+    $nativeRc = $LASTEXITCODE
+    if ($nativeRc -ne 0) {
+        Write-Host ('FAIL Codex-native processor preflight exited ' + $nativeRc + '; run cc-sync and codex login, then retry')
     }
 }
 $nativeModel = Get-EnvTrimmed 'ORCHESTRA_CODEX_MODEL'
@@ -581,11 +586,10 @@ if (Test-Path -LiteralPath $lockDir) {
         # state-tx uses process exit codes (14 = no lease, 19 = legacy lock), so run it
         # in a child PowerShell process. Invoking the script in this runspace would let
         # its `exit` terminate cc-doctor itself.
-        $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
         $stateArgs = @('-NoProfile')
         if ($script:OnWindows) { $stateArgs += @('-ExecutionPolicy', 'Bypass') }
         $stateArgs += @('-File', $stateTx, 'status', '--work', $script:WorkDir, '--json')
-        $stateJson = & $psExe @stateArgs 2>$null
+        $stateJson = & $script:PsExe @stateArgs 2>$null
         $stateRc = $LASTEXITCODE
 
         if ($stateRc -eq 0 -and $stateJson) {
