@@ -87,6 +87,60 @@ function Invoke-Policy {
     return [pscustomobject]@{ ExitCode = $proc.ExitCode; Out = $outT.Result; Err = $errT.Result }
 }
 
+# Starts the real policy tool without waiting. POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL is
+# emitted only after the approval lock's atomic CreateNew probe observes contention, so
+# concurrency tests can establish a real blocked-at-the-lock handshake before release.
+function Start-PolicyAsync {
+    param(
+        [string[]]$ToolArgs,
+        [string]$LockWaitSignal,
+        [ValidateSet('', 'off', 'on', 'invalid')][string]$AutoApprove = ''
+    )
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $script:PsExe
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $script:Utf8
+    $psi.StandardErrorEncoding = $script:Utf8
+    $psi.Environment['ORCHESTRA_AUTO_APPROVE'] = $AutoApprove
+    $psi.Environment['POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL'] = $LockWaitSignal
+    foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
+        $psi.ArgumentList.Add($a)
+    }
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    return [pscustomobject]@{
+        Process = $proc
+        OutTask = $proc.StandardOutput.ReadToEndAsync()
+        ErrTask = $proc.StandardError.ReadToEndAsync()
+    }
+}
+
+function Complete-PolicyAsync {
+    param($Running, [int]$TimeoutMs, [string]$Label)
+    if (-not $Running.Process.WaitForExit($TimeoutMs)) {
+        try { $Running.Process.Kill($true) } catch { }
+        [void]$Running.Process.WaitForExit($TimeoutMs)
+        $script:Failures.Add("FAIL - ${Label}: child did not exit within ${TimeoutMs}ms")
+    }
+    return [pscustomobject]@{
+        ExitCode = $Running.Process.ExitCode
+        Out = $Running.OutTask.Result
+        Err = $Running.ErrTask.Result
+    }
+}
+
+function Wait-ForPath {
+    param([string]$Path, [int]$TimeoutMs)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $Path) { return $true }
+        Start-Sleep -Milliseconds 20
+    }
+    return (Test-Path -LiteralPath $Path)
+}
+
 function Assert-True { param([bool]$Cond, [string]$Msg) if (-not $Cond) { $script:Failures.Add("FAIL - $Msg") } }
 function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -ne $Actual) { $script:Failures.Add("FAIL - ${Msg}: expected [$Expected], got [$Actual]") } }
 function Assert-Exit { param($R, [int]$Code, [string]$Msg) if ($R.ExitCode -ne $Code) { $script:Failures.Add("FAIL - ${Msg}: expected exit $Code, got $($R.ExitCode) (out=[$($R.Out.Trim())] err=[$($R.Err.Trim())])") } }
@@ -981,6 +1035,153 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     $r = Invoke-Policy @('approval-request', '--work', $work, '--task', 'T-203', '--reason', 'human-review', '--fingerprint', 'aa', '--policy-hash', 'bb', '--json') -AutoApprove invalid
     Assert-Exit $r 2 'auto-approve: invalid environment value fails closed'
     Assert-OutMatch $r 'must be.*on.*off' 'auto-approve: invalid value diagnostic names the allowed contract'
+}.Invoke()
+
+# =============================================================================
+# 13. concurrent decisions: the approval id is consumed exactly once
+# =============================================================================
+{
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+
+    $request = Invoke-Policy @(
+        'approval-request', '--work', $work, '--task', 'T-204',
+        '--reason', 'human-review', '--fingerprint', 'race-fingerprint',
+        '--policy-hash', 'race-policy', '--deadline-sec', '3600',
+        '--now', '2026-01-01T00:00:00Z', '--json'
+    )
+    Assert-Exit $request 0 'approval concurrency: pending request is created'
+    $requestRecord = $request.Out.Trim() | ConvertFrom-Json
+    $approvalDir = Join-Path $work 'approvals'
+    $lockPath = Join-Path $approvalDir 'approvals.lock'
+    $holderScript = Join-Path $sb 'approval-lock-holder.ps1'
+    $holderReadySignal = Join-Path $sb 'holder-ready'
+    $holderReleaseSignal = Join-Path $sb 'holder-release'
+    $approveSignal = Join-Path $sb 'approve-contended'
+    $rejectSignal = Join-Path $sb 'reject-contended'
+
+    # A separate holder process owns the artificial lock for its entire lifetime and releases
+    # it through the same PID-checking primitive as production. The parent never removes the
+    # lock, so it cannot unlink a contender's newly-acquired lock after the handoff.
+    $holderText = @'
+param(
+    [Parameter(Mandatory)][string]$CommonPath,
+    [Parameter(Mandatory)][string]$LockPath,
+    [Parameter(Mandatory)][string]$ReadyPath,
+    [Parameter(Mandatory)][string]$ReleasePath,
+    [Parameter(Mandatory)][int]$TimeoutMs
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. $CommonPath
+$script:LockName = 'approval test holder'
+Acquire-Lock $LockPath
+try {
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($ReadyPath, "$PID", $utf8)
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while (-not (Test-Path -LiteralPath $ReleasePath) -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 20
+    }
+    if (-not (Test-Path -LiteralPath $ReleasePath)) {
+        throw 'timed out waiting for the contender-blocked release handshake'
+    }
+} finally {
+    Release-Lock $LockPath
+}
+'@
+    Write-Utf8 $holderScript $holderText
+    $holderPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $holderPsi.FileName = $script:PsExe
+    $holderPsi.UseShellExecute = $false
+    $holderPsi.CreateNoWindow = $true
+    $holderPsi.RedirectStandardOutput = $true
+    $holderPsi.RedirectStandardError = $true
+    $holderPsi.StandardOutputEncoding = $script:Utf8
+    $holderPsi.StandardErrorEncoding = $script:Utf8
+    foreach ($a in @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $holderScript,
+        '-CommonPath', (Join-Path (Split-Path -Parent $script:Tool) 'common.ps1'),
+        '-LockPath', $lockPath, '-ReadyPath', $holderReadySignal,
+        '-ReleasePath', $holderReleaseSignal, '-TimeoutMs', '60000'
+    )) {
+        $holderPsi.ArgumentList.Add($a)
+    }
+    $holderProcess = [System.Diagnostics.Process]::Start($holderPsi)
+    $holderOutTask = $holderProcess.StandardOutput.ReadToEndAsync()
+    $holderErrTask = $holderProcess.StandardError.ReadToEndAsync()
+    $holderReady = Wait-ForPath $holderReadySignal 20000
+    Assert-True $holderReady 'approval concurrency: separate holder owns approvals.lock before contender dispatch'
+
+    if ($holderReady) {
+        $approve = $null
+        $reject = $null
+        try {
+            $approve = Start-PolicyAsync -ToolArgs @(
+                'approval-approve', '--work', $work, '--id', $requestRecord.id,
+                '--by', 'operator-approve', '--now', '2026-01-01T00:01:00Z', '--json'
+            ) -LockWaitSignal $approveSignal
+            $reject = Start-PolicyAsync -ToolArgs @(
+                'approval-reject', '--work', $work, '--id', $requestRecord.id,
+                '--by', 'operator-reject', '--now', '2026-01-01T00:01:00Z', '--json'
+            ) -LockWaitSignal $rejectSignal
+
+            $approveBlocked = Wait-ForPath $approveSignal 20000
+            $rejectBlocked = Wait-ForPath $rejectSignal 20000
+            Assert-True $approveBlocked 'approval concurrency: approve is confirmed blocked on approvals.lock'
+            Assert-True $rejectBlocked 'approval concurrency: reject is confirmed blocked on approvals.lock'
+            if ($approveBlocked) {
+                Assert-True (-not $approve.Process.HasExited) 'approval concurrency: approve remains pending until the held lock is released'
+            }
+            if ($rejectBlocked) {
+                Assert-True (-not $reject.Process.HasExited) 'approval concurrency: reject remains pending until the held lock is released'
+            }
+        } finally {
+            # Release only through the holder that owns the PID recorded in approvals.lock.
+            # Wait for its confirmed completion before either contender result is collected.
+            Write-Utf8 $holderReleaseSignal 'release'
+            $holderExited = $holderProcess.WaitForExit(20000)
+            Assert-True $holderExited 'approval concurrency: holder completes its owner-checked release handshake'
+            if (-not $holderExited) {
+                try { $holderProcess.Kill($true) } catch { }
+                [void]$holderProcess.WaitForExit(20000)
+            }
+            if ($holderProcess.HasExited) {
+                Assert-Equal 0 $holderProcess.ExitCode "approval concurrency: holder exits cleanly (out=[$($holderOutTask.Result.Trim())] err=[$($holderErrTask.Result.Trim())])"
+            }
+        }
+
+        $approveResult = Complete-PolicyAsync $approve 20000 'approval concurrency: approve'
+        $rejectResult = Complete-PolicyAsync $reject 20000 'approval concurrency: reject'
+        $results = @($approveResult, $rejectResult)
+        $winners = @($results | Where-Object { -not [string]::IsNullOrWhiteSpace($_.Out) })
+        $losers = @($results | Where-Object { [string]::IsNullOrWhiteSpace($_.Out) })
+        Assert-Equal 1 $winners.Count 'approval concurrency: exactly one decision writes and emits a result'
+        Assert-Equal 1 $losers.Count 'approval concurrency: exactly one competing decision loses'
+
+        $artifact = Get-Content -LiteralPath (Join-Path $approvalDir "$($requestRecord.id).json") -Raw -Encoding utf8 | ConvertFrom-Json
+        Assert-True ($artifact.decision -in @('approve', 'reject')) 'approval concurrency: durable artifact contains one terminal decision'
+        if ($winners.Count -eq 1) {
+            $winnerRecord = $winners[0].Out.Trim() | ConvertFrom-Json
+            Assert-Equal "decided-$($artifact.decision)" $winnerRecord.state 'approval concurrency: emitted winner matches the durable terminal decision'
+            Assert-Equal $artifact.decided_by $winnerRecord.decided_by 'approval concurrency: winner identity is not overwritten'
+        }
+        if ($losers.Count -eq 1) {
+            Assert-OutMatch $losers[0] 'already (approve|reject).*one-time id cannot be decided twice' 'approval concurrency: loser receives an explicit one-time conflict'
+        }
+        Assert-True (-not (Test-Path -LiteralPath $lockPath)) 'approval concurrency: approvals.lock is released after both decisions'
+    } else {
+        # Do not run an overlap assertion without proof that the artificial holder owns the
+        # lock. Still signal/collect it so a setup failure cannot strand a child process.
+        Write-Utf8 $holderReleaseSignal 'release'
+        if (-not $holderProcess.WaitForExit(20000)) {
+            try { $holderProcess.Kill($true) } catch { }
+            [void]$holderProcess.WaitForExit(20000)
+        }
+        if ($holderProcess.HasExited) {
+            Assert-Equal 0 $holderProcess.ExitCode "approval concurrency: failed holder setup exits cleanly (out=[$($holderOutTask.Result.Trim())] err=[$($holderErrTask.Result.Trim())])"
+        }
+    }
 }.Invoke()
 
 # =============================================================================

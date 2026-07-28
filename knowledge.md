@@ -305,9 +305,14 @@ Processor и merger формируют описательные англоязы
   `approval-request` всё равно сохраняет обычный одноразовый артефакт, fingerprint кода,
   snapshot политики и deadline, но сразу записывает `decision=approve` с
   `decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; `approval-status` также может безопасно
-  потребить существующий свежий pending-запрос при crash recovery. `off`/unset оставляет
-  ручное решение, любое другое значение fail-closed. Это не Claude/Codex permission и не
-  ключ `.work/config.md`; агенту запрещено устанавливать переменную самому.
+  потребить существующий свежий pending-запрос при crash recovery. Весь read-check-write
+  цикл ручного решения и обеих веток auto-approve сериализуется общим
+  `.work/approvals/approvals.lock` через `Acquire-Lock`/`Release-Lock`, поэтому одноразовый
+  ID не может получить два решения, а системное решение не перетирает конкурентное
+  операторское. `Write-JsonAtomic` остаётся атомарной записью отдельного артефакта; лок
+  защищает именно составную транзакцию. `off`/unset оставляет ручное решение, любое другое
+  значение fail-closed. Это не Claude/Codex permission и не ключ `.work/config.md`; агенту
+  запрещено устанавливать переменную самому.
 - **Read-only агрегация эксплуатационных метрик (T-249).** `tools/metrics.ps1 aggregate`
   читает `.work/events.jsonl` ленивым построчным forward-decode (битая/оборванная строка
   пропускается независимо, последующие валидные события сохраняются), дедуплицирует по
@@ -1035,6 +1040,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/outbox-tx.lock` | краткоживущий атомарный лок дозаписи event-outbox (отдельный от `orchestrator.lock`/`queue-tx.lock`/`state-tx.lock`); держит `tools/outbox.ps1` на время одной дозаписи; обеспечивает single-writer инвариант `events.jsonl` |
 | `.work/events_cursor.json` | курсор референсного потребителя outbox (`tools/outbox.ps1 read`): byte-offset + доставленные `event_id` для дедупа; ведёт потребитель/тесты, не processor |
 | `.work/approvals/<apr-id>.json` | персистентный одноразовый запрос на человеческое подтверждение (T-095): subject (task/batch), причина (human-review/force-lock/policy-bypass), diff-фингерпринт затронутых путей, снапшот применённой политики, срок действия и решение; ведёт `tools/policy.ps1 approval-request`; approve/reject оператора потребляют ID ровно один раз; `approval-status` сверяет свежесть (истекает при смене кода/политики или к дедлайну — fail-closed). Системный operator pre-grant `ORCHESTRA_AUTO_APPROVE=on` автоматически потребляет только свежий pending-запрос с `decided_by=system-env:ORCHESTRA_AUTO_APPROVE`, не отменяя audit/fingerprint/policy checks; `off`/unset сохраняет ручной gate, invalid fail-closed. |
+| `.work/approvals/approvals.lock` | краткоживущий атомарный лок мутаций approval-артефактов: `tools/policy.ps1` держит его на всём read-check-write для ручного approve/reject, auto-approve существующей записи в `approval-request` и crash-recovery auto-approve в `approval-status`; атомарность отдельного JSON по-прежнему обеспечивает `Write-JsonAtomic` |
 | `.work/knowledge/` | runtime-KB целевого проекта при `KB:on` |
 | `.work/roadmap.md` | опциональная дорожная карта подключённого проекта: упорядоченные вехи (название/цель, статус `запланирована`/`текущая`/`достигнута`, проверяемый критерий достижения `Достижение:`) + сводка текущего состояния + машиночитаемая связь веха↔`T-ID` (поле `Задачи:` — какие задачи поставлены под веху; завершены = лежат в `Tasks_Done.md`, как readiness §11–§12); нормативный формат — `docs/roadmap_contract.md`. **Машинно-локальный рантайм-артефакт** (как `.work/knowledge/`), а не сеемый версионируемый шаблон (`config.example.md` этой задачей намеренно не трогается) и **без tx-интерфейса** на первом шаге (редкие, эффективно однопользовательские записи — обоснование в контракте, §11). Пишут человек-оператор/`thinker` (создание/переупорядочивание вех, пометка достигнутой); конвейер (`processor`)/популяторы в текущем шаге не пишут, лишь могут читать. Нет файла — деградация без ошибок (плоский бэклог, как раньше); не путать с `plans/LOOP_ORCHESTRA_ROADMAP.md` (план развития самой Orchestra, версионируемый) |
 

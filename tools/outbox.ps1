@@ -988,7 +988,7 @@ function Cmd-Metrics {
                     $w = if (Has-Prop $pl 'wave') { [string]$pl.wave } else { '?' }
                     $k = "$([string](Get-Prop $e 'batch_id'))|$w"
                     if ($roundStart.ContainsKey($k)) {
-                        $ms = [int]((To-Utc $e.occurred_at) - (To-Utc $roundStart[$k])).TotalMilliseconds
+                        $ms = [long]((To-Utc $e.occurred_at) - (To-Utc $roundStart[$k])).TotalMilliseconds
                         [void]$roundDur.Add([pscustomobject]@{ key = $k; duration_ms = $ms })
                     }
                 }
@@ -1031,7 +1031,7 @@ function Cmd-Metrics {
         $critical = New-Object System.Collections.Generic.List[object]
         foreach ($t in $taskDone.Keys) {
             if ($taskCaptured.ContainsKey($t)) {
-                $ms = [int]((To-Utc $taskDone[$t]) - (To-Utc $taskCaptured[$t])).TotalMilliseconds
+                $ms = [long]((To-Utc $taskDone[$t]) - (To-Utc $taskCaptured[$t])).TotalMilliseconds
                 [void]$critical.Add([pscustomobject]@{ task_id = $t; critical_path_ms = $ms })
             }
         }
