@@ -194,6 +194,12 @@ mirror-формы (в кавычках `~` тоже не раскрываетс�
   съедет bookmark лишь на реальном `jj new`/`commit`/`bookmark` (T-120). Всегда непусто (у `@`
   всегда есть `change_id`) — фиксируй PRE и в Режиме 1.
 
+Все четыре VCS-чувствительные команды runtime — `working-copy-status`, `guard-head`,
+`guard-commit`, `cleanup` — требуют явный `--vcs git|jj` и завершаются с contract-error
+вместо Git-default при пропуске/неподдерживаемом значении. Каждый канонический вызов ниже
+поэтому передаёт именно полученный от processor `VCS`; не сокращай команды удалением
+`--vcs`, даже если текущий проект выглядит Git-only.
+
 Сам ты VCS **не мутируешь** — только read-only (`guard-head`/`rev-parse`/`diff`/`log`/`status`).
 
 # Построение промпта codex

@@ -181,9 +181,13 @@ Processor и merger формируют описательные англоязы
   `ЭСКАЛАЦИЯ codex: …`. Оба адаптера зовут его коротким стабильным контрактом (команды
   `run`/`build-argv`/`classify`/`check-diff`/`working-copy-status`/
   `validate-reviewer`/`broker-validate`/`broker-run`/
-  `guard-commit`/`cleanup`/`map-sentinel`) — **один** источник сборки команды, без двух
+  `guard-head`/`guard-commit`/`cleanup`/`map-sentinel`) — **один** источник сборки команды, без двух
   расходящихся вариантов. Публичное поведение (сентинелы, «нет коммитов от codex»,
   нормализованный `codex exec`, форматы `codex_out.md`/`codex_review_out.md`) сохранено.
+  Все четыре VCS-чувствительные команды (`working-copy-status`, `guard-head`,
+  `guard-commit`, `cleanup`) требуют явный `--vcs git|jj` через один fail-closed
+  валидатор (exit 2 при отсутствии/неподдерживаемом значении): ни fingerprint вершины,
+  ни post-guard, ни потенциально деструктивная очистка не имеют скрытого Git-default.
   Детерминированные тесты с fake `codex` — `tests/test-codex-runtime.ps1` (в CI
   `.github/workflows/ci.yml`, шаг «Check Codex runtime behaviour»); написаны переносимо и
   готовы к POSIX-прогону; при наличии jj отдельно воспроизводят colocated-состояние, где

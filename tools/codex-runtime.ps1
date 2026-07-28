@@ -81,17 +81,20 @@
                         bookmarks - NOT the per-edit `commit_id`, so a plain file edit is
                         never mistaken for a commit, T-120). The single source both the
                         PRE capture and guard-commit's POST use, so they cannot diverge.
+                        Requires an explicit --vcs; no Git fallback is permitted.
       guard-commit      No-commit guard: compare the worktree head (see guard-head)
                         against a pre-run value; optionally soft-reset (git) so the
                         processor still commits the leftover working-tree changes. For jj
                         a moved change_id / bookmark, OR a now-divergent `@` (its change_id
                         maps to >1 visible commit - T-255), is reported as `jj-drift` (never
                         a rewrite, never an auto-reconcile); the result carries a `divergent`
-                        flag. Never --hard, never touches a path outside the worktree.
+                        flag. Requires an explicit --vcs. Never --hard, never touches a path
+                        outside the worktree.
       cleanup           Discard the call's own working-copy changes after a failure so a
                         Claude fallback starts clean. In a main-tree call (Phase 5.4)
                         never runs `git clean -fd` (that would delete the untracked
-                        .work/); only tracked files are reverted.
+                        .work/); only tracked files are reverted. Requires an explicit
+                        --vcs so omitted routing can never default to destructive Git cleanup.
       map-sentinel      Map a failure kind/class/detail to the exact escalation sentinel
                         line the processor recognizes (`ЭСКАЛАЦИЯ codex: ...`).
 
@@ -199,6 +202,15 @@ function Emit-Json {
 $AllowedSandbox = @('read-only', 'workspace-write')
 $AllowedReasoning = @('low', 'medium', 'high', 'xhigh')
 $AllowedNetwork = @('on', 'off')
+$AllowedVcs = @('git', 'jj')
+
+function Require-Vcs {
+    $vcs = Require-Opt 'vcs'
+    if ($vcs -notin $AllowedVcs) {
+        Fail 2 "invalid --vcs '$vcs' (allowed: git | jj)"
+    }
+    return $vcs
+}
 
 # The Orchestra-pinned fail-closed approval policy (T-069): every codex exec call
 # carries it so a sandbox-init failure returns an error instead of silently running
@@ -788,7 +800,7 @@ function Invoke-JjViewWarmup {
 function Get-WorkingCopyStatus {
     param([string]$Worktree, [string]$Vcs)
 
-    if ($Vcs -notin @('git', 'jj')) {
+    if ($Vcs -notin $AllowedVcs) {
         Fail 2 "invalid --vcs '$Vcs' (allowed: git | jj)"
     }
 
@@ -960,7 +972,7 @@ function Cmd-CheckDiff {
 
 function Cmd-WorkingCopyStatus {
     $wt = Require-Opt 'worktree'
-    $vcs = Require-Opt 'vcs'
+    $vcs = Require-Vcs
     Emit-Json (Get-WorkingCopyStatus -Worktree $wt -Vcs $vcs)
 }
 
@@ -1080,13 +1092,13 @@ function Cmd-Head {
     # diverge (no duplicated jj template / revset to drift out of sync). Emits a raw
     # string (not JSON): the adapter captures it directly into a shell variable.
     $wt = Require-Opt 'worktree'
-    $vcs = [string](Opt 'vcs' 'git')
+    $vcs = Require-Vcs
     Write-Output (Get-Head -Worktree $wt -Vcs $vcs)
 }
 
 function Cmd-GuardCommit {
     $wt = Require-Opt 'worktree'
-    $vcs = [string](Opt 'vcs' 'git')
+    $vcs = Require-Vcs
     $pre = [string](Opt 'pre' '')
     $post = Get-Head -Worktree $wt -Vcs $vcs
     $committed = ($pre -ne '') -and ($post -ne '') -and ($pre -ne $post)
@@ -1121,7 +1133,7 @@ function Cmd-GuardCommit {
 
 function Cmd-Cleanup {
     $wt = Require-Opt 'worktree'
-    $vcs = [string](Opt 'vcs' 'git')
+    $vcs = Require-Vcs
     $mainTree = [bool](Opt 'main-tree' $false)
     $actions = New-Object System.Collections.Generic.List[string]
     if ($vcs -eq 'jj') {

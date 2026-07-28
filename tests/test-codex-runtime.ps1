@@ -24,6 +24,8 @@
       * invalid codex output (reviewer RECHECK/NEW validation, oversized diff);
       * active-VCS working-copy status in a colocated jj+git repo where Git is
         clean but jj has a substantive uncommitted working-copy revision;
+      * explicit-VCS contract enforcement for working-copy-status, guard-head,
+        guard-commit, and cleanup (missing/unsupported --vcs fails closed);
       * cleanup correctness after a failure (own worktree only; a main-tree call
         never deletes the untracked .work/);
       * failure-class -> escalation-sentinel mapping.
@@ -659,6 +661,36 @@ exit 0
 
     $e = Invoke-Runtime -RuntimeArgs @('map-sentinel', '--kind', 'failed', '--class', 'network', '--detail', 'broker gave up')
     Assert-True ($e.Out.Trim() -like '*CODEX_FAILED*ENV_LIMIT/network*broker gave up*') 'sentinel: ENV_LIMIT/<class> mapping'
+}.Invoke()
+
+# =============================================================================
+# 11a. Every VCS-sensitive worktree command requires the same explicit --vcs.
+# Missing or unsupported routing must fail before any Git/jj fallback can run.
+# =============================================================================
+{
+    $wt = New-TempDir
+    $marker = Join-Path $wt 'must-survive.txt'
+    [System.IO.File]::WriteAllText($marker, 'untouched', $script:Utf8)
+    $commands = @(
+        [pscustomobject]@{ Name = 'working-copy-status'; Args = @('working-copy-status', '--worktree', $wt) }
+        [pscustomobject]@{ Name = 'guard-head';         Args = @('guard-head', '--worktree', $wt) }
+        [pscustomobject]@{ Name = 'guard-commit';       Args = @('guard-commit', '--worktree', $wt, '--pre', 'before') }
+        [pscustomobject]@{ Name = 'cleanup';            Args = @('cleanup', '--worktree', $wt) }
+    )
+
+    foreach ($case in $commands) {
+        $missing = Invoke-Runtime -RuntimeArgs @($case.Args)
+        Assert-Equal 2 $missing.ExitCode "$($case.Name): missing --vcs fails with the contract error code"
+        Assert-Equal 'codex-runtime: missing required option --vcs' $missing.Err.Trim() "$($case.Name): missing --vcs has the shared diagnostic"
+        Assert-True ($null -eq $missing.Json) "$($case.Name): missing --vcs emits no success JSON"
+
+        $invalid = Invoke-Runtime -RuntimeArgs (@($case.Args) + @('--vcs', 'svn'))
+        Assert-Equal 2 $invalid.ExitCode "$($case.Name): unsupported --vcs fails with the contract error code"
+        Assert-Equal "codex-runtime: invalid --vcs 'svn' (allowed: git | jj)" $invalid.Err.Trim() "$($case.Name): unsupported --vcs has the shared diagnostic"
+        Assert-True ($null -eq $invalid.Json) "$($case.Name): unsupported --vcs emits no success JSON"
+    }
+
+    Assert-Equal 'untouched' ([System.IO.File]::ReadAllText($marker)) 'explicit-VCS contract: failed cleanup routing leaves the worktree untouched'
 }.Invoke()
 
 # =============================================================================
