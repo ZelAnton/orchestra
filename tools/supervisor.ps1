@@ -1198,7 +1198,7 @@ function Cmd-Observe {
     $mode = [string](Opt 'mode' 'full')
     $source = [string](Opt 'source' 'claude')
     $batchId = [string](Opt 'batch-id' '')
-    $budgetMs = if (Has-Prop $v 'budget_remaining_ms') { [int]$v.budget_remaining_ms } else { -1 }
+    $budgetMs = if (Has-Prop $v 'budget_remaining_ms') { [long]$v.budget_remaining_ms } else { [long]-1 }
 
     # T-248: best-effort claude usage from the captured stream-json transcript (--stdout-file,
     # optional). Never fatal, never emits raw text - only the non-sensitive integer counts.

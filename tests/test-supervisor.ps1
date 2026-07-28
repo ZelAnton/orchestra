@@ -798,6 +798,7 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     # milliseconds above Int32.MaxValue. An explicit short per-call deadline keeps the
     # worker run finite without narrowing the cohort data.
     $largeBudget = Join-Path $d 'large-budget.json'
+    $largeBudgetResult = Join-Path $d 'large-budget-result.json'
     Write-File $largeBudget (([ordered]@{
         schema = 'orchestra/cohort-budget@1'
         budget_sec = [long]5000000
@@ -807,15 +808,25 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
         owner_id = ''
     } | ConvertTo-Json -Compress))
     $r4 = Invoke-Spv @('supervise', '--file', $w, '--args-json', (ArgsJson @('--code', '0')),
-        '--deadline-sec', '30', '--max-attempts', '1', '--budget-file', $largeBudget, '--json')
+        '--deadline-sec', '30', '--max-attempts', '1', '--budget-file', $largeBudget,
+        '--result-file', $largeBudgetResult, '--json')
     Assert-Exit $r4 0 'supervise accepts Int64 cohort budget fields'
     $largeBudgetVerdict = $r4.Out | ConvertFrom-Json
+    $largeBudgetDurable = Read-File $largeBudgetResult | ConvertFrom-Json
     $largeBudgetAfter = Read-File $largeBudget | ConvertFrom-Json
     $expectedRemaining = ([long]$largeBudgetAfter.budget_sec * 1000) - [long]$largeBudgetAfter.consumed_ms
     Assert-Equal ([long]5000000) ([long]$largeBudgetAfter.budget_sec) 'Consume-Budget preserves a multi-million-second budget'
     Assert-True ([long]$largeBudgetAfter.consumed_ms -ge [long]2147483648) 'Consume-Budget preserves consumed_ms beyond Int32'
     Assert-True ([long]$largeBudgetVerdict.budget_remaining_ms -gt [int]::MaxValue) 'supervise reports remaining milliseconds beyond Int32'
     Assert-Equal $expectedRemaining ([long]$largeBudgetVerdict.budget_remaining_ms) 'supervise reports the exact Int64 remaining budget'
+    Assert-Equal $expectedRemaining ([long]$largeBudgetDurable.budget_remaining_ms) 'result-file persists the exact Int64 remaining budget'
+
+    $largeBudgetObserved = Invoke-Spv @('observe', '--result-file', $largeBudgetResult,
+        '--task-id', 'T-336', '--role', 'coder', '--mode', 'full', '--json')
+    Assert-Exit $largeBudgetObserved 0 'observe accepts an Int64 remaining budget from the result-file'
+    $largeBudgetObservedObj = $largeBudgetObserved.Out | ConvertFrom-Json
+    Assert-Equal $expectedRemaining ([long]$largeBudgetObservedObj.budget_remaining_ms) 'observe preserves the exact Int64 remaining budget'
+    Assert-Contains $largeBudgetObservedObj.journal_line "budget_remaining_ms=$expectedRemaining" 'observe journal projection preserves the exact Int64 remaining budget'
 
     $largeBudgetJson = Invoke-Spv @('budget', '--budget-file', $largeBudget, '--json')
     Assert-Exit $largeBudgetJson 0 'budget JSON inspection accepts Int64 cohort budget fields'
