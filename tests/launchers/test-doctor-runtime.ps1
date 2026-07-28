@@ -34,7 +34,7 @@ $script:Failures = New-Object System.Collections.ArrayList
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
-
+$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
 $script:Pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue)
 if (-not $script:Pwsh) {
     Write-Host 'SKIP - pwsh not found on PATH; the cross-platform doctor runtime requires PowerShell 7.'
@@ -75,7 +75,8 @@ function Invoke-Doctor {
     param(
         [pscustomobject]$Case,
         [hashtable]$Env = @{},
-        [string]$Runtime = $script:Runtime
+        [string]$Runtime = $script:Runtime,
+        [string]$PowerShellHost = $script:Pwsh.Source
     )
     # Env vars the runtime consults from the process environment (CODEX_CODER/
     # CODEX_REVIEWER env fallback, CC_CODEX_EXEC_GRANT session grant). Set them on the
@@ -101,7 +102,7 @@ function Invoke-Doctor {
             '-ProjectRoot', $Case.Proj, '-HomeDir', $Case.Home, '-RepoRoot', $Case.Home)
         $outFile = [System.IO.Path]::GetTempFileName()
         $errFile = [System.IO.Path]::GetTempFileName()
-        $p = Start-Process -FilePath $script:Pwsh.Source -ArgumentList $rtArgs -NoNewWindow -Wait -PassThru `
+        $p = Start-Process -FilePath $PowerShellHost -ArgumentList $rtArgs -NoNewWindow -Wait -PassThru `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile
         $out = Get-Content -LiteralPath $outFile -Raw -ErrorAction SilentlyContinue
         $err = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
@@ -161,6 +162,35 @@ Assert-Contains $r.Out 'OK   ORCHESTRA_PROVIDER = codex (Claude-free native Code
 Assert-Contains $r.Out 'FAIL Codex-native processor preflight exited' 'provider codex: incomplete native package fails preflight visibly'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_PROVIDER = 'invalid' }
 Assert-Contains $r.Out "FAIL ORCHESTRA_PROVIDER: invalid value 'invalid'" 'provider invalid: doctor reports allowed system values'
+Remove-Case $c
+
+# =============================================================================
+# 1b) native package check: current PowerShell host works with pwsh absent from PATH
+# =============================================================================
+$c = New-Case
+$runtimeDir = Join-Path $c.Home 'native-host-fixture'
+$emptyPath = Join-Path $c.Home 'empty-path'
+New-Item -ItemType Directory -Force -Path $runtimeDir, $emptyPath | Out-Null
+$fixtureRuntime = Join-Path $runtimeDir 'doctor-runtime.ps1'
+Copy-Item -LiteralPath $script:Runtime -Destination $fixtureRuntime
+Write-File (Join-Path $runtimeDir 'codex-processor-runtime.ps1') @'
+param([string]$Action, [string]$Root)
+$rc = [Environment]::GetEnvironmentVariable('ORCHESTRA_DOCTOR_NATIVE_FIXTURE_RC')
+if ([string]::IsNullOrWhiteSpace($rc)) { $rc = '0' }
+Write-Host 'OK   fixture Codex-native package check'
+exit [int]$rc
+'@
+$nativeEnv = @{
+    ORCHESTRA_PROVIDER = 'codex'
+    ORCHESTRA_DOCTOR_NATIVE_FIXTURE_RC = '0'
+    PATH = $emptyPath
+}
+$r = Invoke-Doctor -Case $c -Runtime $fixtureRuntime -Env $nativeEnv -PowerShellHost $script:PsExe
+Assert-Contains $r.Out 'OK   fixture Codex-native package check' 'native host: package check runs with pwsh absent from PATH'
+Assert-NotContains $r.Out 'FAIL Codex-native processor preflight exited' 'native host: successful child result is not reported as FAIL'
+$nativeEnv.ORCHESTRA_DOCTOR_NATIVE_FIXTURE_RC = '23'
+$r = Invoke-Doctor -Case $c -Runtime $fixtureRuntime -Env $nativeEnv -PowerShellHost $script:PsExe
+Assert-Contains $r.Out 'FAIL Codex-native processor preflight exited 23' 'native host: exact child exit code is reported'
 Remove-Case $c
 
 # =============================================================================
