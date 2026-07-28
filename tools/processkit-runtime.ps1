@@ -71,6 +71,14 @@ function Set-ProcessKitArgumentList {
     }
 }
 
+function Test-ProcessKitShellAssociationRequired {
+    param([Parameter(Mandatory)][string]$FilePath)
+
+    $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    return [bool]($onWindows -and [System.IO.Path]::GetExtension($FilePath) -in @('.cmd', '.bat'))
+}
+
 function Invoke-ProcessKitCaptured {
     param(
         [Parameter(Mandatory)][string]$FilePath,
@@ -117,7 +125,7 @@ function Invoke-ProcessKitInherited {
     $psi.FileName = $launchPath
     # A .cmd/.bat target needs the Windows shell association; native executables and
     # POSIX scripts use direct argv with no shell reinterpretation.
-    $psi.UseShellExecute = [bool]($IsWindows -and [System.IO.Path]::GetExtension($launchPath) -in @('.cmd', '.bat'))
+    $psi.UseShellExecute = Test-ProcessKitShellAssociationRequired -FilePath $launchPath
     $psi.CreateNoWindow = $false
     Set-ProcessKitArgumentList -StartInfo $psi -ArgumentList $ArgumentList
     $proc = $null

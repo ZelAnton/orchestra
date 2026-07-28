@@ -60,6 +60,29 @@ function Invoke-Runtime {
 function Assert-True { param([bool]$Condition, [string]$Message) if (-not $Condition) { $script:Failures.Add("FAIL - $Message") } }
 function Assert-Equal { param($Expected, $Actual, [string]$Message) if ($Expected -ne $Actual) { $script:Failures.Add("FAIL - ${Message}: expected [$Expected], got [$Actual]") } }
 
+# Windows PowerShell 5.1 has no automatic $IsWindows variable. Remove it when the
+# current host defines it so this StrictMode path reproduces the same contract.
+Remove-Variable -Name IsWindows -Scope Global -Force -ErrorAction SilentlyContinue
+. $script:Runtime
+$onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Windows)
+Assert-Equal $onWindows (Test-ProcessKitShellAssociationRequired 'worker.cmd') '.cmd uses the Windows shell association only on Windows'
+Assert-Equal $onWindows (Test-ProcessKitShellAssociationRequired 'worker.bat') '.bat uses the Windows shell association only on Windows'
+Assert-Equal $false (Test-ProcessKitShellAssociationRequired $script:Pwsh) 'native executable keeps direct argv behavior'
+$strictInherited = Invoke-ProcessKitInherited -FilePath $script:Pwsh -ArgumentList @(
+    '-NoProfile', '-NonInteractive', '-Command', 'exit 0')
+Assert-Equal 0 $strictInherited 'StrictMode inherited launch succeeds without an IsWindows variable'
+
+if ($onWindows) {
+    $shellWork = New-TempDir
+    $shellTarget = Join-Path $shellWork 'inherited.cmd'
+    $shellMarker = Join-Path $shellWork 'shell-marker.txt'
+    [System.IO.File]::WriteAllText($shellTarget, "@echo off`r`n>`"%~1`" echo shell`r`nexit /b 19`r`n", $script:Utf8)
+    $shellExit = Invoke-ProcessKitInherited -FilePath $shellTarget -ArgumentList @($shellMarker)
+    Assert-Equal 19 $shellExit '.cmd inherited launch preserves exit code through shell association'
+    Assert-True (Test-Path -LiteralPath $shellMarker -PathType Leaf) '.cmd inherited launch preserves argv through shell association'
+}
+
 $probe = Invoke-Runtime @('probe', '--json')
 Assert-Equal 0 $probe.ExitCode 'disabled backend probe succeeds'
 $probeObject = $probe.Out | ConvertFrom-Json
