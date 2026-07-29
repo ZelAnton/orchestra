@@ -713,6 +713,9 @@ function Get-KindArg {
 }
 function Assert-ExpectedGeneration {
     param($Paths)
+    # Every mutating command calls this as the first operation after acquiring the
+    # queue lock. The guard therefore observes one serialized generation and takes
+    # precedence even over an idempotent early return: stale callers must re-read.
     if ($opts.ContainsKey('expected-generation')) {
         $exp = [int]$opts['expected-generation']
         $cur = Get-Generation $Paths.State
@@ -916,6 +919,7 @@ function Cmd-Capture {
     $branch = [string](Opt 'branch' "task/$(Format-Id $id)")
     Acquire-Lock $paths.Lock
     try {
+        Assert-ExpectedGeneration $paths
         $state = Read-QueueState $paths
         $t = Get-TaskOrFail $state $id
         if (Is-Captured $t.Status) { Write-Output "already-captured $($t.IdStr)"; return }
@@ -936,6 +940,7 @@ function Cmd-Return {
     $maxAttempts = [int](Opt 'max-attempts' 3)
     Acquire-Lock $paths.Lock
     try {
+        Assert-ExpectedGeneration $paths
         $state = Read-QueueState $paths
         $t = Get-TaskOrFail $state $id
         if (Is-Escalated $t.Status) { Write-Output "already-escalated $($t.IdStr)"; return }  # idempotent
@@ -958,6 +963,7 @@ function Cmd-Escalate {
     $reason = Require-Opt 'reason'
     Acquire-Lock $paths.Lock
     try {
+        Assert-ExpectedGeneration $paths
         $state = Read-QueueState $paths
         $t = Get-TaskOrFail $state $id
         Set-TaskStatus $t "эскалирована · причина=$reason"
@@ -971,6 +977,7 @@ function Cmd-Archive {
     $id = Parse-IdArg
     Acquire-Lock $paths.Lock
     try {
+        Assert-ExpectedGeneration $paths
         $state = Read-QueueState $paths
         $t = (Get-StateTasks $state) | Where-Object { $_.Id -eq $id } | Select-Object -First 1
         if (-not $t) { Write-Output "not-present $(Format-Id $id)"; return }  # idempotent
