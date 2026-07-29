@@ -27,19 +27,23 @@ $ErrorActionPreference = 'Stop'
 $script:ErrPrefix = 'METRICSERR'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
+function Get-MetricsConfigValue {
+    param([string]$Work, [string]$Key)
+    $config = Join-Path $Work 'config.md'
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return $null }
+    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
+        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
+        if ($null -ne $entry -and [string]::Equals($entry.Key, $Key, [System.StringComparison]::Ordinal)) { return $entry.Value }
+    }
+    return $null
+}
+
 function Get-CohortTokenBudget {
     param([string]$Work)
-    $config = Join-Path $Work 'config.md'
-    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return [int64]0 }
-    $rx = '^\s*COHORT_TOKEN_BUDGET\s*:\s*([^#]*?)\s*(?:#.*)?$'
-    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
-        $match = [regex]::Match([string]$line, $rx)
-        if (-not $match.Success) { continue }
-        $raw = $match.Groups[1].Value.Trim()
-        if ($raw -notmatch '^\d+$') { Fail 2 "COHORT_TOKEN_BUDGET in config.md must be a non-negative integer" }
-        try { return [int64]$raw } catch { Fail 2 "COHORT_TOKEN_BUDGET in config.md is out of range" }
-    }
-    return [int64]0
+    $raw = Get-MetricsConfigValue -Work $Work -Key 'COHORT_TOKEN_BUDGET'
+    if ($null -eq $raw) { return [int64]0 }
+    if ($raw -notmatch '^\d+$') { Fail 2 "COHORT_TOKEN_BUDGET in config.md must be a non-negative integer" }
+    try { return [int64]$raw } catch { Fail 2 "COHORT_TOKEN_BUDGET in config.md is out of range" }
 }
 
 # T-321 R-07: `usage_availability=unavailable` is a deliberate marker for a model call whose
@@ -56,32 +60,20 @@ function Get-CohortTokenBudget {
 # for an operator who explicitly opts into that stronger, but self-limiting, guarantee.
 function Get-CohortTokenBudgetStrict {
     param([string]$Work)
-    $config = Join-Path $Work 'config.md'
-    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return $false }
-    $rx = '^\s*COHORT_TOKEN_BUDGET_STRICT\s*:\s*([^#]*?)\s*(?:#.*)?$'
-    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
-        $match = [regex]::Match([string]$line, $rx)
-        if (-not $match.Success) { continue }
-        $value = $match.Groups[1].Value.Trim().ToLowerInvariant()
-        if ($value -notin @('true', 'false')) { Fail 2 "COHORT_TOKEN_BUDGET_STRICT in config.md must be true or false" }
-        return ($value -eq 'true')
-    }
-    return $false
+    $raw = Get-MetricsConfigValue -Work $Work -Key 'COHORT_TOKEN_BUDGET_STRICT'
+    if ($null -eq $raw) { return $false }
+    $value = $raw.ToLowerInvariant()
+    if ($value -notin @('true', 'false')) { Fail 2 "COHORT_TOKEN_BUDGET_STRICT in config.md must be true or false" }
+    return ($value -eq 'true')
 }
 
 function Get-EventsOutbox {
     param([string]$Work)
-    $config = Join-Path $Work 'config.md'
-    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return 'on' }
-    $rx = '^\s*EVENTS_OUTBOX\s*:\s*([^#]*?)\s*(?:#.*)?$'
-    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
-        $match = [regex]::Match([string]$line, $rx)
-        if (-not $match.Success) { continue }
-        $value = $match.Groups[1].Value.Trim().ToLowerInvariant()
-        if ($value -notin @('on', 'off')) { Fail 2 "EVENTS_OUTBOX in config.md must be on or off" }
-        return $value
-    }
-    return 'on'
+    $raw = Get-MetricsConfigValue -Work $Work -Key 'EVENTS_OUTBOX'
+    if ($null -eq $raw) { return 'on' }
+    $value = $raw.ToLowerInvariant()
+    if ($value -notin @('on', 'off')) { Fail 2 "EVENTS_OUTBOX in config.md must be on or off" }
+    return $value
 }
 
 function Get-TemporallyAttributedEvents {

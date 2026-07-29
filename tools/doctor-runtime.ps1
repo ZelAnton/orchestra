@@ -85,6 +85,10 @@ param(
 # their own external calls (git/jj/codex) with 2>$null / -ErrorAction SilentlyContinue.
 $ErrorActionPreference = 'SilentlyContinue'
 
+# Shared `.work/config.md` value/comment extraction. common.ps1 is ASCII-only and is
+# installed beside this runtime by sync-runtime in the mirror layout.
+. (Join-Path $PSScriptRoot 'common.ps1')
+
 # --- OS detection correct on both Windows PowerShell 5.1 and pwsh 7 ----------------
 # $IsWindows does not exist under 5.1; the RuntimeInformation probe works everywhere.
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
@@ -169,13 +173,11 @@ function Get-ConfigLines {
 }
 
 function Get-Cfg {
-    # Value of "KEY: value" from .work/config.md: leading/trailing whitespace trimmed,
-    # value read up to (not including) an inline '#'. First match wins. Empty if unset.
+    # First active matching key wins. Value/comment semantics come from common.ps1.
     param([string]$Key)
-    $rx = '^\s*' + [regex]::Escape($Key) + '\s*:\s*([^#]*?)\s*(?:#.*)?$'
     foreach ($line in (Get-ConfigLines)) {
-        $m = [regex]::Match($line, $rx)
-        if ($m.Success) { return $m.Groups[1].Value }
+        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
+        if ($null -ne $entry -and [string]::Equals($entry.Key, $Key, [System.StringComparison]::Ordinal)) { return $entry.Value }
     }
     return ''
 }
@@ -524,25 +526,20 @@ if (Test-Path -LiteralPath $script:ConfigFile) {
     $verificationCommandsValid = $true
     $unknown = New-Object System.Collections.ArrayList
     foreach ($line in (Get-ConfigLines)) {
-        $t = $line.Trim()
-        if (-not $t -or $t.StartsWith('#')) { continue }
-        if ($t -match '^([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$') {
-            $k = $Matches[1]; $v = $Matches[2]
-            if ($v) {
-                $v = $v.Trim()
-                if (-not $v.StartsWith('[')) { $v = ($v -replace '#.*$', '').Trim() }
-            }
-            if ($known -notcontains $k) { [void]$unknown.Add($k) }
-            if ($k -eq 'SMOKE_CMD' -and $v) { $hasSmoke = $true }
-            if ($k -eq 'VERIFICATION_MODE' -and $v) { $verificationMode = $v; $verificationModeExplicit = $true }
-            if ($k -eq 'VERIFICATION_COMMANDS' -and $v) {
-                try {
-                    $decoded = $v | ConvertFrom-Json
-                    if ($decoded -isnot [array]) { $decoded = @($decoded) }
-                    $verificationCommands = @($decoded)
-                    if ($verificationCommands.Count -eq 0 -or @($verificationCommands | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) { $verificationCommandsValid = $false }
-                } catch { $verificationCommandsValid = $false }
-            }
+        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
+        if ($null -eq $entry) { continue }
+        $k = $entry.Key
+        $v = $entry.Value
+        if ($known -notcontains $k) { [void]$unknown.Add($k) }
+        if ($k -eq 'SMOKE_CMD' -and $v) { $hasSmoke = $true }
+        if ($k -eq 'VERIFICATION_MODE' -and $v) { $verificationMode = $v; $verificationModeExplicit = $true }
+        if ($k -eq 'VERIFICATION_COMMANDS' -and $v) {
+            try {
+                $decoded = $v | ConvertFrom-Json
+                if ($decoded -isnot [array]) { $decoded = @($decoded) }
+                $verificationCommands = @($decoded)
+                if ($verificationCommands.Count -eq 0 -or @($verificationCommands | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) { $verificationCommandsValid = $false }
+            } catch { $verificationCommandsValid = $false }
         }
     }
     if ($unknown.Count -eq 0) {

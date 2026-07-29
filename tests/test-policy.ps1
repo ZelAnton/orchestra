@@ -208,6 +208,22 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     foreach ($k in @('VERIFICATION_MODE', 'VERIFICATION_COMMANDS')) {
         Assert-True ([bool]($schema.config | Where-Object { $_.name -eq $k })) "schema has verification key $k"
     }
+
+    # Shared config extraction: a hash inside a token is data, whitespace + hash starts
+    # a Markdown inline comment, and a leading JSON array is retained byte-for-byte after
+    # outer trimming so `#` inside command strings remains JSON data.
+    $tokenHash = ConvertFrom-OrchestraConfigLine 'SMOKE_CMD: make check#fast'
+    Assert-Equal 'SMOKE_CMD' $tokenHash.Key 'config parser extracts the key'
+    Assert-Equal 'make check#fast' $tokenHash.Value 'config parser preserves a hash inside a command token'
+    Assert-Equal '' $tokenHash.Comment 'config parser does not invent a comment for an in-token hash'
+
+    $inlineComment = ConvertFrom-OrchestraConfigLine 'SMOKE_CMD: make check#fast   # operator note'
+    Assert-Equal 'make check#fast' $inlineComment.Value 'config parser removes an ordinary whitespace-delimited inline comment'
+    Assert-Equal '# operator note' $inlineComment.Comment 'config parser exposes the inline comment without value whitespace'
+
+    $jsonValue = '["git status --short", "echo #tag"]'
+    $jsonEntry = ConvertFrom-OrchestraConfigLine "VERIFICATION_COMMANDS: $jsonValue"
+    Assert-Equal $jsonValue $jsonEntry.Value 'config parser preserves a leading JSON array containing hash characters'
 }.Invoke()
 
 # =============================================================================
@@ -219,6 +235,10 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Write-Utf8 $cfg "# demo`nMAX_PARALLEL: 8`nPUSH: false`nCODEX_REASONING: high`nSMOKE_CMD:`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
     Assert-Exit $r 0 'validate-config accepts a valid file (empty SMOKE_CMD = unset)'
+
+    Write-Utf8 $cfg "SMOKE_CMD: make check#fast # operator note`n"
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 0 'validate-config accepts the exact in-token-hash command later executed by verification'
 
     Write-Utf8 $cfg "VERIFICATION_MODE: required`nVERIFICATION_COMMANDS: [`"git status --short`", `"echo #tag`"]`nCOHORT_TOKEN_BUDGET: 10000`nNOTIFY_CMD: echo notification`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
