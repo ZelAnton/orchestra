@@ -696,6 +696,26 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
 }.Invoke()
 
 # =============================================================================
+# 6a. A pathological project redaction pattern cannot hold observe indefinitely.
+# =============================================================================
+{
+    $d = New-TempDir
+    $work = Join-Path $d '.work'
+    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    Write-File (Join-Path $work 'constraints.md') ('## Redaction patterns' + "`n" + '- (a+)+$')
+    $resFile = Join-Path $d 'result.json'
+    $rawReason = (('a' * 20000) + '!')
+    Write-File $resFile (([pscustomobject]@{ reason = 'error'; exit_code = 6; timed_out = $false; cancelled = $false; duration_ms = 1; attempts = 1; output_bytes = 0; output_truncated = $false; output_sha256 = 'ab'; outcome_reason = $rawReason; occurred_at = '2026-07-29T12:00:00Z' }) | ConvertTo-Json -Compress)
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $obs = Invoke-Spv @('observe', '--result-file', $resFile, '--work', $work, '--task-id', 'T-348', '--role', 'coder', '--mode', 'full', '--json')
+    $timer.Stop()
+    Assert-Exit $obs 0 'observe survives a stalled redactor'
+    Assert-True ($timer.Elapsed.TotalSeconds -lt 12) 'observe redaction timeout remains bounded'
+    $obsObj = $obs.Out | ConvertFrom-Json
+    Assert-Equal $rawReason ([string]$obsObj.outcome_reason) 'observe falls back to classifier-derived text after redaction timeout'
+}.Invoke()
+
+# =============================================================================
 # 6b. T-248: observe parses per-call token usage from a headless `claude -p
 #     --output-format stream-json` transcript (--stdout-file) into usage.recorded
 #     event args, carrying only the non-sensitive integer counts (never raw text).

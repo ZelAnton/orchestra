@@ -31,6 +31,8 @@ $script:AllowedEvents = @('task.escalated', 'approval.pending', 'publish.ci_fail
 $script:DeadlineSec = 10
 $script:OutputMaxBytes = 4096
 $script:TextLimit = 400
+# A notification must never wait longer for redaction than it can wait for delivery itself.
+$script:RedactionDeadlineMs = 5000
 
 $parsed = Parse-CliArgs $args -BoolFlags @('json')
 $Command = $parsed.Command
@@ -58,15 +60,44 @@ function ConvertTo-PosixShellLiteral {
 }
 
 function Get-RedactedShortText {
-    param([string]$Text)
+    param([string]$Text, [string]$Work)
     $redactor = Join-Path $PSScriptRoot 'redaction.ps1'
     if (-not (Test-Path -LiteralPath $redactor -PathType Leaf)) { return $null }
     $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
     if ([string]::IsNullOrWhiteSpace($psExe)) { return $null }
-    $redactionArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact', '--stdin')
-    $out = @($Text | & $psExe @redactionArgs 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $null }
-    $short = [regex]::Replace(($out -join "`n"), '\s+', ' ').Trim()
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $psExe
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    foreach ($a in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact', '--stdin', '--work', $Work)) { $psi.ArgumentList.Add($a) }
+    $process = $null
+    try {
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $outTask = $process.StandardOutput.ReadToEndAsync()
+        $errTask = $process.StandardError.ReadToEndAsync()
+        $process.StandardInput.Write($Text); $process.StandardInput.Close()
+        if (-not $process.WaitForExit($script:RedactionDeadlineMs)) {
+            # Do not pass unredacted text to the operator command after a redaction timeout.
+            try { $process.Kill($true) } catch {
+                try { $process.Kill() } catch { }
+            }
+            return $null
+        }
+        $out = ''
+        try {
+            if (-not $outTask.Wait($script:RedactionDeadlineMs)) { return $null }
+            $out = [string]$outTask.GetAwaiter().GetResult()
+        } catch { return $null }
+        if ($process.ExitCode -ne 0) { return $null }
+    }
+    catch { return $null }
+    finally {
+        if ($null -ne $process) { try { $process.Dispose() } catch { } }
+    }
+    $short = [regex]::Replace($out, '\s+', ' ').Trim()
     if ($short.Length -gt $script:TextLimit) {
         $short = $short.Substring(0, $script:TextLimit - 3) + '...'
     }
@@ -105,7 +136,7 @@ function Cmd-Send {
         return
     }
 
-    $safeText = Get-RedactedShortText -Text $text
+    $safeText = Get-RedactedShortText -Text $text -Work $work
     if ($null -eq $safeText) {
         Write-Result -EventType $eventType -Status 'failed' -Reason 'redaction-unavailable'
         return

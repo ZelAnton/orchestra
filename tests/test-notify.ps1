@@ -87,6 +87,17 @@ printf '%s' 'fixture-output-must-not-leak'
     Assert-NotContains $sent.Output $secret 'notify result never echoes the raw text'
     Assert-NotContains $sent.Output 'fixture-output-must-not-leak' 'notify result never forwards operator stdout'
 
+    Write-Utf8 (Join-Path $work 'constraints.md') ('## Redaction patterns' + "`n" + '- (a+)+$')
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $redactionTimeout = Invoke-Notify @('send', '--work', $work, '--root', $root, '--event', 'task.escalated', '--text', (('a' * 20000) + '!'), '--json')
+    $timer.Stop()
+    Assert-Equal 0 $redactionTimeout.ExitCode 'redaction timeout remains a best-effort notification result'
+    $redactionTimeoutJson = $redactionTimeout.Output | ConvertFrom-Json
+    Assert-Equal 'failed' ([string]$redactionTimeoutJson.status) 'redaction timeout is reported as failed'
+    Assert-Equal 'redaction-unavailable' ([string]$redactionTimeoutJson.reason) 'redaction timeout has the documented safe reason'
+    Assert-True ($timer.Elapsed.TotalSeconds -lt 12) 'notify redaction timeout remains bounded'
+    Remove-Item -LiteralPath (Join-Path $work 'constraints.md') -Force
+
     Write-Utf8 (Join-Path $work 'config.md') 'NOTIFY_CMD: false'
     $failed = Invoke-Notify @('send', '--work', $work, '--root', $root, '--event', 'approval.pending', '--text', 'approval apr-1 requires an operator', '--json')
     Assert-Equal 0 $failed.ExitCode 'failed operator command does not fail the processor-facing hook'
