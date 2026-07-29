@@ -80,15 +80,24 @@ function Invoke-Outbox {
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
     }
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    if ($hasInput) {
-        $proc.StandardInput.Write($InputText)
-        $proc.StandardInput.Close()
+    $proc = $null
+    try {
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if ($hasInput) {
+            $proc.StandardInput.Write($InputText)
+            $proc.StandardInput.Close()
+        }
+        $outT = $proc.StandardOutput.ReadToEndAsync()
+        $errT = $proc.StandardError.ReadToEndAsync()
+        $proc.WaitForExit()
+        # Materialize every field before disposing the process and its redirected handles.
+        $exitCode = $proc.ExitCode
+        $out = $outT.Result
+        $err = $errT.Result
+        return [pscustomobject]@{ ExitCode = $exitCode; Out = $out; Err = $err }
+    } finally {
+        if ($null -ne $proc) { $proc.Dispose() }
     }
-    $outT = $proc.StandardOutput.ReadToEndAsync()
-    $errT = $proc.StandardError.ReadToEndAsync()
-    $proc.WaitForExit()
-    return [pscustomobject]@{ ExitCode = $proc.ExitCode; Out = $outT.Result; Err = $errT.Result }
 }
 
 # Starts the real outbox tool without waiting. OUTBOX_TEST_LOCK_WAIT_SIGNAL is emitted by
@@ -118,18 +127,26 @@ function Start-OutboxAsync {
 
 function Complete-OutboxAsync {
     param($Running, [int]$TimeoutMs, [string]$Label)
-    $exited = $Running.Process.WaitForExit($TimeoutMs)
-    Assert-True $exited "$Label process completes within the safety budget"
-    if (-not $exited) {
-        try { $Running.Process.Kill() } catch { }
-        return [pscustomobject]@{ ExitCode = -999; Out = ''; Err = 'timed out' }
-    }
-    # Parameterless WaitForExit ensures redirected async output has fully drained.
-    $Running.Process.WaitForExit()
-    return [pscustomobject]@{
-        ExitCode = $Running.Process.ExitCode
-        Out      = $Running.OutTask.Result
-        Err      = $Running.ErrTask.Result
+    try {
+        $exited = $Running.Process.WaitForExit($TimeoutMs)
+        Assert-True $exited "$Label process completes within the safety budget"
+        if (-not $exited) {
+            try { $Running.Process.Kill() } catch { }
+            return [pscustomobject]@{ ExitCode = -999; Out = ''; Err = 'timed out' }
+        }
+        # Parameterless WaitForExit ensures redirected async output has fully drained.
+        $Running.Process.WaitForExit()
+        # Capture the complete result before releasing the Process/pipe handles.
+        $exitCode = $Running.Process.ExitCode
+        $out = $Running.OutTask.Result
+        $err = $Running.ErrTask.Result
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Out      = $out
+            Err      = $err
+        }
+    } finally {
+        $Running.Process.Dispose()
     }
 }
 function Outbox-Id { param([string[]]$ToolArgs) return ((Invoke-Outbox (@('event-id') + $ToolArgs)).Out.Trim()) }
@@ -886,7 +903,12 @@ try {
         return [pscustomobject]@{ Process = $proc; ReleasePath = $releasePath }
     }
 
-    $waitBudgetMs = 60000
+    # The suite starts many real pwsh children before this section (including the bounded
+    # cursor-history sequence). On a shared CI host, a 60-second combined writer-release +
+    # consumer-completion window can expire from scheduler pressure even though neither side
+    # is deadlocked. Keep each phase independently bounded, within the outer supervisor's
+    # 1800-second suite deadline.
+    $waitBudgetMs = 180000
 
     function Invoke-DuringWriterHold {
         param([string]$Command, [string]$Dir, [string[]]$ExtraArgs)
@@ -908,10 +930,16 @@ try {
         # Always release after the bounded handshake wait so a failed assertion cannot strand
         # either child. Correct implementations reach this point only after confirmed overlap.
         Write-File $writer.ReleasePath 'release'
-        $result = Complete-OutboxAsync $running $waitBudgetMs "[concurrency] $Command"
+
+        # Confirm the writer observed the release handshake, closed FileShare.None and removed
+        # the canonical lock BEFORE starting the consumer's independent completion budget.
+        # Waiting for the consumer first incorrectly charged delayed writer scheduling against
+        # that budget and hid the primary timeout behind a later missing-JSON-property error.
         $writerExited = $writer.Process.WaitForExit($waitBudgetMs)
         Assert-True $writerExited '[concurrency] the simulated writer completes after the reader-blocked handshake'
         if ($writerExited) { Assert-Equal 0 $writer.Process.ExitCode '[concurrency] the simulated writer exits cleanly' }
+        $writer.Process.Dispose()
+        $result = Complete-OutboxAsync $running $waitBudgetMs "[concurrency] $Command"
         return $result
     }
 
@@ -925,18 +953,48 @@ try {
     # -- verify: same, and reports both committed events. --
     $dir2 = New-TempDir
     $r2 = Invoke-DuringWriterHold -Command 'verify' -Dir $dir2 -ExtraArgs @('--json')
+    $r2ExitCode = [int]$r2.ExitCode
+    $r2Out = [string]$r2.Out
+    $r2Err = [string]$r2.Err
     Assert-Exit $r2 0 'verify during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
-    Assert-NotContains $r2.Err 'cannot read' 'verify never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
-    $vobj = $r2.Out | ConvertFrom-Json
-    Assert-Equal 2 $vobj.events 'verify sees both events once the writer released'
+    Assert-NotContains $r2Err 'cannot read' 'verify never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    if ($r2ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($r2Out)) {
+        try {
+            $vobj = $r2Out | ConvertFrom-Json
+            if ($null -ne $vobj -and $vobj.PSObject.Properties.Name -contains 'events') {
+                Assert-Equal 2 $vobj.events 'verify sees both events once the writer released'
+            } else {
+                $script:Failures.Add("FAIL - [concurrency] verify returned JSON without events (exit=[$r2ExitCode], out=[$r2Out], err=[$r2Err])")
+            }
+        } catch {
+            $script:Failures.Add("FAIL - [concurrency] verify returned invalid JSON (exit=[$r2ExitCode], out=[$r2Out], err=[$r2Err], parse=[$($_.Exception.Message)])")
+        }
+    } else {
+        $script:Failures.Add("FAIL - [concurrency] verify returned no JSON (exit=[$r2ExitCode], out=[$r2Out], err=[$r2Err])")
+    }
 
     # -- metrics: same, over the shared events-common reader. --
     $dir3 = New-TempDir
     $r3 = Invoke-DuringWriterHold -Command 'metrics' -Dir $dir3 -ExtraArgs @('--json')
+    $r3ExitCode = [int]$r3.ExitCode
+    $r3Out = [string]$r3.Out
+    $r3Err = [string]$r3.Err
     Assert-Exit $r3 0 'metrics during the writer''s active FileShare.None window blocks on the outbox lock and succeeds (no IOException)'
-    Assert-NotContains $r3.Err 'cannot read' 'metrics never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
-    $mobj = $r3.Out | ConvertFrom-Json
-    Assert-Equal 2 $mobj.total_events 'metrics sees both events once the writer released'
+    Assert-NotContains $r3Err 'cannot read' 'metrics never surfaces the writer''s FileShare.None window as rc=3 "cannot read"'
+    if ($r3ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($r3Out)) {
+        try {
+            $mobj = $r3Out | ConvertFrom-Json
+            if ($null -ne $mobj -and $mobj.PSObject.Properties.Name -contains 'total_events') {
+                Assert-Equal 2 $mobj.total_events 'metrics sees both events once the writer released'
+            } else {
+                $script:Failures.Add("FAIL - [concurrency] metrics returned JSON without total_events (exit=[$r3ExitCode], out=[$r3Out], err=[$r3Err])")
+            }
+        } catch {
+            $script:Failures.Add("FAIL - [concurrency] metrics returned invalid JSON (exit=[$r3ExitCode], out=[$r3Out], err=[$r3Err], parse=[$($_.Exception.Message)])")
+        }
+    } else {
+        $script:Failures.Add("FAIL - [concurrency] metrics returned no JSON (exit=[$r3ExitCode], out=[$r3Out], err=[$r3Err])")
+    }
 
     # -- Regression guard: a foreign exclusive holder OUTSIDE the documented lock protocol
     #    (no lock file - i.e. not `append`) still correctly fails as unreadable (rc=3), so
