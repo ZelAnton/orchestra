@@ -379,16 +379,6 @@ function Format-DurationExact {
     if ($null -eq $Milliseconds) { return 'недоступно' }
     return "$(Format-Duration $Milliseconds) ($(Format-Number $Milliseconds) ms)"
 }
-function To-NonNegativeInt64 {
-    param($Value)
-    if ($null -eq $Value) { return $null }
-    $parsed = [int64]0
-    if ([int64]::TryParse([string]$Value, [Globalization.NumberStyles]::None,
-            [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -and $parsed -ge 0) {
-        return $parsed
-    }
-    return $null
-}
 function To-TaskUtcTime {
     param($Value)
     if ($Value -is [DateTimeOffset]) { return ([DateTimeOffset]$Value).ToUniversalTime() }
@@ -591,7 +581,7 @@ function Get-TaskExecutionMetrics {
 
     $actualTotal = 0.0; $estimatedTotal = 0.0
     $actualObserved = $false; $estimatedObserved = $false
-    $allocatedDurationTotal = 0.0; $unmeteredOperations = 0; $modelOperations = 0
+    $allocatedDurationTotal = [decimal]0; $unmeteredOperations = 0; $modelOperations = 0
     $seenModelCallKeys = New-Object 'Collections.Generic.HashSet[string]'
     $observedOperationNames = New-Object 'Collections.Generic.HashSet[string]'
     $sequence = 0
@@ -633,7 +623,7 @@ function Get-TaskExecutionMetrics {
             [void]$reasons.Add("повреждённая operation.completed для строки $sequence")
             continue
         }
-        $allocatedDuration = [Math]::Round($duration / $sharedCount, 2)
+        $allocatedDuration = [Math]::Round(([decimal]$duration / [decimal]$sharedCount), 2)
         $allocatedDurationTotal += $allocatedDuration
         [void]$observedOperationNames.Add($operation)
         $usageTaskId = if ($scope -eq 'cohort') { '_cohort' } elseif ($scope -eq 'integration') { '_integration' } else { $TaskId }
