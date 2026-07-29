@@ -17,6 +17,7 @@ $script:Tool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\notify.ps1')).Pa
 $script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
+$fixtureChildPid = 0
 
 function New-TempDir {
     $path = Join-Path ([System.IO.Path]::GetTempPath()) ('orchestra-notify-test-' + [Guid]::NewGuid().ToString('N'))
@@ -28,8 +29,8 @@ function Write-Utf8 { param([string]$Path, [string]$Text)
     if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     [System.IO.File]::WriteAllText($Path, $Text, $script:Utf8)
 }
-function Invoke-Notify { param([string[]]$ToolArgs)
-    $out = @(& $script:PsExe -NoProfile -File $script:Tool @ToolArgs 2>&1)
+function Invoke-Notify { param([string[]]$ToolArgs, [string]$Tool = $script:Tool)
+    $out = @(& $script:PsExe -NoProfile -File $Tool @ToolArgs 2>&1)
     $exitCode = $LASTEXITCODE
     # This helper deliberately exercises rejected tool invocations. Preserve their code for the
     # assertion, but do not leak it to a CI wrapper that invokes this test via `& $p`.
@@ -87,6 +88,49 @@ printf '%s' 'fixture-output-must-not-leak'
     Assert-NotContains $sent.Output $secret 'notify result never echoes the raw text'
     Assert-NotContains $sent.Output 'fixture-output-must-not-leak' 'notify result never forwards operator stdout'
 
+    # A dedicated fixture redactor deterministically creates a sleeping child and then hangs.
+    # The timeout path must reap BOTH the redactor and that child before returning. Copying the
+    # small notify dependency set keeps production script resolution unchanged while allowing
+    # the fixture redactor to occupy the normal sibling path used by notify.ps1.
+    $fixtureTools = Join-Path $root 'fixture-tools'
+    New-Item -ItemType Directory -Force -Path $fixtureTools | Out-Null
+    foreach ($name in @('notify.ps1', 'common.ps1', 'proc-tree.ps1')) {
+        Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Tool) $name) -Destination (Join-Path $fixtureTools $name)
+    }
+    $childScript = Join-Path $fixtureTools 'fixture-child.ps1'
+    Write-Utf8 $childScript 'Start-Sleep -Seconds 120'
+    $childPidFile = Join-Path $work 'redactor-child.pid'
+    $enteredFile = Join-Path $work 'redactor-entered.marker'
+    $env:ORCHESTRA_NOTIFY_FIXTURE_CHILD_PID_FILE = $childPidFile
+    $env:ORCHESTRA_NOTIFY_FIXTURE_ENTERED_FILE = $enteredFile
+    Write-Utf8 (Join-Path $fixtureTools 'redaction.ps1') @'
+[System.IO.File]::WriteAllText($env:ORCHESTRA_NOTIFY_FIXTURE_ENTERED_FILE, 'entered')
+$psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$child = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-NonInteractive', '-File', (Join-Path $PSScriptRoot 'fixture-child.ps1')) -PassThru
+[System.IO.File]::WriteAllText($env:ORCHESTRA_NOTIFY_FIXTURE_CHILD_PID_FILE, [string]$child.Id)
+Start-Sleep -Seconds 120
+'@
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $redactionTimeout = Invoke-Notify -Tool (Join-Path $fixtureTools 'notify.ps1') -ToolArgs @('send', '--work', $work, '--root', $root, '--event', 'task.escalated', '--text', 'fixture timeout', '--json')
+    $timer.Stop()
+    Assert-Equal 0 $redactionTimeout.ExitCode 'redaction timeout remains a best-effort notification result'
+    $redactionTimeoutJson = $redactionTimeout.Output | ConvertFrom-Json
+    Assert-Equal 'failed' ([string]$redactionTimeoutJson.status) 'redaction timeout is reported as failed'
+    Assert-Equal 'redaction-unavailable' ([string]$redactionTimeoutJson.reason) 'redaction timeout has the documented safe reason'
+    # Five seconds are reserved for redaction and Stop-ProcessTree itself waits up to five
+    # more seconds for teardown; leave startup/scheduling headroom without permitting an
+    # unbounded wait.
+    Assert-True ($timer.Elapsed.TotalSeconds -lt 15) 'notify redaction timeout remains bounded'
+    Assert-True (Test-Path -LiteralPath $enteredFile -PathType Leaf) 'fixture redactor was invoked before timing out'
+    Assert-True (Test-Path -LiteralPath $childPidFile -PathType Leaf) 'fixture redactor recorded its child PID before timing out'
+    if (Test-Path -LiteralPath $childPidFile -PathType Leaf) {
+        $fixtureChildPid = [int][System.IO.File]::ReadAllText($childPidFile).Trim()
+        Start-Sleep -Milliseconds 200
+        Assert-True ($null -eq (Get-Process -Id $fixtureChildPid -ErrorAction SilentlyContinue)) 'redaction timeout leaves no surviving child redactor process'
+    }
+    Remove-Item Env:ORCHESTRA_NOTIFY_FIXTURE_CHILD_PID_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:ORCHESTRA_NOTIFY_FIXTURE_ENTERED_FILE -ErrorAction SilentlyContinue
+
     Write-Utf8 (Join-Path $work 'config.md') 'NOTIFY_CMD: false'
     $failed = Invoke-Notify @('send', '--work', $work, '--root', $root, '--event', 'approval.pending', '--text', 'approval apr-1 requires an operator', '--json')
     Assert-Equal 0 $failed.ExitCode 'failed operator command does not fail the processor-facing hook'
@@ -99,6 +143,9 @@ printf '%s' 'fixture-output-must-not-leak'
     Assert-Contains $invalid.Output '--event must be one of' 'unknown event lists the stable allowed set'
 }
 finally {
+    if ($fixtureChildPid -gt 0) { Stop-Process -Id $fixtureChildPid -Force -ErrorAction SilentlyContinue }
+    Remove-Item Env:ORCHESTRA_NOTIFY_FIXTURE_CHILD_PID_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:ORCHESTRA_NOTIFY_FIXTURE_ENTERED_FILE -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 

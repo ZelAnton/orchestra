@@ -120,6 +120,9 @@ $script:TransientReasons = @('timeout', 'crash')
 # descendant survived Stop-ProcessTree and still holds an inherited copy of the pipe's write end,
 # so EOF (and the Task's completion) never arrives - see Receive-BoundedStreamText.
 $script:StreamCollectGraceMs = 5000
+# Redaction is an observability best-effort step. Share the stream collection grace so a
+# pathological project-specific regex cannot hold the processor's observe path forever.
+$script:RedactionDeadlineMs = 5000
 
 # --------------------------------------------------------------------------
 # Small IO helpers.
@@ -1228,26 +1231,66 @@ function Cmd-Supervise {
 # the transcript text; absent/garbled input just omits it.
 # ==========================================================================
 function Invoke-Redact {
-    param([string]$Text)
+    param([string]$Text, [string]$Work = '')
     if ([string]::IsNullOrEmpty($Text)) { return '' }
     $redactor = Join-Path $PSScriptRoot 'redaction.ps1'
     if (-not (Test-Path -LiteralPath $redactor)) { return $Text }
+    $p = $null
+    # A redactor can itself leave a helper holding its redirected pipes after the root
+    # exits. On POSIX the kernel reparents that helper before cleanup, so launch the
+    # redactor in a dedicated group and retain its pgid for Stop-ProcessTree's group reap.
+    # Resolve-SetsidLauncher returns $null on Windows, preserving the existing spawn path.
+    $setsidLauncher = Resolve-SetsidLauncher
+    $launchFile = ''
+    $launchArgs = @()
+    $posixPgid = 0
+    $redactionSucceeded = $false
     try {
         $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+        $launchFile = $psExe
+        $launchArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact')
+        if (-not [string]::IsNullOrWhiteSpace($Work)) { $launchArgs += @('--work', $Work) }
+        if ($setsidLauncher) {
+            $launchFile = $setsidLauncher
+            $launchArgs = @($psExe) + @($launchArgs)
+        }
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $psExe
+        $psi.FileName = $launchFile
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
-        foreach ($a in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact')) { $psi.ArgumentList.Add($a) }
+        foreach ($a in $launchArgs) { $psi.ArgumentList.Add($a) }
         $p = [System.Diagnostics.Process]::Start($psi)
-        $outT = $p.StandardOutput.ReadToEndAsync()
-        $p.StandardInput.Write($Text); $p.StandardInput.Close()
-        $p.WaitForExit()
-        $o = $outT.GetAwaiter().GetResult()
-        return ([string]$o)
+        # `setsid` execs the target in place for this .NET-spawned child, making its pid
+        # the fresh process-group id. 0 keeps the plain-spawn behavior when unsupported.
+        if ($setsidLauncher) { $posixPgid = [int]$p.Id }
+        try {
+            $outT = $p.StandardOutput.ReadToEndAsync()
+            $errT = $p.StandardError.ReadToEndAsync()
+            $p.StandardInput.Write($Text); $p.StandardInput.Close()
+            if (-not $p.WaitForExit($script:RedactionDeadlineMs)) {
+                # Preserve the observe contract: its input is already classifier-derived and
+                # therefore safe to project when redaction infrastructure is unavailable.
+                return $Text
+            }
+            $collected = Receive-BoundedStreamText $outT $errT $script:StreamCollectGraceMs
+            if ($collected.TimedOut -or $p.ExitCode -ne 0) { return $Text }
+            $redactionSucceeded = $true
+            return ([string]$collected.Stdout)
+        }
+        finally {
+            # A redactor can exit while a descendant still owns its redirected pipe.  In that
+            # case the bounded collection times out and the exited root must still be passed
+            # to Stop-ProcessTree. On POSIX the captured group also reaches a reparented
+            # holder; on Windows the group id is 0 and the taskkill fallback is unchanged.
+            # The same cleanup is required for write/read errors and nonzero exits after start.
+            if (-not $redactionSucceeded) {
+                try { Stop-ProcessTree $p -PosixProcessGroupId $posixPgid } catch { }
+            }
+            try { $p.Dispose() } catch { }
+        }
     } catch {
         # Redaction is defense in depth over already-classifier-derived text; if the
         # redactor cannot be spawned, fall back to the (non-raw) input unchanged.
@@ -1312,7 +1355,7 @@ function Cmd-Observe {
     $attempts = if (Has-Prop $v 'attempts') { [int]$v.attempts } else { 1 }
     $bytes = [int](Get-Prop $v 'output_bytes')
     $rawReason = [string](Get-Prop $v 'outcome_reason')
-    $safeReason = (Invoke-Redact $rawReason).Trim()
+    $safeReason = (Invoke-Redact $rawReason ([string](Opt 'work' ''))).Trim()
 
     $taskId = [string](Opt 'task-id' '')
     $role = [string](Opt 'role' 'coder')
