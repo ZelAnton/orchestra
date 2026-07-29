@@ -34,8 +34,11 @@
         no payload_version, a v4 id, an evt- fallback id, or a future unknown top-level key
         still reads/validates without rewrite (no retroactive migration).
       * Reference consumer/cursor: `read` deduplicates by event_id and a durable cursor
-        only ever returns new unique events; `metrics` reports phase / critical-path
-        durations from timestamps and integer durations only.
+        only ever returns new unique events from the normal single-writer stream;
+        `delivered_ids` retention is bounded at zero across a long append/read sequence,
+        while an anomalous duplicate appended after the saved offset has the documented
+        at-least-once trade-off. `metrics` reports phase / critical-path durations from
+        timestamps and integer durations only.
 
 .EXAMPLE
     pwsh -File tests/test-outbox.ps1
@@ -461,6 +464,88 @@ function Ref-UuidV5 {
     Invoke-Outbox @('append', '--events', $ev2, '--type', 'cohort.closed', '--batch-id', 'B-2', '--payload', '{}') | Out-Null
     $c3 = (Invoke-Outbox @('read', '--events', $ev2, '--cursor', $cur, '--json')).Out | ConvertFrom-Json
     Assert-Equal 1 $c3.new_count 'cursor delivers only the newly appended event'
+
+    $compactCursor = Read-File $cur
+    Assert-Contains $compactCursor '"delivered_ids":[]' 'cursor persists an explicit zero-length delivered_ids retention set'
+
+    # A malformed cursor remains a hard input error and is not overwritten by read.
+    $badCur = Join-Path $dir2 'bad_cursor.json'
+    Write-File $badCur '{"byte_offset":'
+    $badCursorBefore = Read-File $badCur
+    $badCursorRead = Invoke-Outbox @('read', '--events', $ev2, '--cursor', $badCur, '--json')
+    Assert-Exit $badCursorRead 3 'malformed cursor JSON remains a read failure (rc=3)'
+    Assert-Equal $badCursorBefore (Read-File $badCur) 'failed cursor read does not overwrite the corrupt cursor'
+
+    # Long-running normal stream: the cursor size stays constant with history, every
+    # newly appended event is delivered exactly once, and byte_offset is monotonic.
+    $longDir = New-TempDir; $longEvents = New-EventsFile $longDir
+    $longCursor = Join-Path $longDir 'events_cursor.json'
+    $previousOffset = 0
+    $deliveredTotal = 0
+    $maxCursorChars = 0
+    $rounds = 32
+    $eventsPerRound = 16
+    for ($roundIndex = 0; $roundIndex -lt $rounds; $roundIndex++) {
+        $chunk = New-Object System.Text.StringBuilder
+        for ($eventIndex = 0; $eventIndex -lt $eventsPerRound; $eventIndex++) {
+            $sequence = ($roundIndex * $eventsPerRound) + $eventIndex + 1
+            $eventId = '00000000-0000-4000-8000-' + $sequence.ToString('D12')
+            [void]$chunk.Append('{"schema_version":1,"event_id":"' + $eventId + '","occurred_at":"2026-07-29T09:00:00Z","type":"cohort.opened","batch_id":"B-long","actor":{"kind":"agent","name":"processor"},"payload":{}}' + "`n")
+        }
+        Append-Raw $longEvents $chunk.ToString()
+
+        $longReadResult = Invoke-Outbox @('read', '--events', $longEvents, '--cursor', $longCursor, '--json')
+        Assert-Exit $longReadResult 0 "long cursor round $roundIndex succeeds"
+        if ($longReadResult.ExitCode -eq 0) {
+            $longRead = $longReadResult.Out | ConvertFrom-Json
+            Assert-Equal $eventsPerRound $longRead.new_count "long cursor round $roundIndex delivers every new event"
+            Assert-Equal 0 $longRead.skipped_dup "long cursor round $roundIndex does not repeat a normal event"
+            Assert-True ([int64]$longRead.byte_offset -gt [int64]$previousOffset) "long cursor round $roundIndex advances byte_offset monotonically"
+            $previousOffset = [int64]$longRead.byte_offset
+            $deliveredTotal += [int]$longRead.new_count
+        }
+
+        $longCursorText = Read-File $longCursor
+        Assert-Contains $longCursorText '"delivered_ids":[]' "long cursor round $roundIndex retains zero historical ids"
+        $maxCursorChars = [Math]::Max($maxCursorChars, $longCursorText.Length)
+    }
+    Assert-Equal ($rounds * $eventsPerRound) $deliveredTotal 'long cursor sequence delivers all appended events exactly once'
+    Assert-True ($maxCursorChars -le 64) 'cursor JSON has an explicit constant-size bound independent of event history'
+    $longReplay = Invoke-Outbox @('read', '--events', $longEvents, '--cursor', $longCursor, '--json')
+    Assert-Exit $longReplay 0 'long cursor no-op replay succeeds'
+    if ($longReplay.ExitCode -eq 0) {
+        $longReplayObj = $longReplay.Out | ConvertFrom-Json
+        Assert-Equal 0 $longReplayObj.new_count 'long cursor no-op replay returns no event twice'
+        Assert-Equal $previousOffset ([int64]$longReplayObj.byte_offset) 'long cursor no-op replay does not move byte_offset backward'
+    }
+
+    # Explicit anomaly policy: after the compact cursor has advanced, a manually appended
+    # repeat of an OLD event_id lies after byte_offset and is delivered again. Duplicates
+    # that coexist inside ONE unread suffix are still suppressed by the in-memory set.
+    $anomalyDir = New-TempDir; $anomalyEvents = New-EventsFile $anomalyDir
+    $anomalyCursor = Join-Path $anomalyDir 'events_cursor.json'
+    Invoke-Outbox @('append', '--events', $anomalyEvents, '--type', 'cohort.opened', '--batch-id', 'B-anomaly', '--payload', '{}') | Out-Null
+    $anomalyLine = (Read-File $anomalyEvents).TrimEnd("`r", "`n")
+    $anomalyFirst = Invoke-Outbox @('read', '--events', $anomalyEvents, '--cursor', $anomalyCursor, '--json')
+    Assert-Exit $anomalyFirst 0 'anomaly fixture initial cursor read succeeds'
+    Append-Raw $anomalyEvents ($anomalyLine + "`n")
+    $anomalyLater = Invoke-Outbox @('read', '--events', $anomalyEvents, '--cursor', $anomalyCursor, '--json')
+    Assert-Exit $anomalyLater 0 'anomalous duplicate after the saved offset is readable'
+    if ($anomalyLater.ExitCode -eq 0) {
+        $anomalyLaterObj = $anomalyLater.Out | ConvertFrom-Json
+        Assert-Equal 1 $anomalyLaterObj.new_count 'anomalous duplicate appended in a later interval is deliberately redelivered'
+        Assert-Equal 0 $anomalyLaterObj.skipped_dup 'no unbounded historical set suppresses the later anomalous duplicate'
+    }
+    Append-Raw $anomalyEvents ($anomalyLine + "`n" + $anomalyLine + "`n")
+    $anomalySameSuffix = Invoke-Outbox @('read', '--events', $anomalyEvents, '--cursor', $anomalyCursor, '--json')
+    Assert-Exit $anomalySameSuffix 0 'same-suffix anomalous duplicates are readable'
+    if ($anomalySameSuffix.ExitCode -eq 0) {
+        $anomalySameSuffixObj = $anomalySameSuffix.Out | ConvertFrom-Json
+        Assert-Equal 1 $anomalySameSuffixObj.new_count 'one copy of a duplicate id is delivered within the current unread suffix'
+        Assert-Equal 1 $anomalySameSuffixObj.skipped_dup 'second copy in the same unread suffix is still deduplicated'
+    }
+    $anomalyVerify = Invoke-Outbox @('verify', '--events', $anomalyEvents, '--json')
+    Assert-Exit $anomalyVerify 4 'verify continues to report persistent duplicate event_ids as an anomaly'
 }.Invoke()
 
 # =============================================================================

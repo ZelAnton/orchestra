@@ -44,7 +44,9 @@
 
       5. Consumable. `read` is a reference consumer/cursor: it reads the outbox, validates
          and deduplicates by `event_id`, skips a torn tail, and (with `--cursor`) advances
-         a durable read position so it only ever returns new unique events. `metrics`
+         a durable read position so it only ever returns new unique events from the normal
+         single-writer stream. The cursor's historical `delivered_ids` retention is bounded
+         at zero; duplicates in the current unread suffix are still suppressed. `metrics`
          is a projection over the deduplicated stream that reports phase / critical-path
          transaction durations (round wall-time, codex.attempt durations, per-task
          captured->done critical path) computed only from timestamps and non-sensitive
@@ -672,7 +674,7 @@ function Read-Outbox {
 # lock. The cursor's read-modify-write is therefore atomic relative to any other cursor
 # advance: two overlapping `read --cursor X` calls can never interleave (one always
 # completes, including its Write-TextAtomic rename, before the other even opens the cursor
-# file), so there is no lost-update window on byte_offset/delivered_ids. This is an explicit
+# file), so there is no lost-update window on the cursor state. This is an explicit
 # design choice (not merely Write-TextAtomic's own rename-atomicity, which only makes ONE
 # write atomic, not a concurrent read+advance sequence) - do not remove the lock from
 # Cmd-Read without re-establishing an equivalent guarantee.
@@ -922,13 +924,16 @@ function Cmd-Read {
         $ob = Read-Outbox $paths.Events 'read'
 
         $startOffset = 0
-        $delivered = New-Object 'System.Collections.Generic.HashSet[string]'
+        $seenIds = New-Object 'System.Collections.Generic.HashSet[string]'
         $cursorPath = [string](Opt 'cursor' '')
         if ($cursorPath -and (Test-Path -LiteralPath $cursorPath)) {
             try {
                 $cur = (Read-TextOrEmpty $cursorPath) | ConvertFrom-Json
                 if (Has-Prop $cur 'byte_offset') { $startOffset = [int]$cur.byte_offset }
-                if (Has-Prop $cur 'delivered_ids') { foreach ($id in @($cur.delivered_ids)) { [void]$delivered.Add([string]$id) } }
+                # Backward compatibility for a cursor written by the old unbounded format:
+                # honour its historical ids for this one compaction read, then discard them
+                # when the cursor is atomically rewritten below.
+                if (Has-Prop $cur 'delivered_ids') { foreach ($id in @($cur.delivered_ids)) { [void]$seenIds.Add([string]$id) } }
             } catch { Fail 3 "cursor $cursorPath is unreadable" }
         }
 
@@ -942,12 +947,22 @@ function Cmd-Read {
             $advance = $r.Span.End + 1
             if (-not $r.Valid) { $skippedInvalid++; continue }
             $id = [string]$r.Obj.event_id
-            if (-not $delivered.Add($id)) { $skippedDup++; continue }
+            if (-not $seenIds.Add($id)) { $skippedDup++; continue }
             [void]$new.Add($r.Obj)
         }
 
         if ($cursorPath) {
-            $curOut = [ordered]@{ byte_offset = $advance; delivered_ids = $delivered }
+            # `byte_offset` is the exactly-once boundary for the normal single writer:
+            # Cmd-Append never appends an event_id already present in the stream, so every
+            # id seen before the new offset can be forgotten after this atomic advance.
+            # Retention is deliberately bounded at ZERO instead of growing with history.
+            #
+            # Explicit anomaly trade-off: once this compact cursor has been written, a
+            # duplicate event_id manually/externally appended AFTER the saved offset in a
+            # later read interval is delivered again. Duplicate occurrences inside one
+            # current unread suffix are still suppressed by $seenIds. `verify` continues
+            # to report persistent duplicate ids as an outbox anomaly.
+            $curOut = [ordered]@{ byte_offset = $advance; delivered_ids = @() }
             Write-TextAtomic $cursorPath ($curOut | ConvertTo-Json -Depth 6 -Compress)
         }
 
