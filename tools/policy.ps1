@@ -594,10 +594,13 @@ function Cmd-CheckPublish {
         if (-not $ok) { $rejects.Add("remote '$remote' is not in the allowed remotes: $($allowedRemotes -join ', ')") }
     }
 
-    # push/merge policy: an active bullet demanding manual confirmation blocks the push.
+    # Push blocking is an explicit policy marker, not a free-text heuristic. This keeps
+    # permissive prose such as "no manual confirmation needed" from becoming a false BLOCK.
     $pushBlocked = $false
     foreach ($b in (Get-PolicyActiveBullets $lines 'Push/merge policy')) {
-        if ($b -match '(?i)(ручного подтверждения|manual|требует подтвержд)') { $pushBlocked = $true }
+        if ([string]::Equals($b, 'Публикация (push): требует ручного подтверждения', [System.StringComparison]::Ordinal)) {
+            $pushBlocked = $true
+        }
     }
 
     if ($rejects.Count -gt 0) {

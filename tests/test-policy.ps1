@@ -607,11 +607,30 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         Assert-Exit $r 8 "check-publish: remote comparison is ordinal and rejects '$caseVariant' on every platform"
     }
 
-    # manual push confirmation blocks the push
+    # The exact documented marker blocks the push.
     Write-Utf8 $constraints "## Push/merge policy`n`n**Активные ограничения**:`n`n- Публикация (push): требует ручного подтверждения`n"
     $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
-    Assert-Exit $r 8 'check-publish: push manual-confirmation blocks'
+    Assert-Exit $r 8 'check-publish: exact push manual-confirmation marker blocks'
     Assert-OutMatch $r 'do not push' 'check-publish: push-block guidance'
+
+    # Permissive prose may contain the old heuristic's keywords, but it is not the
+    # canonical marker and must not silently turn into a policy block.
+    Write-Utf8 $constraints @'
+## Push/merge policy
+
+**Активные ограничения**:
+
+- Публикация (push): direct push allowed, no manual confirmation needed
+- Публикация (push): push без ручного подтверждения разрешён
+'@
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'check-publish: permissive manual-confirmation prose does not block'
+
+    # Unknown free text is deliberately a no-op: only the documented exact marker
+    # controls this executable gate, avoiding an ambiguous implicit restriction.
+    Write-Utf8 $constraints "## Push/merge policy`n`n**Активные ограничения**:`n`n- Публикация (push): требуется согласование с release manager`n"
+    $r = Invoke-Policy @('check-publish', '--work', $work, '--branch', 'main', '--remote', 'origin')
+    Assert-Exit $r 0 'check-publish: unrecognised push prose does not block'
 
     # no policy file at all -> degrade to OK
     $bare = New-Sandbox
