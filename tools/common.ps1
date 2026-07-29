@@ -8,7 +8,8 @@
     copy of the same low-level infrastructure: the `<command> [--key value | --flag]`
     argument parser, the `Fail`/`Opt`/`Require-Opt` coded-error helpers with the shared
     `XXXERR|code|msg` throw convention and the top-level catch dispatcher that decodes it,
-    the crash-safe `Read-TextOrEmpty` / `Write-TextAtomic` (temp+rename) IO, the
+    the shared `.work/config.md` `KEY: value` line parser, the crash-safe
+    `Read-TextOrEmpty` / `Write-TextAtomic` (temp+rename) IO, the
     `Maybe-Fault` crash-injection hook, the `Acquire-Lock`/`Release-Lock` CreateNew file
     lock, the UTC time helpers (`Format-Utc`/`Format-UtcNow`/`Parse-Utc`), and the
     CommandLineToArgvW-correct `ConvertTo-Win32Arg` quoter. Because the copies were
@@ -57,6 +58,43 @@
 $script:ErrPrefix = 'ERR'
 $script:FaultEnv  = 'ORCHESTRA_COMMON_FAULT'
 $script:LockName  = 'resource'
+
+# --------------------------------------------------------------------------
+# .work/config.md line parsing.
+#
+# A Markdown inline comment begins at a `#` that starts the value or is preceded by
+# whitespace. A hash inside a token is data (`make check#fast`). A value whose first
+# non-whitespace character is `[` is kept whole because VERIFICATION_COMMANDS is a JSON
+# array and its string elements may contain whitespace followed by `#`; inline comments
+# are deliberately unsupported for that JSON form.
+#
+# Returns $null for anything other than an active `KEY: value` line. Callers retain their
+# own first/last-match and domain-validation policies while sharing the exact extraction
+# semantics.
+# --------------------------------------------------------------------------
+function ConvertFrom-OrchestraConfigLine {
+    param([AllowEmptyString()][string]$Line)
+    if ($null -eq $Line) { return $null }
+
+    $match = [regex]::Match($Line, '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$')
+    if (-not $match.Success) { return $null }
+
+    $rest = $match.Groups[2].Value
+    $comment = ''
+    if (-not $rest.TrimStart().StartsWith('[')) {
+        $commentMatch = [regex]::Match($rest, '(?<!\S)#')
+        if ($commentMatch.Success) {
+            $comment = $rest.Substring($commentMatch.Index)
+            $rest = $rest.Substring(0, $commentMatch.Index)
+        }
+    }
+
+    return [pscustomobject]@{
+        Key     = $match.Groups[1].Value
+        Value   = $rest.Trim()
+        Comment = $comment
+    }
+}
 
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...

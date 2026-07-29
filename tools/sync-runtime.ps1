@@ -21,7 +21,8 @@
            bare tools/<name>.ps1 path - the launcher engines doctor-runtime.ps1 /
            codex-runtime.ps1 AND the transactional/orchestration runners the
            agents call directly (state-tx, queue-tx, outbox, policy, redaction,
-           supervisor, harness, ...) - resolves from a mirror-only target project
+           supervisor, harness, ...), including their co-located shared dependencies
+           such as common.ps1, resolves from a mirror-only target project
            at ~/.claude/scripts/<name>.ps1 too (task T-115; generalizes the
            two-file T-114 allowlist to the whole tools/ folder, so a new runner is
            picked up automatically)
@@ -400,7 +401,8 @@ function Get-ManagedPairs {
         $pairs.Add([ordered]@{ Source = $codexPrompt; Dest = (Join-Path $scriptsDst 'codex-processor.md'); Kind = 'codex_prompt' })
     }
 
-    # Tools runtimes: mirror the ENTIRE tools/*.ps1 set next to the launchers (task T-115),
+    # Tools runtimes and their shared dot-source dependencies: mirror the ENTIRE tools/*.ps1
+    # set next to the launchers (task T-115),
     # not a curated allowlist, so EVERY runner an agent or launcher drives by a bare
     # tools/<name>.ps1 path resolves from a mirror-only target project (no orchestra checkout)
     # at ~/.claude/scripts/<name>.ps1 - and a NEW runner added to tools/ is picked up

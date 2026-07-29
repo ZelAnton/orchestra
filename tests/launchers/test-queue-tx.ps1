@@ -85,6 +85,34 @@ function Assert-Match {
     param([string] $Text, [string] $Pattern, [string] $Message = '')
     if ($Text -notmatch $Pattern) { throw "Assertion failed: ${Message}: [$Pattern] not found in [$Text]" }
 }
+function Read-ArtifactSnapshot {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '<absent>' }
+    return "<present>`n$([System.IO.File]::ReadAllText($Path))"
+}
+function Assert-StaleLifecycleNoMutation {
+    param(
+        [string] $Work,
+        [string[]] $ToolArgs,
+        [int] $Expected,
+        [int] $Current,
+        [string] $Label
+    )
+    $queuePath = Join-Path $Work 'Tasks_Queue.md'
+    $donePath = Join-Path $Work 'Tasks_Done.md'
+    $statePath = Join-Path $Work 'queue_state.json'
+    $queueBefore = Read-ArtifactSnapshot $queuePath
+    $doneBefore = Read-ArtifactSnapshot $donePath
+    $stateBefore = Read-ArtifactSnapshot $statePath
+
+    $r = Run-Tool (@($ToolArgs) + @('--expected-generation', "$Expected"))
+
+    Assert-Equal 3 $r.ExitCode "[$Label] stale expected-generation exits with CAS code 3"
+    Assert-Match $r.Output "generation mismatch: expected $Expected, current $Current" "[$Label] mismatch reports expected/current generation"
+    Assert-Equal $queueBefore (Read-ArtifactSnapshot $queuePath) "[$Label] stale CAS leaves queue unchanged"
+    Assert-Equal $doneBefore (Read-ArtifactSnapshot $donePath) "[$Label] stale CAS leaves archive unchanged"
+    Assert-Equal $stateBefore (Read-ArtifactSnapshot $statePath) "[$Label] stale CAS leaves generation file unchanged"
+}
 
 Invoke-Test -Name 'queue-tx.ps1' -Body {
 
@@ -389,6 +417,71 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Equal 3 $r.ExitCode '[cas] stale expected-generation rejected with exit 3'
         $r = Run-Tool @('propose', '--work', $W, '--title', 'Gen Fresh', '--body', 'b', '--expected-generation', '1')
         Assert-Equal 0 $r.ExitCode '[cas] correct expected-generation accepted'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 9b: lifecycle CAS is uniform and precedes idempotency ------
+    $W = New-Work
+    try {
+        1..4 | ForEach-Object { Propose $W "Lifecycle $_" 'body' | Out-Null } # generation -> 4
+
+        # capture: stale is mutation-free, a match mutates, omission remains compatible.
+        Assert-StaleLifecycleNoMutation $W @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-stale') 3 4 'capture mismatch'
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-match', '--expected-generation', '4')
+        Assert-Equal 0 $r.ExitCode '[capture CAS match] succeeds'
+        Assert-Match $r.Output 'captured T-001 generation=5' '[capture CAS match] advances generation'
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'T-002', '--batch', 'B-no-option')
+        Assert-Equal 0 $r.ExitCode '[capture CAS omitted] remains backward compatible'
+        Assert-Match $r.Output 'captured T-002 generation=6' '[capture CAS omitted] advances generation'
+
+        # Idempotent capture still rejects a stale caller; a fresh caller gets the
+        # original no-op result without a generation bump.
+        Assert-StaleLifecycleNoMutation $W @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-repeat') 5 6 'capture idempotent stale'
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-repeat', '--expected-generation', '6')
+        Assert-Equal 0 $r.ExitCode '[capture idempotent fresh] succeeds'
+        Assert-Match $r.Output 'already-captured T-001' '[capture idempotent fresh] preserves no-op result'
+        Assert-Equal '6' ((Run-Tool @('generation', '--work', $W)).Output.Trim()) '[capture idempotent fresh] does not bump generation'
+
+        # return: match and omission mutate; its already-escalated no-op follows
+        # the same stale-before-idempotency rule.
+        Assert-StaleLifecycleNoMutation $W @('return', '--work', $W, '--id', 'T-001', '--reason', 'stale') 5 6 'return mismatch'
+        $r = Run-Tool @('return', '--work', $W, '--id', 'T-001', '--reason', 'matched', '--expected-generation', '6')
+        Assert-Equal 0 $r.ExitCode '[return CAS match] succeeds'
+        Assert-Match $r.Output 'requeued T-001 .*generation=7' '[return CAS match] advances generation'
+        $r = Run-Tool @('return', '--work', $W, '--id', 'T-002', '--reason', 'no option')
+        Assert-Equal 0 $r.ExitCode '[return CAS omitted] remains backward compatible'
+        Assert-Match $r.Output 'requeued T-002 .*generation=8' '[return CAS omitted] advances generation'
+
+        # escalate has no idempotent early return. Exercise omission, mismatch,
+        # and match while also creating return's already-escalated fixture.
+        $r = Run-Tool @('escalate', '--work', $W, '--id', 'T-003', '--reason', 'no option')
+        Assert-Equal 0 $r.ExitCode '[escalate CAS omitted] remains backward compatible'
+        Assert-Match $r.Output 'escalated T-003 generation=9' '[escalate CAS omitted] advances generation'
+        Assert-StaleLifecycleNoMutation $W @('return', '--work', $W, '--id', 'T-003', '--reason', 'repeat') 8 9 'return idempotent stale'
+        $r = Run-Tool @('return', '--work', $W, '--id', 'T-003', '--reason', 'repeat', '--expected-generation', '9')
+        Assert-Equal 0 $r.ExitCode '[return idempotent fresh] succeeds'
+        Assert-Match $r.Output 'already-escalated T-003' '[return idempotent fresh] preserves no-op result'
+        Assert-Equal '9' ((Run-Tool @('generation', '--work', $W)).Output.Trim()) '[return idempotent fresh] does not bump generation'
+
+        Assert-StaleLifecycleNoMutation $W @('escalate', '--work', $W, '--id', 'T-004', '--reason', 'stale') 8 9 'escalate mismatch'
+        $r = Run-Tool @('escalate', '--work', $W, '--id', 'T-004', '--reason', 'matched', '--expected-generation', '9')
+        Assert-Equal 0 $r.ExitCode '[escalate CAS match] succeeds'
+        Assert-Match $r.Output 'escalated T-004 generation=10' '[escalate CAS match] advances generation'
+
+        # archive: prove mismatch leaves queue, archive, and state untouched, then
+        # cover match/omission plus stale/fresh not-present idempotency.
+        Assert-StaleLifecycleNoMutation $W @('archive', '--work', $W, '--id', 'T-001') 9 10 'archive mismatch'
+        $r = Run-Tool @('archive', '--work', $W, '--id', 'T-001', '--expected-generation', '10')
+        Assert-Equal 0 $r.ExitCode '[archive CAS match] succeeds'
+        Assert-Match $r.Output 'archived T-001 generation=11' '[archive CAS match] advances generation'
+        $r = Run-Tool @('archive', '--work', $W, '--id', 'T-002')
+        Assert-Equal 0 $r.ExitCode '[archive CAS omitted] remains backward compatible'
+        Assert-Match $r.Output 'archived T-002 generation=12' '[archive CAS omitted] advances generation'
+
+        Assert-StaleLifecycleNoMutation $W @('archive', '--work', $W, '--id', 'T-001') 11 12 'archive idempotent stale'
+        $r = Run-Tool @('archive', '--work', $W, '--id', 'T-001', '--expected-generation', '12')
+        Assert-Equal 0 $r.ExitCode '[archive idempotent fresh] succeeds'
+        Assert-Match $r.Output 'not-present T-001' '[archive idempotent fresh] preserves no-op result'
+        Assert-Equal '12' ((Run-Tool @('generation', '--work', $W)).Output.Trim()) '[archive idempotent fresh] does not bump generation'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
     # --- Scenario 10: crash/retry mid-transaction ---------------------------

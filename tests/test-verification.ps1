@@ -48,6 +48,23 @@ try {
     $evidence=(Get-Content (Join-Path $r '.work/verification.json') -Raw | ConvertFrom-Json); Assert-Eq 2 @($evidence.commands).Count 'evidence preserves both commands'
     $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--json'); Assert-Eq 0 $x.Exit 'current-head pass evidence is reusable on resume'
 
+    # The command accepted from config is the command executed and recorded. A hash inside
+    # the final token is data; only the later whitespace-delimited hash begins a comment.
+    # BASH_ENV supplies a hermetic `make` function whose success requires the exact target.
+    $bashEnv=Join-Path $r 'verification-bash-env.sh'
+    Write-Utf8 $bashEnv "make() { [ `"`$#`" -eq 1 ] && [ `"`$1`" = 'check#fast' ]; }`n"
+    $savedBashEnv=$env:BASH_ENV
+    try {
+        $env:BASH_ENV=$bashEnv.Replace('\','/')
+        Write-Utf8 (Join-Path $r '.work/config.md') 'SMOKE_CMD: make check#fast # operator note'
+        $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head,'--json')
+        Assert-Eq 0 $x.Exit 'SMOKE_CMD: make check#fast executes the exact in-token-hash target'
+        $hashEvidence=(Get-Content (Join-Path $r '.work/verification.json') -Raw | ConvertFrom-Json)
+        Assert-Eq 'make check#fast' ([string]$hashEvidence.commands[0].command) 'verification records the exact parsed command without its inline comment'
+    } finally {
+        if ($null -eq $savedBashEnv) { Remove-Item Env:BASH_ENV -ErrorAction SilentlyContinue } else { $env:BASH_ENV=$savedBashEnv }
+    }
+
     # The supervisor inherits the executable of the current PowerShell host. Put a
     # failing `pwsh` first on PATH: the old hardcoded spawn would hit this shadow,
     # whereas Windows PowerShell 5.1 or PowerShell 7 can both launch their own host.

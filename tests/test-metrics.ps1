@@ -154,7 +154,7 @@ $estLines=@(
     (Event-Line s06 '2026-07-04T02:00:00Z' 'cohort.closed' B-4)
 )
 Write-Utf8 (Join-Path $estWork 'events.jsonl') (($estLines -join "`n")+"`n")
-Write-Utf8 (Join-Path $estWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000'
+Write-Utf8 (Join-Path $estWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000 # cohort cap'
 $estRun=Invoke-Metrics @('aggregate','--work',$estWork,'--last','1','--json')
 Assert-Equal 0 $estRun.ExitCode 'estimated-usage fixture exits zero'
 if ($estRun.ExitCode -eq 0) {
@@ -282,7 +282,7 @@ if ($unavailableBudget.ExitCode -eq 0) {
 
 $strictWork=New-Fixture
 Write-Utf8 (Join-Path $strictWork 'events.jsonl') (($unavailableLines -join "`n")+"`n")
-Write-Utf8 (Join-Path $strictWork 'config.md') "COHORT_TOKEN_BUDGET: 10000`nCOHORT_TOKEN_BUDGET_STRICT: true"
+Write-Utf8 (Join-Path $strictWork 'config.md') "COHORT_TOKEN_BUDGET: 10000 # cohort cap`nCOHORT_TOKEN_BUDGET_STRICT: true # fail closed"
 $strictBudget=Invoke-Metrics @('budget','--work',$strictWork,'--batch-id','B-10','--json')
 Assert-Equal 0 $strictBudget.ExitCode 'strict-posture budget projection exits zero'
 if ($strictBudget.ExitCode -eq 0) {
@@ -293,7 +293,7 @@ if ($strictBudget.ExitCode -eq 0) {
     Assert-Equal $null $strictData.token_budget.actual_tokens 'strict posture: unmetered internal Agent dispatch is never treated as zero'
 }
 
-Write-Utf8 (Join-Path $estWork 'config.md') "COHORT_TOKEN_BUDGET: 1000`nEVENTS_OUTBOX: off"
+Write-Utf8 (Join-Path $estWork 'config.md') "COHORT_TOKEN_BUDGET: 1000 # cohort cap`nEVENTS_OUTBOX: off # operator disabled"
 $offBudget=Invoke-Metrics @('budget','--work',$estWork,'--batch-id','B-4','--json')
 Assert-Equal 0 $offBudget.ExitCode 'disabled outbox budget projection exits zero'
 if ($offBudget.ExitCode -eq 0) {
@@ -301,6 +301,26 @@ if ($offBudget.ExitCode -eq 0) {
     Assert-Equal 'telemetry_unavailable' $offData.status 'outbox-off prevents an enabled spending gate from guessing'
     Assert-Equal 'off' $offData.sources.events_outbox 'projection exposes the outbox configuration'
 }
+
+# Hashes that are not whitespace-delimited comments remain part of the value and are
+# rejected by each consumer's domain validator instead of being silently truncated.
+$hashBudgetWork=New-Fixture
+Write-Utf8 (Join-Path $hashBudgetWork 'config.md') 'COHORT_TOKEN_BUDGET: 1000#fast'
+$hashBudget=Invoke-Metrics @('budget','--work',$hashBudgetWork,'--batch-id','B-hash','--json')
+Assert-Equal 2 $hashBudget.ExitCode 'token budget rejects an in-token hash instead of truncating it'
+Assert-Contains $hashBudget.Err 'COHORT_TOKEN_BUDGET in config.md must be a non-negative integer' 'token budget reports the preserved invalid value'
+
+$hashStrictWork=New-Fixture
+Write-Utf8 (Join-Path $hashStrictWork 'config.md') "COHORT_TOKEN_BUDGET: 1000`nCOHORT_TOKEN_BUDGET_STRICT: true#fast"
+$hashStrict=Invoke-Metrics @('budget','--work',$hashStrictWork,'--batch-id','B-hash','--json')
+Assert-Equal 2 $hashStrict.ExitCode 'strict-budget flag rejects an in-token hash instead of truncating it'
+Assert-Contains $hashStrict.Err 'COHORT_TOKEN_BUDGET_STRICT in config.md must be true or false' 'strict-budget flag reports the preserved invalid value'
+
+$hashOutboxWork=New-Fixture
+Write-Utf8 (Join-Path $hashOutboxWork 'config.md') "COHORT_TOKEN_BUDGET: 1000`nEVENTS_OUTBOX: off#fast"
+$hashOutbox=Invoke-Metrics @('budget','--work',$hashOutboxWork,'--batch-id','B-hash','--json')
+Assert-Equal 2 $hashOutbox.ExitCode 'events-outbox flag rejects an in-token hash instead of truncating it'
+Assert-Contains $hashOutbox.Err 'EVENTS_OUTBOX in config.md must be on or off' 'events-outbox flag reports the preserved invalid value'
 
 # T-311: digest projects a time window from the deduplicated event stream, keeps estimated
 # usage separate, and reads current attention artifacts without mutating any of them.

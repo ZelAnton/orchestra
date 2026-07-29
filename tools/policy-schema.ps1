@@ -46,6 +46,8 @@
 
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'common.ps1')
+
 # ============================================================================
 # The schema
 # ============================================================================
@@ -212,8 +214,7 @@ function Test-ConfigValue {
 # ============================================================================
 # config.md parsing (preserves comments and layout for migration).
 # Each entry: Kind ('key' | 'comment' | 'blank'); Key/Value/Comment (for 'key'); Raw; Line.
-# Value semantics mirror cc-doctor's GetCfg exactly: value is the text after the first ':'
-# up to (but excluding) an inline '#', trimmed.
+# Value/comment extraction is delegated to common.ps1's single config-line primitive.
 # ============================================================================
 function ConvertFrom-ConfigText {
     param([string[]]$Lines)
@@ -229,19 +230,9 @@ function ConvertFrom-ConfigText {
             $out.Add([pscustomobject]@{ Kind = 'comment'; Key = ''; Value = ''; Comment = ''; Raw = $raw; Line = $i + 1 })
             continue
         }
-        $m = [regex]::Match($raw, '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*)$')
-        if ($m.Success) {
-            $key = $m.Groups[1].Value
-            $rest = $m.Groups[2].Value
-            $comment = ''
-            # VERIFICATION_COMMANDS is a JSON array and a shell command may legitimately
-            # contain '#'. Keep JSON values intact; unlike scalar values they do not support
-            # a trailing Markdown comment on the same line.
-            if (-not $rest.TrimStart().StartsWith('[')) {
-                $hIdx = $rest.IndexOf('#')
-                if ($hIdx -ge 0) { $comment = $rest.Substring($hIdx); $rest = $rest.Substring(0, $hIdx) }
-            }
-            $out.Add([pscustomobject]@{ Kind = 'key'; Key = $key; Value = $rest.Trim(); Comment = $comment; Raw = $raw; Line = $i + 1 })
+        $parsed = ConvertFrom-OrchestraConfigLine -Line $raw
+        if ($null -ne $parsed) {
+            $out.Add([pscustomobject]@{ Kind = 'key'; Key = $parsed.Key; Value = $parsed.Value; Comment = $parsed.Comment; Raw = $raw; Line = $i + 1 })
             continue
         }
         # A non-blank, non-comment line that is not KEY: value -> keep verbatim, flag as junk.

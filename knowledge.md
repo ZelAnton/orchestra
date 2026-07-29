@@ -286,8 +286,14 @@ Processor и merger формируют описательные англоязы
   guard», что и allowlist ключей в `tools/check-consistency.ps1`, класс 4).
 - **Исполняемая граница policy/config (T-084).** Единый versioned schema source
   `tools/policy-schema.ps1` (`Get-OrchestraSchema`) описывает и `config.md` (типы, defaults,
-  enum/range, env-precedence, чувствительность), и разделы политики `constraints.md`. CLI
-  `tools/policy.ps1` (companion `state-tx.ps1`/`queue-tx.ps1`) исполняет: `validate-config`
+  enum/range, env-precedence, чувствительность), и разделы политики `constraints.md`.
+  Каноническое извлечение `KEY: value` и отсечение Markdown inline-комментария живёт отдельно
+  в `tools/common.ps1::ConvertFrom-OrchestraConfigLine`: `#` внутри токена сохраняется,
+  whitespace-delimited `#` начинает комментарий, а значение с ведущим `[` сохраняется целиком
+  для JSON-массива `VERIFICATION_COMMANDS`. `policy-schema`, `verification`, `notify`,
+  `metrics` и зеркалируемый `doctor-runtime` используют этот один примитив и оставляют у себя
+  только доменную валидацию/first-vs-last-match политику. CLI `tools/policy.ps1` (companion
+  `state-tx.ps1`/`queue-tx.ps1`) исполняет: `validate-config`
   (fail-closed — неизвестный/дублирующийся/невалидный ключ это ошибка, а не тихий default),
   `validate-policy`, `migrate` (перенос старого `config.md` на схему без потери
   значений/комментариев, append-only), `guard-path` (гард destructive-операций: реальная

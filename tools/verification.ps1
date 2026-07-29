@@ -53,11 +53,8 @@ function Read-Config {
     $path = Join-Path $Work 'config.md'
     if (-not (Test-Path -LiteralPath $path)) { return $values }
     foreach ($raw in (Get-Content -LiteralPath $path -Encoding utf8)) {
-        if ($raw -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$') {
-            $key = $Matches[1]; $value = $Matches[2]
-            if (-not $value.StartsWith('[')) { $value = ($value -replace '\s+#.*$', '').Trim() }
-            $values[$key] = $value
-        }
+        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$raw)
+        if ($null -ne $entry) { $values[$entry.Key] = $entry.Value }
     }
     return $values
 }
