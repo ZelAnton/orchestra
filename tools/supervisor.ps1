@@ -1235,6 +1235,8 @@ function Invoke-Redact {
     if ([string]::IsNullOrEmpty($Text)) { return '' }
     $redactor = Join-Path $PSScriptRoot 'redaction.ps1'
     if (-not (Test-Path -LiteralPath $redactor)) { return $Text }
+    $p = $null
+    $redactionSucceeded = $false
     try {
         $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
         $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -1247,21 +1249,28 @@ function Invoke-Redact {
         foreach ($a in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact')) { $psi.ArgumentList.Add($a) }
         if (-not [string]::IsNullOrWhiteSpace($Work)) { $psi.ArgumentList.Add('--work'); $psi.ArgumentList.Add($Work) }
         $p = [System.Diagnostics.Process]::Start($psi)
-        $outT = $p.StandardOutput.ReadToEndAsync()
-        $errT = $p.StandardError.ReadToEndAsync()
         try {
+            $outT = $p.StandardOutput.ReadToEndAsync()
+            $errT = $p.StandardError.ReadToEndAsync()
             $p.StandardInput.Write($Text); $p.StandardInput.Close()
             if (-not $p.WaitForExit($script:RedactionDeadlineMs)) {
                 # Preserve the observe contract: its input is already classifier-derived and
                 # therefore safe to project when redaction infrastructure is unavailable.
-                Stop-ProcessTree $p
                 return $Text
             }
             $collected = Receive-BoundedStreamText $outT $errT $script:StreamCollectGraceMs
             if ($collected.TimedOut -or $p.ExitCode -ne 0) { return $Text }
+            $redactionSucceeded = $true
             return ([string]$collected.Stdout)
         }
         finally {
+            # A redactor can exit while a descendant still owns its redirected pipe.  In that
+            # case the bounded collection times out and the exited root must still be passed
+            # to Stop-ProcessTree, which handles the Windows PowerShell taskkill fallback.
+            # The same cleanup is required for write/read errors and nonzero exits after start.
+            if (-not $redactionSucceeded) {
+                try { Stop-ProcessTree $p } catch { }
+            }
             try { $p.Dispose() } catch { }
         }
     } catch {

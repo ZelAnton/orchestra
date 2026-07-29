@@ -26,6 +26,7 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'proc-tree.ps1')
 $script:ErrPrefix = 'NTFERR'
 $script:AllowedEvents = @('task.escalated', 'approval.pending', 'publish.ci_failed')
 $script:DeadlineSec = 10
@@ -81,19 +82,35 @@ function Get-RedactedShortText {
         $process.StandardInput.Write($Text); $process.StandardInput.Close()
         if (-not $process.WaitForExit($script:RedactionDeadlineMs)) {
             # Do not pass unredacted text to the operator command after a redaction timeout.
-            try { $process.Kill($true) } catch {
-                try { $process.Kill() } catch { }
-            }
+            # Stop-ProcessTree includes the Windows PowerShell 5.1 taskkill /T fallback and
+            # waits for the captured process after requesting the full tree's termination.
+            Stop-ProcessTree $process
             return $null
         }
         $out = ''
         try {
-            if (-not $outTask.Wait($script:RedactionDeadlineMs)) { return $null }
+            if (-not $outTask.Wait($script:RedactionDeadlineMs)) {
+                # An inherited stdout handle can keep ReadToEndAsync pending after the root
+                # exits. Reap the captured redactor tree before returning the safe fallback.
+                Stop-ProcessTree $process
+                return $null
+            }
             $out = [string]$outTask.GetAwaiter().GetResult()
-        } catch { return $null }
-        if ($process.ExitCode -ne 0) { return $null }
+        } catch {
+            Stop-ProcessTree $process
+            return $null
+        }
+        if ($process.ExitCode -ne 0) {
+            Stop-ProcessTree $process
+            return $null
+        }
     }
-    catch { return $null }
+    catch {
+        # This covers input/stream errors after the redactor has started as well as startup
+        # failures. Stop-ProcessTree is a no-op for a null process.
+        Stop-ProcessTree $process
+        return $null
+    }
     finally {
         if ($null -ne $process) { try { $process.Dispose() } catch { } }
     }

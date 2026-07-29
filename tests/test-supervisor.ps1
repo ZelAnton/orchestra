@@ -71,7 +71,8 @@ function ArgsJson { param([string[]]$A) return (, $A | ConvertTo-Json -Compress)
 function Invoke-Spv {
     param(
         [string[]]$ToolArgs,
-        [hashtable]$EnvironmentOverrides = @{}
+        [hashtable]$EnvironmentOverrides = @{},
+        [string]$ToolPath = $script:Tool
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:PsExe
@@ -88,7 +89,7 @@ function Invoke-Spv {
     foreach ($name in $EnvironmentOverrides.Keys) {
         $psi.Environment[[string]$name] = [string]$EnvironmentOverrides[$name]
     }
-    foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) { $psi.ArgumentList.Add($a) }
+    foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ToolPath) + $ToolArgs)) { $psi.ArgumentList.Add($a) }
     $proc = [System.Diagnostics.Process]::Start($psi)
     $outT = $proc.StandardOutput.ReadToEndAsync()
     $errT = $proc.StandardError.ReadToEndAsync()
@@ -713,6 +714,87 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     Assert-True ($timer.Elapsed.TotalSeconds -lt 12) 'observe redaction timeout remains bounded'
     $obsObj = $obs.Out | ConvertFrom-Json
     Assert-Equal $rawReason ([string]$obsObj.outcome_reason) 'observe falls back to classifier-derived text after redaction timeout'
+}.Invoke()
+
+# =============================================================================
+# 6aa. A redactor that exits but leaves a descendant holding its inherited pipes must
+# still have that descendant reaped before observe takes the bounded fallback.
+# =============================================================================
+{
+    $d = New-TempDir
+    $fixtureTools = Join-Path $d 'tools'
+    New-Item -ItemType Directory -Force -Path $fixtureTools | Out-Null
+    foreach ($name in @('supervisor.ps1', 'common.ps1', 'proc-tree.ps1', 'processkit-runtime.ps1')) {
+        Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Tool) $name) -Destination (Join-Path $fixtureTools $name)
+    }
+    # Keep the fixture fast while retaining the production code path: the copied supervisor
+    # starts its normal sibling redactor and performs the normal bounded stream collection.
+    $fixtureTool = Join-Path $fixtureTools 'supervisor.ps1'
+    $fixtureSource = Read-File $fixtureTool
+    $fixtureSource = $fixtureSource.Replace('$script:StreamCollectGraceMs = 5000', '$script:StreamCollectGraceMs = 250')
+    Write-File $fixtureTool $fixtureSource
+
+    $childRecord = Join-Path $d 'redactor-pipe-child.txt'
+$fixtureRedactor = @'
+param([string]$Action)
+$record = [string]$env:ORCHESTRA_TEST_REDACTION_CHILD_RECORD
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+foreach ($arg in @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120')) { $psi.ArgumentList.Add($arg) }
+$child = [System.Diagnostics.Process]::Start($psi)
+[System.IO.File]::WriteAllText($record, "$($child.Id)|$($child.StartTime.ToUniversalTime().Ticks)")
+exit 0
+'@
+    Write-File (Join-Path $fixtureTools 'redaction.ps1') $fixtureRedactor
+
+    $resFile = Join-Path $d 'result.json'
+    $rawReason = 'classifier-derived failure text'
+    Write-File $resFile (([pscustomobject]@{ reason = 'error'; exit_code = 6; timed_out = $false; cancelled = $false; duration_ms = 1; attempts = 1; output_bytes = 0; output_truncated = $false; output_sha256 = 'ab'; outcome_reason = $rawReason; occurred_at = '2026-07-29T12:00:00Z' }) | ConvertTo-Json -Compress)
+    $childIdentity = $null
+    try {
+        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+        $obs = Invoke-Spv @('observe', '--result-file', $resFile, '--task-id', 'T-348', '--role', 'coder', '--mode', 'full', '--json') -ToolPath $fixtureTool -EnvironmentOverrides @{ ORCHESTRA_TEST_REDACTION_CHILD_RECORD = $childRecord }
+        $timer.Stop()
+        Assert-Exit $obs 0 'observe falls back after an exited redactor leaves its pipes open'
+        # Process startup plus Stop-ProcessTree's Windows fallback can take several seconds;
+        # the 120-second holder still makes this a strong bound without a flaky startup budget.
+        Assert-True ($timer.Elapsed.TotalSeconds -lt 15) 'pipe-holder redaction fixture remains bounded'
+        $obsObj = $obs.Out | ConvertFrom-Json
+        Assert-Equal $rawReason ([string]$obsObj.outcome_reason) 'pipe-holder redaction fixture returns classifier-derived fallback text'
+        Assert-True (Test-Path -LiteralPath $childRecord) 'pipe-holder redaction fixture records its inherited-pipe child identity'
+        if (Test-Path -LiteralPath $childRecord) {
+            $identity = (Read-File $childRecord).Trim() -split '\|', 2
+            if (@($identity).Count -eq 2) {
+                $childIdentity = [pscustomobject]@{ Id = [int]$identity[0]; StartTime = [DateTime]::new([long]$identity[1], [DateTimeKind]::Utc) }
+            }
+        }
+        Assert-True ($null -ne $childIdentity) 'pipe-holder redaction fixture writes a valid child identity'
+        if ($null -ne $childIdentity) {
+            $exitWait = [System.Diagnostics.Stopwatch]::StartNew()
+            $alive = $true
+            do {
+                try {
+                    $process = Get-Process -Id $childIdentity.Id -ErrorAction Stop
+                    $alive = (-not $process.HasExited) -and ($process.StartTime.ToUniversalTime() -eq $childIdentity.StartTime)
+                } catch { $alive = $false }
+                if (-not $alive) { break }
+                Start-Sleep -Milliseconds 50
+            } while ($exitWait.Elapsed.TotalSeconds -lt 3)
+            Assert-True (-not $alive) 'pipe-holder redaction child is terminated before bounded fallback returns'
+        }
+    } finally {
+        # Preserve test-run hygiene if the regression is reintroduced.
+        if ($null -ne $childIdentity) {
+            try {
+                $process = Get-Process -Id $childIdentity.Id -ErrorAction Stop
+                if ($process.StartTime.ToUniversalTime() -eq $childIdentity.StartTime) {
+                    $process | Stop-Process -Force -ErrorAction SilentlyContinue
+                }
+            } catch { }
+        }
+    }
 }.Invoke()
 
 # =============================================================================
