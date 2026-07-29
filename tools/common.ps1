@@ -146,6 +146,19 @@ function Require-Opt {
     }
     return [string]$opts[$Name]
 }
+function Parse-IntOpt {
+    param([string]$Name, [int]$Default, [int]$Min = 0)
+    $raw = [string](Opt $Name "$Default")
+    if ([string]::IsNullOrEmpty($raw)) { return $Default }
+    if ($raw -notmatch '^-?\d+$') { Fail 2 "--$Name must be an integer (got '$raw')" }
+    $n = 0
+    if (-not [int]::TryParse($raw, [System.Globalization.NumberStyles]::Integer,
+            [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n)) {
+        Fail 2 "--$Name must be an integer in the Int32 range (got '$raw')"
+    }
+    if ($n -lt $Min) { Fail 2 "--$Name must be >= $Min (got $n)" }
+    return $n
+}
 
 # --------------------------------------------------------------------------
 # Top-level catch dispatcher: decode a `<Prefix>|code|msg` coded error into the tool's

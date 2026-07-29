@@ -397,6 +397,50 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
         Assert-Equal 2 $r.ExitCode '[trans] unknown --from state is a usage error (2)'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 11b: numeric CLI options have stable usage errors ---------
+    foreach ($raw in @('not-a-number', '2147483648', '0', '-1')) {
+        $W = New-Work
+        try {
+            $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--ttl', $raw)
+            Assert-Equal 2 $r.ExitCode "[int-opt] invalid ttl '$raw' is usage code 2"
+            Assert-Match $r.Output '--ttl' "[int-opt] invalid ttl '$raw' names the option"
+        } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $W = New-Work
+    try {
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--ttl', '2147483647')
+        Assert-Equal 0 $r.ExitCode '[int-opt] Int32 maximum is a valid ttl'
+        Assert-Equal ([int]::MaxValue) ([int](Read-Lease $W).ttl_seconds) '[int-opt] maximum ttl is stored exactly'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    $W = New-Work
+    try {
+        foreach ($raw in @('not-a-number', '2147483648', '-1')) {
+            $r = Run-Tool @('bump-generation', '--work', $W, '--expected-generation', $raw)
+            Assert-Equal 2 $r.ExitCode "[int-opt] bump-generation rejects expected-generation '$raw' with usage code 2"
+            Assert-Match $r.Output '--expected-generation' "[int-opt] bump-generation diagnostic names expected-generation for '$raw'"
+        }
+        $r = Run-Tool @('bump-generation', '--work', $W, '--expected-generation', '2147483647')
+        Assert-Equal 3 $r.ExitCode '[int-opt] maximum expected-generation parses before bump-generation CAS rejects it'
+        $r = Run-Tool @('bump-generation', '--work', $W, '--expected-generation', '0')
+        Assert-Equal 0 $r.ExitCode '[int-opt] matching zero expected-generation remains valid'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    $W = New-Work
+    try {
+        $acquired = Run-Tool @('acquire', '--work', $W, '--root', $ROOT)
+        $owner = Get-Owner $acquired
+        foreach ($raw in @('not-a-number', '2147483648', '-1')) {
+            $r = Run-Tool @('heartbeat', '--work', $W, '--owner', $owner, '--expected-generation', $raw)
+            Assert-Equal 2 $r.ExitCode "[int-opt] heartbeat rejects expected-generation '$raw' with usage code 2"
+            Assert-Match $r.Output '--expected-generation' "[int-opt] heartbeat diagnostic names expected-generation for '$raw'"
+        }
+        $r = Run-Tool @('heartbeat', '--work', $W, '--owner', $owner, '--expected-generation', '2147483647')
+        Assert-Equal 3 $r.ExitCode '[int-opt] maximum expected-generation parses before heartbeat CAS rejects it'
+        $r = Run-Tool @('heartbeat', '--work', $W, '--owner', $owner, '--expected-generation', '1')
+        Assert-Equal 0 $r.ExitCode '[int-opt] matching heartbeat expected-generation remains valid'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 12: control-plane generation counter (CAS) ----------------
     $W = New-Work
     try {

@@ -419,6 +419,19 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         Assert-Equal 0 $r.ExitCode '[cas] correct expected-generation accepted'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
+    # --- Scenario 9a: expected-generation has stable usage errors -----------
+    $W = New-Work
+    try {
+        Propose $W 'Gen Parse' 'a' | Out-Null
+        foreach ($raw in @('not-a-number', '2147483648', '-1')) {
+            $r = Run-Tool @('propose', '--work', $W, '--title', "Bad Gen $raw", '--body', 'b', '--expected-generation', $raw)
+            Assert-Equal 2 $r.ExitCode "[cas-parse] invalid expected-generation '$raw' is usage code 2"
+            Assert-Match $r.Output '--expected-generation' "[cas-parse] invalid value '$raw' names the option"
+        }
+        $r = Run-Tool @('propose', '--work', $W, '--title', 'Max Gen', '--body', 'b', '--expected-generation', '2147483647')
+        Assert-Equal 3 $r.ExitCode '[cas-parse] Int32 maximum parses and reaches the domain CAS check'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
     # --- Scenario 9b: lifecycle CAS is uniform and precedes idempotency ------
     $W = New-Work
     try {

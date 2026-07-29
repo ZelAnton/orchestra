@@ -213,6 +213,33 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
 }.Invoke()
 
 # =============================================================================
+# 7. Parse-IntOpt: strict decimal syntax, Int32 range, defaults and minimum bounds.
+# =============================================================================
+{
+    $script:ErrPrefix = 'CMNERR'
+
+    $script:opts = @{}
+    Assert-Equal 17 (Parse-IntOpt 'count' 17 0) 'omitted integer option returns its default'
+
+    $script:opts = @{ count = '2147483647' }
+    Assert-Equal ([int]::MaxValue) (Parse-IntOpt 'count' 0 0) 'Int32 maximum is accepted'
+
+    $script:opts = @{ count = '-2147483648' }
+    Assert-Equal ([int]::MinValue) (Parse-IntOpt 'count' 0 ([int]::MinValue)) 'Int32 minimum is accepted when the caller permits it'
+
+    foreach ($case in @(
+            @{ Raw = 'not-a-number'; Pattern = '--count must be an integer' },
+            @{ Raw = '2147483648'; Pattern = '--count must be an integer in the Int32 range' },
+            @{ Raw = '-2147483649'; Pattern = '--count must be an integer in the Int32 range' },
+            @{ Raw = '-1'; Pattern = '--count must be >= 0' })) {
+        $script:opts = @{ count = $case.Raw }
+        $message = ''
+        try { [void](Parse-IntOpt 'count' 0 0) } catch { $message = [string]$_.Exception.Message }
+        Assert-True ($message -like "CMNERR|2|*$($case.Pattern)*") "invalid integer '$($case.Raw)' is a named usage error"
+    }
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in $script:TempDirs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
