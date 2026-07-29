@@ -68,7 +68,13 @@ function Has-Prop {
 }
 function Get-Prop {
     param($Obj, [string]$Name)
-    if (Has-Prop $Obj $Name) { return $Obj.$Name } else { return $null }
+    if (-not (Has-Prop $Obj $Name)) { return $null }
+    $value = $Obj.PSObject.Properties[$Name].Value
+    # Preserve the actual JSON property shape. A normal PowerShell function enumerates
+    # array output, so `[1]` would otherwise reach a caller as scalar `1` before a strict
+    # consumer has any opportunity to reject the structured value.
+    if ($value -is [array]) { return ,$value }
+    return $value
 }
 # First of $Names whose value is present and non-blank (used by the metrics projection to
 # accept a field under any of several historical spellings).
@@ -84,11 +90,49 @@ function Get-FirstProp {
 }
 
 # --------------------------------------------------------------------------
-# Scalar coercions used across the projection. To-Number is a NON-NEGATIVE invariant-culture
-# float parse (a negative or unparseable value is "unknown", i.e. $null); To-Time parses an
-# ISO-8601 / offset timestamp as UTC (AssumeUniversal, so an offset-less string is read as
-# UTC, never as host-local), returning $null when unparseable.
+# Scalar coercions used across the projection. To-Int64 tolerates historical integer strings,
+# but rejects structured JSON values before string conversion (a one-element array otherwise
+# stringifies as its sole value in PowerShell). To-NonNegativeInt64 additionally rejects
+# negative values. Test-JsonIntegerScalar is the stricter WRITER predicate: only an actual
+# integral JSON/CLR scalar is accepted, never a numeric string or floating-point value.
+# To-Number is a NON-NEGATIVE invariant-culture float parse (a negative or unparseable value
+# is "unknown", i.e. $null); To-Time parses an ISO-8601 / offset timestamp as UTC
+# (AssumeUniversal, so an offset-less string is read as UTC, never as host-local), returning
+# $null when unparseable.
 # --------------------------------------------------------------------------
+function To-Int64 {
+    param($Value)
+    if ($null -eq $Value -or $Value -is [array] -or
+            $Value -is [System.Collections.IDictionary] -or
+            $Value -is [System.Management.Automation.PSCustomObject]) {
+        return $null
+    }
+    $text = [string]$Value
+    if ($text -notmatch '^-?\d+$') { return $null }
+    $parsed = [int64]0
+    if ([int64]::TryParse($text, [Globalization.NumberStyles]::AllowLeadingSign,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed)) {
+        return $parsed
+    }
+    return $null
+}
+function To-NonNegativeInt64 {
+    param($Value)
+    $parsed = To-Int64 $Value
+    if ($null -ne $parsed -and $parsed -ge 0) { return $parsed }
+    return $null
+}
+function Test-JsonIntegerScalar {
+    param($Value)
+    if ($null -eq $Value) { return $false }
+    $isIntegerType = (
+        $Value -is [sbyte] -or $Value -is [byte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64]
+    )
+    return ($isIntegerType -and $null -ne (To-Int64 $Value))
+}
 function To-Number {
     param($Value)
     if ($null -eq $Value) { return $null }

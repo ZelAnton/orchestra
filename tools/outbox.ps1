@@ -146,6 +146,7 @@ $script:CodexAttemptKeys = @(
     'effective_model', 'effective_reasoning', 'effective_sandbox', 'effective_network',
     'exit_code', 'outcome', 'outcome_reason'
 )
+$script:CodexAttemptNonNegativeInt64Keys = @('duration_ms', 'attempt_number')
 # usage.recorded payload is a strict SCALAR allowlist (T-248): per-model-call token usage,
 # uniformly for both a headless `claude -p --output-format stream-json` result event and a
 # `codex exec` token count. Same privacy posture as codex.attempt - no prompt/diff/paths/
@@ -480,6 +481,33 @@ function Test-Envelope {
         if ([string]$Obj.type -eq 'codex.attempt') {
             foreach ($k in $payload.PSObject.Properties.Name) {
                 if ($script:CodexAttemptKeys -notcontains $k) { return "codex.attempt payload key '$k' is not in the privacy allowlist" }
+            }
+            foreach ($k in $script:CodexAttemptNonNegativeInt64Keys) {
+                if (Has-Prop $payload $k) {
+                    $rawValue = Get-Prop $payload $k
+                    if (-not (Test-JsonIntegerScalar $rawValue)) {
+                        return "codex.attempt payload key '$k' must be an integer in range 0..$([int64]::MaxValue)"
+                    }
+                    $parsed = To-NonNegativeInt64 $rawValue
+                    if ($null -eq $parsed) {
+                        return "codex.attempt payload key '$k' must be an integer in range 0..$([int64]::MaxValue)"
+                    }
+                    if ($k -eq 'attempt_number' -and $parsed -lt 1) {
+                        return 'codex.attempt attempt_number must be positive'
+                    }
+                }
+            }
+            if (Has-Prop $payload 'exit_code') {
+                $rawExitCode = Get-Prop $payload 'exit_code'
+                if ($null -ne $rawExitCode) {
+                    if (-not (Test-JsonIntegerScalar $rawExitCode)) {
+                        return "codex.attempt payload key 'exit_code' must be null or an integer in range $([int]::MinValue)..$([int]::MaxValue)"
+                    }
+                    $exitCode = To-Int64 $rawExitCode
+                    if ($null -eq $exitCode -or $exitCode -lt [int]::MinValue -or $exitCode -gt [int]::MaxValue) {
+                        return "codex.attempt payload key 'exit_code' must be null or an integer in range $([int]::MinValue)..$([int]::MaxValue)"
+                    }
+                }
             }
         }
         if ([string]$Obj.type -eq 'usage.recorded') {
@@ -960,7 +988,7 @@ function Cmd-Metrics {
 
         $typeCounts = [ordered]@{}
         foreach ($t in $script:KnownTypes) { $typeCounts[$t] = 0 }
-        $codexDur = New-Object System.Collections.Generic.List[int]
+        $codexDur = New-Object System.Collections.Generic.List[int64]
         $roundStart = @{}   # "batch|wave" -> occurred_at
         $roundDur = New-Object System.Collections.Generic.List[object]
         $taskCaptured = @{} # task_id -> earliest occurred_at
@@ -978,7 +1006,10 @@ function Cmd-Metrics {
             $pl = $e.payload
             switch ($type) {
                 'codex.attempt' {
-                    if ((Has-Prop $pl 'duration_ms') -and ([string]$pl.duration_ms -match '^\d+$')) { [void]$codexDur.Add([int]$pl.duration_ms) }
+                    if (Has-Prop $pl 'duration_ms') {
+                        $duration = To-NonNegativeInt64 (Get-Prop $pl 'duration_ms')
+                        if ($null -ne $duration) { [void]$codexDur.Add($duration) }
+                    }
                 }
                 'cohort.round_started' {
                     $w = if (Has-Prop $pl 'wave') { [string]$pl.wave } else { '?' }
@@ -1038,9 +1069,14 @@ function Cmd-Metrics {
 
         function Stat { param($List)
             if ($List.Count -eq 0) { return [ordered]@{ n = 0; total_ms = 0; min_ms = 0; max_ms = 0; avg_ms = 0 } }
-            $sum = 0; $min = [int]::MaxValue; $max = 0
-            foreach ($v in $List) { $sum += $v; if ($v -lt $min) { $min = $v }; if ($v -gt $max) { $max = $v } }
-            return [ordered]@{ n = $List.Count; total_ms = $sum; min_ms = $min; max_ms = $max; avg_ms = [int]($sum / $List.Count) }
+            $sum = [decimal]0; $min = [int64]::MaxValue; $max = [int64]0
+            foreach ($v in $List) {
+                $value = [int64]$v
+                $sum += [decimal]$value
+                if ($value -lt $min) { $min = $value }
+                if ($value -gt $max) { $max = $value }
+            }
+            return [ordered]@{ n = $List.Count; total_ms = $sum; min_ms = $min; max_ms = $max; avg_ms = [int64]($sum / $List.Count) }
         }
 
         $usage = [ordered]@{

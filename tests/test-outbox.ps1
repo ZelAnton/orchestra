@@ -377,6 +377,29 @@ function Ref-UuidV5 {
     Assert-Exit $cx 5 'codex.attempt non-allowlisted key rejected'
     Assert-Contains $cx.Err 'allowlist' 'rejection cites the privacy allowlist'
 
+    # codex.attempt numeric fields are bounded scalars on write. duration_ms and
+    # attempt_number use the non-negative Int64 domain (attempt_number is 1-based);
+    # exit_code is nullable but otherwise follows the signed Int32 process-exit domain.
+    $validCodexNumbers = Invoke-Outbox @('append', '--events', $ev, '--task-id', 'T-2', '--type', 'codex.attempt', '--role', 'coder', '--mode', 'full', '--attempt-number', '2', '--payload', '{"role":"coder","mode":"full","attempt_number":2,"duration_ms":99999999999999,"exit_code":-1073741819,"outcome":"failed"}')
+    Assert-Exit $validCodexNumbers 0 'codex.attempt accepts Int64 duration and signed Int32 exit code'
+    foreach ($case in @(
+        @{ Name='non-numeric duration'; Attempt='3'; Payload='{"attempt_number":3,"duration_ms":"slow","exit_code":0}' },
+        @{ Name='negative duration'; Attempt='4'; Payload='{"attempt_number":4,"duration_ms":-1,"exit_code":0}' },
+        @{ Name='overflowing duration'; Attempt='5'; Payload='{"attempt_number":5,"duration_ms":9223372036854775808,"exit_code":0}' },
+        @{ Name='zero attempt number'; Attempt='6'; Payload='{"attempt_number":0,"duration_ms":1,"exit_code":0}' },
+        @{ Name='overflowing attempt number'; Attempt='7'; Payload='{"attempt_number":9223372036854775808,"duration_ms":1,"exit_code":0}' },
+        @{ Name='non-numeric exit code'; Attempt='8'; Payload='{"attempt_number":8,"duration_ms":1,"exit_code":"failed"}' },
+        @{ Name='out-of-range exit code'; Attempt='9'; Payload='{"attempt_number":9,"duration_ms":1,"exit_code":2147483648}' },
+        @{ Name='duration array'; Attempt='10'; Payload='{"attempt_number":10,"duration_ms":[1],"exit_code":0}' },
+        @{ Name='attempt-number array'; Attempt='11'; Payload='{"attempt_number":[1],"duration_ms":1,"exit_code":0}' },
+        @{ Name='exit-code array'; Attempt='12'; Payload='{"attempt_number":12,"duration_ms":1,"exit_code":[0]}' },
+        @{ Name='numeric string'; Attempt='13'; Payload='{"attempt_number":13,"duration_ms":"1","exit_code":0}' },
+        @{ Name='non-integer number'; Attempt='14'; Payload='{"attempt_number":14,"duration_ms":1.5,"exit_code":0}' }
+    )) {
+        $badCodexNumber = Invoke-Outbox @('append', '--events', $ev, '--task-id', 'T-2', '--type', 'codex.attempt', '--role', 'coder', '--mode', 'full', '--attempt-number', $case.Attempt, '--payload', $case.Payload)
+        Assert-Exit $badCodexNumber 5 "codex.attempt rejects $($case.Name)"
+    }
+
     # absolute path anywhere in payload (privacy) (rc=5) - exact JSON, no shell mangling.
     $ap = Invoke-Outbox @('append', '--events', $ev, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{"p":"C:\\secret\\creds"}')
     Assert-Exit $ap 5 'absolute Windows path in payload rejected'
@@ -460,6 +483,23 @@ function Ref-UuidV5 {
     Assert-Equal 30000 $obj.round_durations[0].duration_ms 'metrics reports round wall-time (30s)'
     Assert-Equal 300000 $obj.critical_paths[0].critical_path_ms 'metrics reports captured->done critical path (5min)'
     Assert-NotContains $m.Out 'secret' 'metrics carries no sensitive text'
+
+    # Existing append-only streams are read-lenient. A historical Int64 duration remains
+    # usable, while malformed and beyond-Int64 values are skipped instead of terminating
+    # the entire metrics projection.
+    $legacyDir = New-TempDir; $legacyEvents = New-EventsFile $legacyDir
+    Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000001","occurred_at":"2026-07-10T10:00:00Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":99999999999999}}' + "`n")
+    Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000002","occurred_at":"2026-07-10T10:00:01Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":9223372036854775808}}' + "`n")
+    Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000003","occurred_at":"2026-07-10T10:00:02Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":"corrupt"}}' + "`n")
+    Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000004","occurred_at":"2026-07-10T10:00:03Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":[99999999999999]}}' + "`n")
+    $legacyMetrics = Invoke-Outbox @('metrics', '--events', $legacyEvents, '--json')
+    Assert-Exit $legacyMetrics 0 'metrics tolerates malformed historical codex.attempt durations'
+    if ($legacyMetrics.ExitCode -eq 0) {
+        $legacyObj = $legacyMetrics.Out | ConvertFrom-Json
+        Assert-Equal 1 $legacyObj.codex_attempt.n 'metrics skips malformed historical durations'
+        Assert-Equal ([int64]99999999999999) ([int64]$legacyObj.codex_attempt.avg_ms) 'metrics preserves historical Int64 duration'
+        Assert-Equal ([int64]99999999999999) ([int64]$legacyObj.codex_attempt.total_ms) 'metrics total preserves historical Int64 duration'
+    }
 
     # A 31-day interval is greater than Int32.MaxValue milliseconds. Both timestamp-
     # derived metric paths must preserve it as Int64 instead of terminating metrics with
