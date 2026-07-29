@@ -1236,19 +1236,36 @@ function Invoke-Redact {
     $redactor = Join-Path $PSScriptRoot 'redaction.ps1'
     if (-not (Test-Path -LiteralPath $redactor)) { return $Text }
     $p = $null
+    # A redactor can itself leave a helper holding its redirected pipes after the root
+    # exits. On POSIX the kernel reparents that helper before cleanup, so launch the
+    # redactor in a dedicated group and retain its pgid for Stop-ProcessTree's group reap.
+    # Resolve-SetsidLauncher returns $null on Windows, preserving the existing spawn path.
+    $setsidLauncher = Resolve-SetsidLauncher
+    $launchFile = ''
+    $launchArgs = @()
+    $posixPgid = 0
     $redactionSucceeded = $false
     try {
         $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+        $launchFile = $psExe
+        $launchArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact')
+        if (-not [string]::IsNullOrWhiteSpace($Work)) { $launchArgs += @('--work', $Work) }
+        if ($setsidLauncher) {
+            $launchFile = $setsidLauncher
+            $launchArgs = @($psExe) + @($launchArgs)
+        }
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $psExe
+        $psi.FileName = $launchFile
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardInput = $true
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
-        foreach ($a in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact')) { $psi.ArgumentList.Add($a) }
-        if (-not [string]::IsNullOrWhiteSpace($Work)) { $psi.ArgumentList.Add('--work'); $psi.ArgumentList.Add($Work) }
+        foreach ($a in $launchArgs) { $psi.ArgumentList.Add($a) }
         $p = [System.Diagnostics.Process]::Start($psi)
+        # `setsid` execs the target in place for this .NET-spawned child, making its pid
+        # the fresh process-group id. 0 keeps the plain-spawn behavior when unsupported.
+        if ($setsidLauncher) { $posixPgid = [int]$p.Id }
         try {
             $outT = $p.StandardOutput.ReadToEndAsync()
             $errT = $p.StandardError.ReadToEndAsync()
@@ -1266,10 +1283,11 @@ function Invoke-Redact {
         finally {
             # A redactor can exit while a descendant still owns its redirected pipe.  In that
             # case the bounded collection times out and the exited root must still be passed
-            # to Stop-ProcessTree, which handles the Windows PowerShell taskkill fallback.
+            # to Stop-ProcessTree. On POSIX the captured group also reaches a reparented
+            # holder; on Windows the group id is 0 and the taskkill fallback is unchanged.
             # The same cleanup is required for write/read errors and nonzero exits after start.
             if (-not $redactionSucceeded) {
-                try { Stop-ProcessTree $p } catch { }
+                try { Stop-ProcessTree $p -PosixProcessGroupId $posixPgid } catch { }
             }
             try { $p.Dispose() } catch { }
         }

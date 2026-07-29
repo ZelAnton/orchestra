@@ -744,7 +744,21 @@ $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 foreach ($arg in @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120')) { $psi.ArgumentList.Add($arg) }
 $child = [System.Diagnostics.Process]::Start($psi)
-[System.IO.File]::WriteAllText($record, "$($child.Id)|$($child.StartTime.ToUniversalTime().Ticks)")
+# Linux lets the fixture prove the structural POSIX precondition too: after setsid wraps
+# the redactor, its pid is the fresh pgrp inherited by the pipe-holding child. This is
+# intentionally collected before the root exits; the later assertion proves group cleanup.
+$childPgrp = 'unavailable'
+if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+    try {
+        $stat = [System.IO.File]::ReadAllText("/proc/$($child.Id)/stat")
+        $rightParen = $stat.LastIndexOf(')')
+        if ($rightParen -ge 0) {
+            $fields = @($stat.Substring($rightParen + 1).Trim() -split '\s+')
+            if ($fields.Count -ge 3) { $childPgrp = $fields[2] }
+        }
+    } catch { }
+}
+[System.IO.File]::WriteAllText($record, "$($child.Id)|$($child.StartTime.ToUniversalTime().Ticks)|$PID|$childPgrp")
 exit 0
 '@
     Write-File (Join-Path $fixtureTools 'redaction.ps1') $fixtureRedactor
@@ -765,9 +779,12 @@ exit 0
         Assert-Equal $rawReason ([string]$obsObj.outcome_reason) 'pipe-holder redaction fixture returns classifier-derived fallback text'
         Assert-True (Test-Path -LiteralPath $childRecord) 'pipe-holder redaction fixture records its inherited-pipe child identity'
         if (Test-Path -LiteralPath $childRecord) {
-            $identity = (Read-File $childRecord).Trim() -split '\|', 2
-            if (@($identity).Count -eq 2) {
+            $identity = (Read-File $childRecord).Trim() -split '\|', 4
+            if (@($identity).Count -eq 4) {
                 $childIdentity = [pscustomobject]@{ Id = [int]$identity[0]; StartTime = [DateTime]::new([long]$identity[1], [DateTimeKind]::Utc) }
+                if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+                    Assert-Equal ([string]$identity[2]) ([string]$identity[3]) 'pipe-holder fixture launches the redactor in its own POSIX process group'
+                }
             }
         }
         Assert-True ($null -ne $childIdentity) 'pipe-holder redaction fixture writes a valid child identity'

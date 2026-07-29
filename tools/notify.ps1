@@ -75,8 +75,21 @@ function Get-RedactedShortText {
     $psi.RedirectStandardError = $true
     foreach ($a in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact', '--stdin', '--work', $Work)) { $psi.ArgumentList.Add($a) }
     $process = $null
+    # The redactor can exit while a helper retains an inherited output pipe. Give it a
+    # dedicated POSIX process group so cleanup can reach that reparented helper; Windows
+    # receives $null from Resolve-SetsidLauncher and retains its ordinary launch behavior.
+    $setsidLauncher = Resolve-SetsidLauncher
+    if ($setsidLauncher) {
+        $redactorArgs = @($psi.ArgumentList)
+        $psi.FileName = $setsidLauncher
+        $psi.ArgumentList.Clear()
+        $psi.ArgumentList.Add($psExe)
+        foreach ($arg in $redactorArgs) { $psi.ArgumentList.Add($arg) }
+    }
+    $posixPgid = 0
     try {
         $process = [System.Diagnostics.Process]::Start($psi)
+        if ($setsidLauncher) { $posixPgid = [int]$process.Id }
         $outTask = $process.StandardOutput.ReadToEndAsync()
         $errTask = $process.StandardError.ReadToEndAsync()
         $process.StandardInput.Write($Text); $process.StandardInput.Close()
@@ -84,7 +97,7 @@ function Get-RedactedShortText {
             # Do not pass unredacted text to the operator command after a redaction timeout.
             # Stop-ProcessTree includes the Windows PowerShell 5.1 taskkill /T fallback and
             # waits for the captured process after requesting the full tree's termination.
-            Stop-ProcessTree $process
+            Stop-ProcessTree $process -PosixProcessGroupId $posixPgid
             return $null
         }
         $out = ''
@@ -92,23 +105,23 @@ function Get-RedactedShortText {
             if (-not $outTask.Wait($script:RedactionDeadlineMs)) {
                 # An inherited stdout handle can keep ReadToEndAsync pending after the root
                 # exits. Reap the captured redactor tree before returning the safe fallback.
-                Stop-ProcessTree $process
+                Stop-ProcessTree $process -PosixProcessGroupId $posixPgid
                 return $null
             }
             $out = [string]$outTask.GetAwaiter().GetResult()
         } catch {
-            Stop-ProcessTree $process
+            Stop-ProcessTree $process -PosixProcessGroupId $posixPgid
             return $null
         }
         if ($process.ExitCode -ne 0) {
-            Stop-ProcessTree $process
+            Stop-ProcessTree $process -PosixProcessGroupId $posixPgid
             return $null
         }
     }
     catch {
         # This covers input/stream errors after the redactor has started as well as startup
         # failures. Stop-ProcessTree is a no-op for a null process.
-        Stop-ProcessTree $process
+        Stop-ProcessTree $process -PosixProcessGroupId $posixPgid
         return $null
     }
     finally {
