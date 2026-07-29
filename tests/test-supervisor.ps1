@@ -39,6 +39,8 @@
       * Optional released ProcessKit CLI integration: when ORCHESTRA_PROCESSKIT_TEST_CLI
         is set, mediated stdin reaches the child through run:--stdin-file and 0.3.0's
         bounded capture path keeps flooding output out of the supervisor's memory.
+      * Incomplete but parseable ProcessKit lifecycle/capture events degrade to a
+        structured runner-failure source under StrictMode instead of throwing.
 
 .EXAMPLE
     pwsh -File tests/test-supervisor.ps1
@@ -153,6 +155,24 @@ exit $code
 '@
     Write-File $p $body
     return $p
+}
+
+function Resolve-ProcessKitFixture {
+    param(
+        [string[]]$Events,
+        [bool]$CaptureExpected = $true,
+        $InitialExitCode = 99
+    )
+    $d = New-TempDir
+    $eventPath = Join-Path $d 'processkit.jsonl'
+    Write-File $eventPath ($Events -join "`n")
+    $lifecycle = Read-ProcessKitLifecycle -Path $eventPath
+    return Resolve-ProcessKitLifecycle `
+        -Lifecycle $lifecycle `
+        -CaptureExpected $CaptureExpected `
+        -TimedOut $false `
+        -Cancelled $false `
+        -InitialExitCode $InitialExitCode
 }
 
 # =============================================================================
@@ -520,6 +540,118 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     Assert-Equal 'full-stderr' ([string]$both.Stderr) 'normal stderr fully captured within the grace'
 
     $wedged.SetResult('release')   # release the simulated task so nothing lingers after the test
+}.Invoke()
+
+# =============================================================================
+# 4d. Parseable but incomplete ProcessKit lifecycle/capture events.
+# =============================================================================
+{
+    # Dot-source in this invocation scope: the earlier helper test intentionally loads
+    # the tool only inside its own isolated scriptblock.
+    . $script:Tool
+    $started = '{"event":"run_started","root_pid":4321,"mechanism":"job-object","abrupt_cleanup":"none"}'
+    $captured = '{"event":"output_captured","stdout":{"bytes":11,"truncated":false,"write_error":false},"stderr":{"bytes":7,"truncated":true,"write_error":false}}'
+    $terminal = '{"event":"runner_exit","source":"child_exit","child_code":7}'
+    $noise = '{"schema":1}'
+    $membersWithoutPayload = '{"event":"members_snapshot"}'
+
+    $complete = Resolve-ProcessKitFixture @($noise, $started, $membersWithoutPayload, $captured, $terminal)
+    Assert-Equal '' ([string]$complete.RunnerFailureSource) 'complete ProcessKit lifecycle keeps runner failure empty'
+    Assert-Equal 7 ([int]$complete.ExitCode) 'complete ProcessKit lifecycle keeps child exit code'
+    Assert-Equal 4321 ([int]$complete.RootPid) 'complete ProcessKit lifecycle keeps root pid'
+    Assert-Equal 'job-object' ([string]$complete.Mechanism) 'complete ProcessKit lifecycle keeps mechanism'
+    Assert-Equal 'none' ([string]$complete.AbruptCleanup) 'complete ProcessKit lifecycle keeps abrupt cleanup'
+    Assert-True ([bool]$complete.CaptureValid) 'complete ProcessKit capture remains valid'
+    Assert-Equal 18 ([int64]$complete.CaptureBytes) 'complete ProcessKit capture keeps the full byte count'
+    Assert-True ([bool]$complete.CaptureTruncated) 'complete ProcessKit capture keeps truncation'
+    Assert-True (-not [bool]$complete.CaptureWriteError) 'complete ProcessKit capture keeps write-error=false'
+
+    $incompleteFixtures = @(
+        [pscustomobject]@{
+            Name = 'missing run_started event'
+            Events = @($noise, $membersWithoutPayload, $captured, $terminal)
+            Expected = 'missing_run_started'
+        },
+        [pscustomobject]@{
+            Name = 'run_started missing root_pid'
+            Events = @('{"event":"run_started","mechanism":"job-object","abrupt_cleanup":"none"}', $captured, $terminal)
+            Expected = 'invalid_run_started'
+        },
+        [pscustomobject]@{
+            Name = 'run_started missing mechanism'
+            Events = @('{"event":"run_started","root_pid":4321,"abrupt_cleanup":"none"}', $captured, $terminal)
+            Expected = 'invalid_run_started'
+        },
+        [pscustomobject]@{
+            Name = 'run_started missing abrupt_cleanup'
+            Events = @('{"event":"run_started","root_pid":4321,"mechanism":"job-object"}', $captured, $terminal)
+            Expected = 'invalid_run_started'
+        },
+        [pscustomobject]@{
+            Name = 'missing output_captured event'
+            Events = @($started, $terminal)
+            Expected = 'missing_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured missing stdout object'
+            Events = @($started, '{"event":"output_captured","stderr":{"bytes":7,"truncated":false,"write_error":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured missing stderr object'
+            Events = @($started, '{"event":"output_captured","stdout":{"bytes":11,"truncated":false,"write_error":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured stdout missing write_error'
+            Events = @($started, '{"event":"output_captured","stdout":{"bytes":11,"truncated":false},"stderr":{"bytes":7,"truncated":false,"write_error":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured stderr missing write_error'
+            Events = @($started, '{"event":"output_captured","stdout":{"bytes":11,"truncated":false,"write_error":false},"stderr":{"bytes":7,"truncated":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured stdout missing bytes'
+            Events = @($started, '{"event":"output_captured","stdout":{"truncated":false,"write_error":false},"stderr":{"bytes":7,"truncated":false,"write_error":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured stderr missing bytes'
+            Events = @($started, '{"event":"output_captured","stdout":{"bytes":11,"truncated":false,"write_error":false},"stderr":{"truncated":false,"write_error":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured stdout missing truncated'
+            Events = @($started, '{"event":"output_captured","stdout":{"bytes":11,"write_error":false},"stderr":{"bytes":7,"truncated":false,"write_error":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'output_captured stderr missing truncated'
+            Events = @($started, '{"event":"output_captured","stdout":{"bytes":11,"truncated":false,"write_error":false},"stderr":{"bytes":7,"write_error":false}}', $terminal)
+            Expected = 'invalid_output_captured'
+        },
+        [pscustomobject]@{
+            Name = 'missing runner_exit event'
+            Events = @($started, $captured)
+            Expected = 'missing_runner_exit'
+        },
+        [pscustomobject]@{
+            Name = 'runner_exit missing source'
+            Events = @($started, $captured, '{"event":"runner_exit","child_code":7}')
+            Expected = 'invalid_runner_exit'
+        },
+        [pscustomobject]@{
+            Name = 'child_exit missing child_code'
+            Events = @($started, $captured, '{"event":"runner_exit","source":"child_exit"}')
+            Expected = 'invalid_runner_exit'
+        }
+    )
+    foreach ($fixture in $incompleteFixtures) {
+        $resolved = Resolve-ProcessKitFixture -Events @($fixture.Events)
+        Assert-Equal $fixture.Expected ([string]$resolved.RunnerFailureSource) "$($fixture.Name) reaches structured crash source"
+    }
 }.Invoke()
 
 # =============================================================================

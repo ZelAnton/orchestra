@@ -401,15 +401,143 @@ function Read-ProcessKitLifecycle {
         foreach ($line in @(Get-Content -LiteralPath $Path -Encoding utf8 -ErrorAction SilentlyContinue)) {
             if ([string]::IsNullOrWhiteSpace([string]$line)) { continue }
             try { $pkEvent = [string]$line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-            switch ([string]$pkEvent.event) {
+            switch ([string](Get-Prop $pkEvent 'event')) {
                 'run_started' { $started = $pkEvent }
-                'members_snapshot' { $members = @($pkEvent.members) }
+                'members_snapshot' {
+                    $memberValue = Get-Prop $pkEvent 'members'
+                    $members = if ($null -eq $memberValue) { @() } else { @($memberValue) }
+                }
                 'output_captured' { $captured = $pkEvent }
                 'runner_exit' { $terminal = $pkEvent }
             }
         }
     }
     return [pscustomobject]@{ Terminal = $terminal; Started = $started; Members = $members; Captured = $captured }
+}
+
+function Convert-ProcessKitInt32 {
+    param($Value)
+    if ($null -eq $Value) { return [pscustomobject]@{ Valid = $false; Value = $null } }
+    try { return [pscustomobject]@{ Valid = $true; Value = [int]$Value } }
+    catch { return [pscustomobject]@{ Valid = $false; Value = $null } }
+}
+
+function Convert-ProcessKitInt64 {
+    param($Value)
+    if ($null -eq $Value) { return [pscustomobject]@{ Valid = $false; Value = $null } }
+    try { return [pscustomobject]@{ Valid = $true; Value = [int64]$Value } }
+    catch { return [pscustomobject]@{ Valid = $false; Value = $null } }
+}
+
+function Convert-ProcessKitBool {
+    param($Value)
+    if ($Value -isnot [bool]) { return [pscustomobject]@{ Valid = $false; Value = $false } }
+    return [pscustomobject]@{ Valid = $true; Value = [bool]$Value }
+}
+
+function Resolve-ProcessKitLifecycle {
+    param(
+        $Lifecycle,
+        [bool]$CaptureExpected,
+        [bool]$TimedOut,
+        [bool]$Cancelled,
+        $InitialExitCode
+    )
+
+    $started = Get-Prop $Lifecycle 'Started'
+    $terminal = Get-Prop $Lifecycle 'Terminal'
+    $captured = Get-Prop $Lifecycle 'Captured'
+    $eventFailureSource = ''
+    $rootPid = $null
+    $mechanism = ''
+    $abruptCleanup = ''
+
+    if ($null -eq $started) {
+        $eventFailureSource = 'missing_run_started'
+    } else {
+        $rootPidValue = Convert-ProcessKitInt32 (Get-Prop $started 'root_pid')
+        $mechanismValue = Get-Prop $started 'mechanism'
+        $abruptCleanupValue = Get-Prop $started 'abrupt_cleanup'
+        if ([bool]$rootPidValue.Valid) { $rootPid = $rootPidValue.Value }
+        if ($null -ne $mechanismValue) { $mechanism = [string]$mechanismValue }
+        if ($null -ne $abruptCleanupValue) { $abruptCleanup = [string]$abruptCleanupValue }
+        if (-not [bool]$rootPidValue.Valid -or $null -eq $mechanismValue -or $null -eq $abruptCleanupValue) {
+            $eventFailureSource = 'invalid_run_started'
+        }
+    }
+
+    $captureValid = $false
+    $captureWriteError = $false
+    [int64]$captureBytes = 0
+    $captureTruncated = $false
+    if ($CaptureExpected) {
+        if ($null -eq $captured) {
+            if (-not $eventFailureSource) { $eventFailureSource = 'missing_output_captured' }
+        } else {
+            $stdoutEvent = Get-Prop $captured 'stdout'
+            $stderrEvent = Get-Prop $captured 'stderr'
+            $stdoutWriteError = Convert-ProcessKitBool (Get-Prop $stdoutEvent 'write_error')
+            $stderrWriteError = Convert-ProcessKitBool (Get-Prop $stderrEvent 'write_error')
+            $stdoutBytes = Convert-ProcessKitInt64 (Get-Prop $stdoutEvent 'bytes')
+            $stderrBytes = Convert-ProcessKitInt64 (Get-Prop $stderrEvent 'bytes')
+            $stdoutTruncated = Convert-ProcessKitBool (Get-Prop $stdoutEvent 'truncated')
+            $stderrTruncated = Convert-ProcessKitBool (Get-Prop $stderrEvent 'truncated')
+            $captureValid = (
+                [bool]$stdoutWriteError.Valid -and [bool]$stderrWriteError.Valid -and
+                [bool]$stdoutBytes.Valid -and [bool]$stderrBytes.Valid -and
+                [bool]$stdoutTruncated.Valid -and [bool]$stderrTruncated.Valid)
+            if ($captureValid) {
+                $captureWriteError = ([bool]$stdoutWriteError.Value -or [bool]$stderrWriteError.Value)
+                $captureBytes = [int64]$stdoutBytes.Value + [int64]$stderrBytes.Value
+                $captureTruncated = ([bool]$stdoutTruncated.Value -or [bool]$stderrTruncated.Value)
+            } elseif (-not $eventFailureSource) {
+                $eventFailureSource = 'invalid_output_captured'
+            }
+        }
+    }
+
+    $rc = $InitialExitCode
+    $runnerFailureSource = ''
+    if ($null -eq $terminal) {
+        if (-not ($TimedOut -or $Cancelled)) { $runnerFailureSource = 'missing_runner_exit' }
+    } else {
+        $sourceValue = Get-Prop $terminal 'source'
+        $source = if ($null -ne $sourceValue) { [string]$sourceValue } else { '' }
+        if (-not $source) {
+            $runnerFailureSource = 'invalid_runner_exit'
+        } elseif ($source -eq 'child_exit') {
+            $childCode = Convert-ProcessKitInt32 (Get-Prop $terminal 'child_code')
+            if ([bool]$childCode.Valid) { $rc = $childCode.Value }
+            else { $runnerFailureSource = 'invalid_runner_exit' }
+        } elseif ($source -eq 'timeout') {
+            if (-not $Cancelled) { $TimedOut = $true }
+        } elseif ($source -in @('cancelled', 'control_cancel', 'control_kill')) {
+            # A supervisor deadline/cancel is already the authoritative reason for the
+            # addressable kill we just sent. Do not let the runner's mechanical
+            # `control_kill` terminal event rewrite timeout into cancelled.
+            if (-not $TimedOut) { $Cancelled = $true }
+        } else {
+            $runnerFailureSource = $source
+        }
+    }
+    if (-not $runnerFailureSource -and $eventFailureSource) {
+        $runnerFailureSource = $eventFailureSource
+    }
+
+    return [pscustomobject]@{
+        ExitCode = $rc
+        TimedOut = $TimedOut
+        Cancelled = $Cancelled
+        RunnerFailureSource = $runnerFailureSource
+        RootPid = $rootPid
+        Mechanism = $mechanism
+        AbruptCleanup = $abruptCleanup
+        StartedPresent = ($null -ne $started)
+        CaptureValid = $captureValid
+        CaptureWriteError = $captureWriteError
+        CaptureBytes = $captureBytes
+        CaptureTruncated = $captureTruncated
+    }
 }
 
 function Read-ProcessKitCaptureText {
@@ -709,57 +837,50 @@ function Invoke-SupervisedCall {
     $stderrCapture = if ($processkitCaptureDir) { Read-ProcessKitCaptureText -Directory $processkitCaptureDir -Name 'stderr.log' } else { $null }
     $stdoutFull = if ($null -ne $stdoutCapture) { [string]$stdoutCapture.Text } else { [string]$collected.Stdout }
     $stderrFull = if ($null -ne $stderrCapture) { [string]$stderrCapture.Text } else { [string]$collected.Stderr }
-    $captureEvent = if ($null -ne $lifecycle) { $lifecycle.Captured } else { $null }
-    $captureWriteError = ($null -ne $captureEvent -and
-        ([bool]$captureEvent.stdout.write_error -or [bool]$captureEvent.stderr.write_error))
-    $captureUnavailable = ($processkitCaptureDir -and $null -ne $lifecycle.Started -and
-        ($null -eq $captureEvent -or [bool]$stdoutCapture.Failed -or [bool]$stderrCapture.Failed))
+    $rc = $null
+    try { $rc = $proc.ExitCode } catch { $rc = $null }
+    $processkitLifecycle = if ($processkitCli) {
+        Resolve-ProcessKitLifecycle `
+            -Lifecycle $lifecycle `
+            -CaptureExpected ([bool]$processkitCaptureDir) `
+            -TimedOut $timedOut `
+            -Cancelled $cancelled `
+            -InitialExitCode $rc
+    } else { $null }
+    if ($null -ne $processkitLifecycle) {
+        $rc = $processkitLifecycle.ExitCode
+        $timedOut = [bool]$processkitLifecycle.TimedOut
+        $cancelled = [bool]$processkitLifecycle.Cancelled
+    }
+    $captureWriteError = ($null -ne $processkitLifecycle -and [bool]$processkitLifecycle.CaptureWriteError)
+    $captureUnavailable = ($processkitCaptureDir -and
+        ($null -eq $processkitLifecycle -or -not [bool]$processkitLifecycle.StartedPresent -or
+            -not [bool]$processkitLifecycle.CaptureValid -or
+            [bool]$stdoutCapture.Failed -or [bool]$stderrCapture.Failed))
     $outputCollectionTimedOut = ([bool]$collected.TimedOut -or $captureWriteError -or $captureUnavailable)
     $outRes = Get-CappedText $stdoutFull $OutputMaxBytes
     $errRes = Get-CappedText $stderrFull $OutputMaxBytes
     $stdout = $outRes.Text
     $stderr = $errRes.Text
-    $totalBytes = if ($processkitCaptureDir -and $null -ne $captureEvent) {
-        [int64]$captureEvent.stdout.bytes + [int64]$captureEvent.stderr.bytes
+    $totalBytes = if ($processkitCaptureDir -and $null -ne $processkitLifecycle -and [bool]$processkitLifecycle.CaptureValid) {
+        [int64]$processkitLifecycle.CaptureBytes
     } else {
         [int64]$outRes.TotalBytes + [int64]$errRes.TotalBytes
     }
-    $truncated = if ($processkitCaptureDir -and $null -ne $captureEvent) {
-        [bool]$captureEvent.stdout.truncated -or [bool]$captureEvent.stderr.truncated -or $captureWriteError -or $captureUnavailable
+    $truncated = if ($processkitCaptureDir -and $null -ne $processkitLifecycle -and [bool]$processkitLifecycle.CaptureValid) {
+        [bool]$processkitLifecycle.CaptureTruncated -or $captureWriteError -or $captureUnavailable
     } else {
-        $outRes.Truncated -or $errRes.Truncated
+        $outRes.Truncated -or $errRes.Truncated -or $captureUnavailable
     }
     # The digest covers exactly the transient text retained for review. For complete streams
     # this is the full output; when ProcessKit bounded capture truncates a stream, the explicit
     # output_truncated flag prevents consumers from mistaking this prefix digest for a full one.
     $sha = Sha256Hex ($script:Utf8.GetBytes($stdoutFull + $stderrFull))
 
-    $rc = $null
-    try { $rc = $proc.ExitCode } catch { $rc = $null }
-    $runnerFailureSource = ''
-    $processkitRootPid = $null
-    if ($processkitCli) {
-        if ($null -ne $lifecycle.Started -and $null -ne $lifecycle.Started.root_pid) {
-            $processkitRootPid = [int]$lifecycle.Started.root_pid
-        }
-        if ($null -eq $lifecycle.Terminal) {
-            if (-not ($timedOut -or $cancelled)) { $runnerFailureSource = 'missing_runner_exit' }
-        } else {
-            $source = [string]$lifecycle.Terminal.source
-            if ($source -eq 'child_exit') {
-                if ($null -ne $lifecycle.Terminal.child_code) { $rc = [int]$lifecycle.Terminal.child_code }
-            } elseif ($source -eq 'timeout') {
-                if (-not $cancelled) { $timedOut = $true }
-            } elseif ($source -in @('cancelled', 'control_cancel', 'control_kill')) {
-                # A supervisor deadline/cancel is already the authoritative reason for
-                # the addressable kill we just sent. Do not let the runner's mechanical
-                # `control_kill` terminal event rewrite timeout into cancelled.
-                if (-not $timedOut) { $cancelled = $true }
-            } else {
-                $runnerFailureSource = if ($source) { $source } else { 'unknown_runner_exit' }
-            }
-        }
-    }
+    $runnerFailureSource = if ($null -ne $processkitLifecycle) { [string]$processkitLifecycle.RunnerFailureSource } else { '' }
+    $processkitRootPid = if ($null -ne $processkitLifecycle) { $processkitLifecycle.RootPid } else { $null }
+    $processkitMechanism = if ($null -ne $processkitLifecycle) { [string]$processkitLifecycle.Mechanism } else { '' }
+    $processkitAbruptCleanup = if ($null -ne $processkitLifecycle) { [string]$processkitLifecycle.AbruptCleanup } else { '' }
     try { $proc.Dispose() } catch { }
 
     # Classify the four stop reasons.
@@ -795,8 +916,8 @@ function Invoke-SupervisedCall {
         containment = $containmentKind; containment_runner_pid = $procId
         containment_degraded_reason = $containmentDegradedReason
         processkit_events_file = $processkitEvents; processkit_run_id = $processkitRunId
-        processkit_mechanism = if ($null -ne $lifecycle -and $null -ne $lifecycle.Started) { [string]$lifecycle.Started.mechanism } else { '' }
-        processkit_abrupt_cleanup = if ($null -ne $lifecycle -and $null -ne $lifecycle.Started) { [string]$lifecycle.Started.abrupt_cleanup } else { '' }
+        processkit_mechanism = $processkitMechanism
+        processkit_abrupt_cleanup = $processkitAbruptCleanup
         descendants_before_cleanup = $descendantsBefore; survivors_after_cleanup = $descendantsAfter
         temporal_candidates = $temporalCandidates; temporal_candidates_after_cleanup = $temporalAfter
     }
