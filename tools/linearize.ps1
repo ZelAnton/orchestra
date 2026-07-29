@@ -199,16 +199,25 @@ function Invoke-LinearizeJj {
     param([string]$Root, [string]$Base, [string]$Head, [string[]]$TaskRefs, [string]$Ref)
     function JjRaw { param([string[]]$A) return (Invoke-Proc 'jj' (@('-R', $Root) + $A) $Root) }
     function JjOut { param([string[]]$A) $r = JjRaw $A; if ($r.ExitCode -ne 0) { Fail 5 "jj $($A -join ' ') failed: $(([string]$r.Err).Trim())" }; return ([string]$r.Out).Trim() }
-    function JjCommitId { param([string]$Rev) return (JjOut @('log', '-r', $Rev, '--no-graph', '-T', 'commit_id')) }
+    function Resolve-JjSingleRevision {
+        param([string]$Rev, [string]$Parameter = 'revset')
+        $raw = JjOut @('log', '-r', $Rev, '--no-graph', '-T', 'commit_id ++ "\n"')
+        $ids = @($raw -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($ids.Count -ne 1) {
+            Fail 5 "$Parameter revset '$Rev' must resolve to exactly one revision (got $($ids.Count))"
+        }
+        return $ids[0]
+    }
 
     # Fail closed with a clean diagnostic if --root is not a jj repo (e.g. wrong --vcs passed).
     if ((Invoke-Proc 'jj' @('-R', $Root, 'root') $Root).ExitCode -ne 0) { Fail 5 "--root is not a jj repository: $Root" }
-    $baseId = JjCommitId $Base
-    $headId = JjCommitId $Head
-    if ($baseId -match "`n" -or $headId -match "`n") { Fail 5 "--base/--head must resolve to a single revision (got multiple)" }
+    $baseId = Resolve-JjSingleRevision -Rev $Base -Parameter '--base'
+    $headId = Resolve-JjSingleRevision -Rev $Head -Parameter '--head'
 
     $taskSet = @{}
-    foreach ($t in $TaskRefs) { $taskSet[(JjCommitId $t)] = $true }
+    foreach ($t in $TaskRefs) {
+        $taskSet[(Resolve-JjSingleRevision -Rev $t -Parameter '--task-refs entry')] = $true
+    }
 
     $getParents = {
         param([string]$C)
@@ -223,7 +232,7 @@ function Invoke-LinearizeJj {
         if ([string]::IsNullOrWhiteSpace($msg)) { $msg = 'Linearized integration step' }
         JjOut @('new', $prev, '-m', $msg) | Out-Null          # @ := empty child of $prev
         JjOut @('restore', '--from', $s) | Out-Null           # @ tree := tree($s) (all paths, --to @)
-        $prev = JjCommitId '@'                                 # content edit reissues @'s commit id
+        $prev = Resolve-JjSingleRevision -Rev '@' -Parameter 'working-copy' # content edit reissues @'s commit id
     }
     $newTip = $prev
 

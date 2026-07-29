@@ -35,6 +35,9 @@
         actually fired.
       * jj: the clean scenario also publishes on jj (self-skipped, never failed, when the
         jj binary is absent - mirroring the rest of the suite's optional-binary skips).
+      * jj: empty and multi-revision revsets for linearizer --base, --head and every
+        --task-refs entry fail at the shared exactly-one resolver with exit 5 and a
+        contextual diagnostic, never later as an ambiguous spine.
       * usage errors (unknown scenario / unknown fault) are rejected (exit 2).
 
 .EXAMPLE
@@ -96,7 +99,8 @@ Write-Host 'harness fast matrix: this spawns many child transaction-tool process
     $ls = Invoke-Harness @('list-scenarios')
     Assert-Exit $ls 0 'list-scenarios rc=0'
     foreach ($s in @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
-            'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale', 'linear-publish', 'linear-diverge')) {
+            'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout', 'approval-stale', 'linear-publish', 'linear-diverge',
+            'linear-jj-resolve-guard')) {
         Assert-Contains $ls.Out $s "list-scenarios includes '$s'"
     }
     $lf = Invoke-Harness @('list-faults')
@@ -278,6 +282,16 @@ if (-not $hasJj) {
         Assert-Equal 'published' $linDivJj.outcome 'linear-diverge jj -> published (re-anchored merge topology re-linearized, merge-free trunk)'
         Assert-Contains $linDivJj.archive 'T-101' 'linear-diverge jj archived T-101'
         Assert-Contains $linDivJj.archive 'T-102' 'linear-diverge jj archived T-102'
+    }
+    # T-344: every externally supplied JJ revset crosses the same exactly-one boundary.
+    # The scenario internally checks both empty and multi-revision forms, exact Fail 5,
+    # contextual parameter+revset diagnostics, and rejection before spine traversal.
+    $resolveGuardJj = Run-Scenario 'jj' 'linear-jj-resolve-guard'
+    if ($resolveGuardJj) {
+        Assert-Equal 'rejected' $resolveGuardJj.outcome 'linear-jj-resolve-guard jj -> rejected at exactly-one resolution boundary'
+        Assert-Contains $resolveGuardJj.notes '--base' 'linear-jj-resolve-guard covers --base'
+        Assert-Contains $resolveGuardJj.notes '--head' 'linear-jj-resolve-guard covers --head'
+        Assert-Contains $resolveGuardJj.notes '--task-refs' 'linear-jj-resolve-guard covers --task-refs entries'
     }
 }
 

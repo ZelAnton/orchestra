@@ -329,15 +329,49 @@ function Vcs-FileAt {
     return (Invoke-Jj $Fx @('file', 'show', '-r', $Rev, $script:TrunkFile)).Out
 }
 
-# Drive the REAL publish-time linearizer (tools/linearize.ps1) over the fixture and re-point the
-# integration ref to the linearized tip. Returns the parsed JSON verdict.
-function Vcs-Linearize {
+# Drive the REAL publish-time linearizer (tools/linearize.ps1) over the fixture.
+function Invoke-LinearizeRaw {
     param($Fx, [string]$Base, [string]$Head, [string[]]$TaskRefs, [string]$Ref)
     $a = @('linearize', '--root', $Fx.Repo, '--vcs', $Fx.Vcs, '--base', $Base, '--head', $Head,
         '--task-refs', ($TaskRefs -join ','), '--ref', $Ref, '--json')
-    $r = Invoke-Tool $script:Linearize $a
+    return (Invoke-Tool $script:Linearize $a)
+}
+
+# Re-point the integration ref to a successfully linearized tip and return the parsed JSON
+# verdict. Failure-path scenarios call Invoke-LinearizeRaw directly to inspect the exact
+# resolution-boundary exit and diagnostic without wrapping it as a generic harness failure.
+function Vcs-Linearize {
+    param($Fx, [string]$Base, [string]$Head, [string[]]$TaskRefs, [string]$Ref)
+    $r = Invoke-LinearizeRaw $Fx $Base $Head $TaskRefs $Ref
     if ($r.ExitCode -ne 0) { Fail 4 "linearize $($Fx.Vcs) failed (exit $($r.ExitCode)): $([string]$r.Err)$([string]$r.Out)" }
     try { return ($r.Out.Trim() | ConvertFrom-Json) } catch { Fail 4 "linearize produced unparseable JSON: $([string]$r.Out)" }
+}
+
+# Assert that a JJ revset is rejected by the shared exactly-one resolver itself. This pins
+# both the Fail 5 boundary and the contextual diagnostic; a later topology error ("spine is
+# ambiguous") or a generic follow-on jj command failure is not an acceptable substitute.
+function Assert-JjResolveFailure {
+    param(
+        $Fx,
+        [string]$Base,
+        [string]$Head,
+        [string[]]$TaskRefs,
+        [string]$Parameter,
+        [string]$Revset,
+        [int]$ExpectedCount
+    )
+    $r = Invoke-LinearizeRaw $Fx $Base $Head $TaskRefs ''
+    $diag = ([string]$r.Err + [string]$r.Out).Trim()
+    if ($r.ExitCode -ne 5) {
+        Fail 4 "linearize JJ resolver guard for $Parameter revset '$Revset' returned exit $($r.ExitCode), expected Fail 5: $diag"
+    }
+    $expected = "$Parameter revset '$Revset' must resolve to exactly one revision (got $ExpectedCount)"
+    if ($diag.IndexOf($expected, [System.StringComparison]::Ordinal) -lt 0) {
+        Fail 4 "linearize JJ resolver guard for $Parameter revset '$Revset' missed contextual diagnostic '$expected': $diag"
+    }
+    if ($diag -match 'spine is ambiguous') {
+        Fail 4 "linearize JJ resolver guard for $Parameter revset '$Revset' failed after resolution at the spine boundary: $diag"
+    }
 }
 
 # An OUT-OF-BAND writer advances the trunk (main) directly - modelling an operator or another
@@ -713,7 +747,7 @@ function Seed-Task {
 # ==========================================================================
 $script:Scenarios = @('clean', 'deps', 'conflict', 'quarantine', 'policy', 'checks', 'publish', 'resume',
     'diverge', 'diverge-push', 'ci-delayed', 'ci-rerun', 'ci-outage', 'approve', 'reject', 'approval-timeout',
-    'approval-stale', 'review-cycle', 'linear-publish', 'linear-diverge')
+    'approval-stale', 'review-cycle', 'linear-publish', 'linear-diverge', 'linear-jj-resolve-guard')
 
 function Scenario-Clean {
     param($Fx)
@@ -741,6 +775,33 @@ function Scenario-Clean {
 
 function Scenario-Publish { param($Fx) return (Scenario-Clean $Fx) }
 function Scenario-Resume  { param($Fx) return (Scenario-Clean $Fx) }
+
+function Scenario-LinearJjResolveGuard {
+    param($Fx)
+    if ($Fx.Vcs -ne 'jj') {
+        return [pscustomobject]@{
+            Outcome = 'not-applicable'
+            Notes = 'linear-jj-resolve-guard is JJ-specific'
+        }
+    }
+
+    # Vcs-Init leaves @ as the working-copy child of main, so this revset deterministically
+    # contains two revisions. none() is the corresponding valid empty revset. Exercise both
+    # cardinality failures for every externally supplied revset boundary.
+    $multiple = 'main | @'
+    $empty = 'none()'
+    Assert-JjResolveFailure $Fx $multiple 'main' @() '--base' $multiple 2
+    Assert-JjResolveFailure $Fx $empty 'main' @() '--base' $empty 0
+    Assert-JjResolveFailure $Fx 'main' $multiple @() '--head' $multiple 2
+    Assert-JjResolveFailure $Fx 'main' $empty @() '--head' $empty 0
+    Assert-JjResolveFailure $Fx 'main' 'main' @($multiple) '--task-refs entry' $multiple 2
+    Assert-JjResolveFailure $Fx 'main' 'main' @($empty) '--task-refs entry' $empty 0
+
+    return [pscustomobject]@{
+        Outcome = 'rejected'
+        Notes = 'JJ exactly-one resolver rejected empty and multi-revision --base, --head, and --task-refs entries at Fail 5'
+    }
+}
 
 function Scenario-LinearPublish {
     param($Fx)
@@ -1479,6 +1540,7 @@ function Invoke-Scenario {
         'review-cycle'     { return (Scenario-ReviewCycle $Fx) }
         'linear-publish'   { return (Scenario-LinearPublish $Fx) }
         'linear-diverge'   { return (Scenario-LinearDiverge $Fx) }
+        'linear-jj-resolve-guard' { return (Scenario-LinearJjResolveGuard $Fx) }
         default            { Fail 2 "unknown scenario '$Name' (valid: $($script:Scenarios -join ', '))" }
     }
 }
