@@ -417,6 +417,27 @@ Assert-Contains $taskMarkdown.Out '4 мин (240000 ms)' 'archive summary preser
 Assert-Contains $taskMarkdown.Out '1 мин (60000 ms)' 'archive rows preserve exact operation milliseconds'
 Assert-Equal $taskEventsBefore ([IO.File]::ReadAllText((Join-Path $taskWork 'events.jsonl'))) 'task projection leaves the event stream unchanged'
 Assert-True (-not (Test-Path (Join-Path $taskWork 'orchestrator.lock'))) 'task projection never creates/acquires orchestrator.lock'
+
+# Consumer-side duration coercion is Int64-safe and rejects historical values outside
+# that domain without failing the whole task projection.
+$wideDurationWork=New-Fixture
+$wideDurationLines=@(
+    (Event-Line wd-c '2026-07-12T10:00:00Z' 'task.captured' B-wide T-700),
+    (Event-Line wd-good '2026-07-12T10:01:00Z' 'operation.completed' B-wide T-700 @{operation='ci_wait';role='ci';mode='wait';attempt_number=1;scope='task';executor_kind='external';started_at='2026-07-12T10:00:00Z';ended_at='2026-07-12T10:01:00Z';duration_ms=99999999999999;outcome='success';shared_task_count=1}),
+    (Event-Line wd-bad '2026-07-12T10:02:00Z' 'operation.completed' B-wide T-700 @{operation='publish';role='processor';mode='full';attempt_number=1;scope='task';executor_kind='tool';started_at='2026-07-12T10:01:00Z';ended_at='2026-07-12T10:02:00Z';duration_ms=9223372036854775808;outcome='success';shared_task_count=1}),
+    (Event-Line wd-d '2026-07-12T10:03:00Z' 'task.status_changed' B-wide T-700 @{from='опубликована';to='выполнена'})
+)
+Write-Utf8 (Join-Path $wideDurationWork 'events.jsonl') (($wideDurationLines -join "`n")+"`n")
+$wideDurationRun=Invoke-Metrics @('task','--work',$wideDurationWork,'--task-id','T-700','--batch-id','B-wide','--json')
+Assert-Equal 0 $wideDurationRun.ExitCode "task metrics tolerates beyond-Int64 historical duration (stderr=$($wideDurationRun.Err.Trim()))"
+if ($wideDurationRun.ExitCode -eq 0) {
+    $wideDurationData=$wideDurationRun.Out | ConvertFrom-Json
+    Assert-Equal 1 $wideDurationData.totals.operation_count 'task metrics skips only the beyond-Int64 operation'
+    Assert-Equal ([int64]99999999999999) ([int64]$wideDurationData.totals.operation_time_ms) 'task metrics preserves Int64 operation duration'
+    Assert-Equal ([int64]99999999999999) ([int64]$wideDurationData.operations[0].duration_ms) 'task metrics JSON preserves Int64 duration field'
+    Assert-Contains ($wideDurationData.completeness.reasons -join ';') 'повреждённая operation.completed' 'beyond-Int64 duration is reported as malformed'
+}
+
 $taskNoData=Invoke-Metrics @('task','--work',$taskWork,'--task-id','T-999','--batch-id','B-task','--json')
 Assert-Equal 0 $taskNoData.ExitCode 'task metrics missing telemetry is an explicit non-blocking projection'
 if ($taskNoData.ExitCode -eq 0) { Assert-Equal 'no_data' (($taskNoData.Out|ConvertFrom-Json).status) 'missing task telemetry is never fabricated as zero' }

@@ -379,16 +379,6 @@ function Format-DurationExact {
     if ($null -eq $Milliseconds) { return 'недоступно' }
     return "$(Format-Duration $Milliseconds) ($(Format-Number $Milliseconds) ms)"
 }
-function To-NonNegativeInt64 {
-    param($Value)
-    if ($null -eq $Value) { return $null }
-    $parsed = [int64]0
-    if ([int64]::TryParse([string]$Value, [Globalization.NumberStyles]::None,
-            [Globalization.CultureInfo]::InvariantCulture, [ref]$parsed) -and $parsed -ge 0) {
-        return $parsed
-    }
-    return $null
-}
 function To-TaskUtcTime {
     param($Value)
     if ($Value -is [DateTimeOffset]) { return ([DateTimeOffset]$Value).ToUniversalTime() }
