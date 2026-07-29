@@ -63,7 +63,7 @@ try {
     # `supervisor --shell-command` uses bash. The explicitly operator-owned command invokes a
     # tiny POSIX fixture that writes its first two notification arguments to a capture file.
     $capture = Join-Path $root 'captured.txt'
-    $scriptPath = Join-Path $root 'capture.sh'
+    $scriptPath = Join-Path $root 'capture#fast.sh'
     Write-Utf8 $scriptPath @'
 #!/bin/sh
 printf '%s|%s' "$2" "$3" > "$1"
@@ -71,7 +71,7 @@ printf '%s' 'fixture-output-must-not-leak'
 '@
     $posixScript = $scriptPath.Replace('\', '/')
     $posixCapture = $capture.Replace('\', '/')
-    Write-Utf8 (Join-Path $work 'config.md') ("NOTIFY_CMD: sh '{0}' '{1}'" -f $posixScript, $posixCapture)
+    Write-Utf8 (Join-Path $work 'config.md') (("NOTIFY_CMD: sh '{0}' '{1}'" -f $posixScript, $posixCapture) + ' # operator hook')
 
     $secret = 'AKIAIOSFODNN7EXAMPLE'
     $sent = Invoke-Notify @('send', '--work', $work, '--root', $root, '--event', 'task.escalated', '--text', "operator's CI report carries $secret", '--json')

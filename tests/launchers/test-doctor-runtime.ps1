@@ -173,6 +173,7 @@ $emptyPath = Join-Path $c.Home 'empty-path'
 New-Item -ItemType Directory -Force -Path $runtimeDir, $emptyPath | Out-Null
 $fixtureRuntime = Join-Path $runtimeDir 'doctor-runtime.ps1'
 Copy-Item -LiteralPath $script:Runtime -Destination $fixtureRuntime
+Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'common.ps1') -Destination (Join-Path $runtimeDir 'common.ps1')
 Write-File (Join-Path $runtimeDir 'codex-processor-runtime.ps1') @'
 param([string]$Action, [string]$Root)
 $rc = [Environment]::GetEnvironmentVariable('ORCHESTRA_DOCTOR_NATIVE_FIXTURE_RC')
@@ -372,11 +373,18 @@ Remove-Case $c
 $c = New-Case
 $hdr = "# Q`n`n### [T-001] Title " + $script:EmDash + " " + $script:StatusWord + ": " + $script:NeNachata + "`n"
 Write-File (Join-Path $c.Proj '.work/Tasks_Queue.md') $hdr
-Set-Config $c (@('SMOKE_CMD: pwsh -File tools/check-consistency.ps1', 'BOGUS_KEY: x') -join "`n")
+Set-Config $c (@('SMOKE_CMD: make check#fast # operator note', 'BOGUS_KEY: x') -join "`n")
 $r = Invoke-Doctor -Case $c
 Assert-Contains $r.Out 'OK   Tasks_Queue.md: 1 task header(s), format valid, IDs unique' 'queue: valid Cyrillic header recognized'
 Assert-Contains $r.Out 'unknown/possibly mistyped key(s): BOGUS_KEY' 'config: unknown key flagged'
 Assert-Contains $r.Out 'OK   verification profile uses backward-compatible SMOKE_CMD fallback (1 command)' 'config: SMOKE_CMD detected as verification fallback'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'CODEX_CMD: codex#fixture # operator note'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out 'codex binary : NOT FOUND (codex#fixture)' 'config: in-token hash is preserved while ordinary inline comment is removed'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_CMD\s+=\s+codex#fixture')) 'config: effective summary uses the shared parsed value'
 Remove-Case $c
 
 $c = New-Case
@@ -454,11 +462,13 @@ Copy-Item -LiteralPath $script:Runtime -Destination (Join-Path $mirrorDir 'docto
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'state-tx.ps1') -Destination (Join-Path $mirrorDir 'state-tx.ps1')
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'common.ps1') -Destination (Join-Path $mirrorDir 'common.ps1')
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'policy-schema.ps1') -Destination (Join-Path $mirrorDir 'policy-schema.ps1')
+Set-Config $c 'CODEX_CMD: codex#mirror # operator note'
 $r = Invoke-Doctor -Case $c -Runtime (Join-Path $mirrorDir 'doctor-runtime.ps1')
 Assert-Contains $r.Out 'OK   orchestrator.lock: owner=OWNER-A role=processor heartbeat ' 'lock lease mirror: owner/role/heartbeat reported'
 Assert-Contains $r.Out '/900s (live)' 'lock lease mirror: TTL threshold reported'
 Assert-Contains $r.Out 's (live)' 'lock lease mirror: live status reported'
 Assert-NotContains $r.Out 'WARN orchestrator.lock' 'lock lease mirror: healthy lease does not WARN'
+Assert-Contains $r.Out 'codex binary : NOT FOUND (codex#mirror)' 'lock lease mirror: shared config parser dependency is present and preserves in-token hash'
 Remove-Case $c
 
 # =============================================================================
