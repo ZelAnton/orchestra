@@ -992,7 +992,15 @@ function Cmd-Archive {
 function Cmd-ValidateDeps {
     $paths = Resolve-Paths
     $q = Split-Queue (Read-TextOrEmpty $paths.Queue)
-    $findings = @(Validate-Graph $paths $q.Tasks)
+    $findings = New-Object System.Collections.Generic.List[string]
+    foreach ($record in $q.Records) {
+        if ($record.Malformed) {
+            [void]$findings.Add("Malformed $($record.Kind) header: $($record.Header)")
+        }
+    }
+    foreach ($finding in @(Validate-Graph $paths $q.Tasks)) {
+        [void]$findings.Add($finding)
+    }
     if ($findings.Count -eq 0) { Write-Output 'OK - dependency graph valid'; return }
     foreach ($f in $findings) { Write-Output $f }
     exit 5

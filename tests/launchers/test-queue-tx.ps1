@@ -1112,4 +1112,24 @@ exit $rc
         $r = Run-Tool @('classify-proposal', '--work', $W, '--id', 'P-002', '--outcome', 'rejected', '--tasks', '')
         Assert-Equal 0 $r.ExitCode '[classify-tasks-not-required] rejected outcome with an empty --tasks value still succeeds'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 25: validate-deps reports malformed queued headers ---------
+    $W = New-Work
+    try {
+        $q = @(
+            '# Очередь задач', '',
+            '### [T-050] Task without a status suffix', 'x', '',
+            '### [P-007] Proposal without kind and status', 'x', '',
+            '### [T-051] Valid task — статус: не начата', 'x', '',
+            '### [P-008] Valid proposal — kind: proposal — status: proposed', 'x'
+        ) -join "`n"
+        [System.IO.File]::WriteAllText((Join-Path $W 'Tasks_Queue.md'), $q, (New-Object System.Text.UTF8Encoding($false)))
+
+        $r = Run-Tool @('validate-deps', '--work', $W)
+        Assert-Equal 5 $r.ExitCode '[malformed-headers] malformed records fail validation with finding exit 5'
+        Assert-Match $r.Output 'Malformed task header: ### \[T-050\] Task without a status suffix' '[malformed-headers] malformed task header is reported'
+        Assert-Match $r.Output 'Malformed proposal header: ### \[P-007\] Proposal without kind and status' '[malformed-headers] malformed proposal header is reported'
+        Assert-True (-not ($r.Output -match 'Valid task')) '[malformed-headers] valid task keeps the graph validation path clean'
+        Assert-True (-not ($r.Output -match 'Valid proposal')) '[malformed-headers] valid proposal remains excluded from task graph findings'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }
