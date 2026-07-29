@@ -389,7 +389,12 @@ function Ref-UuidV5 {
         @{ Name='zero attempt number'; Attempt='6'; Payload='{"attempt_number":0,"duration_ms":1,"exit_code":0}' },
         @{ Name='overflowing attempt number'; Attempt='7'; Payload='{"attempt_number":9223372036854775808,"duration_ms":1,"exit_code":0}' },
         @{ Name='non-numeric exit code'; Attempt='8'; Payload='{"attempt_number":8,"duration_ms":1,"exit_code":"failed"}' },
-        @{ Name='out-of-range exit code'; Attempt='9'; Payload='{"attempt_number":9,"duration_ms":1,"exit_code":2147483648}' }
+        @{ Name='out-of-range exit code'; Attempt='9'; Payload='{"attempt_number":9,"duration_ms":1,"exit_code":2147483648}' },
+        @{ Name='duration array'; Attempt='10'; Payload='{"attempt_number":10,"duration_ms":[1],"exit_code":0}' },
+        @{ Name='attempt-number array'; Attempt='11'; Payload='{"attempt_number":[1],"duration_ms":1,"exit_code":0}' },
+        @{ Name='exit-code array'; Attempt='12'; Payload='{"attempt_number":12,"duration_ms":1,"exit_code":[0]}' },
+        @{ Name='numeric string'; Attempt='13'; Payload='{"attempt_number":13,"duration_ms":"1","exit_code":0}' },
+        @{ Name='non-integer number'; Attempt='14'; Payload='{"attempt_number":14,"duration_ms":1.5,"exit_code":0}' }
     )) {
         $badCodexNumber = Invoke-Outbox @('append', '--events', $ev, '--task-id', 'T-2', '--type', 'codex.attempt', '--role', 'coder', '--mode', 'full', '--attempt-number', $case.Attempt, '--payload', $case.Payload)
         Assert-Exit $badCodexNumber 5 "codex.attempt rejects $($case.Name)"
@@ -486,6 +491,7 @@ function Ref-UuidV5 {
     Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000001","occurred_at":"2026-07-10T10:00:00Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":99999999999999}}' + "`n")
     Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000002","occurred_at":"2026-07-10T10:00:01Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":9223372036854775808}}' + "`n")
     Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000003","occurred_at":"2026-07-10T10:00:02Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":"corrupt"}}' + "`n")
+    Append-Raw $legacyEvents ('{"schema_version":1,"event_id":"10000000-0000-0000-0000-000000000004","occurred_at":"2026-07-10T10:00:03Z","type":"codex.attempt","task_id":"T-1","actor":{"kind":"tool","name":"fixture"},"payload":{"duration_ms":[99999999999999]}}' + "`n")
     $legacyMetrics = Invoke-Outbox @('metrics', '--events', $legacyEvents, '--json')
     Assert-Exit $legacyMetrics 0 'metrics tolerates malformed historical codex.attempt durations'
     if ($legacyMetrics.ExitCode -eq 0) {

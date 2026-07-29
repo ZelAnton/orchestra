@@ -425,6 +425,7 @@ $wideDurationLines=@(
     (Event-Line wd-c '2026-07-12T10:00:00Z' 'task.captured' B-wide T-700),
     (Event-Line wd-good '2026-07-12T10:01:00Z' 'operation.completed' B-wide T-700 @{operation='ci_wait';role='ci';mode='wait';attempt_number=1;scope='task';executor_kind='external';started_at='2026-07-12T10:00:00Z';ended_at='2026-07-12T10:01:00Z';duration_ms=99999999999999;outcome='success';shared_task_count=1}),
     (Event-Line wd-bad '2026-07-12T10:02:00Z' 'operation.completed' B-wide T-700 @{operation='publish';role='processor';mode='full';attempt_number=1;scope='task';executor_kind='tool';started_at='2026-07-12T10:01:00Z';ended_at='2026-07-12T10:02:00Z';duration_ms=9223372036854775808;outcome='success';shared_task_count=1}),
+    (Event-Line wd-array '2026-07-12T10:02:30Z' 'operation.completed' B-wide T-700 @{operation='publish';role='processor';mode='full';attempt_number=2;scope='task';executor_kind='tool';started_at='2026-07-12T10:02:00Z';ended_at='2026-07-12T10:02:30Z';duration_ms=@(1);outcome='success';shared_task_count=1}),
     (Event-Line wd-d '2026-07-12T10:03:00Z' 'task.status_changed' B-wide T-700 @{from='опубликована';to='выполнена'})
 )
 Write-Utf8 (Join-Path $wideDurationWork 'events.jsonl') (($wideDurationLines -join "`n")+"`n")
@@ -436,6 +437,22 @@ if ($wideDurationRun.ExitCode -eq 0) {
     Assert-Equal ([int64]99999999999999) ([int64]$wideDurationData.totals.operation_time_ms) 'task metrics preserves Int64 operation duration'
     Assert-Equal ([int64]99999999999999) ([int64]$wideDurationData.operations[0].duration_ms) 'task metrics JSON preserves Int64 duration field'
     Assert-Contains ($wideDurationData.completeness.reasons -join ';') 'повреждённая operation.completed' 'beyond-Int64 duration is reported as malformed'
+}
+
+# Shared-scope allocation stays decimal end to end. The maximum valid Int64 duration is
+# intentionally odd and above 2^53, so a Double intermediate would lose milliseconds.
+$exactSharedWork=New-Fixture
+$exactSharedLines=@(
+    (Event-Line xs-c '2026-07-12T11:00:00Z' 'task.captured' B-exact T-701),
+    (Event-Line xs-o '2026-07-12T11:01:00Z' 'operation.completed' B-exact T-701 @{operation='ci_wait';role='ci';mode='wait';attempt_number=1;scope='integration';executor_kind='external';started_at='2026-07-12T11:00:00Z';ended_at='2026-07-12T11:01:00Z';duration_ms=9223372036854775807;outcome='success';shared_task_count=2}),
+    (Event-Line xs-d '2026-07-12T11:02:00Z' 'task.status_changed' B-exact T-701 @{from='опубликована';to='выполнена'})
+)
+Write-Utf8 (Join-Path $exactSharedWork 'events.jsonl') (($exactSharedLines -join "`n")+"`n")
+$exactSharedRun=Invoke-Metrics @('task','--work',$exactSharedWork,'--task-id','T-701','--batch-id','B-exact','--json')
+Assert-Equal 0 $exactSharedRun.ExitCode "task metrics preserves exact shared Int64 allocation (stderr=$($exactSharedRun.Err.Trim()))"
+if ($exactSharedRun.ExitCode -eq 0) {
+    Assert-Contains $exactSharedRun.Out '"allocated_duration_ms":4611686018427387903.5' 'shared allocation JSON preserves the exact decimal half'
+    Assert-Contains $exactSharedRun.Out '"operation_time_ms":4611686018427387903.5' 'shared total JSON preserves the exact decimal half'
 }
 
 $taskNoData=Invoke-Metrics @('task','--work',$taskWork,'--task-id','T-999','--batch-id','B-task','--json')

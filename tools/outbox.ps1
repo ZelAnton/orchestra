@@ -484,7 +484,11 @@ function Test-Envelope {
             }
             foreach ($k in $script:CodexAttemptNonNegativeInt64Keys) {
                 if (Has-Prop $payload $k) {
-                    $parsed = To-NonNegativeInt64 (Get-Prop $payload $k)
+                    $rawValue = Get-Prop $payload $k
+                    if (-not (Test-JsonIntegerScalar $rawValue)) {
+                        return "codex.attempt payload key '$k' must be an integer in range 0..$([int64]::MaxValue)"
+                    }
+                    $parsed = To-NonNegativeInt64 $rawValue
                     if ($null -eq $parsed) {
                         return "codex.attempt payload key '$k' must be an integer in range 0..$([int64]::MaxValue)"
                     }
@@ -496,6 +500,9 @@ function Test-Envelope {
             if (Has-Prop $payload 'exit_code') {
                 $rawExitCode = Get-Prop $payload 'exit_code'
                 if ($null -ne $rawExitCode) {
+                    if (-not (Test-JsonIntegerScalar $rawExitCode)) {
+                        return "codex.attempt payload key 'exit_code' must be null or an integer in range $([int]::MinValue)..$([int]::MaxValue)"
+                    }
                     $exitCode = To-Int64 $rawExitCode
                     if ($null -eq $exitCode -or $exitCode -lt [int]::MinValue -or $exitCode -gt [int]::MaxValue) {
                         return "codex.attempt payload key 'exit_code' must be null or an integer in range $([int]::MinValue)..$([int]::MaxValue)"
