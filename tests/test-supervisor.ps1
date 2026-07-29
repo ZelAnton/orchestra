@@ -1100,6 +1100,16 @@ exit 0
     Assert-Exit $none 2 'neither --file nor --exe is a usage error'
     $badcmd = Invoke-Spv @('frobnicate')
     Assert-Exit $badcmd 2 'unknown command is a usage error'
+
+    $d = New-TempDir
+    $worker = New-Worker $d
+    foreach ($raw in @('not-a-number', '2147483648', '-1')) {
+        $badInt = Invoke-Spv @('run', '--file', $worker, '--deadline-sec', $raw)
+        Assert-Exit $badInt 2 "invalid --deadline-sec '$raw' is a usage error"
+        Assert-Contains $badInt.Err '--deadline-sec' "invalid --deadline-sec '$raw' names the option"
+    }
+    $maxInt = Invoke-Spv @('run', '--file', $worker, '--deadline-sec', '2147483647')
+    Assert-Exit $maxInt 0 'Int32 maximum remains a valid --deadline-sec value'
 }.Invoke()
 
 # =============================================================================

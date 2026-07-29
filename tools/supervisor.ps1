@@ -150,15 +150,6 @@ function Sha256Hex { param([byte[]]$Bytes)
     return -join ($h | ForEach-Object { $_.ToString('x2') })
 }
 # Format-UtcNow comes from tools/common.ps1 (T-240).
-function Parse-IntOpt {
-    param([string]$Name, [int]$Default, [int]$Min = 0)
-    $raw = [string](Opt $Name "$Default")
-    if ([string]::IsNullOrEmpty($raw)) { return $Default }
-    if ($raw -notmatch '^-?\d+$') { Fail 2 "--$Name must be an integer (got '$raw')" }
-    $n = [int]$raw
-    if ($n -lt $Min) { Fail 2 "--$Name must be >= $Min (got $n)" }
-    return $n
-}
 function Parse-IntList {
     param([string]$Raw)
     $out = New-Object System.Collections.Generic.List[int]

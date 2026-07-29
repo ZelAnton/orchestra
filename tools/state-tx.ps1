@@ -319,8 +319,7 @@ function Invoke-Acquire {
     $role = [string](Opt 'role' 'processor')
     $hostVal = [string](Opt 'host' (Get-HostName))
     $session = [string](Opt 'session' '')
-    $ttl = [int](Opt 'ttl' 900)
-    if ($ttl -le 0) { Fail 2 "--ttl must be a positive number of seconds" }
+    $ttl = Parse-IntOpt 'ttl' 900 1
     $owner = [string](Opt 'owner' '')
     if (-not $owner) { $owner = [guid]::NewGuid().ToString('N') }
     $force = [bool](Opt 'force' $false)
@@ -397,7 +396,7 @@ function Cmd-Heartbeat {
         $L = $existing.Lease
         if ($L.owner_id -ne $owner) { Fail 13 "not the owner: lease owned by '$($L.owner_id)', you presented '$owner'" }
         if ($opts.ContainsKey('expected-generation')) {
-            $exp = [int]$opts['expected-generation']
+            $exp = Parse-IntOpt 'expected-generation' 0 0
             if ($exp -ne [int]$L.generation) { Fail 3 "generation mismatch: expected $exp, current $($L.generation)" }
         }
         $gen = [int]$L.generation + 1
@@ -557,7 +556,7 @@ function Cmd-BumpGeneration {
     Acquire-Lock $paths.TxLock
     try {
         if ($opts.ContainsKey('expected-generation')) {
-            $exp = [int]$opts['expected-generation']
+            $exp = Parse-IntOpt 'expected-generation' 0 0
             $cur = Get-ControlGeneration $paths.State
             if ($exp -ne $cur) { Fail 3 "generation mismatch: expected $exp, current $cur" }
         }

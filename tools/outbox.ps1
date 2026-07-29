@@ -766,7 +766,7 @@ function Build-EventLine {
     $rec = [ordered]@{ schema_version = $script:SchemaVersion; event_id = $EventId; occurred_at = $occurred; type = $type }
     if ($opts.ContainsKey('batch-id') -and $opts['batch-id']) { $rec['batch_id'] = [string]$opts['batch-id'] }
     if ($opts.ContainsKey('task-id') -and $opts['task-id']) { $rec['task_id'] = [string]$opts['task-id'] }
-    if ($opts.ContainsKey('payload-version') -and $opts['payload-version']) { $rec['payload_version'] = [int]$opts['payload-version'] }
+    if ($opts.ContainsKey('payload-version') -and $opts['payload-version']) { $rec['payload_version'] = Parse-IntOpt 'payload-version' 1 1 }
     $rec['actor'] = [ordered]@{ kind = $actorKind; name = $actorName }
     $rec['payload'] = $payload
 
@@ -799,7 +799,7 @@ function Cmd-Append {
     }
     $eid = [string]$chk.Obj.event_id
 
-    $timeout = [int](Opt 'lock-timeout-ms' 30000)
+    $timeout = Parse-IntOpt 'lock-timeout-ms' 30000 0
     Acquire-OutboxLock $paths.Lock $timeout
     try {
         $ob = Read-Outbox $paths.Events 'read'
@@ -864,7 +864,7 @@ function Cmd-Verify {
     # Take the SAME outbox lock Cmd-Append holds for its whole write ("Concurrent read vs.
     # the writer" above): guarantees this read never races the writer's FileShare.None
     # window, instead of merely hoping a share-flag combination happens to be compatible.
-    $timeout = [int](Opt 'lock-timeout-ms' 30000)
+    $timeout = Parse-IntOpt 'lock-timeout-ms' 30000 0
     Acquire-OutboxLock $paths.Lock $timeout
     try {
         $ob = Read-Outbox $paths.Events 'read'
@@ -918,7 +918,7 @@ function Cmd-Read {
     # writer" above for why this is what actually closes the race, and why it is also what
     # makes a concurrent cursor read-modify-write safe (no lost update between two
     # overlapping `read --cursor` calls).
-    $timeout = [int](Opt 'lock-timeout-ms' 30000)
+    $timeout = Parse-IntOpt 'lock-timeout-ms' 30000 0
     Acquire-OutboxLock $paths.Lock $timeout
     try {
         $ob = Read-Outbox $paths.Events 'read'
@@ -995,7 +995,7 @@ function Cmd-Metrics {
     # above): Read-EventStream (tools/events-common.ps1) itself already opens with
     # FileShare.ReadWrite, but that alone cannot survive the writer's FileShare.None window
     # (the FIRST opener's share governs); the lock is what actually closes the race.
-    $timeout = [int](Opt 'lock-timeout-ms' 30000)
+    $timeout = Parse-IntOpt 'lock-timeout-ms' 30000 0
     Acquire-OutboxLock $paths.Lock $timeout
     try {
         $stream = Read-EventStream $paths.Events

@@ -355,6 +355,55 @@ function Ref-UuidV5 {
 }.Invoke()
 
 # =============================================================================
+# 6b. Numeric CLI options reject syntax/range errors with rc=2 and named diagnostics.
+# =============================================================================
+{
+    foreach ($raw in @('not-a-number', '2147483648', '0', '-1')) {
+        $dir = New-TempDir; $ev = New-EventsFile $dir
+        $r = Invoke-Outbox @(
+            'append', '--events', $ev, '--type', 'cohort.opened', '--batch-id', 'B-1',
+            '--payload', '{}', '--payload-version', $raw
+        )
+        Assert-Exit $r 2 "invalid --payload-version '$raw' is a usage error"
+        Assert-Contains $r.Err '--payload-version' "invalid --payload-version '$raw' names the option"
+    }
+    $dir = New-TempDir; $ev = New-EventsFile $dir
+    $maxPayloadVersion = Invoke-Outbox @(
+        'append', '--events', $ev, '--type', 'cohort.opened', '--batch-id', 'B-1',
+        '--payload', '{}', '--payload-version', '2147483647'
+    )
+    Assert-Exit $maxPayloadVersion 0 'Int32 maximum is a valid --payload-version'
+    Assert-Equal ([int]::MaxValue) ([int]((Read-File $ev).Trim() | ConvertFrom-Json).payload_version) 'maximum payload_version is stored exactly'
+
+    foreach ($raw in @('not-a-number', '2147483648', '-1')) {
+        $dir = New-TempDir; $ev = New-EventsFile $dir
+        $commands = @(
+            @{ Name = 'append'; Args = @('append', '--events', $ev, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}') },
+            @{ Name = 'verify'; Args = @('verify', '--events', $ev) },
+            @{ Name = 'read'; Args = @('read', '--events', $ev) },
+            @{ Name = 'metrics'; Args = @('metrics', '--events', $ev) }
+        )
+        foreach ($case in $commands) {
+            $r = Invoke-Outbox (@($case.Args) + @('--lock-timeout-ms', $raw))
+            Assert-Exit $r 2 "$($case.Name) rejects --lock-timeout-ms '$raw' with usage code 2"
+            Assert-Contains $r.Err '--lock-timeout-ms' "$($case.Name) names invalid --lock-timeout-ms '$raw'"
+        }
+    }
+
+    $dir = New-TempDir; $ev = New-EventsFile $dir
+    $zeroTimeoutCommands = @(
+        @('append', '--events', $ev, '--type', 'cohort.opened', '--batch-id', 'B-1', '--payload', '{}'),
+        @('verify', '--events', $ev),
+        @('read', '--events', $ev),
+        @('metrics', '--events', $ev)
+    )
+    foreach ($commandArgs in $zeroTimeoutCommands) {
+        $r = Invoke-Outbox (@($commandArgs) + @('--lock-timeout-ms', '0'))
+        Assert-Exit $r 0 "zero lock timeout remains valid for $($commandArgs[0]) when the lock is free"
+    }
+}.Invoke()
+
+# =============================================================================
 # 7. Write validation is strict; read validation is lenient forward.
 # =============================================================================
 {

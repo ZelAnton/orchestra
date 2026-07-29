@@ -717,7 +717,7 @@ function Assert-ExpectedGeneration {
     # queue lock. The guard therefore observes one serialized generation and takes
     # precedence even over an idempotent early return: stale callers must re-read.
     if ($opts.ContainsKey('expected-generation')) {
-        $exp = [int]$opts['expected-generation']
+        $exp = Parse-IntOpt 'expected-generation' 0 0
         $cur = Get-Generation $Paths.State
         if ($exp -ne $cur) { Fail 3 "generation mismatch: expected $exp, current $cur (queue changed since you read it; re-read and retry)" }
     }
