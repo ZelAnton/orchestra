@@ -100,9 +100,9 @@ function Invoke-Outbox {
     }
 }
 
-# Starts the real outbox tool without waiting. OUTBOX_TEST_LOCK_WAIT_SIGNAL is emitted by
-# tools/outbox.ps1 only after its atomic CreateNew probe has actually found the resolved
-# outbox lock contended, giving concurrency tests a deterministic blocked-reader handshake.
+# Starts the real outbox tool without waiting. OUTBOX_TEST_LOCK_WAIT_SIGNAL is consumed by
+# the shared common.ps1 wrapper and emitted only after its atomic CreateNew probe has actually
+# found the resolved outbox lock contended, giving tests a deterministic handshake.
 function Start-OutboxAsync {
     param([string[]]$ToolArgs, [string]$LockWaitSignal)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -1057,6 +1057,31 @@ try {
         Assert-Exit $rRogue 3 '[concurrency] a foreign exclusive holder outside the lock protocol still correctly fails as unreadable (rc=3)'
         Assert-Contains $rRogue.Err 'cannot read' 'a genuine unreadable-file error still reports "cannot read"'
     } finally { $rogueFs.Dispose() }
+}.Invoke()
+
+# =============================================================================
+# 16. The outbox-specific signal contract delegates through the shared wrapper without a
+#     false handshake on an uncontended lock; the successful probe is replaced by the real
+#     acquisition and the command releases that lock normally.
+# =============================================================================
+{
+    $dir = New-TempDir
+    $events = New-EventsFile $dir
+    $lock = New-OutboxLockPath $dir
+    $signal = Join-Path $dir 'unexpected-uncontended-signal'
+    $seed = Invoke-Outbox @(
+        'append', '--work', $dir, '--type', 'cohort.opened',
+        '--batch-id', 'B-uncontended', '--payload', '{}'
+    )
+    Assert-Exit $seed 0 'uncontended signal contract: seed append succeeds'
+
+    $running = Start-OutboxAsync `
+        -ToolArgs @('verify', '--events', $events, '--json', '--lock-timeout-ms', '5000') `
+        -LockWaitSignal $signal
+    $result = Complete-OutboxAsync $running 20000 'uncontended signal contract: verify'
+    Assert-Exit $result 0 'uncontended signal contract: verify succeeds through the shared wrapper'
+    Assert-True (-not (Test-Path -LiteralPath $signal)) 'uncontended signal contract: no false OUTBOX_TEST_LOCK_WAIT_SIGNAL is emitted'
+    Assert-True (-not (Test-Path -LiteralPath $lock)) 'uncontended signal contract: probe and real outbox lock are both released'
 }.Invoke()
 
 # =============================================================================

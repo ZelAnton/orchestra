@@ -806,31 +806,15 @@ function Get-ApprovalLockPath {
     return (Join-Path $dir 'approvals.lock')
 }
 
-# Acquire through the shared primitive. The optional test signal is emitted only after an
-# atomic CreateNew probe has actually observed the approval lock as contended. Regression
-# tests use this handshake to place two real decision processes behind the same held lock
-# before releasing them; normal invocations do not set the environment variable.
+# Acquire through the shared test-signal wrapper. POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL
+# remains the policy integration-test contract, while common.ps1 owns the CreateNew probe,
+# signal and cleanup sequence. Omitting TimeoutMs deliberately preserves Acquire-Lock's
+# established 30-second default.
 function Acquire-ApprovalLock {
     param([string]$LockPath)
-    $waitSignal = [Environment]::GetEnvironmentVariable('POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL')
-    if ($waitSignal) {
-        $probe = $null
-        try {
-            $probe = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        } catch [System.IO.IOException] {
-            $signalDir = Split-Path -Parent $waitSignal
-            if ($signalDir -and -not (Test-Path -LiteralPath $signalDir)) {
-                [void][System.IO.Directory]::CreateDirectory($signalDir)
-            }
-            [System.IO.File]::WriteAllText($waitSignal, 'contended', (New-Object System.Text.UTF8Encoding($false)))
-        } finally {
-            if ($null -ne $probe) {
-                $probe.Dispose()
-                Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-    Acquire-Lock $LockPath
+    Acquire-LockWithTestSignal `
+        -LockPath $LockPath `
+        -TestSignalEnvName 'POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL'
 }
 
 function Write-JsonAtomic {

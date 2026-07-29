@@ -88,8 +88,8 @@ function Invoke-Policy {
 }
 
 # Starts the real policy tool without waiting. POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL is
-# emitted only after the approval lock's atomic CreateNew probe observes contention, so
-# concurrency tests can establish a real blocked-at-the-lock handshake before release.
+# consumed by the shared common.ps1 wrapper and emitted only after the approval lock's atomic
+# CreateNew probe observes contention, so tests can establish a real lock handshake.
 function Start-PolicyAsync {
     param(
         [string[]]$ToolArgs,
@@ -1221,6 +1221,28 @@ try {
             Assert-Equal 0 $holderProcess.ExitCode "approval concurrency: failed holder setup exits cleanly (out=[$($holderOutTask.Result.Trim())] err=[$($holderErrTask.Result.Trim())])"
         }
     }
+}.Invoke()
+
+# =============================================================================
+# 14. The policy-specific signal contract delegates through the shared wrapper without a
+#     false handshake on an uncontended approvals.lock; the request transaction releases
+#     both the successful probe and the real lock.
+# =============================================================================
+{
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+    $signal = Join-Path $sb 'unexpected-uncontended-signal'
+    $lock = Join-Path (Join-Path $work 'approvals') 'approvals.lock'
+    $running = Start-PolicyAsync -ToolArgs @(
+        'approval-request', '--work', $work, '--task', 'T-999',
+        '--reason', 'test-shared-wrapper', '--fingerprint', 'uncontended-fingerprint',
+        '--policy-hash', 'uncontended-policy', '--deadline-sec', '3600',
+        '--now', '2026-01-01T00:00:00Z', '--json'
+    ) -LockWaitSignal $signal
+    $result = Complete-PolicyAsync $running 20000 'uncontended signal contract: approval-request'
+    Assert-Exit $result 0 'uncontended signal contract: approval-request succeeds through the shared wrapper'
+    Assert-True (-not (Test-Path -LiteralPath $signal)) 'uncontended signal contract: no false POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL is emitted'
+    Assert-True (-not (Test-Path -LiteralPath $lock)) 'uncontended signal contract: probe and real approval lock are both released'
 }.Invoke()
 
 # =============================================================================

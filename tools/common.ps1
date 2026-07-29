@@ -315,6 +315,56 @@ function Acquire-Lock {
         }
     }
 }
+# Test-only contention handshake shared by tools whose integration tests must prove that a
+# real caller reached Acquire-Lock while another process owns the target lock. The signal
+# environment variable name is explicit so production tools retain their established,
+# tool-specific contracts without copying this probe/signal/cleanup sequence.
+#
+# A successful CreateNew probe owns a temporary lock file. Dispose its exclusive handle and
+# remove exactly that file before delegating to Acquire-Lock, which creates the real
+# PID-bearing lock. An IOException is signalled only when the target still exists after the
+# failed CreateNew attempt, matching Acquire-Lock's contention classification; other I/O
+# failures and release races produce no false "contended" handshake.
+function Acquire-LockWithTestSignal {
+    param(
+        [Parameter(Mandatory)][string]$LockPath,
+        [Parameter(Mandatory)][string]$TestSignalEnvName,
+        [int]$TimeoutMs = 30000,
+        [int]$StaleMs = 300000
+    )
+
+    $waitSignal = [Environment]::GetEnvironmentVariable($TestSignalEnvName)
+    if ($waitSignal) {
+        $probe = $null
+        try {
+            $probe = [System.IO.File]::Open(
+                $LockPath,
+                [System.IO.FileMode]::CreateNew,
+                [System.IO.FileAccess]::Write,
+                [System.IO.FileShare]::None
+            )
+        } catch [System.IO.IOException] {
+            if (Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue) {
+                $signalDir = Split-Path -Parent $waitSignal
+                if ($signalDir -and -not (Test-Path -LiteralPath $signalDir)) {
+                    [void][System.IO.Directory]::CreateDirectory($signalDir)
+                }
+                [System.IO.File]::WriteAllText(
+                    $waitSignal,
+                    'contended',
+                    (New-Object System.Text.UTF8Encoding($false))
+                )
+            }
+        } finally {
+            if ($null -ne $probe) {
+                $probe.Dispose()
+                Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    Acquire-Lock -LockPath $LockPath -TimeoutMs $TimeoutMs -StaleMs $StaleMs
+}
 function Release-Lock {
     param([string]$LockPath)
     $snapshot = Read-LockSnapshot $LockPath

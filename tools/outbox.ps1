@@ -680,32 +680,16 @@ function Read-Outbox {
 # Cmd-Read without re-establishing an equivalent guarantee.
 # --------------------------------------------------------------------------
 
-# Acquire through the shared primitive. The optional test signal is deliberately emitted
-# only after an atomic CreateNew probe has ACTUALLY observed the target lock as contended;
-# tests use it to prove a reader reached the blocked state before releasing a simulated
-# writer's FileShare.None hold. Normal invocations do not set this environment variable and
-# take the production path directly.
+# Acquire through the shared test-signal wrapper. OUTBOX_TEST_LOCK_WAIT_SIGNAL remains the
+# outbox integration-test contract, while common.ps1 owns the CreateNew probe, signal and
+# cleanup sequence. Normal invocations do not set this environment variable and delegate
+# directly to Acquire-Lock with the caller's explicit timeout.
 function Acquire-OutboxLock {
     param([string]$LockPath, [int]$TimeoutMs)
-    $waitSignal = [Environment]::GetEnvironmentVariable('OUTBOX_TEST_LOCK_WAIT_SIGNAL')
-    if ($waitSignal) {
-        $probe = $null
-        try {
-            $probe = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        } catch [System.IO.IOException] {
-            $signalDir = Split-Path -Parent $waitSignal
-            if ($signalDir -and -not (Test-Path -LiteralPath $signalDir)) {
-                [void][System.IO.Directory]::CreateDirectory($signalDir)
-            }
-            [System.IO.File]::WriteAllText($waitSignal, 'contended', (New-Object System.Text.UTF8Encoding($false)))
-        } finally {
-            if ($null -ne $probe) {
-                $probe.Dispose()
-                Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-    Acquire-Lock $LockPath $TimeoutMs
+    Acquire-LockWithTestSignal `
+        -LockPath $LockPath `
+        -TestSignalEnvName 'OUTBOX_TEST_LOCK_WAIT_SIGNAL' `
+        -TimeoutMs $TimeoutMs
 }
 
 # --------------------------------------------------------------------------

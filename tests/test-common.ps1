@@ -213,7 +213,86 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
 }.Invoke()
 
 # =============================================================================
-# 7. Parse-IntOpt: strict decimal syntax, Int32 range, defaults and minimum bounds.
+# 7. Acquire-LockWithTestSignal: the shared wrapper signals only observed contention,
+#    removes a successful probe before the real acquisition, and accepts an explicit
+#    per-tool environment-variable name.
+# =============================================================================
+{
+    $envName = 'COMMON_TEST_LOCK_WAIT_SIGNAL_' + [guid]::NewGuid().ToString('N')
+    $oldSignalValue = [Environment]::GetEnvironmentVariable($envName)
+    try {
+        # No contention: the CreateNew probe succeeds, is disposed/removed, and the delegated
+        # Acquire-Lock creates a fresh PID-bearing lock. If the probe were left behind this
+        # call would time out instead of returning.
+        $dir = New-TempDir
+        $p = New-LockPath $dir
+        $signal = Join-Path $dir 'no-contention.signal'
+        [Environment]::SetEnvironmentVariable($envName, $signal)
+        $threw = $false
+        try {
+            Acquire-LockWithTestSignal `
+                -LockPath $p `
+                -TestSignalEnvName $envName `
+                -TimeoutMs 1000 `
+                -StaleMs 60000
+        } catch {
+            $threw = $true
+        }
+        Assert-False $threw 'test-signal wrapper removes its successful probe before delegating to Acquire-Lock'
+        Assert-False (Test-Path -LiteralPath $signal) 'successful probe does not emit a false contention signal'
+        Assert-Equal ([string]$PID) (Read-LockContent $p) 'delegated Acquire-Lock replaces the probe with the real PID-bearing lock'
+        Release-Lock $p
+        Assert-False (Test-Path -LiteralPath $p) 'real lock acquired after a successful probe releases normally'
+
+        # Real contention: the failed CreateNew probe observes the existing lock, emits the
+        # configured signal, and then delegates to the usual bounded Acquire-Lock path.
+        $held = New-LockPath $dir
+        Write-LockFile -Path $held -Content '99999' | Out-Null
+        $contendedSignal = Join-Path $dir 'nested\contended.signal'
+        [Environment]::SetEnvironmentVariable($envName, $contendedSignal)
+        $code = $null
+        try {
+            Acquire-LockWithTestSignal `
+                -LockPath $held `
+                -TestSignalEnvName $envName `
+                -TimeoutMs 250 `
+                -StaleMs 60000
+        } catch {
+            $parts = ([string]$_.Exception.Message) -split '\|', 3
+            if ($parts.Count -ge 2) { $code = $parts[1] }
+        }
+        Assert-Equal '7' $code 'contended wrapper delegates to Acquire-Lock and preserves its timeout failure'
+        Assert-True (Test-Path -LiteralPath $contendedSignal) 'failed CreateNew probe emits the configured contention signal'
+        if (Test-Path -LiteralPath $contendedSignal) {
+            Assert-Equal 'contended' ([System.IO.File]::ReadAllText($contendedSignal)) 'contention signal carries the established marker'
+        }
+        Assert-Equal '99999' (Read-LockContent $held) 'contention probe does not disturb the existing lock owner'
+
+        # A CreateNew IOException without an extant target (missing parent) is an I/O failure,
+        # not contention. The wrapper must not lie to concurrency tests about reaching a held
+        # lock, while Acquire-Lock still surfaces the underlying failure.
+        $missingParentLock = Join-Path (Join-Path $dir 'missing-parent') 'lock'
+        $falseSignal = Join-Path $dir 'false-contention.signal'
+        [Environment]::SetEnvironmentVariable($envName, $falseSignal)
+        $message = ''
+        try {
+            Acquire-LockWithTestSignal `
+                -LockPath $missingParentLock `
+                -TestSignalEnvName $envName `
+                -TimeoutMs 1000 `
+                -StaleMs 60000
+        } catch {
+            $message = [string]$_.Exception.Message
+        }
+        Assert-True ($message.Length -gt 0) 'non-contention probe failure is still surfaced by Acquire-Lock'
+        Assert-False (Test-Path -LiteralPath $falseSignal) 'non-contention CreateNew failure does not emit a false signal'
+    } finally {
+        [Environment]::SetEnvironmentVariable($envName, $oldSignalValue)
+    }
+}.Invoke()
+
+# =============================================================================
+# 8. Parse-IntOpt: strict decimal syntax, Int32 range, defaults and minimum bounds.
 # =============================================================================
 {
     $script:ErrPrefix = 'CMNERR'
