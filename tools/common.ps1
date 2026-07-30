@@ -276,6 +276,7 @@ function Acquire-Lock {
     param([string]$LockPath, [int]$TimeoutMs = 30000, [int]$StaleMs = 300000)
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     $missingLockFailures = 0
+    $accessDeniedRetryDeadline = $null
     while ($true) {
         try {
             $fs = [System.IO.File]::Open($LockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
@@ -297,12 +298,32 @@ function Acquire-Lock {
             # on Windows. Other absent-path I/O errors still surface after one retry.
             $nativeCode = ([int]$baseException.HResult -band 0xFFFF)
             $isCreateCollision = $isIoFailure -and ($nativeCode -in @(17, 80, 183))
+            # Windows can report CREATE_NEW against a DeleteOnClose entry that is still
+            # delete-pending as UnauthorizedAccessException / ERROR_ACCESS_DENIED (5), not
+            # IOException / ERROR_FILE_EXISTS. That state is transient but code 5 is also
+            # used for real ACL/directory denial, so it must not enter the full lock timeout.
+            # Give only this exact shape a short handoff grace period; if it persists, rethrow
+            # the original access error rather than misreporting "held by another writer".
+            $isDeletePendingCandidate = `
+                ($baseException -is [System.UnauthorizedAccessException]) -and ($nativeCode -eq 5)
             $lockExists = [bool](Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue)
             # Only CreateNew's expected "file already exists" IOException is contention.
             # A loser can observe the holder release between Open and Test-Path; its native
             # collision code remains authoritative even when the path has already vanished.
             # For any other absent-file IOException, allow one short retry before surfacing
             # the persistent path/I/O failure instead of spinning for the full lock timeout.
+            if ($isDeletePendingCandidate) {
+                $now = [DateTime]::UtcNow
+                if ($null -eq $accessDeniedRetryDeadline) {
+                    $accessDeniedRetryDeadline = $now.AddMilliseconds(250)
+                }
+                if ($now -lt $deadline -and $now -lt $accessDeniedRetryDeadline) {
+                    Start-Sleep -Milliseconds 10
+                    continue
+                }
+                throw $failure
+            }
+            $accessDeniedRetryDeadline = $null
             if (-not $isIoFailure) { throw $failure }
             if (-not $lockExists) {
                 if ($isCreateCollision) {
@@ -344,7 +365,9 @@ function Acquire-Lock {
 # Dispose->path-based Remove window in which a replacement PID-bearing lock could be unlinked.
 # Acquire-Lock then creates the real lock. An IOException is signalled only when the target
 # still exists after the failed CreateNew attempt, matching Acquire-Lock's contention
-# classification; other I/O failures and release races produce no false handshake.
+# classification. Windows ERROR_ACCESS_DENIED during delete-pending handoff is ambiguous, so
+# the probe emits no signal and delegates to Acquire-Lock's narrowly bounded classification;
+# other I/O failures and release races likewise produce no false handshake.
 function Acquire-LockWithTestSignal {
     param(
         [Parameter(Mandatory)][string]$LockPath,
@@ -365,8 +388,17 @@ function Acquire-LockWithTestSignal {
                 1,
                 [System.IO.FileOptions]::DeleteOnClose
             )
-        } catch [System.IO.IOException] {
-            if (Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue) {
+        } catch {
+            $probeFailure = $_
+            $probeBaseException = $probeFailure.Exception.GetBaseException()
+            $probeNativeCode = ([int]$probeBaseException.HResult -band 0xFFFF)
+            $probeIsIoFailure = ($probeBaseException -is [System.IO.IOException])
+            $probeIsDeletePendingCandidate = `
+                ($probeBaseException -is [System.UnauthorizedAccessException]) -and ($probeNativeCode -eq 5)
+            if (-not $probeIsIoFailure -and -not $probeIsDeletePendingCandidate) {
+                throw $probeFailure
+            }
+            if ($probeIsIoFailure -and (Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue)) {
                 $signalDir = Split-Path -Parent $waitSignal
                 if ($signalDir -and -not (Test-Path -LiteralPath $signalDir)) {
                     [void][System.IO.Directory]::CreateDirectory($signalDir)

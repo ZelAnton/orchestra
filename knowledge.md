@@ -1093,9 +1093,12 @@ codex-правилами выше (см. «Резолвинг раннеров `
   поздний former holder не удаляет лок, уже пересозданный другим писателем. `Acquire-Lock`
   считает contention только I/O-ошибку CreateNew при реально существующем lock-файле либо
   при нативном коде atomic-collision (`EEXIST`/`ERROR_FILE_EXISTS`), даже если быстрый holder
-  успел удалить файл до последующего `Test-Path`; если файл отсутствует повторно и код ошибки
-  не доказывает collision либо тип ошибки иной, немедленно пробрасывает исходную I/O-причину,
-  а не маскирует её 30-секундным `held by another writer`. `Read-Lease` до liveness валидирует
+  успел удалить файл до последующего `Test-Path`. Windows delete-pending handoff после
+  `DeleteOnClose` может временно дать `UnauthorizedAccessException`/`ERROR_ACCESS_DENIED`;
+  только эта точная форма получает короткое ограниченное повторение, а постоянный access
+  denial сохраняет исходную диагностику. Если файл отсутствует повторно и код ошибки не
+  доказывает collision либо тип ошибки иной, примитив немедленно пробрасывает исходную
+  I/O-причину, а не маскирует её 30-секундным `held by another writer`. `Read-Lease` до liveness валидирует
   `ttl_seconds`/`pid`/`pid_started`, поэтому битые scalar-поля всегда дают структурный код 18.
 - **`cc-doctor` диагностирует современную аренду через `state-tx status --json`.**
   `tools/doctor-runtime.ps1` резолвит `state-tx.ps1` в обеих поддерживаемых раскладках

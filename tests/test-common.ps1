@@ -197,7 +197,8 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
 }.Invoke()
 
 # =============================================================================
-# 6. Persistent non-contention I/O failures surface immediately with their real diagnostic.
+# 6. Persistent non-contention I/O/access failures surface promptly with their real
+#    diagnostic instead of being swallowed as lock contention.
 # =============================================================================
 {
     $dir = New-TempDir
@@ -212,6 +213,34 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
     Assert-False ($message -match 'held by another writer') 'missing parent is not misreported as lock contention'
     Assert-True ($sw.ElapsedMilliseconds -lt 1000) 'persistent missing-parent failure returns quickly instead of waiting for the lock timeout'
     Assert-False (Test-Path -LiteralPath $p) 'failed Acquire-Lock does not materialize a lock file'
+
+    # On Windows CREATE_NEW over a directory has the same UnauthorizedAccessException /
+    # ERROR_ACCESS_DENIED shape as the transient DeleteOnClose handoff race. The handoff
+    # classifier may retry that ambiguous shape briefly, but a permanent denial must retain
+    # its native diagnostic and must never become a 30-second "held by another writer".
+    if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
+        $deniedPath = Join-Path $dir 'directory-at-lock-path'
+        [void][System.IO.Directory]::CreateDirectory($deniedPath)
+        $deniedBase = $null
+        $deniedMessage = ''
+        $sw.Restart()
+        try { Acquire-Lock -LockPath $deniedPath -TimeoutMs 30000 -StaleMs 60000 }
+        catch {
+            $deniedMessage = [string]$_.Exception.Message
+            $deniedBase = $_.Exception.GetBaseException()
+        }
+        $sw.Stop()
+        $deniedType = if ($null -eq $deniedBase) { '' } else { $deniedBase.GetType().FullName }
+        $deniedNativeCode = if ($null -eq $deniedBase) { -1 } else { ([int]$deniedBase.HResult -band 0xFFFF) }
+        Assert-Equal ([System.UnauthorizedAccessException].FullName) $deniedType `
+            'persistent Windows access denial retains UnauthorizedAccessException'
+        Assert-Equal 5 $deniedNativeCode `
+            'persistent Windows access denial retains native ERROR_ACCESS_DENIED'
+        Assert-False ($deniedMessage -match 'held by another writer') `
+            'persistent Windows access denial is not misreported as lock contention'
+        Assert-True ($sw.ElapsedMilliseconds -lt 2000) `
+            'persistent Windows access denial only receives a short handoff retry window'
+    }
 }.Invoke()
 
 # =============================================================================
@@ -288,6 +317,28 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
         }
         Assert-True ($message.Length -gt 0) 'non-contention probe failure is still surfaced by Acquire-Lock'
         Assert-False (Test-Path -LiteralPath $falseSignal) 'non-contention CreateNew failure does not emit a false signal'
+
+        if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
+            $deniedLock = Join-Path $dir 'directory-probe-lock'
+            [void][System.IO.Directory]::CreateDirectory($deniedLock)
+            $deniedSignal = Join-Path $dir 'access-denied-contention.signal'
+            [Environment]::SetEnvironmentVariable($envName, $deniedSignal)
+            $deniedBase = $null
+            try {
+                Acquire-LockWithTestSignal `
+                    -LockPath $deniedLock `
+                    -TestSignalEnvName $envName `
+                    -TimeoutMs 1000 `
+                    -StaleMs 60000
+            } catch {
+                $deniedBase = $_.Exception.GetBaseException()
+            }
+            $deniedType = if ($null -eq $deniedBase) { '' } else { $deniedBase.GetType().FullName }
+            Assert-Equal ([System.UnauthorizedAccessException].FullName) $deniedType `
+                'test-signal wrapper preserves persistent Windows access denial'
+            Assert-False (Test-Path -LiteralPath $deniedSignal) `
+                'ambiguous Windows access denial does not emit a false contention signal'
+        }
     } finally {
         [Environment]::SetEnvironmentVariable($envName, $oldSignalValue)
     }
@@ -407,7 +458,15 @@ try {
     [System.IO.File]::WriteAllText($ResultPath, 'ok', $ascii)
     exit 0
 } catch {
-    [System.IO.File]::WriteAllText($ResultPath, [string]$_.Exception.Message, $ascii)
+    $caught = $_.Exception
+    $base = $caught.GetBaseException()
+    $detail = '{0} [type={1}; base={2}; hresult=0x{3:X8}; native={4}]' -f `
+        [string]$caught.Message,
+        $caught.GetType().FullName,
+        $base.GetType().FullName,
+        ([int]$base.HResult),
+        ([int]$base.HResult -band 0xFFFF)
+    [System.IO.File]::WriteAllText($ResultPath, $detail, $ascii)
     exit 1
 } finally {
     [Environment]::SetEnvironmentVariable($envName, $null)
