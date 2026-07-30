@@ -356,6 +356,113 @@ exit 0
     Assert-True ($survivorResult.Exit -ne 0) 'survivors greater than zero fail aggregate runner'
     Assert-Eq 1 $survivorResult.Summary.survivors 'survivor count is preserved in summary'
 
+    # Malformed supervisor evidence must never become terminal green through
+    # PowerShell's scalar or one-element-array coercion. Every case still produces
+    # one complete aggregate result and a zero aggregate survivor count.
+    $malformedRoot = New-Root
+    Write-Utf8 (Join-Path $malformedRoot 'test-malformed.ps1') "# ci:posix`nexit 0`n"
+    Assert-Eq 1 @(Get-PosixEligibleFixtures $malformedRoot).Count 'malformed-result fixture is POSIX-eligible'
+    $malformedSupervisor = Join-Path $malformedRoot 'malformed-supervisor.ps1'
+    Write-Utf8 $malformedSupervisor @'
+$result = ''
+$stdout = ''
+$stderr = ''
+for ($i = 0; $i -lt $args.Count; $i++) {
+    if ($args[$i] -eq '--result-file') { $result = $args[++$i] }
+    elseif ($args[$i] -eq '--stdout-file') { $stdout = $args[++$i] }
+    elseif ($args[$i] -eq '--stderr-file') { $stderr = $args[++$i] }
+}
+[IO.File]::WriteAllText($stdout, '')
+[IO.File]::WriteAllText($stderr, '')
+[IO.File]::WriteAllText($result, [string]$env:ORCHESTRA_RUN_ALL_MALFORMED_RESULT)
+exit 0
+'@
+    $malformedCases = @(
+        [pscustomobject]@{
+            Name = 'one-element root array'
+            Json = '[{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}]'
+        },
+        [pscustomobject]@{
+            Name = 'two concatenated root objects'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'string exit_code'
+            Json = '{"reason":"ok","exit_code":"0","duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'string survivors'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":"0"}'
+        },
+        [pscustomobject]@{
+            Name = 'string cleanup_attempted'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":"true","survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'one-element reason array'
+            Json = '{"reason":["ok"],"exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'one-element exit_code array'
+            Json = '{"reason":"ok","exit_code":[0],"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'one-element survivors array'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":[0]}'
+        },
+        [pscustomobject]@{
+            Name = 'one-element cleanup_attempted array'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":[true],"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'cleanup_attempted object'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":{"value":true},"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'null cleanup_attempted'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":null,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'missing cleanup_attempted'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'floating exit_code'
+            Json = '{"reason":"ok","exit_code":0.0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'floating survivors'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0.0}'
+        },
+        [pscustomobject]@{
+            Name = 'negative survivors'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":-1}'
+        },
+        [pscustomobject]@{
+            Name = 'wrong-case reason'
+            Json = '{"reason":"OK","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+        },
+        [pscustomobject]@{
+            Name = 'false cleanup_attempted'
+            Json = '{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":false,"survivor_count_after_cleanup":0}'
+        }
+    )
+    try {
+        foreach ($case in $malformedCases) {
+            $env:ORCHESTRA_RUN_ALL_MALFORMED_RESULT = $case.Json
+            $malformed = Invoke-Runner $malformedRoot 'Serial' 1 $false $malformedSupervisor
+            Assert-True ($malformed.Exit -ne 0) "$($case.Name) fails aggregate runner"
+            Assert-Eq 'fail' $malformed.Summary.verdict "$($case.Name) produces fail verdict"
+            Assert-Eq 1 $malformed.Summary.discovered "$($case.Name) preserves discovered count"
+            Assert-Eq 1 $malformed.Summary.child_launches "$($case.Name) preserves launch count"
+            Assert-Eq 1 @($malformed.Summary.results).Count "$($case.Name) preserves complete result set"
+            Assert-Eq 0 $malformed.Summary.survivors "$($case.Name) reports zero aggregate survivors"
+            Assert-True (-not $malformed.Summary.results[0].terminal_green) "$($case.Name) is not terminal green"
+        }
+    } finally {
+        Remove-Item Env:ORCHESTRA_RUN_ALL_MALFORMED_RESULT -ErrorAction SilentlyContinue
+    }
+
     # A supervisor process that never emits a result is bounded by the aggregate
     # parent deadline; its descendant tree is killed and a complete failing summary
     # is still produced.

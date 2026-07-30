@@ -159,9 +159,64 @@ $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 function Get-Prop {
     param($Object, [string] $Name)
     if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary] -and $Object.Contains($Name)) {
+        $value = $Object[$Name]
+        if ($value -is [System.Array]) {
+            Write-Output -NoEnumerate $value
+        } else {
+            return $value
+        }
+        return
+    }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
-    return $property.Value
+    if ($property.Value -is [System.Array]) {
+        Write-Output -NoEnumerate $property.Value
+    } else {
+        return $property.Value
+    }
+}
+
+function Test-JsonObject {
+    param($Value)
+    return ($null -ne $Value -and
+        $Value.GetType() -eq [System.Management.Automation.PSCustomObject])
+}
+
+function Test-JsonString {
+    param($Value)
+    return ($null -ne $Value -and $Value.GetType() -eq [string])
+}
+
+function Test-JsonIntegerInRange {
+    param($Value, [decimal] $Minimum, [decimal] $Maximum)
+    if ($null -eq $Value) { return $false }
+    $integralTypes = @(
+        [sbyte], [byte], [int16], [uint16],
+        [int32], [uint32], [int64], [uint64]
+    )
+    if ($integralTypes -notcontains $Value.GetType()) { return $false }
+    $number = [decimal]$Value
+    return ($number -ge $Minimum -and $number -le $Maximum)
+}
+
+function Test-TerminalSupervisorRecord {
+    param($Record)
+    if (-not (Test-JsonObject $Record)) { return $false }
+    $reason = Get-Prop $Record 'reason'
+    $exitCode = Get-Prop $Record 'exit_code'
+    $survivors = Get-Prop $Record 'survivor_count_after_cleanup'
+    $cleanupAttempted = Get-Prop $Record 'cleanup_attempted'
+    return (
+        (Test-JsonString $reason) -and $reason -ceq 'ok' -and
+        (Test-JsonIntegerInRange $exitCode ([int]::MinValue) ([int]::MaxValue)) -and
+            [decimal]$exitCode -eq 0 -and
+        (Test-JsonIntegerInRange $survivors 0 ([int]::MaxValue)) -and
+            [decimal]$survivors -eq 0 -and
+        $null -ne $cleanupAttempted -and
+            $cleanupAttempted.GetType() -eq [bool] -and
+            $cleanupAttempted -eq $true
+    )
 }
 
 function Start-Suite {
@@ -237,9 +292,21 @@ function Complete-Suite {
     $recordState = 'missing-result'
     if (Test-Path -LiteralPath $Entry.ResultFile) {
         try {
-            $record = Get-Content -LiteralPath $Entry.ResultFile -Raw | ConvertFrom-Json
-            $recordState = [string](Get-Prop $record 'reason')
-            if (-not $recordState) { $recordState = 'incomplete-result' }
+            $rawRecord = Get-Content -LiteralPath $Entry.ResultFile -Raw
+            if ([string]::IsNullOrWhiteSpace($rawRecord) -or
+                -not $rawRecord.TrimStart().StartsWith('{')) {
+                throw 'supervisor result body must be one JSON object'
+            }
+            $record = ConvertFrom-Json -InputObject $rawRecord
+            if (-not (Test-JsonObject $record)) {
+                throw 'supervisor result body must be one JSON object'
+            }
+            $rawReason = Get-Prop $record 'reason'
+            $recordState = if (Test-JsonString $rawReason) {
+                $rawReason
+            } else {
+                'invalid-result'
+            }
         } catch {
             $recordState = 'invalid-result'
             $supervisorStderr = ($supervisorStderr + "`n" + $_.Exception.Message).Trim()
@@ -255,10 +322,9 @@ function Complete-Suite {
         $duration = [int64]([DateTime]::UtcNow - $Entry.StartedAt).TotalMilliseconds
     }
     $terminalGreen = (
+        -not $ForcedReason -and
         $supervisorExit -eq 0 -and
-        $recordState -eq 'ok' -and
-        $null -ne $childExit -and [int]$childExit -eq 0 -and
-        $null -ne $survivors -and [int]$survivors -eq 0
+        (Test-TerminalSupervisorRecord $record)
     )
     $script:results[$Entry.File.Name] = [pscustomobject]@{
         name = $Entry.File.Name
@@ -338,7 +404,9 @@ foreach ($result in $ordered) {
 $failed = @($ordered | Where-Object { -not $_.terminal_green })
 $survivorsTotal = 0
 foreach ($result in $ordered) {
-    if ($null -ne $result.survivors) { $survivorsTotal += [int]$result.survivors }
+    if (Test-JsonIntegerInRange $result.survivors 0 ([int]::MaxValue)) {
+        $survivorsTotal += [int]$result.survivors
+    }
 }
 $summary = [ordered]@{
     schema = 'orchestra/launcher-suite-summary@1'
