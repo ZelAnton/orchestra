@@ -320,11 +320,12 @@ function Acquire-Lock {
 # environment variable name is explicit so production tools retain their established,
 # tool-specific contracts without copying this probe/signal/cleanup sequence.
 #
-# A successful CreateNew probe owns a temporary lock file. Dispose its exclusive handle and
-# remove exactly that file before delegating to Acquire-Lock, which creates the real
-# PID-bearing lock. An IOException is signalled only when the target still exists after the
-# failed CreateNew attempt, matching Acquire-Lock's contention classification; other I/O
-# failures and release races produce no false "contended" handshake.
+# A successful CreateNew probe owns a temporary lock file opened with DeleteOnClose. Disposing
+# that exclusive handle atomically deletes the exact file object it created; there is no
+# Dispose->path-based Remove window in which a replacement PID-bearing lock could be unlinked.
+# Acquire-Lock then creates the real lock. An IOException is signalled only when the target
+# still exists after the failed CreateNew attempt, matching Acquire-Lock's contention
+# classification; other I/O failures and release races produce no false handshake.
 function Acquire-LockWithTestSignal {
     param(
         [Parameter(Mandatory)][string]$LockPath,
@@ -337,11 +338,13 @@ function Acquire-LockWithTestSignal {
     if ($waitSignal) {
         $probe = $null
         try {
-            $probe = [System.IO.File]::Open(
+            $probe = [System.IO.FileStream]::new(
                 $LockPath,
                 [System.IO.FileMode]::CreateNew,
                 [System.IO.FileAccess]::Write,
-                [System.IO.FileShare]::None
+                [System.IO.FileShare]::None,
+                1,
+                [System.IO.FileOptions]::DeleteOnClose
             )
         } catch [System.IO.IOException] {
             if (Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue) {
@@ -358,7 +361,6 @@ function Acquire-LockWithTestSignal {
         } finally {
             if ($null -ne $probe) {
                 $probe.Dispose()
-                Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
             }
         }
     }

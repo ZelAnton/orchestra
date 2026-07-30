@@ -30,6 +30,8 @@
         PID; the current owner still removes its own lock.
       * (d) fresh lock: a lock younger than the threshold is never broken; the waiter retries
         until TimeoutMs and fails with rc=7 without disturbing the live lock.
+      * (e) probe handoff: concurrent test-signalled callers starting without a pre-existing
+        lock never unlink a replacement PID-bearing lock or overlap their critical sections.
 
 .EXAMPLE
     pwsh -File tests/test-common.ps1
@@ -292,7 +294,168 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
 }.Invoke()
 
 # =============================================================================
-# 8. Parse-IntOpt: strict decimal syntax, Int32 range, defaults and minimum bounds.
+# 8. Acquire-LockWithTestSignal probe handoff: several processes start without a
+#    pre-existing lock and repeatedly race through the successful-probe path. Probe cleanup
+#    must never unlink another process's replacement PID-bearing lock, and the resulting
+#    critical sections must remain mutually exclusive.
+# =============================================================================
+{
+    $dir = New-TempDir
+    $p = New-LockPath $dir
+    $start = Join-Path $dir 'start-at-ticks'
+    $active = Join-Path $dir 'critical-section-active'
+    $workerScript = Join-Path $dir 'probe-handoff-worker.ps1'
+    $commonPath = Join-Path $PSScriptRoot '..\tools\common.ps1'
+    $workerCount = 6
+    $iterations = 60
+    $periodTicks = [TimeSpan]::FromMilliseconds(25).Ticks
+    $workerText = @'
+param(
+    [Parameter(Mandatory)][string]$CommonPath,
+    [Parameter(Mandatory)][string]$LockPath,
+    [Parameter(Mandatory)][string]$StartPath,
+    [Parameter(Mandatory)][string]$ActivePath,
+    [Parameter(Mandatory)][string]$SignalPath,
+    [Parameter(Mandatory)][string]$ResultPath,
+    [Parameter(Mandatory)][int]$Iterations,
+    [Parameter(Mandatory)][long]$PeriodTicks
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+. $CommonPath
+$envName = 'COMMON_HANDOFF_SIGNAL_' + [guid]::NewGuid().ToString('N')
+[Environment]::SetEnvironmentVariable($envName, $SignalPath)
+$ascii = [System.Text.Encoding]::ASCII
+$activeHandle = $null
+
+try {
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    while (-not (Test-Path -LiteralPath $StartPath)) {
+        if ([DateTime]::UtcNow -gt $deadline) { throw 'timed out waiting for the start barrier' }
+        Start-Sleep -Milliseconds 10
+    }
+    $startTicks = [long]([System.IO.File]::ReadAllText($StartPath, $ascii))
+
+    for ($i = 0; $i -lt $Iterations; $i++) {
+        $targetTicks = $startTicks + ($i * $PeriodTicks)
+        while ([DateTime]::UtcNow.Ticks -lt $targetTicks) {
+            [System.Threading.Thread]::SpinWait(200)
+        }
+
+        Acquire-LockWithTestSignal `
+            -LockPath $LockPath `
+            -TestSignalEnvName $envName `
+            -TimeoutMs 30000 `
+            -StaleMs 60000
+        try {
+            $owner = [System.IO.File]::ReadAllText($LockPath, $ascii)
+            if (-not [string]::Equals($owner, [string]$PID, [System.StringComparison]::Ordinal)) {
+                throw "foreign lock owner observed after acquisition: expected $PID, got $owner"
+            }
+            try {
+                $activeHandle = [System.IO.FileStream]::new(
+                    $ActivePath,
+                    [System.IO.FileMode]::CreateNew,
+                    [System.IO.FileAccess]::Write,
+                    [System.IO.FileShare]::None
+                )
+            } catch [System.IO.IOException] {
+                throw 'critical sections overlapped'
+            }
+            $bytes = $ascii.GetBytes([string]$PID)
+            $activeHandle.Write($bytes, 0, $bytes.Length)
+            $activeHandle.Flush()
+            Start-Sleep -Milliseconds 3
+        } finally {
+            if ($null -ne $activeHandle) {
+                $activeHandle.Dispose()
+                $activeHandle = $null
+                Remove-Item -LiteralPath $ActivePath -Force -ErrorAction SilentlyContinue
+            }
+            Release-Lock $LockPath
+        }
+    }
+
+    [System.IO.File]::WriteAllText($ResultPath, 'ok', $ascii)
+    exit 0
+} catch {
+    [System.IO.File]::WriteAllText($ResultPath, [string]$_.Exception.Message, $ascii)
+    exit 1
+} finally {
+    [Environment]::SetEnvironmentVariable($envName, $null)
+}
+'@
+    [System.IO.File]::WriteAllText($workerScript, $workerText, (New-Object System.Text.UTF8Encoding($false)))
+
+    $psExe = (Get-Process -Id $PID).Path
+    $workers = @()
+    for ($i = 0; $i -lt $workerCount; $i++) {
+        $signal = Join-Path $dir "worker-$i-contended"
+        $result = Join-Path $dir "worker-$i-result"
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = $psExe
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        foreach ($arg in @(
+                '-NoProfile', '-NonInteractive', '-File', $workerScript,
+                '-CommonPath', $commonPath,
+                '-LockPath', $p,
+                '-StartPath', $start,
+                '-ActivePath', $active,
+                '-SignalPath', $signal,
+                '-ResultPath', $result,
+                '-Iterations', [string]$iterations,
+                '-PeriodTicks', [string]$periodTicks)) {
+            [void]$psi.ArgumentList.Add($arg)
+        }
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $workers += [pscustomobject]@{
+            Process = $proc
+            OutTask = $proc.StandardOutput.ReadToEndAsync()
+            ErrTask = $proc.StandardError.ReadToEndAsync()
+            Signal = $signal
+            Result = $result
+        }
+    }
+
+    # Give every child time to load common.ps1, then publish one future timestamp so their
+    # first (and subsequent periodic) acquisitions contend without a pre-created lock.
+    Start-Sleep -Milliseconds 500
+    $startTicks = [DateTime]::UtcNow.AddSeconds(1).Ticks
+    [System.IO.File]::WriteAllText($start, [string]$startTicks, $script:Ascii)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    foreach ($worker in $workers) {
+        $remainingMs = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+        if (-not $worker.Process.WaitForExit($remainingMs)) {
+            try { $worker.Process.Kill($true) } catch { }
+            Assert-True $false 'probe handoff worker finishes within the bounded deadline'
+            continue
+        }
+        $worker.Process.WaitForExit()
+        $out = $worker.OutTask.GetAwaiter().GetResult()
+        $err = $worker.ErrTask.GetAwaiter().GetResult()
+        $detail = if (Test-Path -LiteralPath $worker.Result) {
+            [System.IO.File]::ReadAllText($worker.Result, $script:Ascii)
+        } else {
+            "missing result; stdout=[$($out.Trim())] stderr=[$($err.Trim())]"
+        }
+        Assert-Equal 0 $worker.Process.ExitCode "probe handoff worker succeeds ($detail)"
+        Assert-Equal 'ok' $detail 'probe handoff worker observes only its own PID-bearing lock and no overlap'
+        $worker.Process.Dispose()
+    }
+
+    Assert-True (@($workers | Where-Object { Test-Path -LiteralPath $_.Signal }).Count -gt 0) `
+        'simultaneous test-signalled callers actually observe contention during probe handoff'
+    Assert-False (Test-Path -LiteralPath $p) 'all probe-handoff workers release the shared PID-bearing lock'
+    Assert-False (Test-Path -LiteralPath $active) 'no critical-section sentinel remains after the concurrent handoff test'
+}.Invoke()
+
+# =============================================================================
+# 9. Parse-IntOpt: strict decimal syntax, Int32 range, defaults and minimum bounds.
 # =============================================================================
 {
     $script:ErrPrefix = 'CMNERR'
