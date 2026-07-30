@@ -449,7 +449,6 @@ function Format-DigestIds {
 
 function Cmd-Digest {
     $work = Require-Opt 'work'
-    foreach ($key in $opts.Keys) { if (@('work','since','until','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
     if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
 
     $now = [DateTimeOffset]::UtcNow
@@ -734,7 +733,6 @@ function Format-TaskExecutionMetrics {
 
 function Cmd-Task {
     $work = Require-Opt 'work'; $taskId = Require-Opt 'task-id'; $batchId = Require-Opt 'batch-id'
-    foreach ($key in $opts.Keys) { if (@('work','task-id','batch-id','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
     if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
     if ($taskId -notmatch '^T-\d+$') { Fail 2 '--task-id must be a T-id' }
     if ($batchId -notmatch '^B-[A-Za-z0-9._-]+$') { Fail 2 '--batch-id must be a safe B-id token' }
@@ -746,7 +744,6 @@ function Cmd-Task {
 function Cmd-Aggregate {
     $work = Require-Opt 'work'
     if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
-    foreach ($key in $opts.Keys) { if (@('work','last','since','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
     if ($opts.ContainsKey('last') -and $opts.ContainsKey('since')) { Fail 2 'use either --last or --since, not both' }
 
     $last = $null; $since = $null
@@ -858,7 +855,6 @@ function Cmd-Aggregate {
 function Cmd-Budget {
     $work = Require-Opt 'work'
     $batchId = Require-Opt 'batch-id'
-    foreach ($key in $opts.Keys) { if (@('work','batch-id','json') -notcontains $key) { Fail 2 "unknown option --$key" } }
     if (-not (Test-Path -LiteralPath $work -PathType Container)) { Fail 3 "work directory does not exist: $work" }
     if ($batchId -notmatch '^B-\S+$') { Fail 2 '--batch-id must be a B-id' }
 
@@ -886,15 +882,15 @@ function Cmd-Budget {
 }
 
 try {
-    $parsed = Parse-CliArgs -Argv $args -BoolFlags @('json')
-    for ($i = 1; $i -lt $args.Count; $i++) {
-        $arg = [string]$args[$i]
-        if ($arg -notlike '--*') { Fail 2 "unexpected argument '$arg'" }
-        $key = $arg.Substring(2)
-        if ($key -eq 'json') { continue }
-        if ($i + 1 -ge $args.Count -or [string]$args[$i + 1] -like '--*') { Fail 2 "missing value for --$key" }
-        $i++
+    $allowedOptionsByCommand = @{
+        'aggregate' = @('work', 'last', 'since', 'json')
+        'budget'    = @('work', 'batch-id', 'json')
+        'digest'    = @('work', 'since', 'until', 'json')
+        'task'      = @('work', 'task-id', 'batch-id', 'json')
     }
+    $commandArg = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
+    $allowedOptions = if ($allowedOptionsByCommand.ContainsKey($commandArg)) { [string[]]$allowedOptionsByCommand[$commandArg] } else { $null }
+    $parsed = Parse-CliArgs -Argv $args -BoolFlags @('json') -AllowedKeys $allowedOptions
     $Command = $parsed.Command
     $opts = $parsed.Opts
     switch ($Command) {

@@ -390,6 +390,9 @@ $digestBadWindow=Invoke-Metrics @('digest','--work',$digestWork,'--since','2026-
 Assert-Equal 2 $digestBadWindow.ExitCode 'digest rejects reversed period'
 $digestUnknown=Invoke-Metrics @('digest','--work',$digestWork,'--last','1')
 Assert-Equal 2 $digestUnknown.ExitCode 'digest rejects aggregate-only options'
+$digestDuplicate=Invoke-Metrics @('digest','--work',$digestWork,'--work',$digestWork)
+Assert-Equal 2 $digestDuplicate.ExitCode 'digest rejects duplicate non-repeat options through the common parser'
+Assert-Contains $digestDuplicate.Err 'option --work may not be repeated' 'digest duplicate diagnostic comes from the common parser'
 
 # Per-task archive projection: task-scoped calls count fully, shared integration calls are
 # allocated by shared_task_count, tool operations carry time but no token expectation, and an

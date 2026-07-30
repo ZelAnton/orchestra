@@ -101,9 +101,23 @@ $script:LockName  = 'outbox'        # label in the Acquire-Lock failure message
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$parsed = Parse-CliArgs $args -BoolFlags @('json', 'stdin')
-$Command = $parsed.Command
-$opts = $parsed.Opts
+$allowedOptionsByCommand = @{
+    'append' = @(
+        'work', 'events', 'lock', 'owner', 'type', 'payload', 'batch-id', 'task-id',
+        'event-id', 'occurred-at', 'actor-kind', 'actor-name', 'payload-version',
+        'json-line', 'stdin', 'lock-timeout-ms', 'wave', 'attempt', 'round', 'from',
+        'to', 'role', 'mode', 'attempt-number', 'source', 'operation'
+    )
+}
+$commandArg = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
+$allowedOptions = if ($allowedOptionsByCommand.ContainsKey($commandArg)) { [string[]]$allowedOptionsByCommand[$commandArg] } else { $null }
+try {
+    $parsed = Parse-CliArgs $args -BoolFlags @('json', 'stdin') -AllowedKeys $allowedOptions
+    $Command = $parsed.Command
+    $opts = $parsed.Opts
+} catch {
+    exit (Resolve-CatchExit $_ 'OBXERR' 'outbox' 'OUTBOX_DEBUG')
+}
 
 # Has-Prop / Get-Prop are the single canonical copy in tools/events-common.ps1 (K-048's safe
 # indexer form `$Obj.PSObject.Properties[$Name]`, NOT `.Properties.Name -contains`, which

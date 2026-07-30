@@ -1145,4 +1145,35 @@ exit $rc
         Assert-True (-not ($r.Output -match 'Valid task')) '[malformed-headers] valid task keeps the graph validation path clean'
         Assert-True (-not ($r.Output -match 'Valid proposal')) '[malformed-headers] valid proposal remains excluded from task graph findings'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 26: strict command-specific CLI rejects dangerous typos ----
+    $W = New-Work
+    try {
+        Propose $W 'Strict parser task' 'x' | Out-Null
+        $queuePath = Join-Path $W 'Tasks_Queue.md'
+        $statePath = Join-Path $W 'queue_state.json'
+        $before = (Read-ArtifactSnapshot $queuePath) + "`n---state---`n" + (Read-ArtifactSnapshot $statePath)
+
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-strict', '--expectedgeneration', '1')
+        Assert-Equal 2 $r.ExitCode '[strict-cli] misspelled expected-generation is a usage error'
+        Assert-Match $r.Output 'unknown option --expectedgeneration' '[strict-cli] CAS typo is named'
+        $after = (Read-ArtifactSnapshot $queuePath) + "`n---state---`n" + (Read-ArtifactSnapshot $statePath)
+        Assert-Equal $before $after '[strict-cli] CAS typo does not mutate queue artifacts'
+
+        $r = Run-Tool @('capture', '--work', $W, '-id', 'T-001', '--batch', 'B-strict')
+        Assert-Equal 2 $r.ExitCode '[strict-cli] single-dash id is a usage error'
+        Assert-Match $r.Output "unexpected argument '-id'" '[strict-cli] positional single-dash token is named'
+        $after = (Read-ArtifactSnapshot $queuePath) + "`n---state---`n" + (Read-ArtifactSnapshot $statePath)
+        Assert-Equal $before $after '[strict-cli] positional token does not mutate queue artifacts'
+
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'T-001', '--id', 'T-002', '--batch', 'B-strict')
+        Assert-Equal 2 $r.ExitCode '[strict-cli] duplicate non-repeat id is a usage error'
+        Assert-Match $r.Output 'option --id may not be repeated' '[strict-cli] duplicate id is named'
+        $after = (Read-ArtifactSnapshot $queuePath) + "`n---state---`n" + (Read-ArtifactSnapshot $statePath)
+        Assert-Equal $before $after '[strict-cli] duplicate id does not mutate queue artifacts'
+
+        $r = Run-Tool @('capture', '--work', $W, '--id', 'T-001', '--batch', 'B-strict', '--expected-generation', '1')
+        Assert-Equal 0 $r.ExitCode '[strict-cli] valid CAS-sensitive capture remains compatible'
+        Assert-Match $r.Output 'captured T-001 generation=2' '[strict-cli] valid capture still mutates once'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }

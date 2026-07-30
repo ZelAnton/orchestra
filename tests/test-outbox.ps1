@@ -1085,6 +1085,46 @@ try {
 }.Invoke()
 
 # =============================================================================
+# 17. append has a strict command-specific allowlist and rejects malformed argv before write.
+# =============================================================================
+{
+    $dir = New-TempDir
+    $events = New-EventsFile $dir
+
+    $bad = Invoke-Outbox @(
+        'append', '--work', $dir, '--type', 'cohort.opened',
+        '--batch-id', 'B-strict', '--payload', '{}', '--event_id',
+        '44444444-4444-4444-8444-444444444444'
+    )
+    Assert-Exit $bad 2 'append rejects misspelled event_id with usage code 2'
+    Assert-Contains $bad.Err 'unknown option --event_id' 'append names the unknown event_id option'
+    Assert-Equal 0 (Line-Count $events) 'rejected event_id typo does not append or generate a replacement id'
+
+    $positional = Invoke-Outbox @(
+        'append', '--work', $dir, 'positional', '--type', 'cohort.opened',
+        '--batch-id', 'B-strict', '--payload', '{}'
+    )
+    Assert-Exit $positional 2 'append rejects positional tokens with usage code 2'
+    Assert-Contains $positional.Err "unexpected argument 'positional'" 'append names the positional token'
+    Assert-Equal 0 (Line-Count $events) 'rejected positional token does not mutate events'
+
+    $duplicate = Invoke-Outbox @(
+        'append', '--work', $dir, '--type', 'cohort.opened', '--type', 'cohort.closed',
+        '--batch-id', 'B-strict', '--payload', '{}'
+    )
+    Assert-Exit $duplicate 2 'append rejects duplicate non-repeat type with usage code 2'
+    Assert-Contains $duplicate.Err 'option --type may not be repeated' 'append names the duplicate type'
+    Assert-Equal 0 (Line-Count $events) 'rejected duplicate option does not mutate events'
+
+    $good = Invoke-Outbox @(
+        'append', '--work', $dir, '--type', 'cohort.opened', '--batch-id', 'B-strict',
+        '--payload', '{}', '--event-id', '44444444-4444-4444-8444-444444444444'
+    )
+    Assert-Exit $good 0 'append accepts the correctly spelled event-id option'
+    Assert-Equal 1 (Line-Count $events) 'valid strict append writes exactly one event'
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in $script:TempDirs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }

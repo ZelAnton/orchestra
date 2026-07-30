@@ -538,4 +538,28 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
         $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $otherRoot, '--force')
         Assert-Equal 15 $r.ExitCode '[root-norm] takeover still root-mismatches a genuinely different require-root (15)'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 17: strict command-specific CLI fails before state mutation -
+    $W = New-Work
+    try {
+        $statePath = Join-Path $W 'control_state.json'
+        $r = Run-Tool @('bump-generation', '--work', $W, '--expectedgeneration', '0')
+        Assert-Equal 2 $r.ExitCode '[strict-cli] misspelled expected-generation is a usage error'
+        Assert-Match $r.Output 'unknown option --expectedgeneration' '[strict-cli] state CAS typo is named'
+        Assert-True (-not (Test-Path -LiteralPath $statePath)) '[strict-cli] state CAS typo does not create control state'
+
+        $r = Run-Tool @('bump-generation', '--work', $W, 'positional')
+        Assert-Equal 2 $r.ExitCode '[strict-cli] positional token is a usage error'
+        Assert-Match $r.Output "unexpected argument 'positional'" '[strict-cli] positional token is named'
+        Assert-True (-not (Test-Path -LiteralPath $statePath)) '[strict-cli] positional token does not create control state'
+
+        $r = Run-Tool @('bump-generation', '--work', $W, '--work', $W)
+        Assert-Equal 2 $r.ExitCode '[strict-cli] duplicate work option is a usage error'
+        Assert-Match $r.Output 'option --work may not be repeated' '[strict-cli] duplicate work option is named'
+        Assert-True (-not (Test-Path -LiteralPath $statePath)) '[strict-cli] duplicate work does not create control state'
+
+        $r = Run-Tool @('bump-generation', '--work', $W, '--expected-generation', '0')
+        Assert-Equal 0 $r.ExitCode '[strict-cli] valid state CAS mutation remains compatible'
+        Assert-Match $r.Output 'generation=1' '[strict-cli] valid state mutation advances generation once'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }

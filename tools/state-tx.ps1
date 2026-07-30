@@ -95,9 +95,26 @@ $script:LockName  = 'state-tx'        # label in the Acquire-Lock failure messag
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$parsed = Parse-CliArgs $args -BoolFlags @('force', 'json')
-$Command = $parsed.Command
-$opts = $parsed.Opts
+$allowedOptionsByCommand = @{
+    'acquire'          = @('work', 'root', 'role', 'host', 'session', 'ttl', 'owner', 'pid', 'force', 'require-root', 'require-role', 'require-owner')
+    'takeover'         = @('work', 'root', 'role', 'host', 'session', 'ttl', 'owner', 'pid', 'force', 'require-root', 'require-role', 'require-owner')
+    'heartbeat'        = @('work', 'owner', 'expected-generation')
+    'release'          = @('work', 'owner', 'force')
+    'verify'           = @('work', 'require-root', 'require-role', 'owner')
+    'status'           = @('work', 'json')
+    'check-transition' = @('kind', 'from', 'to')
+    'generation'       = @('work')
+    'bump-generation'  = @('work', 'expected-generation')
+}
+$commandArg = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
+$allowedOptions = if ($allowedOptionsByCommand.ContainsKey($commandArg)) { [string[]]$allowedOptionsByCommand[$commandArg] } else { $null }
+try {
+    $parsed = Parse-CliArgs $args -BoolFlags @('force', 'json') -AllowedKeys $allowedOptions
+    $Command = $parsed.Command
+    $opts = $parsed.Opts
+} catch {
+    exit (Resolve-CatchExit $_ 'STXERR' 'state-tx' 'STATE_TX_DEBUG')
+}
 
 # --------------------------------------------------------------------------
 # Paths (resolved once --work is known)

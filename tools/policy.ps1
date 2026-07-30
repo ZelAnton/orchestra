@@ -131,9 +131,29 @@ $script:LockName = 'approvals' # label in the Acquire-Lock failure message
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...  (repeatable keys collect)
 # --------------------------------------------------------------------------
-$parsed = Parse-CliArgs $args -BoolFlags @('json', 'quiet', 'require-nonempty') -RepeatKeys @('path')
-$Command = $parsed.Command
-$opts = $parsed.Opts
+$approvalRequestOptions = @(
+    'work', 'dir', 'task', 'batch', 'reason', 'fingerprint', 'paths-from', 'path',
+    'root', 'policy-hash', 'policy', 'deadline-sec', 'now', 'json'
+)
+$approvalStatusOptions = @(
+    'work', 'dir', 'id', 'task', 'batch', 'reason', 'fingerprint', 'paths-from',
+    'path', 'root', 'policy-hash', 'policy', 'now', 'json'
+)
+$allowedOptionsByCommand = @{
+    'approval-request' = $approvalRequestOptions
+    'approval-approve' = @('work', 'dir', 'id', 'by', 'note', 'now', 'json')
+    'approval-reject'  = @('work', 'dir', 'id', 'by', 'note', 'now', 'json')
+    'approval-status'  = $approvalStatusOptions
+}
+$commandArg = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
+$allowedOptions = if ($allowedOptionsByCommand.ContainsKey($commandArg)) { [string[]]$allowedOptionsByCommand[$commandArg] } else { $null }
+try {
+    $parsed = Parse-CliArgs $args -BoolFlags @('json', 'quiet', 'require-nonempty') -RepeatKeys @('path') -AllowedKeys $allowedOptions
+    $Command = $parsed.Command
+    $opts = $parsed.Opts
+} catch {
+    exit (Resolve-CatchExit $_ 'PLCERR' 'policy' 'POLICY_DEBUG')
+}
 
 # Human-readable status line - suppressed under --json so a machine consumer gets ONLY the
 # JSON object on stdout (the JSON emitters below print the machine form when --json is set).

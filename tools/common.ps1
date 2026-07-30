@@ -99,27 +99,50 @@ function ConvertFrom-OrchestraConfigLine {
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # A key listed in -BoolFlags is a valueless flag; a key listed in -RepeatKeys collects
-# repeated occurrences into a List[string]; any other key takes the next token as its value
-# (or '' at end of input). Returns { Command; Opts } - Opts is a hashtable the caller keeps
-# as its own $opts.
+# repeated occurrences into a List[string]. Every other key takes one following value; a
+# terminal key keeps the historical empty-string value because Windows PowerShell 5.1 drops
+# an explicit trailing `''` while forwarding native argv. When -AllowedKeys is supplied, it
+# is the command-specific option allowlist. Positional tokens, an empty `--`, a value omitted
+# before the next option, unknown allowlisted options and duplicate non-repeatable keys are
+# deterministic usage errors. Returns { Command; Opts } - Opts is a hashtable the caller
+# keeps as its own $opts.
 # --------------------------------------------------------------------------
 function Parse-CliArgs {
-    param([string[]]$Argv = @(), [string[]]$BoolFlags = @(), [string[]]$RepeatKeys = @())
+    param(
+        [string[]]$Argv = @(),
+        [string[]]$BoolFlags = @(),
+        [string[]]$RepeatKeys = @(),
+        [AllowNull()][string[]]$AllowedKeys = $null
+    )
     $command = if ($Argv.Count -ge 1) { [string]$Argv[0] } else { '' }
     $o = @{}
     for ($i = 1; $i -lt $Argv.Count; $i++) {
         $a = [string]$Argv[$i]
-        if ($a -like '--*') {
-            $key = $a.Substring(2)
-            if ($BoolFlags -contains $key) { $o[$key] = $true; continue }
-            $i++
-            $val = if ($i -lt $Argv.Count) { [string]$Argv[$i] } else { '' }
-            if ($RepeatKeys -contains $key) {
-                if (-not $o.ContainsKey($key)) { $o[$key] = [System.Collections.Generic.List[string]]::new() }
-                $o[$key].Add($val)
-            } else {
-                $o[$key] = $val
-            }
+        if (-not $a.StartsWith('--', [System.StringComparison]::Ordinal)) {
+            Fail 2 "unexpected argument '$a'"
+        }
+        $key = $a.Substring(2)
+        if ([string]::IsNullOrEmpty($key)) { Fail 2 "empty option '--'" }
+        if ($null -ne $AllowedKeys -and $AllowedKeys -notcontains $key) {
+            Fail 2 "unknown option --$key"
+        }
+        if ($o.ContainsKey($key) -and $RepeatKeys -notcontains $key) {
+            Fail 2 "option --$key may not be repeated"
+        }
+        if ($BoolFlags -contains $key) {
+            $o[$key] = $true
+            continue
+        }
+        $i++
+        if ($i -lt $Argv.Count -and ([string]$Argv[$i]).StartsWith('--', [System.StringComparison]::Ordinal)) {
+            Fail 2 "missing value for --$key"
+        }
+        $val = if ($i -lt $Argv.Count) { [string]$Argv[$i] } else { '' }
+        if ($RepeatKeys -contains $key) {
+            if (-not $o.ContainsKey($key)) { $o[$key] = [System.Collections.Generic.List[string]]::new() }
+            $o[$key].Add($val)
+        } else {
+            $o[$key] = $val
         }
     }
     return [pscustomobject]@{ Command = $command; Opts = $o }

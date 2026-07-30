@@ -1246,6 +1246,53 @@ try {
 }.Invoke()
 
 # =============================================================================
+# 15. approval-* parsing is strict; repeatable --path keeps all values in order.
+# =============================================================================
+{
+    $sb = New-Sandbox
+    $work = Join-Path $sb '.work'
+    $approvalDir = Join-Path $work 'approvals'
+
+    foreach ($command in @('approval-request', 'approval-approve', 'approval-reject', 'approval-status')) {
+        $r = Invoke-Policy @($command, '--unknown-approval-option', 'value')
+        Assert-Exit $r 2 "strict approval CLI: $command rejects an unknown key"
+        Assert-OutMatch $r 'unknown option --unknown-approval-option' "strict approval CLI: $command names the unknown key"
+    }
+    Assert-True (-not (Test-Path -LiteralPath $approvalDir)) 'strict approval CLI: rejected unknown keys create no approval artifacts'
+
+    $positional = Invoke-Policy @(
+        'approval-request', '--work', $work, 'positional', '--task', 'T-352',
+        '--reason', 'human-review', '--fingerprint', 'fp', '--policy-hash', 'ph'
+    )
+    Assert-Exit $positional 2 'strict approval CLI: positional token is a usage error'
+    Assert-OutMatch $positional "unexpected argument 'positional'" 'strict approval CLI: positional token is named'
+
+    $duplicate = Invoke-Policy @(
+        'approval-request', '--work', $work, '--task', 'T-352', '--task', 'T-353',
+        '--reason', 'human-review', '--fingerprint', 'fp', '--policy-hash', 'ph'
+    )
+    Assert-Exit $duplicate 2 'strict approval CLI: duplicate non-repeat task is a usage error'
+    Assert-OutMatch $duplicate 'option --task may not be repeated' 'strict approval CLI: duplicate task is named'
+    Assert-True (-not (Test-Path -LiteralPath $approvalDir)) 'strict approval CLI: rejected structure does not create approval artifacts'
+
+    $fileOne = Join-Path $sb 'one.txt'
+    $fileTwo = Join-Path $sb 'two.txt'
+    Write-Utf8 $fileOne 'one'
+    Write-Utf8 $fileTwo 'two'
+    $good = Invoke-Policy @(
+        'approval-request', '--work', $work, '--task', 'T-352', '--reason', 'human-review',
+        '--path', 'one.txt', '--path', 'two.txt', '--root', $sb,
+        '--policy-hash', 'strict-policy', '--deadline-sec', '3600',
+        '--now', '2026-01-01T00:00:00Z', '--json'
+    )
+    Assert-Exit $good 0 'strict approval CLI: repeatable path request remains compatible'
+    if ($good.ExitCode -eq 0) {
+        $record = $good.Out.Trim() | ConvertFrom-Json
+        Assert-True (Test-Path -LiteralPath (Join-Path $approvalDir "$($record.id).json")) 'strict approval CLI: valid repeated paths create one approval artifact'
+    }
+}.Invoke()
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($item in $script:TempItems) {

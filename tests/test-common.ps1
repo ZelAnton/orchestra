@@ -544,7 +544,41 @@ try {
 }.Invoke()
 
 # =============================================================================
-# 9. Parse-IntOpt: strict decimal syntax, Int32 range, defaults and minimum bounds.
+# 9. Parse-CliArgs: command allowlists and structural usage errors are enforced centrally.
+# =============================================================================
+{
+    $script:ErrPrefix = 'CMNERR'
+
+    $parsed = Parse-CliArgs `
+        -Argv @('demo', '--name', 'alpha', '--verbose', '--path', 'first', '--path', 'second') `
+        -BoolFlags @('verbose') `
+        -RepeatKeys @('path') `
+        -AllowedKeys @('name', 'verbose', 'path')
+    Assert-Equal 'demo' $parsed.Command 'strict parser preserves the command'
+    Assert-Equal 'alpha' $parsed.Opts['name'] 'strict parser preserves an ordinary option value'
+    Assert-True ([bool]$parsed.Opts['verbose']) 'strict parser preserves a bool flag'
+    Assert-Equal 2 $parsed.Opts['path'].Count 'repeatable option keeps every occurrence'
+    Assert-Equal 'first' $parsed.Opts['path'][0] 'repeatable option preserves first value order'
+    Assert-Equal 'second' $parsed.Opts['path'][1] 'repeatable option preserves second value order'
+
+    foreach ($case in @(
+            @{ Argv = @('demo', '--typo', 'x'); Pattern = 'unknown option --typo'; Label = 'unknown allowlisted key' },
+            @{ Argv = @('demo', 'positional'); Pattern = "unexpected argument 'positional'"; Label = 'positional token' },
+            @{ Argv = @('demo', '--'); Pattern = "empty option '--'"; Label = 'empty key' },
+            @{ Argv = @('demo', '--name', 'one', '--name', 'two'); Pattern = 'option --name may not be repeated'; Label = 'duplicate non-repeat key' },
+            @{ Argv = @('demo', '--name', '--verbose'); Pattern = 'missing value for --name'; Label = 'missing option value' })) {
+        $message = ''
+        try {
+            [void](Parse-CliArgs -Argv $case.Argv -BoolFlags @('verbose') -RepeatKeys @('path') -AllowedKeys @('name', 'verbose', 'path'))
+        } catch {
+            $message = [string]$_.Exception.Message
+        }
+        Assert-True ($message -like "CMNERR|2|*$($case.Pattern)*") "$($case.Label) is a named usage error"
+    }
+}.Invoke()
+
+# =============================================================================
+# 10. Parse-IntOpt: strict decimal syntax, Int32 range, defaults and minimum bounds.
 # =============================================================================
 {
     $script:ErrPrefix = 'CMNERR'

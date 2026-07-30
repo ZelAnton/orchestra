@@ -94,9 +94,31 @@ $script:LockName  = 'queue'           # label in the Acquire-Lock failure messag
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...
 # --------------------------------------------------------------------------
-$parsed = Parse-CliArgs $args -BoolFlags @('force', 'json', 'next-major')
-$Command = $parsed.Command
-$opts = $parsed.Opts
+$allowedOptionsByCommand = @{
+    'allocate-id'       = @('work', 'kind')
+    'propose'           = @('work', 'kind', 'title', 'body', 'body-file', 'predecessors', 'id', 'force', 'expected-generation', 'source', 'suggested-target')
+    'capture'           = @('work', 'id', 'batch', 'worktree', 'branch', 'expected-generation')
+    'return'            = @('work', 'id', 'reason', 'max-attempts', 'expected-generation')
+    'escalate'          = @('work', 'id', 'reason', 'expected-generation')
+    'archive'           = @('work', 'id', 'expected-generation')
+    'validate-deps'     = @('work')
+    'ready'             = @('work', 'id', 'next-major')
+    'generation'        = @('work')
+    'bump-generation'   = @('work')
+    'inbox-add'         = @('work', 'kind', 'title', 'body', 'body-file', 'predecessors', 'source', 'suggested-target')
+    'inbox-drain'       = @('work')
+    'classify-proposal' = @('work', 'id', 'outcome', 'reason', 'tasks', 'expected-generation')
+    'list-proposals'    = @('work', 'status')
+}
+$commandArg = if ($args.Count -ge 1) { [string]$args[0] } else { '' }
+$allowedOptions = if ($allowedOptionsByCommand.ContainsKey($commandArg)) { [string[]]$allowedOptionsByCommand[$commandArg] } else { $null }
+try {
+    $parsed = Parse-CliArgs $args -BoolFlags @('force', 'json', 'next-major') -AllowedKeys $allowedOptions
+    $Command = $parsed.Command
+    $opts = $parsed.Opts
+} catch {
+    exit (Resolve-CatchExit $_ 'QTXERR' 'queue-tx' 'QUEUE_TX_DEBUG')
+}
 
 function Format-Id { param([int]$N) return ('T-{0:D3}' -f $N) }
 function Format-PId { param([int]$N) return ('P-{0:D3}' -f $N) }
