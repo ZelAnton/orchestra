@@ -111,7 +111,16 @@ Processor и merger формируют описательные англоязы
   (не пустой WIP workspace `@`) и fail-closed требует exactly-one full commit id.
   Config читается из `--config-root` (default `--work`), а transient supervisor-файлы
   каждого `run` лежат в уникальном invocation-каталоге, привязанном к `--result-file`;
-  параллельные reviewer-вызовы не делят artifacts.
+  параллельные reviewer-вызовы не делят artifacts. Один логический supervisor/
+  verification-вызов адресуется стабильным result path и на всё время исполнения держит
+  sibling `<result-file>.run.lock`: внешний shell/tool timeout не считается terminal
+  verdict, а повтор с тем же path получает rc=2 как уже активный логический вызов и
+  fail-closed не порождает второй дочерний процесс. Дедлайн
+  дочерней команды не сокращается ниже effective `CALL_DEADLINE_SEC` и повышается до 125%
+  известной terminal-green длительности; внешний wait timeout обязан превышать рассчитанный
+  completion bound минимум на 120 секунд. Второй обязательный clean review-pass на
+  неизменном SHA повторяет содержательный анализ, но не идентичную уже terminal-green
+  focused-команду без нового сигнала риска.
   Processor повторно проверяет evidence перед ff/push и на resume. Missing-profile для исполняемого diff блокирует
   публикацию; допустимы только механический docs-only и operator-owned `disabled` exemptions.
   Перед каждым merge `tools/policy.ps1 guard-revision` связывает branch/bookmark с полным
@@ -330,7 +339,10 @@ Processor и merger формируют описательные англоязы
   Список ключей и Codex-enum'ы схемы **машинно-сверяются** с `config.example.md`
   (`tools/check-consistency.ps1`, класс 5), а та — с `cc-doctor` (класс 4): движок
   `cc-doctor` (`tools/doctor-runtime.ps1`) держит копию хардкодом (mirror-совместимость),
-  но со схемой разойтись не может. Тесты — `tests/test-policy.ps1`.
+  но со схемой разойтись не может. Класс 1 того же guard отличает operator config от
+  производных reviewer-handoff полей: `REVIEW_STRICT`, `REVIEW_FINAL_CLEAN_PASSES` и
+  `VERIFICATION_EVIDENCE` входят в явный non-key allow-list, а не раздувают публичную
+  config-схему. Тесты — `tests/test-policy.ps1`.
   В полностью автономном режиме operator-owned переменная ОС
   `ORCHESTRA_AUTO_APPROVE=on` заранее разрешает внутренние human gates во всех проектах:
   `approval-request` всё равно сохраняет обычный одноразовый артефакт, fingerprint кода,
@@ -1065,6 +1077,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/integration_state.md` | служебное состояние джойна (Ревью-SHA предыдущего интеграционного ревью, F-циклов); ведёт processor, создаётся в Фазе 5, удаляется в 6.4 |
 | `.work/merge_report.md` | результаты merge и причины карантина |
 | `.work/verification.json` | атомарное exact-SHA evidence обязательного pre-push verification-гейта (`tools/verification.ps1`, schema `orchestra/verification@2`): точные упорядоченные команды, безопасный environment/profile fingerprint и terminal supervisor facts без путей/stdout/stderr; `check` отвергает crash-residue `running`, смену профиля/окружения и старую вершину, а `check --require-pass` разрешает review-reuse только для `pass` с `reason=ok`, `exit_code=0`, `survivors=0` каждого запуска; exemptions остаются только pre-publish policy semantics и никогда не доказывают выполнение дорогой команды |
+| `<supervisor/verification result-file>.run.lock` | краткоживущий sibling-lock одного логического foreground-вызова; предотвращает второй запуск с тем же стабильным result path, пока оболочка могла прекратить ожидание, но исходный supervisor/verification process ещё жив. Освобождается владельцем при terminal outcome; crash-residue ломается только после bound, включающего все попытки/команды и cleanup |
 | `.work/status.md` | текущий обзор processor |
 | `.work/journal.md` | постоянный журнал завершённых прогонов; read-only fallback для отсутствующих в событиях полей `tools/metrics.ps1` |
 | `.work/events.jsonl` | append-only машинный event-outbox; пишет только processor (одна JSON-строка на событие) при `EVENTS_OUTBOX:on` через транзакционный интерфейс `tools/outbox.ps1` (валидация конверта/payload, детерминированный `event_id`-дедуп-ключ, строгие scalar-only `operation.completed` как timing spine архива, отказ с rc=5 для многострочного raw-ввода `--json-line`/`--stdin`, игнорирование whitespace-only строк, ремонт оборванного хвоста, single-writer); основной источник read-only агрегатора/пер-задачной проекции `tools/metrics.ps1`; машинный контракт для будущей платформы наблюдаемости (`docs/queue_contract.md`, §19); не привязан к одной когорте, переживает очистку Фазы 6, никогда не переписывается/не усекается; Markdown-артефакты остаются источником истины для человека |

@@ -23,6 +23,8 @@ $codexProcessor = Read-Text 'codex/processor.md'
 $codexReviewer = Read-Text 'codex/agents/orchestra_reviewer.toml'
 $codexReviewerStd = Read-Text 'codex/agents/orchestra_reviewer_std.toml'
 $codexFullReviewer = Read-Text 'codex/agents/orchestra_full_reviewer.toml'
+$supervisor = Read-Text 'tools/supervisor.ps1'
+$verification = Read-Text 'tools/verification.ps1'
 
 foreach ($pair in @(
     @($processor, 'processor'),
@@ -32,6 +34,9 @@ foreach ($pair in @(
     Assert-Contains $pair[0] '--require-pass' "$($pair[1]) uses the single mechanical reusable-evidence gate"
     Assert-Contains $pair[0] 'survivors=0' "$($pair[1]) requires terminal cleanup"
     Assert-Contains $pair[0] 'publish-CI' "$($pair[1]) keeps local evidence separate from publish CI"
+    Assert-Contains $pair[0] '<result-file>.run.lock' "$($pair[1]) addresses one in-flight logical verification"
+    Assert-Contains $pair[0] 'Внешний timeout оболочки не является terminal outcome supervisor' "$($pair[1]) does not confuse wrapper timeout with supervisor completion"
+    Assert-Contains $pair[0] 'минимум на 120 секунд' "$($pair[1]) keeps the outer wait beyond the computed completion bound"
 }
 
 Assert-Contains $processor 'REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>' 'processor dispatches strict final-clean count'
@@ -43,6 +48,11 @@ Assert-Contains $fullReviewer 'Reuse не заменяет содержател�
 Assert-Contains $fullReviewer 'exempt' 'integration reviewer rejects exempt evidence for reuse'
 Assert-Contains $fullReviewer '--revision integration/<B-id>' 'integration reviewer seals exact integration bookmark'
 Assert-Contains $processor '--revision integration/<B-id>' 'processor checks the sealed integration bookmark'
+Assert-Contains $processor 'второй проход не' 'processor forbids an identical focused rerun on the second clean analysis pass'
+Assert-Contains $reviewerTemplate 'Второй последовательный чистый проход на неизменном' 'task reviewer separates the second clean analysis from command repetition'
+Assert-Contains $fullReviewer 'Второй последовательный чистый проход на неизменном' 'integration reviewer separates the second clean analysis from command repetition'
+Assert-Contains $supervisor 'Acquire-ResultFileRunLock' 'supervisor serializes calls by their stable result path'
+Assert-Contains $verification 'Acquire-Lock -LockPath $runLock' 'verification runner serializes whole-profile runs by evidence path'
 
 foreach ($generated in @(
     @($reviewer, 'generated reviewer'),
@@ -55,6 +65,9 @@ foreach ($generated in @(
     Assert-Contains $generated[0] '--require-pass' "$($generated[1]) includes exact-SHA evidence contract"
     Assert-Contains $generated[0] 'publish-CI' "$($generated[1]) preserves full publish CI"
     Assert-Contains $generated[0] '--revision' "$($generated[1]) includes sealed revision contract"
+    Assert-Contains $generated[0] '<result-file>.run.lock' "$($generated[1]) preserves in-flight duplicate prevention"
+    Assert-Contains $generated[0] 'Внешний timeout оболочки не является terminal outcome supervisor' "$($generated[1]) preserves terminal-outcome semantics"
+    Assert-Contains $generated[0] 'минимум на 120 секунд' "$($generated[1]) preserves the outer wait margin"
 }
 
 Assert-NotContains $reviewerTemplate 'reuse evidence считается содержательным проходом' 'reviewer template has no analysis-reuse shortcut'

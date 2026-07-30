@@ -20,7 +20,10 @@ function Invoke-ToolHost {
     [pscustomobject]@{Exit=$LASTEXITCODE;Out=($o -join "`n")}
 }
 function New-Repo {
-    $root=Join-Path ([IO.Path]::GetTempPath()) ('orchestra-verification-'+[guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($root); $Dirs.Add($root)
+    # jj 0.38 writes 128-character operation object names. Keep the Windows fixture
+    # root short enough that .jj/repo/op_store/operations/<object> stays below MAX_PATH.
+    $suffix=[guid]::NewGuid().ToString('N').Substring(0,12)
+    $root=Join-Path ([IO.Path]::GetTempPath()) ('ov-'+$suffix); [void][IO.Directory]::CreateDirectory($root); $Dirs.Add($root)
     & git -C $root init -q; & git -C $root config user.email fixture@example.invalid; & git -C $root config user.name Fixture
     Write-Utf8 (Join-Path $root 'src.txt') "base`n"; & git -C $root add src.txt; & git -C $root commit -q -m base
     [void][IO.Directory]::CreateDirectory((Join-Path $root '.work'))
@@ -297,10 +300,38 @@ exit 0
     if($artifactA.Count -eq 1){Assert-Eq 'A' ((Get-Content (Join-Path $artifactA[0].FullName 'command-1.out.txt') -Raw).TrimEnd()) 'artifact A output is isolated'}
     if($artifactB.Count -eq 1){Assert-Eq 'B' ((Get-Content (Join-Path $artifactB[0].FullName 'command-1.out.txt') -Raw).TrimEnd()) 'artifact B output is isolated'}
 
+    # A wrapper can stop waiting while the first verification process is still alive.
+    # The shared logical result path must reject a duplicate runner before it creates a
+    # second invocation artifact or child process.
+    Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_COMMANDS: ["sleep 4"]'
+    $stableResult=Join-Path $r '.work/stable-logical-run.json'
+    $stableOut=Join-Path $r '.work/stable-logical-run.out'
+    $stableErr=Join-Path $r '.work/stable-logical-run.err'
+    $stableArgs=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Tool,
+        'run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,
+        '--head',$newHead,'--deadline-sec','30','--result-file',$stableResult)
+    $firstStable=Start-Process -FilePath $PsExe -ArgumentList $stableArgs -NoNewWindow -PassThru `
+        -RedirectStandardOutput $stableOut -RedirectStandardError $stableErr
+    $stableLock="$stableResult.run.lock"
+    $wait=[Diagnostics.Stopwatch]::StartNew()
+    while($wait.Elapsed.TotalSeconds-lt 10-and(-not(Test-Path $stableLock))){Start-Sleep -Milliseconds 50}
+    Assert-True (Test-Path $stableLock) 'first verification run exposes its stable result lock'
+    $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git',
+        '--base',$base,'--head',$newHead,'--deadline-sec','30','--result-file',$stableResult)
+    Assert-Eq 2 $x.Exit 'duplicate verification run for the same result-file is rejected'
+    Assert-Contains $x.Out 'verification run already active' 'duplicate verification run reports the active logical invocation'
+    $firstStable|Wait-Process -Timeout 30
+    $firstStable.Refresh(); Assert-Eq 0 $firstStable.ExitCode 'original verification run completes normally'
+    $firstStable.Dispose()
+    Assert-True (-not(Test-Path $stableLock)) 'terminal verification run releases its stable result lock'
+    $stableArtifacts=@(Get-ChildItem -LiteralPath $artifactParent -Directory -Filter 'stable-logical-run.json-*')
+    Assert-Eq 1 $stableArtifacts.Count 'duplicate verification run creates no second invocation artifact root'
+
     # Jujutsu reviewers verify the sealed bookmark, not the empty WIP workspace @.
     if(Get-Command jj -ErrorAction SilentlyContinue){
         $j=New-Repo
-        & jj git init --colocate $j 2>&1|Out-Null
+        $jjInitOutput=@(& jj git init --colocate $j 2>&1|ForEach-Object{$_.ToString()})
+        if($LASTEXITCODE-ne 0){throw "jj fixture init failed for [$j]: $($jjInitOutput-join ' | ')"}
         & jj -R $j bookmark create task-fixture -r '@-' 2>&1|Out-Null
         $sealed=(& jj -R $j log -r task-fixture --no-graph -T 'commit_id').Trim()
         $wip=(& jj -R $j log -r '@' --no-graph -T 'commit_id').Trim()

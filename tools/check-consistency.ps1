@@ -135,15 +135,17 @@ if ($defaultKeys.Count -eq 0) {
 # `THREAD_ID` / `PROMPT_RESUME` (T-222) are the coder_codex adapter's own local shell
 # variables for the resume-image follow-up call (holding the captured session id / the
 # follow-up prompt file path respectively - same nature as CODEX_RT/SKIP_GIT above), not
-# .work/config.md keys. Reviewed by hand against current repo content; extend this list if
-# a genuinely new non-key token starts matching.
+# .work/config.md keys. `REVIEW_STRICT`, `REVIEW_FINAL_CLEAN_PASSES` and
+# `VERIFICATION_EVIDENCE` are processor-derived per-dispatch handoff fields: they are passed
+# to reviewers but are never operator-owned config keys. Reviewed by hand against current
+# repo content; extend this list if a genuinely new non-key token starts matching.
 $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CC_CODEX_EXEC_GRANT', 'CODEX_FAILED', 'CODEX_RT', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
         'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NEED_IMAGE_VIEW', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
-        'ORCHESTRA_AUTO_APPROVE', 'RUNTIME_LAYOUT',
+        'ORCHESTRA_AUTO_APPROVE', 'REVIEW_FINAL_CLEAN_PASSES', 'REVIEW_STRICT', 'RUNTIME_LAYOUT',
         'OTHER_FAILURE', 'PROMPT_RESUME', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
-        'THREAD_ID', 'UPPER_SNAKE_CASE'
+        'THREAD_ID', 'UPPER_SNAKE_CASE', 'VERIFICATION_EVIDENCE'
     ), [StringComparer]::Ordinal)
 
 $keyPattern = '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'

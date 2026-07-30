@@ -1283,6 +1283,27 @@ Supervisor не мутирует очередь, аренду или outbox; о�
 их после возврата при ошибке. Устойчивость всего пути покрыта `tools/harness.ps1`
 (git+jj, fault injection после каждого критического перехода).
 
+`CALL_DEADLINE_SEC` ограничивает дочернюю команду supervisor, а не ожидание внешнего
+Bash/tool-вызова. Для каждой внешней проверки используй стабильный `--result-file` по
+логическому ключу `(полная commit id, нормализованный текст команды, environment
+fingerprint)`: повтор ожидания обязан адресовать тот же файл, рядом с которым supervisor/
+verification runner держит `<result-file>.run.lock`. Дедлайн дочерней команды не сокращай
+ниже effective `CALL_DEADLINE_SEC`; если известна последняя terminal-green длительность
+идентичной команды, подними его минимум до 125% этой длительности. Рассчитай bound всего
+foreground-вызова (все последовательные команды + bounded cleanup + запись evidence), а
+timeout внешнего tool-вызова выставь строго выше максимума этого bound и дочернего дедлайна
+минимум на 120 секунд.
+
+**Внешний timeout оболочки не является terminal outcome supervisor.** После него не
+ретраишь команду: сначала читаешь стабильный result-file, `.run.lock` и доступный
+ProcessKit/PID+start-time lifecycle. Пока прежний запуск жив или его исход неопределён,
+второй идентичный процесс запрещён; terminal outcome доказывает только валидный verdict
+supervisor. При недоказуемом исходе останови соответствующий вызов как требующий безопасного
+resume/ручного вмешательства, не считай его завершённым. Два последовательных чистых
+review-прохода означают два независимых анализа: на неизменном SHA второй проход не
+перезапускает идентичную terminal-green focused-команду без нового сигнала риска, а дорогой
+профиль переиспользует только через `verification.ps1 check --require-pass`.
+
 ### Пер-операционная телеметрия задач
 
 При `EVENTS_OUTBOX: on` измеряй **каждую итерацию** существенной операции от момента
@@ -1617,6 +1638,7 @@ environment fingerprint; каждый command-result обязан быть termi
    task/<T-ID>, база <BASE>. WORK=<абс>. Worktree=<абс $WORK/worktrees/<T-ID>>.
    VCS=<jj|git>. REVIEW_MIN_PASSES=<из конфига>. REVIEW_STRICT=<true|false>.
    REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
+   CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.
    VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` — для
    `reviewer_codex` добавь `Worktree=<абс $WORK/worktrees/<T-ID>>.
    RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`
@@ -1736,6 +1758,7 @@ Worktree=<абс>. WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>.
    Worktree=<абс $WORK/worktrees/<T-ID>>. VCS=<jj|git>.
    REVIEW_MIN_PASSES=<из конфига>. REVIEW_STRICT=<true|false>.
    REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
+   CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.
    VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` (для `reviewer_codex` добавь `Worktree=<абс>.
    RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`; его сентинел
    `ЭСКАЛАЦИЯ codex: …` → перезапусти это
@@ -1895,6 +1918,7 @@ REVIEW_MIN_PASSES=<из конфига>.
 REVIEW_STRICT=<true, если хотя бы один слитый дескриптор high-risk/запрещает fast-path/
 требует два финальных чистых прохода; иначе false>.
 REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
+CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.
 VERIFICATION_EVIDENCE=$WORK/verification.json.` → прочитай
 `$WORK/review_integration.md` (`F-`). Full reviewer проверяет reuse только
 `verification.ps1 check --require-pass`; локальное evidence не заменяет ни

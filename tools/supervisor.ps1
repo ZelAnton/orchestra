@@ -89,6 +89,7 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 . (Join-Path $PSScriptRoot 'common.ps1')
 . (Join-Path $PSScriptRoot 'processkit-runtime.ps1')
 $script:ErrPrefix = 'SPVERR'  # coded-error tag decoded by the catch dispatcher
+$script:LockName = 'supervisor-result'
 
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...  (shape of queue-tx.ps1)
@@ -1131,86 +1132,131 @@ function Resolve-CallOptions {
     }
 }
 
+# A shell/tool wrapper can stop waiting while this foreground supervisor process is still
+# running.  A stable --result-file therefore doubles as the identity of one logical call:
+# hold a sibling lock for the whole run so a retry cannot start a duplicate child and race
+# the same durable verdict.  The stale horizon covers every bounded attempt plus teardown;
+# an explicitly unlimited call keeps a conservative 24-hour crash-recovery horizon.
+function Acquire-ResultFileRunLock {
+    param($CallOptions, [int]$MaxAttempts = 1)
+    $resultFile = [string](Opt 'result-file' '')
+    if ([string]::IsNullOrWhiteSpace($resultFile)) { return '' }
+
+    $resultFull = [System.IO.Path]::GetFullPath($resultFile)
+    $parent = Split-Path -Parent $resultFull
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        [void][System.IO.Directory]::CreateDirectory($parent)
+    }
+    $lockPath = "$resultFull.run.lock"
+    $deadlineSec = [long]$CallOptions.Deadline
+    $attempts = [math]::Max(1, $MaxAttempts)
+    $staleSec = if ($deadlineSec -gt 0) {
+        ($deadlineSec * $attempts) + 300L
+    } else {
+        86400L
+    }
+    $staleMs = [int][math]::Min([long][int]::MaxValue, ($staleSec * 1000L))
+    try {
+        Acquire-Lock -LockPath $lockPath -TimeoutMs 1000 -StaleMs $staleMs
+    } catch {
+        $message = [string]$_.Exception.Message
+        if ($message.StartsWith("$($script:ErrPrefix)|7|", [System.StringComparison]::Ordinal)) {
+            Fail 2 'logical invocation already active for the requested --result-file'
+        }
+        throw
+    }
+    return $lockPath
+}
+
 # ==========================================================================
 # Commands
 # ==========================================================================
 function Cmd-Run {
     $target = Resolve-Target
     $co = Resolve-CallOptions
-    $res = Invoke-SupervisedCall -FilePath $target.FilePath -CallArgs $target.Args -StdinText $co.Stdin `
-        -WorkingDirectory $target.WorkingDirectory `
-        -DeadlineSec $co.Deadline -CancelFile $co.CancelFile -OutputMaxBytes $co.OutputMax `
-        -CrashExitCodes $co.Crash -ErrorExitCodes $co.ErrorCodes
-    $verdict = Save-CallArtifacts $res 1 -1
-    if ($res.reason -in @('cancelled', 'timeout')) { [void](Write-Checkpoint $res 1) }
-    Emit-Verdict $verdict
-    exit ([int]$script:ReasonExit[$res.reason])
+    $runLock = Acquire-ResultFileRunLock -CallOptions $co
+    try {
+        $res = Invoke-SupervisedCall -FilePath $target.FilePath -CallArgs $target.Args -StdinText $co.Stdin `
+            -WorkingDirectory $target.WorkingDirectory `
+            -DeadlineSec $co.Deadline -CancelFile $co.CancelFile -OutputMaxBytes $co.OutputMax `
+            -CrashExitCodes $co.Crash -ErrorExitCodes $co.ErrorCodes
+        $verdict = Save-CallArtifacts $res 1 -1
+        if ($res.reason -in @('cancelled', 'timeout')) { [void](Write-Checkpoint $res 1) }
+        Emit-Verdict $verdict
+        exit ([int]$script:ReasonExit[$res.reason])
+    } finally {
+        if ($runLock) { Release-Lock -LockPath $runLock }
+    }
 }
 
 function Cmd-Supervise {
     $target = Resolve-Target
     $co = Resolve-CallOptions
     $maxAttempts = Parse-IntOpt 'max-attempts' 2 1
-
-    # Cohort budget (optional).
-    $budgetFile = [string](Opt 'budget-file' '')
-    $budget = $null
-    if ($budgetFile) {
-        $budget = Read-Budget $budgetFile
-        if ($null -eq $budget) {
-            $bs = Parse-IntOpt 'budget-sec' 0 0
-            $budget = Init-Budget $budgetFile $bs
+    $runLock = Acquire-ResultFileRunLock -CallOptions $co -MaxAttempts $maxAttempts
+    try {
+        # Cohort budget (optional).
+        $budgetFile = [string](Opt 'budget-file' '')
+        $budget = $null
+        if ($budgetFile) {
+            $budget = Read-Budget $budgetFile
+            if ($null -eq $budget) {
+                $bs = Parse-IntOpt 'budget-sec' 0 0
+                $budget = Init-Budget $budgetFile $bs
+            }
+            $remaining = Get-BudgetRemainingMs $budget
+            if ($remaining -le 0) {
+                $res = [pscustomobject]@{ reason = 'budget'; exit_code = $null; timed_out = $false; cancelled = $false; duration_ms = 0; output_bytes = 0; output_truncated = $false; output_sha256 = (Sha256Hex ([byte[]]@())); stdout = ''; stderr = ''; outcome_reason = 'cohort budget exhausted'; pid = $null }
+                $verdict = Save-CallArtifacts $res 0 0 0
+                Emit-Verdict $verdict
+                exit ([int]$script:ReasonExit['budget'])
+            }
         }
-        $remaining = Get-BudgetRemainingMs $budget
-        if ($remaining -le 0) {
-            $res = [pscustomobject]@{ reason = 'budget'; exit_code = $null; timed_out = $false; cancelled = $false; duration_ms = 0; output_bytes = 0; output_truncated = $false; output_sha256 = (Sha256Hex ([byte[]]@())); stdout = ''; stderr = ''; outcome_reason = 'cohort budget exhausted'; pid = $null }
-            $verdict = Save-CallArtifacts $res 0 0 0
-            Emit-Verdict $verdict
-            exit ([int]$script:ReasonExit['budget'])
-        }
-    }
 
-    $attempt = 0
-    $res = $null
-    $totalMs = 0
-    while ($attempt -lt $maxAttempts) {
-        $attempt++
-        # Trim this call's deadline to what the cohort budget still allows.
-        $callDeadline = $co.Deadline
-        if ($null -ne $budget) {
-            $remainingSec = [long][math]::Floor((Get-BudgetRemainingMs $budget) / 1000.0)
-            if ($remainingSec -le 0) { break }
-            if ($callDeadline -le 0 -or $remainingSec -lt $callDeadline) { $callDeadline = $remainingSec }
-        }
-        $res = Invoke-SupervisedCall -FilePath $target.FilePath -CallArgs $target.Args -StdinText $co.Stdin `
-            -WorkingDirectory $target.WorkingDirectory `
-            -DeadlineSec $callDeadline -CancelFile $co.CancelFile -OutputMaxBytes $co.OutputMax `
-            -CrashExitCodes $co.Crash -ErrorExitCodes $co.ErrorCodes
-        $totalMs += $res.duration_ms
-        if ($null -ne $budget) { Consume-Budget $budgetFile $budget $res.duration_ms; $budget = Read-Budget $budgetFile }
-        # Terminal reasons stop the loop immediately: ok (done), error (quarantine),
-        # cancelled (checkpoint + free slot). Only timeout/crash retry.
-        if ($res.reason -notin $script:TransientReasons) { break }
-        # A transient failure: retry only if attempts AND budget remain.
-        if ($attempt -ge $maxAttempts) { break }
-        if ($null -ne $budget -and (Get-BudgetRemainingMs $budget) -le 0) { break }
-    }
-
-    # The budget can be positive but under a second (sub-deadline granularity): the loop
-    # then breaks before running any call. Report it as a budget stop rather than trimming
-    # the deadline to 0 (which would DISABLE the deadline) or dereferencing a null result.
-    if ($null -eq $res) {
-        $res = [pscustomobject]@{ reason = 'budget'; exit_code = $null; timed_out = $false; cancelled = $false; duration_ms = 0; output_bytes = 0; output_truncated = $false; output_sha256 = (Sha256Hex ([byte[]]@())); stdout = ''; stderr = ''; outcome_reason = 'cohort budget too small to run a call'; pid = $null }
         $attempt = 0
-    }
+        $res = $null
+        $totalMs = 0
+        while ($attempt -lt $maxAttempts) {
+            $attempt++
+            # Trim this call's deadline to what the cohort budget still allows.
+            $callDeadline = $co.Deadline
+            if ($null -ne $budget) {
+                $remainingSec = [long][math]::Floor((Get-BudgetRemainingMs $budget) / 1000.0)
+                if ($remainingSec -le 0) { break }
+                if ($callDeadline -le 0 -or $remainingSec -lt $callDeadline) { $callDeadline = $remainingSec }
+            }
+            $res = Invoke-SupervisedCall -FilePath $target.FilePath -CallArgs $target.Args -StdinText $co.Stdin `
+                -WorkingDirectory $target.WorkingDirectory `
+                -DeadlineSec $callDeadline -CancelFile $co.CancelFile -OutputMaxBytes $co.OutputMax `
+                -CrashExitCodes $co.Crash -ErrorExitCodes $co.ErrorCodes
+            $totalMs += $res.duration_ms
+            if ($null -ne $budget) { Consume-Budget $budgetFile $budget $res.duration_ms; $budget = Read-Budget $budgetFile }
+            # Terminal reasons stop the loop immediately: ok (done), error (quarantine),
+            # cancelled (checkpoint + free slot). Only timeout/crash retry.
+            if ($res.reason -notin $script:TransientReasons) { break }
+            # A transient failure: retry only if attempts AND budget remain.
+            if ($attempt -ge $maxAttempts) { break }
+            if ($null -ne $budget -and (Get-BudgetRemainingMs $budget) -le 0) { break }
+        }
 
-    $budgetRemaining = if ($null -ne $budget) { [math]::Max([long]0, [long](Get-BudgetRemainingMs $budget)) } else { -1 }
-    $cp = $null
-    if ($res.reason -in @('cancelled', 'timeout', 'crash')) { $cp = Write-Checkpoint $res $attempt }
-    $checkpointName = if ($cp) { Split-Path -Leaf $cp } else { '' }
-    $verdict = Save-CallArtifacts $res $attempt $budgetRemaining $totalMs $checkpointName
-    Emit-Verdict $verdict
-    exit ([int]$script:ReasonExit[$res.reason])
+        # The budget can be positive but under a second (sub-deadline granularity): the loop
+        # then breaks before running any call. Report it as a budget stop rather than trimming
+        # the deadline to 0 (which would DISABLE the deadline) or dereferencing a null result.
+        if ($null -eq $res) {
+            $res = [pscustomobject]@{ reason = 'budget'; exit_code = $null; timed_out = $false; cancelled = $false; duration_ms = 0; output_bytes = 0; output_truncated = $false; output_sha256 = (Sha256Hex ([byte[]]@())); stdout = ''; stderr = ''; outcome_reason = 'cohort budget too small to run a call'; pid = $null }
+            $attempt = 0
+        }
+
+        $budgetRemaining = if ($null -ne $budget) { [math]::Max([long]0, [long](Get-BudgetRemainingMs $budget)) } else { -1 }
+        $cp = $null
+        if ($res.reason -in @('cancelled', 'timeout', 'crash')) { $cp = Write-Checkpoint $res $attempt }
+        $checkpointName = if ($cp) { Split-Path -Leaf $cp } else { '' }
+        $verdict = Save-CallArtifacts $res $attempt $budgetRemaining $totalMs $checkpointName
+        Emit-Verdict $verdict
+        exit ([int]$script:ReasonExit[$res.reason])
+    } finally {
+        if ($runLock) { Release-Lock -LockPath $runLock }
+    }
 }
 
 # ==========================================================================

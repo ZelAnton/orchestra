@@ -29,6 +29,7 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 . (Join-Path $PSScriptRoot 'common.ps1')
 . (Join-Path $PSScriptRoot 'processkit-runtime.ps1')
 $script:ErrPrefix = 'VERERR'
+$script:LockName = 'verification-run'
 $parsed = Parse-CliArgs $args -BoolFlags @('json', 'require-pass')
 $Command = $parsed.Command
 $opts = $parsed.Opts
@@ -300,83 +301,109 @@ function Invoke-RunCommand {
     $work = Get-RequiredOption 'work'; $configRoot = Get-Opt 'config-root' $work
     $root = Get-RequiredOption 'root'; $vcs = Get-RequiredOption 'vcs'; $expectedHead = Get-RequiredOption 'head'; $base = Get-Opt 'base'; $revision = Get-Opt 'revision'
     $resultFile = Get-Opt 'result-file' (Join-Path $work 'verification.json')
-    $deadline = Get-Opt 'deadline-sec' '1800'; $maxBytes = Get-Opt 'output-max-bytes' '1048576'
+    $deadlineSec = Parse-IntOpt 'deadline-sec' 1800 0; $deadline = [string]$deadlineSec
+    $maxBytes = Get-Opt 'output-max-bytes' '1048576'
     $head = Resolve-VerificationHead $root $vcs $revision
     if ($head -ne $expectedHead) { Fail 3 "verification head mismatch: expected '$expectedHead', current '$head'" }
     $verificationProfile = Get-Profile $configRoot
-    $paths = @(Get-ChangedPathList $root $vcs $base $head)
-    $docsOnly = Test-DocsOnly $paths
-    # An explicit `VERIFICATION_MODE: disabled` is a deliberate operator override and
-    # always wins, unconditionally, over a mechanically detected docs-only diff. The
-    # implicit "nothing configured at all" default (see Get-Profile) instead yields
-    # priority to the more specific docs-only exemption when both apply.
-    if ($verificationProfile.state -eq 'disabled' -and $verificationProfile.explicitDisabled) {
-        $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'operator-disabled' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
-    }
-    if ($docsOnly) {
-        $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'docs-only' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
-    }
-    if ($verificationProfile.state -eq 'disabled') {
-        $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'operator-disabled' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
-    }
-    if ($verificationProfile.state -ne 'configured') {
-        $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'blocked' 'missing-profile' @(); Write-JsonAtomic $resultFile $record; Emit $record; exit 4
-    }
-    $runs = [System.Collections.Generic.List[object]]::new()
-    $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'running' '' @(); Write-JsonAtomic $resultFile $record
-    $supervisor = Join-Path $PSScriptRoot 'supervisor.ps1'
-    $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
     $resultFull = [System.IO.Path]::GetFullPath($resultFile)
-    $artifactParent = Join-Path (Split-Path -Parent $resultFull) '.verification-artifacts'
-    [void][System.IO.Directory]::CreateDirectory($artifactParent)
-    $safeResultName = ([System.IO.Path]::GetFileName($resultFull) -replace '[^A-Za-z0-9_.-]', '_')
-    $invocationId = [guid]::NewGuid().ToString('N')
-    $artifactRoot = Join-Path $artifactParent "$safeResultName-$invocationId"
-    [void][System.IO.Directory]::CreateDirectory($artifactRoot)
-    $i = 0
-    foreach ($cmd in $verificationProfile.commands) {
-        $i++
-        $prefix = Join-Path $artifactRoot ("command-{0}" -f $i)
-        $supervisorResult = "$prefix.json"; $stdoutFile = "$prefix.out.txt"; $stderrFile = "$prefix.err.txt"
-        $null = & $psExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $supervisor run --shell-command $cmd --working-directory $root --deadline-sec $deadline --output-max-bytes $maxBytes --result-file $supervisorResult --stdout-file $stdoutFile --stderr-file $stderrFile --work $work --task-id _integration --role merger --label verification --process-diagnostics 2>&1
-        $rc = $LASTEXITCODE
-        $supervisorRecord = $null
-        $reason = 'missing-result'
-        if (Test-Path -LiteralPath $supervisorResult) {
-            try {
-                $rawSupervisorRecord = Get-Content -LiteralPath $supervisorResult -Raw
-                if ([string]::IsNullOrWhiteSpace($rawSupervisorRecord) -or
-                    -not $rawSupervisorRecord.TrimStart().StartsWith('{')) {
-                    throw 'supervisor result body must be one JSON object'
-                }
-                $supervisorRecord = ConvertFrom-Json -InputObject $rawSupervisorRecord
-                if (-not (Test-JsonObject $supervisorRecord)) {
-                    throw 'supervisor result body must be one JSON object'
-                }
-                $rawReason = Get-RecordProp $supervisorRecord 'reason'
-                if (Test-JsonString $rawReason) { $reason = $rawReason }
-                else { $reason = 'invalid-result' }
-            } catch { $reason = 'invalid-result' }
-        }
-        $childExit = Get-RecordProp $supervisorRecord 'exit_code'
-        $survivors = Get-RecordProp $supervisorRecord 'survivor_count_after_cleanup'
-        $cleanupAttempted = Get-RecordProp $supervisorRecord 'cleanup_attempted'
-        $terminalGreen = (
-            $rc -eq 0 -and
-            (Test-TerminalSupervisorRecord $supervisorRecord 'survivor_count_after_cleanup')
-        )
-        $runs.Add([ordered]@{
-            command = $cmd
-            reason = $reason
-            exit_code = $childExit
-            survivors = $survivors
-            cleanup_attempted = $cleanupAttempted
-        })
-        $verdict = if ($terminalGreen) { 'running' } else { 'failed' }
-        $record = ConvertTo-VerificationRecord $verificationProfile $head $base $verdict '' @($runs); Write-JsonAtomic $resultFile $record
-        if ($verdict -eq 'failed') { Emit $record; exit 5 }
+    $resultParent = Split-Path -Parent $resultFull
+    if ($resultParent -and -not (Test-Path -LiteralPath $resultParent)) {
+        [void][System.IO.Directory]::CreateDirectory($resultParent)
     }
-    $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'pass' '' @($runs); Write-JsonAtomic $resultFile $record; Emit $record
+    $runLock = "$resultFull.run.lock"
+    $commandCount = [math]::Max(1, @($verificationProfile.commands).Count)
+    $staleSec = if ($deadlineSec -gt 0) {
+        ([long]$deadlineSec * $commandCount) + 300L
+    } else {
+        86400L
+    }
+    $staleMs = [int][math]::Min([long][int]::MaxValue, ($staleSec * 1000L))
+    try {
+        Acquire-Lock -LockPath $runLock -TimeoutMs 1000 -StaleMs $staleMs
+    } catch {
+        $message = [string]$_.Exception.Message
+        if ($message.StartsWith("$($script:ErrPrefix)|7|", [System.StringComparison]::Ordinal)) {
+            Fail 2 'verification run already active for the requested --result-file'
+        }
+        throw
+    }
+    try {
+        $paths = @(Get-ChangedPathList $root $vcs $base $head)
+        $docsOnly = Test-DocsOnly $paths
+        # An explicit `VERIFICATION_MODE: disabled` is a deliberate operator override and
+        # always wins, unconditionally, over a mechanically detected docs-only diff. The
+        # implicit "nothing configured at all" default (see Get-Profile) instead yields
+        # priority to the more specific docs-only exemption when both apply.
+        if ($verificationProfile.state -eq 'disabled' -and $verificationProfile.explicitDisabled) {
+            $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'operator-disabled' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
+        }
+        if ($docsOnly) {
+            $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'docs-only' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
+        }
+        if ($verificationProfile.state -eq 'disabled') {
+            $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'exempt' 'operator-disabled' @(); Write-JsonAtomic $resultFile $record; Emit $record; return
+        }
+        if ($verificationProfile.state -ne 'configured') {
+            $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'blocked' 'missing-profile' @(); Write-JsonAtomic $resultFile $record; Emit $record; exit 4
+        }
+        $runs = [System.Collections.Generic.List[object]]::new()
+        $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'running' '' @(); Write-JsonAtomic $resultFile $record
+        $supervisor = Join-Path $PSScriptRoot 'supervisor.ps1'
+        $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+        $artifactParent = Join-Path (Split-Path -Parent $resultFull) '.verification-artifacts'
+        [void][System.IO.Directory]::CreateDirectory($artifactParent)
+        $safeResultName = ([System.IO.Path]::GetFileName($resultFull) -replace '[^A-Za-z0-9_.-]', '_')
+        $invocationId = [guid]::NewGuid().ToString('N')
+        $artifactRoot = Join-Path $artifactParent "$safeResultName-$invocationId"
+        [void][System.IO.Directory]::CreateDirectory($artifactRoot)
+        $i = 0
+        foreach ($cmd in $verificationProfile.commands) {
+            $i++
+            $prefix = Join-Path $artifactRoot ("command-{0}" -f $i)
+            $supervisorResult = "$prefix.json"; $stdoutFile = "$prefix.out.txt"; $stderrFile = "$prefix.err.txt"
+            $null = & $psExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $supervisor run --shell-command $cmd --working-directory $root --deadline-sec $deadline --output-max-bytes $maxBytes --result-file $supervisorResult --stdout-file $stdoutFile --stderr-file $stderrFile --work $work --task-id _integration --role merger --label verification --process-diagnostics 2>&1
+            $rc = $LASTEXITCODE
+            $supervisorRecord = $null
+            $reason = 'missing-result'
+            if (Test-Path -LiteralPath $supervisorResult) {
+                try {
+                    $rawSupervisorRecord = Get-Content -LiteralPath $supervisorResult -Raw
+                    if ([string]::IsNullOrWhiteSpace($rawSupervisorRecord) -or
+                        -not $rawSupervisorRecord.TrimStart().StartsWith('{')) {
+                        throw 'supervisor result body must be one JSON object'
+                    }
+                    $supervisorRecord = ConvertFrom-Json -InputObject $rawSupervisorRecord
+                    if (-not (Test-JsonObject $supervisorRecord)) {
+                        throw 'supervisor result body must be one JSON object'
+                    }
+                    $rawReason = Get-RecordProp $supervisorRecord 'reason'
+                    if (Test-JsonString $rawReason) { $reason = $rawReason }
+                    else { $reason = 'invalid-result' }
+                } catch { $reason = 'invalid-result' }
+            }
+            $childExit = Get-RecordProp $supervisorRecord 'exit_code'
+            $survivors = Get-RecordProp $supervisorRecord 'survivor_count_after_cleanup'
+            $cleanupAttempted = Get-RecordProp $supervisorRecord 'cleanup_attempted'
+            $terminalGreen = (
+                $rc -eq 0 -and
+                (Test-TerminalSupervisorRecord $supervisorRecord 'survivor_count_after_cleanup')
+            )
+            $runs.Add([ordered]@{
+                command = $cmd
+                reason = $reason
+                exit_code = $childExit
+                survivors = $survivors
+                cleanup_attempted = $cleanupAttempted
+            })
+            $verdict = if ($terminalGreen) { 'running' } else { 'failed' }
+            $record = ConvertTo-VerificationRecord $verificationProfile $head $base $verdict '' @($runs); Write-JsonAtomic $resultFile $record
+            if ($verdict -eq 'failed') { Emit $record; exit 5 }
+        }
+        $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'pass' '' @($runs); Write-JsonAtomic $resultFile $record; Emit $record
+    } finally {
+        Release-Lock -LockPath $runLock
+    }
 }
 function Invoke-CheckCommand {
     $work = Get-RequiredOption 'work'; $configRoot = Get-Opt 'config-root' $work

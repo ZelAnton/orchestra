@@ -96,6 +96,43 @@ function Invoke-Spv {
     $proc.WaitForExit()
     return [pscustomobject]@{ ExitCode = $proc.ExitCode; Out = $outT.Result; Err = $errT.Result }
 }
+function Start-Spv {
+    param([string[]]$ToolArgs)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $script:PsExe
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $script:Utf8
+    $psi.StandardErrorEncoding = $script:Utf8
+    $psi.Environment['CC_PROCESSKIT_CLI'] = 'off'
+    $psi.Environment['CC_PROCESSKIT_PYTHON'] = ''
+    foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
+        $psi.ArgumentList.Add($a)
+    }
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    return [pscustomobject]@{
+        Process = $proc
+        Stdout = $proc.StandardOutput.ReadToEndAsync()
+        Stderr = $proc.StandardError.ReadToEndAsync()
+    }
+}
+function Complete-Spv {
+    param($Running, [int]$TimeoutMs = 30000)
+    if (-not $Running.Process.WaitForExit($TimeoutMs)) {
+        try { $Running.Process.Kill($true) } catch { try { $Running.Process.Kill() } catch { } }
+        $script:Failures.Add("FAIL - background supervisor did not finish within ${TimeoutMs}ms")
+        try { $Running.Process.WaitForExit() } catch { }
+    }
+    $result = [pscustomobject]@{
+        ExitCode = $Running.Process.ExitCode
+        Out = $Running.Stdout.Result
+        Err = $Running.Stderr.Result
+    }
+    $Running.Process.Dispose()
+    return $result
+}
 function Invoke-Outbox {
     param([string[]]$ToolArgs)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -362,6 +399,40 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     Assert-Equal 'timeout' $o.reason 'timeout reason'
     Assert-True ([bool]$o.timed_out) 'timed_out flag set'
     Assert-True ($sw.Elapsed.TotalSeconds -lt 25) "returns promptly on deadline (was $([int]$sw.Elapsed.TotalSeconds)s, child sleep was 30s)"
+}.Invoke()
+
+# =============================================================================
+# 2b. A wrapper timeout/retry must not create two children for one logical
+#     --result-file. The first process owns <result-file>.run.lock until terminal.
+# =============================================================================
+{
+    $d = New-TempDir; $w = New-Worker $d
+    $counter = Join-Path $d 'logical-call-count.txt'
+    $result = Join-Path $d 'stable-result.json'
+    $callArgs = @(
+        'run', '--file', $w,
+        '--args-json', (ArgsJson @('--counter', $counter, '--sleep', '4')),
+        '--deadline-sec', '30', '--result-file', $result, '--json'
+    )
+    $first = Start-Spv $callArgs
+    $lockPath = "$result.run.lock"
+    $wait = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($wait.Elapsed.TotalSeconds -lt 10 -and
+        (-not (Test-Path -LiteralPath $lockPath) -or -not (Test-Path -LiteralPath $counter))) {
+        Start-Sleep -Milliseconds 50
+    }
+    Assert-True (Test-Path -LiteralPath $lockPath) 'first logical call exposes its stable result lock while running'
+    Assert-Equal '1' (Read-File $counter).Trim() 'first logical call starts exactly one child'
+
+    $duplicate = Invoke-Spv $callArgs
+    Assert-Exit $duplicate 2 'duplicate logical result-file is rejected before spawning another child'
+    Assert-Contains ($duplicate.Err + $duplicate.Out) 'logical invocation already active' 'duplicate reports the active logical invocation'
+    Assert-Equal '1' (Read-File $counter).Trim() 'duplicate rejection does not start a second child'
+
+    $completed = Complete-Spv $first 30000
+    Assert-Exit $completed 0 'original logical call reaches its terminal result'
+    Assert-Equal '1' (Read-File $counter).Trim() 'only the original child ran after terminal completion'
+    Assert-True (-not (Test-Path -LiteralPath $lockPath)) 'terminal supervisor releases the logical result lock'
 }.Invoke()
 
 # =============================================================================
