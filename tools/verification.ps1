@@ -6,8 +6,10 @@
     Reads VERIFICATION_MODE / VERIFICATION_COMMANDS from .work/config.md, with SMOKE_CMD
     as a backward-compatible one-command profile. `run` executes every configured command
     through tools/supervisor.ps1 and atomically records an exact-command, exact-head verdict.
-    `check` is the crash-recovery gate: only a terminal pass/exempt verdict for the current
-    profile fingerprint and requested VCS head is reusable. VERIFICATION_MODE defaults to
+    `check` is the crash-recovery/publish gate: only a terminal pass/exempt verdict for the
+    current profile fingerprint, environment and requested VCS head is accepted.
+    `check --require-pass` is the stricter expensive-command reuse gate: exemptions and any
+    non-terminal/non-green supervisor result are rejected. VERIFICATION_MODE defaults to
     `disabled` when unset (unconfigured projects are exempt as `operator-disabled`, not
     silently skipped and not blocked); set `VERIFICATION_MODE: auto` or `required` to opt
     into the stricter "missing profile blocks executable changes" behavior. A mechanically
@@ -25,8 +27,9 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { $null = $_ }
 
 . (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'processkit-runtime.ps1')
 $script:ErrPrefix = 'VERERR'
-$parsed = Parse-CliArgs $args -BoolFlags @('json')
+$parsed = Parse-CliArgs $args -BoolFlags @('json', 'require-pass')
 $Command = $parsed.Command
 $opts = $parsed.Opts
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -46,6 +49,54 @@ function Get-Sha256Text {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try { $bytes = $script:Utf8.GetBytes($Text); $hash = $sha.ComputeHash($bytes) } finally { $sha.Dispose() }
     return -join ($hash | ForEach-Object { $_.ToString('x2') })
+}
+function Get-Sha256File {
+    param([string]$Path)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try { $hash = $sha.ComputeHash($stream) } finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+    return -join ($hash | ForEach-Object { $_.ToString('x2') })
+}
+function Get-RecordProp {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+function Get-EnvironmentProfile {
+    $backend = Resolve-OrchestraProcessKitBackend
+    $platform = if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)) { 'windows' }
+        elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [System.Runtime.InteropServices.OSPlatform]::Linux)) { 'linux' }
+        elseif ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [System.Runtime.InteropServices.OSPlatform]::OSX)) { 'macos' }
+        else { 'unknown' }
+    $containment = if ($backend.Kind -eq 'cli') { 'processkit-cli' }
+        elseif ($backend.Kind -eq 'python') { 'processkit-python' }
+        elseif ($platform -ne 'windows' -and
+            (Get-Command setsid -CommandType Application -ErrorAction SilentlyContinue)) {
+            'process-group'
+        } else { 'pid-tree' }
+    $hostPath = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    $safe = [ordered]@{
+        os = $platform
+        os_description = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+        process_architecture = [string][System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+        powershell_edition = [string]$PSVersionTable.PSEdition
+        powershell_version = [string]$PSVersionTable.PSVersion
+        powershell_host = [System.IO.Path]::GetFileName($hostPath)
+        execution_mode = $containment
+        processkit_kind = [string]$backend.Kind
+        processkit_version = [string]$backend.Version
+        processkit_schema = [int]$backend.SchemaVersion
+        supervisor_sha256 = Get-Sha256File (Join-Path $PSScriptRoot 'supervisor.ps1')
+    }
+    $fingerprint = Get-Sha256Text ($safe | ConvertTo-Json -Compress -Depth 5)
+    return [pscustomobject]@{ values = $safe; fingerprint = $fingerprint }
 }
 function Read-Config {
     param([string]$Work)
@@ -99,9 +150,24 @@ function Get-Profile {
         $state = 'disabled'
         $mode = 'disabled'
     }
-    $canonical = [ordered]@{ mode = $mode; source = $source; commands = @($commands) }
+    $environment = Get-EnvironmentProfile
+    $canonical = [ordered]@{
+        mode = $mode
+        source = $source
+        commands = @($commands)
+        environment_fingerprint = $environment.fingerprint
+    }
     $fingerprint = Get-Sha256Text ($canonical | ConvertTo-Json -Compress -Depth 5)
-    return [pscustomobject]@{ mode = $mode; state = $state; source = $source; commands = @($commands); fingerprint = $fingerprint; explicitDisabled = $explicitDisabled }
+    return [pscustomobject]@{
+        mode = $mode
+        state = $state
+        source = $source
+        commands = @($commands)
+        fingerprint = $fingerprint
+        explicitDisabled = $explicitDisabled
+        environment = $environment.values
+        environmentFingerprint = $environment.fingerprint
+    }
 }
 function Get-CurrentHead {
     param([string]$Root, [string]$Vcs)
@@ -133,8 +199,10 @@ function Test-DocsOnly {
 function ConvertTo-VerificationRecord {
     param($VerificationProfile, [string]$Head, [string]$Base, [string]$Verdict, [string]$Exemption, [object[]]$Runs)
     return [ordered]@{
-        schema = 'orchestra/verification@1'; verdict = $Verdict; verified_head = $Head; base = $Base
+        schema = 'orchestra/verification@2'; verdict = $Verdict; verified_head = $Head; base = $Base
         profile_fingerprint = $VerificationProfile.fingerprint; profile_state = $VerificationProfile.state; profile_source = $VerificationProfile.source
+        environment_fingerprint = $VerificationProfile.environmentFingerprint
+        environment = $VerificationProfile.environment
         commands = @($Runs); exemption = $Exemption; updated_at = (Format-UtcNow)
     }
 }
@@ -180,10 +248,33 @@ function Invoke-RunCommand {
         $supervisorResult = "$prefix.json"; $stdoutFile = "$prefix.out.txt"; $stderrFile = "$prefix.err.txt"
         $null = & $psExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $supervisor run --shell-command $cmd --working-directory $root --deadline-sec $deadline --output-max-bytes $maxBytes --result-file $supervisorResult --stdout-file $stdoutFile --stderr-file $stderrFile --work $work --task-id _integration --role merger --label verification --process-diagnostics 2>&1
         $rc = $LASTEXITCODE
+        $supervisorRecord = $null
         $reason = 'missing-result'
-        if (Test-Path -LiteralPath $supervisorResult) { try { $reason = [string]((Get-Content -LiteralPath $supervisorResult -Raw) | ConvertFrom-Json).reason } catch { $reason = 'invalid-result' } }
-        $runs.Add([ordered]@{ command = $cmd; reason = $reason; exit_code = $rc; result_file = $supervisorResult; stdout_file = $stdoutFile; stderr_file = $stderrFile })
-        $verdict = if ($rc -eq 0 -and $reason -eq 'ok') { 'running' } else { 'failed' }
+        if (Test-Path -LiteralPath $supervisorResult) {
+            try {
+                $supervisorRecord = (Get-Content -LiteralPath $supervisorResult -Raw) | ConvertFrom-Json
+                $reason = [string](Get-RecordProp $supervisorRecord 'reason')
+                if (-not $reason) { $reason = 'incomplete-result' }
+            } catch { $reason = 'invalid-result' }
+        }
+        $childExit = Get-RecordProp $supervisorRecord 'exit_code'
+        $survivors = Get-RecordProp $supervisorRecord 'survivor_count_after_cleanup'
+        $cleanupAttempted = Get-RecordProp $supervisorRecord 'cleanup_attempted'
+        $terminalGreen = (
+            $rc -eq 0 -and
+            $reason -eq 'ok' -and
+            $null -ne $childExit -and [int]$childExit -eq 0 -and
+            $null -ne $survivors -and [int]$survivors -eq 0 -and
+            $cleanupAttempted -eq $true
+        )
+        $runs.Add([ordered]@{
+            command = $cmd
+            reason = $reason
+            exit_code = $childExit
+            survivors = $survivors
+            cleanup_attempted = $cleanupAttempted
+        })
+        $verdict = if ($terminalGreen) { 'running' } else { 'failed' }
         $record = ConvertTo-VerificationRecord $verificationProfile $head $base $verdict '' @($runs); Write-JsonAtomic $resultFile $record
         if ($verdict -eq 'failed') { Emit $record; exit 5 }
     }
@@ -197,9 +288,42 @@ function Invoke-CheckCommand {
     if (-not (Test-Path -LiteralPath $resultFile)) { Fail 4 "verification evidence missing: $resultFile" }
     try { $record = (Get-Content -LiteralPath $resultFile -Raw) | ConvertFrom-Json } catch { Fail 4 "verification evidence unreadable: $resultFile" }
     $verificationProfile = Get-Profile $work
+    if ([string](Get-RecordProp $record 'schema') -ne 'orchestra/verification@2') {
+        Fail 4 'verification evidence schema is obsolete or unsupported'
+    }
     if ([string]$record.verified_head -ne $head) { Fail 4 "verification evidence is stale: recorded head '$($record.verified_head)', current '$head'" }
     if ([string]$record.profile_fingerprint -ne $verificationProfile.fingerprint) { Fail 4 'verification evidence is stale: profile changed since the run' }
-    if ([string]$record.verdict -notin @('pass', 'exempt')) { Fail 4 "verification evidence is not terminal green (verdict '$($record.verdict)')" }
+    if ([string](Get-RecordProp $record 'environment_fingerprint') -ne $verificationProfile.environmentFingerprint) {
+        Fail 4 'verification evidence is stale: execution environment changed since the run'
+    }
+    $verdict = [string](Get-RecordProp $record 'verdict')
+    if ($opts.ContainsKey('require-pass') -and $verdict -ne 'pass') {
+        Fail 4 "verification evidence is not reusable command evidence (verdict '$verdict')"
+    }
+    if ($verdict -notin @('pass', 'exempt')) {
+        Fail 4 "verification evidence is not terminal green (verdict '$verdict')"
+    }
+    if ($verdict -eq 'pass') {
+        $runs = @(Get-RecordProp $record 'commands')
+        if ($runs.Count -ne $verificationProfile.commands.Count) {
+            Fail 4 'verification evidence command set is incomplete'
+        }
+        for ($i = 0; $i -lt $verificationProfile.commands.Count; $i++) {
+            $run = $runs[$i]
+            if ([string](Get-RecordProp $run 'command') -cne [string]$verificationProfile.commands[$i]) {
+                Fail 4 "verification evidence command $($i + 1) differs from the current ordered profile"
+            }
+            $reason = [string](Get-RecordProp $run 'reason')
+            $exitCode = Get-RecordProp $run 'exit_code'
+            $survivors = Get-RecordProp $run 'survivors'
+            $cleanupAttempted = Get-RecordProp $run 'cleanup_attempted'
+            if ($reason -ne 'ok' -or $null -eq $exitCode -or [int]$exitCode -ne 0 -or
+                $null -eq $survivors -or [int]$survivors -ne 0 -or
+                $cleanupAttempted -ne $true) {
+                Fail 4 "verification evidence command $($i + 1) is not terminal green"
+            }
+        }
+    }
     Emit $record
 }
 

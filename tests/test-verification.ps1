@@ -9,7 +9,9 @@ $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $Failures = [System.Collections.Generic.List[string]]::new()
 $Dirs = [System.Collections.Generic.List[string]]::new()
 function Write-Utf8 { param([string]$Path,[string]$Text) $d=Split-Path -Parent $Path; if($d -and -not(Test-Path $d)){[void][IO.Directory]::CreateDirectory($d)}; [IO.File]::WriteAllText($Path,$Text,$Utf8) }
+function Write-Json { param([string]$Path,$Value) Write-Utf8 $Path ($Value | ConvertTo-Json -Depth 16) }
 function Assert-Eq { param($Expected,$Actual,[string]$Message) if($Expected -ne $Actual){$Failures.Add("FAIL - ${Message}: expected [$Expected], got [$Actual]")} }
+function Assert-True { param([bool]$Condition,[string]$Message) if(-not $Condition){$Failures.Add("FAIL - $Message")} }
 function Assert-Contains { param([string]$Text,[string]$Needle,[string]$Message) if(-not $Text.Contains($Needle)){$Failures.Add("FAIL - $Message (missing [$Needle] in [$Text])")} }
 function Invoke-Tool { param([string[]]$ToolArgs) $o=@(& $PsExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Tool @ToolArgs 2>&1 | ForEach-Object {$_.ToString()}); [pscustomobject]@{Exit=$LASTEXITCODE;Out=($o -join "`n")} }
 function New-Repo {
@@ -47,6 +49,37 @@ try {
     try { $jsonOutput = $x.Out | ConvertFrom-Json; Assert-Eq 'pass' $jsonOutput.verdict '--json emits exactly one parseable verdict object' } catch { $Failures.Add("FAIL - --json output is not a single JSON object: $($x.Out)") }
     $evidence=(Get-Content (Join-Path $r '.work/verification.json') -Raw | ConvertFrom-Json); Assert-Eq 2 @($evidence.commands).Count 'evidence preserves both commands'
     $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--json'); Assert-Eq 0 $x.Exit 'current-head pass evidence is reusable on resume'
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass','--json'); Assert-Eq 0 $x.Exit 'require-pass accepts exact terminal-green evidence'
+    Assert-Eq 'orchestra/verification@2' $evidence.schema 'evidence uses strict terminal-result schema'
+    Assert-True ($null -ne $evidence.environment_fingerprint) 'evidence records stable environment fingerprint'
+    Assert-Eq 0 @($evidence.commands | Where-Object { $_.reason -ne 'ok' -or $_.exit_code -ne 0 -or $_.survivors -ne 0 -or $_.cleanup_attempted -ne $true }).Count 'every recorded command is terminal green'
+    $evidenceText=Get-Content (Join-Path $r '.work/verification.json') -Raw
+    if($evidenceText.Contains($r)){$Failures.Add('FAIL - evidence must not record absolute fixture/user paths')}
+    if($evidenceText -match 'stdout_file|stderr_file|result_file'){$Failures.Add('FAIL - evidence must not record stdout/stderr/result paths')}
+
+    # `check --require-pass` validates the evidence body, not just its top-level verdict.
+    # Every stale/fail-open mutation requires a fresh run before the next case.
+    $evidencePath=Join-Path $r '.work/verification.json'
+    $record=Get-Content $evidencePath -Raw|ConvertFrom-Json; $record.commands[0].command='git status --short'; Write-Json $evidencePath $record
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass'); Assert-Eq 4 $x.Exit 'changed/reordered command body is rejected'
+    $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit 'fresh run restores command evidence'
+    $record=Get-Content $evidencePath -Raw|ConvertFrom-Json; $record.environment_fingerprint='tampered'; Write-Json $evidencePath $record
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass'); Assert-Eq 4 $x.Exit 'changed environment fingerprint is rejected'
+    $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit 'fresh run restores environment evidence'
+    foreach($badVerdict in @('running','failed','blocked')){
+        $record=Get-Content $evidencePath -Raw|ConvertFrom-Json; $record.verdict=$badVerdict; Write-Json $evidencePath $record
+        $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass'); Assert-Eq 4 $x.Exit "$badVerdict evidence is rejected"
+        $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit "fresh run restores after $badVerdict"
+    }
+    $record=Get-Content $evidencePath -Raw|ConvertFrom-Json; $record.commands[0].exit_code=7; Write-Json $evidencePath $record
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass'); Assert-Eq 4 $x.Exit 'nonzero child exit is rejected despite pass verdict'
+    $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit 'fresh run restores after nonzero exit'
+    $record=Get-Content $evidencePath -Raw|ConvertFrom-Json; $record.commands[0].PSObject.Properties.Remove('reason'); Write-Json $evidencePath $record
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass'); Assert-Eq 4 $x.Exit 'missing terminal command result is rejected'
+    $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit 'fresh run restores missing result'
+    $record=Get-Content $evidencePath -Raw|ConvertFrom-Json; $record.commands[0].survivors=1; Write-Json $evidencePath $record
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass'); Assert-Eq 4 $x.Exit 'survivors greater than zero are rejected'
+    $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit 'fresh run restores after survivor evidence'
 
     # The command accepted from config is the command executed and recorded. A hash inside
     # the final token is data; only the later whitespace-delimited hash begins a comment.
@@ -102,6 +135,8 @@ try {
     Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_MODE: disabled'
     $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head,'--json')
     Assert-Eq 0 $x.Exit 'operator-disabled profile is exempt'; Assert-Contains $x.Out '"exemption":"operator-disabled"' 'operator-disabled exemption is explicit'
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass')
+    Assert-Eq 4 $x.Exit 'exempt evidence is never reusable as an expensive command result'
 
     # Crash recovery never accepts running evidence or evidence from an old head/profile.
     $record=Get-Content (Join-Path $r '.work/verification.json') -Raw | ConvertFrom-Json; $record.verdict='running'; Write-Utf8 (Join-Path $r '.work/verification.json') ($record | ConvertTo-Json -Depth 12)

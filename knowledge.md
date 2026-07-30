@@ -101,12 +101,25 @@ Processor и merger формируют описательные англоязы
   карантинит конфликты, пишет `merge_report.md`. `SMOKE_CMD` сохраняется для быстрых
   per-merge самопроверок и как legacy fallback, но финальную вершину всегда проводит через
   `tools/verification.ps1`: ordered `VERIFICATION_COMMANDS` выполняются supervisor'ом,
-  evidence привязано к profile fingerprint и commit/change id, а processor повторно
-  проверяет его перед ff/push и на resume. Missing-profile для исполняемого diff блокирует
+  evidence привязано к profile fingerprint, commit/change id и стабильному несекретному
+  environment fingerprint (ОС/архитектура, PowerShell host/version, эффективный
+  ProcessKit/containment mode и hash supervisor). Schema `orchestra/verification@2` не
+  хранит абсолютные пользовательские пути/stdout/stderr/env blobs и считает команду
+  reusable только при `reason=ok`, `exit_code=0`, `survivors=0`,
+  `cleanup_attempted=true`; `check --require-pass` дополнительно отвергает любой `exempt`.
+  Processor повторно проверяет evidence перед ff/push и на resume. Missing-profile для исполняемого diff блокирует
   публикацию; допустимы только механический docs-only и operator-owned `disabled` exemptions.
   Перед каждым merge `tools/policy.ps1 guard-revision` связывает branch/bookmark с полным
   `Ревью-SHA` из `task.md` и требует непустой diff от BASE: пустой init-коммит, divergence
   или непроверенный post-review tip детерминированно карантинятся до интеграции.
+
+- `tests/launchers/run-all.ps1` владеет scheduler launcher-suite: явный reviewed allow-list
+  герметичных suites выполняется максимум четырьмя отдельными supervised PowerShell
+  процессами, timing/process-sensitive и все новые/unclassified suites — сериализованно.
+  Discovery фиксируется до запуска, результаты и вывод сводятся детерминированно по имени,
+  а missing/invalid terminal result, nonzero exit или `survivors>0` fail-closed ломают
+  aggregate verdict. Reusable in-process worker, affected-scope skipping и меж-SHA cache
+  здесь намеренно отсутствуют.
 
 ### Полностью Codex-native provider
 
@@ -1043,7 +1056,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/review_integration.md` | интеграционные находки `F-NN` |
 | `.work/integration_state.md` | служебное состояние джойна (Ревью-SHA предыдущего интеграционного ревью, F-циклов); ведёт processor, создаётся в Фазе 5, удаляется в 6.4 |
 | `.work/merge_report.md` | результаты merge и причины карантина |
-| `.work/verification.json` | атомарное SHA-bound evidence обязательного pre-push verification-гейта (`tools/verification.ps1`): точные команды и их supervisor-verdict, полный `verified_head`, fingerprint текущего профиля, итог `pass`/`failed`/`blocked`/`exempt`; `check` отвергает crash-residue `running`, смену профиля и старую вершину |
+| `.work/verification.json` | атомарное exact-SHA evidence обязательного pre-push verification-гейта (`tools/verification.ps1`, schema `orchestra/verification@2`): точные упорядоченные команды, безопасный environment/profile fingerprint и terminal supervisor facts без путей/stdout/stderr; `check` отвергает crash-residue `running`, смену профиля/окружения и старую вершину, а `check --require-pass` разрешает review-reuse только для `pass` с `reason=ok`, `exit_code=0`, `survivors=0` каждого запуска; exemptions остаются только pre-publish policy semantics и никогда не доказывают выполнение дорогой команды |
 | `.work/status.md` | текущий обзор processor |
 | `.work/journal.md` | постоянный журнал завершённых прогонов; read-only fallback для отсутствующих в событиях полей `tools/metrics.ps1` |
 | `.work/events.jsonl` | append-only машинный event-outbox; пишет только processor (одна JSON-строка на событие) при `EVENTS_OUTBOX:on` через транзакционный интерфейс `tools/outbox.ps1` (валидация конверта/payload, детерминированный `event_id`-дедуп-ключ, строгие scalar-only `operation.completed` как timing spine архива, отказ с rc=5 для многострочного raw-ввода `--json-line`/`--stdin`, игнорирование whitespace-only строк, ремонт оборванного хвоста, single-writer); основной источник read-only агрегатора/пер-задачной проекции `tools/metrics.ps1`; машинный контракт для будущей платформы наблюдаемости (`docs/queue_contract.md`, §19); не привязан к одной когорте, переживает очистку Фазы 6, никогда не переписывается/не усекается; Markdown-артефакты остаются источником истины для человека |

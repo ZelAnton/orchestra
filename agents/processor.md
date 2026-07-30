@@ -1526,6 +1526,25 @@ usage и флаг `estimated` — как есть из блока). Для **Cla
 не опция), затем гоняй цикл на каждую до её собственной сходимости; это те же шаги
 раунда 2.1–2.9, просто для задач, уже прошедших 2.2–2.3 (в этом или прошлом раунде):
 
+**Exact-SHA evidence не является отчётом о ревью.** Reviewer может не повторять
+идентичную дорогую команду только когда сам механически выполнил
+`tools/verification.ps1 check ... --require-pass` против полной текущей commit id,
+task-local `$WORK/tasks/<T-ID>/verification.json`, текущего упорядоченного профиля и
+environment fingerprint; каждый command-result обязан быть terminal-green:
+`reason=ok`, `exit_code=0`, `survivors=0`. Не принимай prose «тесты уже проходили»
+вместо этого гейта.
+Невалидное/отсутствующее evidence, `exempt`, смена SHA/команд/окружения, новая находка
+или сигнал риска требуют свежего `verification.ps1 run` через supervisor. Reuse не
+уменьшает количество независимых содержательных проходов и не заменяет publish-CI.
+
+Перед диспетчем вычисли усиленный review-контракт дескриптора. `Риск: high`, явный
+запрет fast-path или требование двух финальных чистых проходов означают:
+`REVIEW_STRICT=true`, fast-path запрещён, первый цикл содержит минимум два
+содержательных прохода, а после любого некосметического исправления последние два
+независимых содержательных прохода подряд должны быть чистыми. Передавай эти поля в
+каждый первый/повторный вызов reviewer и не переводи задачу в `готова к слиянию`, если
+свежая `SUMMARY-R` не подтверждает требуемое число проходов.
+
 2.4. **Выбор ревьюера.** Сначала базовый Claude-уровень (тиринг, если
 `REVIEWER_TIERING` не выключен): если `Рекомендуемый исполнитель` в дескрипторе —
 `coder_fast`, база **reviewer_std** (sonnet/high); иначе (`coder`/`coder_deep`) — база
@@ -1561,7 +1580,9 @@ usage и флаг `estimated` — как есть из блока). Для **Cla
    Вызови `<ревьюер задачи>` **без** `Previous review SHA` (первый цикл — полный
    протокол, режим 1): `Use the <ревьюер задачи> subagent to review task <T-ID>. Ветка
    task/<T-ID>, база <BASE>. WORK=<абс>. Worktree=<абс $WORK/worktrees/<T-ID>>.
-   VCS=<jj|git>. REVIEW_MIN_PASSES=<из конфига>.` — для
+   VCS=<jj|git>. REVIEW_MIN_PASSES=<из конфига>. REVIEW_STRICT=<true|false>.
+   REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
+   VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` — для
    `reviewer_codex` добавь `Worktree=<абс $WORK/worktrees/<T-ID>>.
    RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`
    **Сентинел `ЭСКАЛАЦИЯ codex: <…>`** от `reviewer_codex` (режим `full`) → перезапусти
@@ -1576,6 +1597,10 @@ usage и флаг `estimated` — как есть из блока). Для **Cla
 2.6. Прочитай `$WORK/tasks/<T-ID>/review.md`. Если появилась **свежая** `SUMMARY-R`
 (метка времени в её id — UTC ISO-8601 — **позже** зафиксированного тобой `date -u`
 перед этим вызовом ревью, не любая историческая), проход ревью завершился **чисто** —
+для `REVIEW_STRICT=true` сначала механически проверь её поле `Прогонов:`: значение
+должно быть не меньше 2, а reviewer должен был применить переданный
+`REVIEW_FINAL_CLEAN_PASSES=2`; иначе считай вызов незавершённым и продолжай по 2.7,
+не принимая SUMMARY как гейт. Затем
 **запиши/перезапиши `Ревью-SHA: <текущая вершина ветки>`** (`git rev-parse
 task/<T-ID>`; для jj — `commit_id` bookmark'а): это и есть вершина, которую ревьюер
 только что просмотрел (за время прохода ветка не менялась — фиксы идут лишь в 2.8), и
@@ -1674,7 +1699,9 @@ Worktree=<абс>. WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>.
    **режиме повторного ревью**: `Use the <ревьюер задачи> subagent to re-review task <T-ID> after
    fixes. Previous review SHA=<сохранённый>. Ветка task/<T-ID>, база <BASE>. WORK=<абс>.
    Worktree=<абс $WORK/worktrees/<T-ID>>. VCS=<jj|git>.
-   REVIEW_MIN_PASSES=<из конфига>.` (для `reviewer_codex` добавь `Worktree=<абс>.
+   REVIEW_MIN_PASSES=<из конфига>. REVIEW_STRICT=<true|false>.
+   REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
+   VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` (для `reviewer_codex` добавь `Worktree=<абс>.
    RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`; его сентинел
    `ЭСКАЛАЦИЯ codex: …` → перезапусти это
    повторное ревью на базовом Claude-ревьюере из 2.4.) — вернись к шагу 2.6. Максимум
@@ -1827,7 +1854,14 @@ resume, если `Ревью-SHA` уже стоит и есть открытые
 **абсолютным путём**: `Use the full_reviewer subagent to review the integration branch
 integration/<B-id> in worktree <абс $WORK/worktrees/_integration>. Merged batch tasks:
 <T-ID список задач со Статус: слита>. База <BASE>. WORK=<абс $WORK>. VCS=<jj|git>.
-REVIEW_MIN_PASSES=<из конфига>.` → прочитай `$WORK/review_integration.md` (`F-`).
+REVIEW_MIN_PASSES=<из конфига>.
+REVIEW_STRICT=<true, если хотя бы один слитый дескриптор high-risk/запрещает fast-path/
+требует два финальных чистых прохода; иначе false>.
+REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
+VERIFICATION_EVIDENCE=$WORK/verification.json.` → прочитай
+`$WORK/review_integration.md` (`F-`). Full reviewer проверяет reuse только
+`verification.ps1 check --require-pass`; локальное evidence не заменяет ни
+содержательные проходы, ни полный publish-CI на опубликованном SHA.
 
 5.2. **Гейт паузы (начало итерации цикла интеграционного ревью):** если существует
 `$WORK/PAUSE` (см. «Пауза»), останови прогон здесь — это до-публикационная граница

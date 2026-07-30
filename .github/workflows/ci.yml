@@ -379,6 +379,34 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check bounded launcher-suite scheduler
+        # Explicitly wired: hermetic serial/optimized benchmark, partial failure,
+        # serial conflict group, discovery preservation and survivor fail-closed gates.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-run-all.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Check exact-SHA review evidence contract
+        # Canonical and generated reviewer/processor roles keep substantive passes and
+        # publish CI while reusing only mechanically terminal-green command evidence.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-review-evidence.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Run resilience harness (fast matrix)
         # tests/test-harness.ps1 (T-093): the FAST, mandatory slice of the end-to-end
         # resilience matrix - drives tools/harness.ps1 through a few representative cohort
