@@ -296,14 +296,17 @@ function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -n
 # =============================================================================
 # 8. Acquire-LockWithTestSignal probe handoff: several processes start without a
 #    pre-existing lock and repeatedly race through the successful-probe path. Probe cleanup
-#    must never unlink another process's replacement PID-bearing lock, and the resulting
-#    critical sections must remain mutually exclusive.
+#    must never unlink another process's replacement PID-bearing lock, the current owner must
+#    still release while waiters take snapshot reads, and the resulting critical sections
+#    must remain mutually exclusive.
 # =============================================================================
 {
     $dir = New-TempDir
     $p = New-LockPath $dir
     $start = Join-Path $dir 'start-at-ticks'
     $active = Join-Path $dir 'critical-section-active'
+    $leaderHeld = Join-Path $dir 'leader-holds-real-lock'
+    $firstPeerSignal = Join-Path $dir 'worker-1-contended'
     $workerScript = Join-Path $dir 'probe-handoff-worker.ps1'
     $commonPath = Join-Path $PSScriptRoot '..\tools\common.ps1'
     $workerCount = 6
@@ -315,8 +318,11 @@ param(
     [Parameter(Mandatory)][string]$LockPath,
     [Parameter(Mandatory)][string]$StartPath,
     [Parameter(Mandatory)][string]$ActivePath,
+    [Parameter(Mandatory)][string]$LeaderHeldPath,
+    [Parameter(Mandatory)][string]$FirstPeerSignalPath,
     [Parameter(Mandatory)][string]$SignalPath,
     [Parameter(Mandatory)][string]$ResultPath,
+    [Parameter(Mandatory)][int]$WorkerIndex,
     [Parameter(Mandatory)][int]$Iterations,
     [Parameter(Mandatory)][long]$PeriodTicks
 )
@@ -343,6 +349,19 @@ try {
             [System.Threading.Thread]::SpinWait(200)
         }
 
+        # Make the first probe-contention handshake deterministic without an artificial
+        # pre-created lock: worker 0 starts from an empty path, acquires the real PID-bearing
+        # lock through the wrapper, and peers enter their probes only after that ownership is
+        # published. The leader does not release until worker 1's wrapper has emitted its
+        # real contention signal.
+        if ($i -eq 0 -and $WorkerIndex -ne 0) {
+            $leaderDeadline = [DateTime]::UtcNow.AddSeconds(20)
+            while (-not (Test-Path -LiteralPath $LeaderHeldPath)) {
+                if ([DateTime]::UtcNow -gt $leaderDeadline) { throw 'timed out waiting for the leader to acquire the real lock' }
+                Start-Sleep -Milliseconds 10
+            }
+        }
+
         Acquire-LockWithTestSignal `
             -LockPath $LockPath `
             -TestSignalEnvName $envName `
@@ -352,6 +371,14 @@ try {
             $owner = [System.IO.File]::ReadAllText($LockPath, $ascii)
             if (-not [string]::Equals($owner, [string]$PID, [System.StringComparison]::Ordinal)) {
                 throw "foreign lock owner observed after acquisition: expected $PID, got $owner"
+            }
+            if ($i -eq 0 -and $WorkerIndex -eq 0) {
+                [System.IO.File]::WriteAllText($LeaderHeldPath, 'held', $ascii)
+                $peerDeadline = [DateTime]::UtcNow.AddSeconds(20)
+                while (-not (Test-Path -LiteralPath $FirstPeerSignalPath)) {
+                    if ([DateTime]::UtcNow -gt $peerDeadline) { throw 'timed out waiting for a peer probe-contention signal' }
+                    Start-Sleep -Milliseconds 10
+                }
             }
             try {
                 $activeHandle = [System.IO.FileStream]::new(
@@ -405,8 +432,11 @@ try {
                 '-LockPath', $p,
                 '-StartPath', $start,
                 '-ActivePath', $active,
+                '-LeaderHeldPath', $leaderHeld,
+                '-FirstPeerSignalPath', $firstPeerSignal,
                 '-SignalPath', $signal,
                 '-ResultPath', $result,
+                '-WorkerIndex', [string]$i,
                 '-Iterations', [string]$iterations,
                 '-PeriodTicks', [string]$periodTicks)) {
             [void]$psi.ArgumentList.Add($arg)

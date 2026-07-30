@@ -284,14 +284,33 @@ function Acquire-Lock {
         } catch {
             $failure = $_
             $exception = $failure.Exception
-            $isIoFailure = ($exception -is [System.IO.IOException]) -or ($exception.InnerException -is [System.IO.IOException])
+            # PowerShell can wrap the same File.Open IOException in either one
+            # MethodInvocationException or an additional RuntimeException layer under
+            # concurrent invocation. Classify by the base exception so an ordinary
+            # CreateNew loser is never leaked as a raw "file already exists" failure.
+            $baseException = $exception.GetBaseException()
+            $isIoFailure = ($baseException -is [System.IO.IOException])
+            # Test-Path happens after the atomic CreateNew failure. A fast owner can release
+            # in that gap, and several consecutive handoffs can therefore all observe an
+            # absent path. Preserve the OS evidence that CreateNew itself lost to an existing
+            # file: EEXIST (17) on POSIX, ERROR_FILE_EXISTS (80) / ERROR_ALREADY_EXISTS (183)
+            # on Windows. Other absent-path I/O errors still surface after one retry.
+            $nativeCode = ([int]$baseException.HResult -band 0xFFFF)
+            $isCreateCollision = $isIoFailure -and ($nativeCode -in @(17, 80, 183))
             $lockExists = [bool](Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue)
             # Only CreateNew's expected "file already exists" IOException is contention.
-            # A loser can observe the holder release between Open and Test-Path, so allow one
-            # short retry for an absent file; a repeated absent-file IOException is persistent
-            # path/I/O failure and must surface its real diagnostic instead of spinning 30 s.
+            # A loser can observe the holder release between Open and Test-Path; its native
+            # collision code remains authoritative even when the path has already vanished.
+            # For any other absent-file IOException, allow one short retry before surfacing
+            # the persistent path/I/O failure instead of spinning for the full lock timeout.
             if (-not $isIoFailure) { throw $failure }
             if (-not $lockExists) {
+                if ($isCreateCollision) {
+                    $missingLockFailures = 0
+                    if ([DateTime]::UtcNow -gt $deadline) { Fail 7 "could not acquire $($script:LockName) lock at $LockPath (held by another writer)" }
+                    Start-Sleep -Milliseconds 10
+                    continue
+                }
                 $missingLockFailures++
                 if ($missingLockFailures -ge 2) { throw $failure }
                 Start-Sleep -Milliseconds 10
@@ -369,13 +388,37 @@ function Acquire-LockWithTestSignal {
 }
 function Release-Lock {
     param([string]$LockPath)
-    $snapshot = Read-LockSnapshot $LockPath
-    if ($null -eq $snapshot) { return }
-    if (-not [string]::Equals([string]$snapshot.Content, [string]$PID, [System.StringComparison]::Ordinal)) {
-        Write-Warning "refusing to release $($script:LockName) lock at $LockPath because it is owned by PID '$($snapshot.Content)', not this process ($PID)"
-        return
+
+    # A contending Acquire-Lock repeatedly opens the lock for a snapshot read. On Windows
+    # that short-lived reader does not share delete access, so a single best-effort
+    # Remove-Item can lose the race and silently leave this process's PID-bearing lock
+    # behind. Retry that transient sharing violation for a bounded interval, re-checking
+    # ownership before every attempt so a lock recreated by another writer is never removed.
+    $deadline = [DateTime]::UtcNow.AddMilliseconds(1000)
+    while ($true) {
+        $snapshot = Read-LockSnapshot $LockPath
+        if ($null -eq $snapshot) {
+            if (-not (Test-Path -LiteralPath $LockPath -ErrorAction SilentlyContinue)) { return }
+        } elseif (-not [string]::Equals([string]$snapshot.Content, [string]$PID, [System.StringComparison]::Ordinal)) {
+            Write-Warning "refusing to release $($script:LockName) lock at $LockPath because it is owned by PID '$($snapshot.Content)', not this process ($PID)"
+            return
+        } else {
+            try {
+                [System.IO.File]::Delete($LockPath)
+                return
+            } catch [System.IO.IOException] {
+                # A concurrent snapshot reader can transiently deny delete access.
+            } catch [System.UnauthorizedAccessException] {
+                # Treat a transient access denial like the equivalent Windows sharing race.
+            }
+        }
+
+        if ([DateTime]::UtcNow -gt $deadline) {
+            Write-Warning "could not release $($script:LockName) lock at $LockPath after bounded retries"
+            return
+        }
+        Start-Sleep -Milliseconds 10
     }
-    Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
 }
 
 # --------------------------------------------------------------------------
