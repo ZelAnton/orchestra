@@ -14,6 +14,11 @@ function Assert-Eq { param($Expected,$Actual,[string]$Message) if($Expected -ne 
 function Assert-True { param([bool]$Condition,[string]$Message) if(-not $Condition){$Failures.Add("FAIL - $Message")} }
 function Assert-Contains { param([string]$Text,[string]$Needle,[string]$Message) if(-not $Text.Contains($Needle)){$Failures.Add("FAIL - $Message (missing [$Needle] in [$Text])")} }
 function Invoke-Tool { param([string[]]$ToolArgs) $o=@(& $PsExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Tool @ToolArgs 2>&1 | ForEach-Object {$_.ToString()}); [pscustomobject]@{Exit=$LASTEXITCODE;Out=($o -join "`n")} }
+function Invoke-ToolHost {
+    param([string]$Executable,[string]$ToolPath,[string[]]$ToolArgs)
+    $o=@(& $Executable -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ToolPath @ToolArgs 2>&1 | ForEach-Object {$_.ToString()})
+    [pscustomobject]@{Exit=$LASTEXITCODE;Out=($o -join "`n")}
+}
 function New-Repo {
     $root=Join-Path ([IO.Path]::GetTempPath()) ('orchestra-verification-'+[guid]::NewGuid().ToString('N')); [void][IO.Directory]::CreateDirectory($root); $Dirs.Add($root)
     & git -C $root init -q; & git -C $root config user.email fixture@example.invalid; & git -C $root config user.name Fixture
@@ -158,6 +163,86 @@ try {
         Assert-Eq 0 $x.Exit 'run resolves the current PowerShell host instead of pwsh from PATH'; Assert-Contains $x.Out '"verdict":"pass"' 'current-host supervisor run passes'
     } finally {
         $env:PATH=$savedPath
+    }
+
+    # Exercise the production supervisor-result ingestion path with a hermetic
+    # copied tool and fake supervisor. PowerShell 7 unwraps a one-element root
+    # array through pipeline output while Windows PowerShell preserves it, so run
+    # the same malformed/pristine contract under both hosts when available.
+    $fakeToolRoot=Join-Path ([IO.Path]::GetTempPath()) ('orchestra-verification-fake-'+[guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($fakeToolRoot); $Dirs.Add($fakeToolRoot)
+    $fakeTools=Join-Path $fakeToolRoot 'tools'; [void][IO.Directory]::CreateDirectory($fakeTools)
+    foreach($toolName in @('verification.ps1','common.ps1','processkit-runtime.ps1')){
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot "..\tools\$toolName") -Destination $fakeTools
+    }
+    $fakeVerification=Join-Path $fakeTools 'verification.ps1'
+    Write-Utf8 (Join-Path $fakeTools 'supervisor.ps1') @'
+$result=''
+$stdout=''
+$stderr=''
+for($i=0;$i-lt$args.Count;$i++){
+    if($args[$i]-eq'--result-file'){$result=$args[++$i]}
+    elseif($args[$i]-eq'--stdout-file'){$stdout=$args[++$i]}
+    elseif($args[$i]-eq'--stderr-file'){$stderr=$args[++$i]}
+}
+[IO.File]::WriteAllText($stdout,'')
+[IO.File]::WriteAllText($stderr,'')
+[IO.File]::WriteAllText($result,[string]$env:ORCHESTRA_VERIFICATION_FAKE_RESULT)
+exit 0
+'@
+    $verificationHosts=@(
+        [pscustomobject]@{
+            Name='pwsh'
+            Executable=[string](@(Get-Command pwsh -CommandType Application -ErrorAction Stop)|Select-Object -First 1).Source
+        }
+    )
+    if([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT){
+        $windowsPowerShell=@(Get-Command powershell.exe -CommandType Application -ErrorAction SilentlyContinue)|Select-Object -First 1
+        if($windowsPowerShell){
+            $verificationHosts+= [pscustomobject]@{
+                Name='windows-powershell'
+                Executable=[string]$windowsPowerShell.Source
+            }
+        }
+    }
+    $fakeRunCases=@(
+        [pscustomobject]@{
+            Name='singleton-root-array'
+            Json='[{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}]'
+        },
+        [pscustomobject]@{
+            Name='concatenated-roots'
+            Json='{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+        }
+    )
+    try {
+        Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_COMMANDS: ["git --version"]'
+        foreach($hostCase in $verificationHosts){
+            foreach($fakeCase in $fakeRunCases){
+                $env:ORCHESTRA_VERIFICATION_FAKE_RESULT=$fakeCase.Json
+                $fakeEvidencePath=Join-Path $r ".work/fake-$($hostCase.Name)-$($fakeCase.Name).json"
+                $x=Invoke-ToolHost $hostCase.Executable $fakeVerification @(
+                    'run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git',
+                    '--base',$base,'--head',$head,'--result-file',$fakeEvidencePath,'--json')
+                Assert-Eq 5 $x.Exit "$($hostCase.Name) run rejects $($fakeCase.Name)"
+                $fakeEvidence=Get-Content $fakeEvidencePath -Raw|ConvertFrom-Json
+                Assert-Eq 'failed' $fakeEvidence.verdict "$($hostCase.Name) $($fakeCase.Name) is failed, never pass"
+                Assert-Eq 1 @($fakeEvidence.commands).Count "$($hostCase.Name) $($fakeCase.Name) preserves command result"
+                Assert-True (-not (@($fakeEvidence.commands)[0].cleanup_attempted -eq $true)) "$($hostCase.Name) $($fakeCase.Name) is not normalized to terminal green"
+            }
+            $env:ORCHESTRA_VERIFICATION_FAKE_RESULT='{"reason":"ok","exit_code":0,"duration_ms":1,"cleanup_attempted":true,"survivor_count_after_cleanup":0}'
+            $fakeEvidencePath=Join-Path $r ".work/fake-$($hostCase.Name)-pristine.json"
+            $x=Invoke-ToolHost $hostCase.Executable $fakeVerification @(
+                'run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git',
+                '--base',$base,'--head',$head,'--result-file',$fakeEvidencePath,'--json')
+            Assert-Eq 0 $x.Exit "$($hostCase.Name) run accepts pristine supervisor object"
+            $fakeEvidence=Get-Content $fakeEvidencePath -Raw|ConvertFrom-Json
+            Assert-Eq 'pass' $fakeEvidence.verdict "$($hostCase.Name) pristine supervisor object remains pass"
+            Assert-Eq 0 @($fakeEvidence.commands)[0].survivors "$($hostCase.Name) pristine evidence records zero survivors"
+            Assert-Eq $true @($fakeEvidence.commands)[0].cleanup_attempted "$($hostCase.Name) pristine evidence records cleanup"
+        }
+    } finally {
+        Remove-Item Env:ORCHESTRA_VERIFICATION_FAKE_RESULT -ErrorAction SilentlyContinue
     }
 
     # A later failing command makes the whole profile fail.

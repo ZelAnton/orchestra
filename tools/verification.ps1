@@ -344,7 +344,15 @@ function Invoke-RunCommand {
         $reason = 'missing-result'
         if (Test-Path -LiteralPath $supervisorResult) {
             try {
-                $supervisorRecord = (Get-Content -LiteralPath $supervisorResult -Raw) | ConvertFrom-Json
+                $rawSupervisorRecord = Get-Content -LiteralPath $supervisorResult -Raw
+                if ([string]::IsNullOrWhiteSpace($rawSupervisorRecord) -or
+                    -not $rawSupervisorRecord.TrimStart().StartsWith('{')) {
+                    throw 'supervisor result body must be one JSON object'
+                }
+                $supervisorRecord = ConvertFrom-Json -InputObject $rawSupervisorRecord
+                if (-not (Test-JsonObject $supervisorRecord)) {
+                    throw 'supervisor result body must be one JSON object'
+                }
                 $rawReason = Get-RecordProp $supervisorRecord 'reason'
                 if (Test-JsonString $rawReason) { $reason = $rawReason }
                 else { $reason = 'invalid-result' }
