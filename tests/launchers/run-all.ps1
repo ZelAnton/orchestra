@@ -40,7 +40,8 @@ $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
 $hostExe = if ($onWindows) {
     'powershell.exe'
 } else {
-    $pwshCmd = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue
+    $pwshCmd = @(Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue) |
+        Select-Object -First 1
     if (-not $pwshCmd) {
         Write-Host 'FAIL - pwsh (PowerShell 7) not found on PATH.'
         exit 1

@@ -35,6 +35,14 @@ function New-Root {
     $Roots.Add($root)
     return $root
 }
+function Get-PosixEligibleFixtures {
+    param([string]$Directory)
+    return @(Get-ChildItem -LiteralPath $Directory -Filter 'test-*.ps1' -File |
+        Where-Object {
+            $head = Get-Content -LiteralPath $_.FullName -TotalCount 40 -ErrorAction SilentlyContinue
+            ($head -join "`n") -match '(?m)^#\s*ci:posix\b'
+        })
+}
 function Get-RunnerCompletionPlan {
     param(
         [string]$Directory,
@@ -171,6 +179,7 @@ function Invoke-Runner {
 }
 
 $suiteText = @'
+# ci:posix
 # ci:parallel-safe-fixture
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -226,25 +235,55 @@ exit 0
 '@
 
 try {
+    # Address the production POSIX discovery branch without weakening its marker
+    # filter. Windows checks the exact first-40-lines eligibility rule statically;
+    # Linux/macOS additionally executes this population and must exclude the
+    # deliberately unmarked failing file.
+    $posixBranch = New-Root
+    Write-Utf8 (Join-Path $posixBranch 'test-posix-eligible.ps1') "# ci:posix`nexit 0`n"
+    Write-Utf8 (Join-Path $posixBranch 'test-windows-only.ps1') 'exit 97'
+    $posixEligible = @(Get-PosixEligibleFixtures $posixBranch)
+    Assert-Eq 1 $posixEligible.Count 'POSIX discovery includes only canonically marked fixtures'
+    Assert-Eq 'test-posix-eligible.ps1' $posixEligible[0].Name 'POSIX discovery keeps the marked fixture'
+    $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    if (-not $onWindows) {
+        $posixBranchResult = Invoke-Runner $posixBranch 'Serial' 1 $false
+        Assert-Eq 0 $posixBranchResult.Exit 'production POSIX branch runs the eligible fixture'
+        Assert-Eq 1 $posixBranchResult.Summary.discovered 'production POSIX branch excludes unmarked fixture'
+        Assert-Eq 1 $posixBranchResult.Summary.child_launches 'production POSIX branch launches only marked fixture'
+        Assert-Eq 0 $posixBranchResult.Summary.survivors 'production POSIX branch is terminal clean'
+    }
+
     # Same four artificial suites and same exit codes in serial/optimized modes.
     $benchmark = New-Root
     foreach ($name in @('test-a.ps1', 'test-b.ps1', 'test-c.ps1', 'test-d.ps1')) {
         Write-Utf8 (Join-Path $benchmark $name) $suiteText
     }
+    Assert-Eq 4 @(Get-PosixEligibleFixtures $benchmark).Count 'serial/optimized fixtures are POSIX-eligible'
     $serial = Invoke-Runner $benchmark 'Serial' 3 $true
-    $serialState = Get-Content -LiteralPath (Join-Path $benchmark 'state.json') -Raw | ConvertFrom-Json
-    Remove-Item -LiteralPath (Join-Path $benchmark 'state.json') -Force -ErrorAction SilentlyContinue
-    Get-ChildItem -LiteralPath $benchmark -Filter '*.started' -ErrorAction SilentlyContinue |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-    $optimized = Invoke-Runner $benchmark 'Optimized' 3 $true -RequireGate $true
-    $optimizedState = Get-Content -LiteralPath (Join-Path $benchmark 'state.json') -Raw | ConvertFrom-Json
-
     if ($null -eq $serial.Summary) {
         throw "serial benchmark summary missing (exit=$($serial.Exit), diagnostic=$($serial.Diagnostic))`nstdout:`n$($serial.Out)`nstderr:`n$($serial.Err)"
     }
+    $serialStatePath = Join-Path $benchmark 'state.json'
+    if (-not (Test-Path -LiteralPath $serialStatePath)) {
+        $serialSummaryText = $serial.Summary | ConvertTo-Json -Compress -Depth 8
+        throw "serial benchmark fixture state missing (exit=$($serial.Exit), summary=$serialSummaryText)`nstdout:`n$($serial.Out)`nstderr:`n$($serial.Err)"
+    }
+    $serialState = Get-Content -LiteralPath $serialStatePath -Raw | ConvertFrom-Json
+    Remove-Item -LiteralPath $serialStatePath -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $benchmark -Filter '*.started' -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    $optimized = Invoke-Runner $benchmark 'Optimized' 3 $true -RequireGate $true
     if ($null -eq $optimized.Summary) {
         throw "optimized benchmark summary missing (exit=$($optimized.Exit), diagnostic=$($optimized.Diagnostic))`nstdout:`n$($optimized.Out)`nstderr:`n$($optimized.Err)"
     }
+    $optimizedStatePath = Join-Path $benchmark 'state.json'
+    if (-not (Test-Path -LiteralPath $optimizedStatePath)) {
+        $optimizedSummaryText = $optimized.Summary | ConvertTo-Json -Compress -Depth 8
+        throw "optimized benchmark fixture state missing (exit=$($optimized.Exit), summary=$optimizedSummaryText)`nstdout:`n$($optimized.Out)`nstderr:`n$($optimized.Err)"
+    }
+    $optimizedState = Get-Content -LiteralPath $optimizedStatePath -Raw | ConvertFrom-Json
     Assert-True (-not $serial.TimedOut) 'serial benchmark completes inside computed outer bound'
     Assert-True (-not $optimized.TimedOut) 'optimized benchmark completes inside computed outer bound'
     Assert-True ($serial.CompletionBoundMs -gt $optimized.CompletionBoundMs) 'completion bound reflects serial versus parallel wave count'
@@ -275,6 +314,7 @@ try {
     $serialized = New-Root
     Write-Utf8 (Join-Path $serialized 'test-s1.ps1') ($suiteText -replace '# ci:parallel-safe-fixture', '')
     Write-Utf8 (Join-Path $serialized 'test-s2.ps1') ($suiteText -replace '# ci:parallel-safe-fixture', '')
+    Assert-Eq 2 @(Get-PosixEligibleFixtures $serialized).Count 'serial conflict fixtures are POSIX-eligible'
     $serialGroup = Invoke-Runner $serialized 'Optimized' 4 $true
     $serialGroupState = Get-Content -LiteralPath (Join-Path $serialized 'state.json') -Raw | ConvertFrom-Json
     Assert-Eq 0 $serialGroup.Exit 'unclassified serial group passes'
@@ -284,8 +324,9 @@ try {
 
     # One failed parallel suite cannot be masked by successful siblings.
     $partial = New-Root
-    Write-Utf8 (Join-Path $partial 'test-ok.ps1') "# ci:parallel-safe-fixture`nexit 0`n"
-    Write-Utf8 (Join-Path $partial 'test-fail.ps1') "# ci:parallel-safe-fixture`nexit 9`n"
+    Write-Utf8 (Join-Path $partial 'test-ok.ps1') "# ci:posix`n# ci:parallel-safe-fixture`nexit 0`n"
+    Write-Utf8 (Join-Path $partial 'test-fail.ps1') "# ci:posix`n# ci:parallel-safe-fixture`nexit 9`n"
+    Assert-Eq 2 @(Get-PosixEligibleFixtures $partial).Count 'partial-failure fixtures are POSIX-eligible'
     $partialResult = Invoke-Runner $partial 'Optimized' 2 $true
     Assert-True ($partialResult.Exit -ne 0) 'partial parallel failure returns nonzero'
     Assert-Eq 'fail' $partialResult.Summary.verdict 'partial parallel failure summary'
@@ -294,7 +335,8 @@ try {
 
     # A nominally successful supervisor result with a survivor is fail-closed.
     $survivorRoot = New-Root
-    Write-Utf8 (Join-Path $survivorRoot 'test-survivor.ps1') 'exit 0'
+    Write-Utf8 (Join-Path $survivorRoot 'test-survivor.ps1') "# ci:posix`nexit 0`n"
+    Assert-Eq 1 @(Get-PosixEligibleFixtures $survivorRoot).Count 'survivor fixture is POSIX-eligible'
     $fakeSupervisor = Join-Path $survivorRoot 'fake-supervisor.ps1'
     Write-Utf8 $fakeSupervisor @'
 $result = ''
@@ -318,7 +360,8 @@ exit 0
     # parent deadline; its descendant tree is killed and a complete failing summary
     # is still produced.
     $hangRoot = New-Root
-    Write-Utf8 (Join-Path $hangRoot 'test-hang.ps1') 'exit 0'
+    Write-Utf8 (Join-Path $hangRoot 'test-hang.ps1') "# ci:posix`nexit 0`n"
+    Assert-Eq 1 @(Get-PosixEligibleFixtures $hangRoot).Count 'supervisor-timeout fixture is POSIX-eligible'
     $hangPidFile = Join-Path $hangRoot 'hang-child.pid'
     $env:ORCHESTRA_RUN_ALL_HANG_PID_FILE = $hangPidFile
     $hangSupervisor = Join-Path $hangRoot 'hang-supervisor.ps1'
@@ -357,7 +400,8 @@ Start-Sleep -Seconds 90
     # timeout branch with a fake outer runner and prove whole-tree cleanup plus explicit
     # diagnostics; this is distinct from run-all's per-suite supervisor deadline above.
     $outerHangRoot = New-Root
-    Write-Utf8 (Join-Path $outerHangRoot 'test-placeholder.ps1') 'exit 0'
+    Write-Utf8 (Join-Path $outerHangRoot 'test-placeholder.ps1') "# ci:posix`nexit 0`n"
+    Assert-Eq 1 @(Get-PosixEligibleFixtures $outerHangRoot).Count 'outer-timeout fixture is POSIX-eligible'
     $outerHangPidFile = Join-Path $outerHangRoot 'outer-hang-child.pid'
     $env:ORCHESTRA_RUN_ALL_OUTER_HANG_PID_FILE = $outerHangPidFile
     $outerHangRunner = Join-Path $outerHangRoot 'outer-hang-runner.ps1'

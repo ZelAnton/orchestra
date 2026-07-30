@@ -48,8 +48,8 @@ try {
     Assert-Eq 0 $x.Exit 'multiple successful commands pass'; Assert-Contains $x.Out '"verdict":"pass"' 'multiple-command run emits pass'
     try { $jsonOutput = $x.Out | ConvertFrom-Json; Assert-Eq 'pass' $jsonOutput.verdict '--json emits exactly one parseable verdict object' } catch { $Failures.Add("FAIL - --json output is not a single JSON object: $($x.Out)") }
     $evidence=(Get-Content (Join-Path $r '.work/verification.json') -Raw | ConvertFrom-Json); Assert-Eq 2 @($evidence.commands).Count 'evidence preserves both commands'
-    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--json'); Assert-Eq 0 $x.Exit 'current-head pass evidence is reusable on resume'
-    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass','--json'); Assert-Eq 0 $x.Exit 'require-pass accepts exact terminal-green evidence'
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--json'); Assert-Eq 0 $x.Exit "current-head pass evidence is reusable on resume (tool: $($x.Out))"
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass','--json'); Assert-Eq 0 $x.Exit "require-pass accepts exact terminal-green evidence (tool: $($x.Out))"
     Assert-Eq 'orchestra/verification@2' $evidence.schema 'evidence uses strict terminal-result schema'
     Assert-True ($null -ne $evidence.environment_fingerprint) 'evidence records stable environment fingerprint'
     Assert-Eq 0 @($evidence.commands | Where-Object { $_.reason -ne 'ok' -or $_.exit_code -ne 0 -or $_.survivors -ne 0 -or $_.cleanup_attempted -ne $true }).Count 'every recorded command is terminal green'
@@ -80,6 +80,45 @@ try {
     $record=Get-Content $evidencePath -Raw|ConvertFrom-Json; $record.commands[0].survivors=1; Write-Json $evidencePath $record
     $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass'); Assert-Eq 4 $x.Exit 'survivors greater than zero are rejected'
     $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit 'fresh run restores after survivor evidence'
+
+    # Schema v2 is type-strict. JSON strings, nulls, objects and one-element arrays
+    # must never be accepted through PowerShell scalar coercion.
+    $strictEvidence = Get-Content $evidencePath -Raw
+    $malformedCases = @(
+        [pscustomobject]@{ Name='string exit_code'; Mutate={param($e) $e.commands[0].exit_code='0'} },
+        [pscustomobject]@{ Name='string survivors'; Mutate={param($e) $e.commands[0].survivors='0'} },
+        [pscustomobject]@{ Name='floating exit_code'; Mutate={param($e) $e.commands[0].exit_code=[double]0.0} },
+        [pscustomobject]@{ Name='floating survivors'; Mutate={param($e) $e.commands[0].survivors=[double]0.0} },
+        [pscustomobject]@{ Name='string cleanup_attempted'; Mutate={param($e) $e.commands[0].cleanup_attempted='true'} },
+        [pscustomobject]@{ Name='numeric cleanup_attempted'; Mutate={param($e) $e.commands[0].cleanup_attempted=1} },
+        [pscustomobject]@{ Name='null cleanup_attempted'; Mutate={param($e) $e.commands[0].cleanup_attempted=$null} },
+        [pscustomobject]@{ Name='one-element exit_code array'; Mutate={param($e) $e.commands[0].exit_code=[object[]]@(0)} },
+        [pscustomobject]@{ Name='survivors object'; Mutate={param($e) $e.commands[0].survivors=[pscustomobject]@{value=0}} },
+        [pscustomobject]@{ Name='reason object'; Mutate={param($e) $e.commands[0].reason=[pscustomobject]@{value='ok'}} },
+        [pscustomobject]@{ Name='one-element command array'; Mutate={param($e) $e.commands[0].command=[object[]]@([string]$e.commands[0].command)} },
+        [pscustomobject]@{ Name='one-element verdict array'; Mutate={param($e) $e.verdict=[object[]]@('pass')} },
+        [pscustomobject]@{ Name='null verified_head'; Mutate={param($e) $e.verified_head=$null} },
+        [pscustomobject]@{ Name='one-element base array'; Mutate={param($e) $e.base=[object[]]@([string]$e.base)} },
+        [pscustomobject]@{ Name='schema object'; Mutate={param($e) $e.schema=[pscustomobject]@{value='orchestra/verification@2'}} },
+        [pscustomobject]@{ Name='null updated_at'; Mutate={param($e) $e.updated_at=$null} },
+        [pscustomobject]@{ Name='missing profile_source'; Mutate={param($e) $e.PSObject.Properties.Remove('profile_source')} },
+        [pscustomobject]@{ Name='commands object'; Mutate={param($e) $e.commands=[pscustomobject]@{value=$e.commands[0]}} },
+        [pscustomobject]@{ Name='environment scalar array'; Mutate={param($e) $e.environment.os=[object[]]@([string]$e.environment.os)} },
+        [pscustomobject]@{ Name='string environment integer'; Mutate={param($e) $e.environment.processkit_schema=[string]$e.environment.processkit_schema} }
+    )
+    foreach($case in $malformedCases){
+        $bad=$strictEvidence|ConvertFrom-Json
+        & $case.Mutate $bad
+        Write-Json $evidencePath $bad
+        $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass')
+        Assert-Eq 4 $x.Exit "$($case.Name) evidence is rejected without scalar coercion"
+    }
+    Write-Utf8 $evidencePath "[$strictEvidence]"
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass')
+    Assert-Eq 4 $x.Exit 'one-element root object array is rejected without coercion'
+    Write-Utf8 $evidencePath $strictEvidence
+    $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head,'--require-pass')
+    Assert-Eq 0 $x.Exit 'pristine strict schema v2 evidence remains reusable'
 
     # The command accepted from config is the command executed and recorded. A hash inside
     # the final token is data; only the later whitespace-delimited hash begins a comment.

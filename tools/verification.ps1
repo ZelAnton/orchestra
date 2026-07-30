@@ -62,9 +62,87 @@ function Get-Sha256File {
 function Get-RecordProp {
     param($Object, [string]$Name)
     if ($null -eq $Object) { return $null }
+    if ($Object -is [System.Collections.IDictionary] -and $Object.Contains($Name)) {
+        $value = $Object[$Name]
+        if ($value -is [System.Array]) {
+            Write-Output -NoEnumerate $value
+        } else {
+            return $value
+        }
+        return
+    }
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
-    return $property.Value
+    if ($property.Value -is [System.Array]) {
+        Write-Output -NoEnumerate $property.Value
+    } else {
+        return $property.Value
+    }
+}
+function Test-JsonObject {
+    param($Value)
+    return ($null -ne $Value -and $Value.GetType() -eq [System.Management.Automation.PSCustomObject])
+}
+function Test-JsonArray {
+    param($Value)
+    return ($null -ne $Value -and $Value -is [System.Array])
+}
+function Test-JsonString {
+    param($Value)
+    return ($null -ne $Value -and $Value.GetType() -eq [string])
+}
+function Test-JsonIntegerInRange {
+    param($Value, [decimal]$Minimum, [decimal]$Maximum)
+    if ($null -eq $Value) { return $false }
+    $integralTypes = @(
+        [sbyte], [byte], [int16], [uint16],
+        [int32], [uint32], [int64], [uint64]
+    )
+    if ($integralTypes -notcontains $Value.GetType()) { return $false }
+    $number = [decimal]$Value
+    return ($number -ge $Minimum -and $number -le $Maximum)
+}
+function Test-TerminalSupervisorRecord {
+    param($Record, [string]$SurvivorsProperty)
+    if (-not (Test-JsonObject $Record)) { return $false }
+    $reason = Get-RecordProp $Record 'reason'
+    $exitCode = Get-RecordProp $Record 'exit_code'
+    $survivors = Get-RecordProp $Record $SurvivorsProperty
+    $cleanupAttempted = Get-RecordProp $Record 'cleanup_attempted'
+    return (
+        (Test-JsonString $reason) -and $reason -ceq 'ok' -and
+        (Test-JsonIntegerInRange $exitCode ([int]::MinValue) ([int]::MaxValue)) -and
+            [decimal]$exitCode -eq 0 -and
+        (Test-JsonIntegerInRange $survivors 0 ([int]::MaxValue)) -and
+            [decimal]$survivors -eq 0 -and
+        $null -ne $cleanupAttempted -and $cleanupAttempted.GetType() -eq [bool] -and
+            $cleanupAttempted -eq $true
+    )
+}
+function Test-VerificationEnvironmentRecord {
+    param($Record, $Expected)
+    if (-not (Test-JsonObject $Record)) { return $false }
+    $stringFields = @(
+        'os', 'os_description', 'process_architecture', 'powershell_edition',
+        'powershell_version', 'powershell_host', 'execution_mode',
+        'processkit_kind', 'processkit_version', 'supervisor_sha256'
+    )
+    foreach ($field in $stringFields) {
+        $actualValue = Get-RecordProp $Record $field
+        $expectedValue = Get-RecordProp $Expected $field
+        if (-not (Test-JsonString $actualValue) -or
+            -not (Test-JsonString $expectedValue) -or
+            $actualValue -cne $expectedValue) {
+            return $false
+        }
+    }
+    $actualSchema = Get-RecordProp $Record 'processkit_schema'
+    $expectedSchema = Get-RecordProp $Expected 'processkit_schema'
+    return (
+        (Test-JsonIntegerInRange $actualSchema 0 ([int]::MaxValue)) -and
+        (Test-JsonIntegerInRange $expectedSchema 0 ([int]::MaxValue)) -and
+        [decimal]$actualSchema -eq [decimal]$expectedSchema
+    )
 }
 function Get-EnvironmentProfile {
     $backend = Resolve-OrchestraProcessKitBackend
@@ -267,8 +345,9 @@ function Invoke-RunCommand {
         if (Test-Path -LiteralPath $supervisorResult) {
             try {
                 $supervisorRecord = (Get-Content -LiteralPath $supervisorResult -Raw) | ConvertFrom-Json
-                $reason = [string](Get-RecordProp $supervisorRecord 'reason')
-                if (-not $reason) { $reason = 'incomplete-result' }
+                $rawReason = Get-RecordProp $supervisorRecord 'reason'
+                if (Test-JsonString $rawReason) { $reason = $rawReason }
+                else { $reason = 'invalid-result' }
             } catch { $reason = 'invalid-result' }
         }
         $childExit = Get-RecordProp $supervisorRecord 'exit_code'
@@ -276,10 +355,7 @@ function Invoke-RunCommand {
         $cleanupAttempted = Get-RecordProp $supervisorRecord 'cleanup_attempted'
         $terminalGreen = (
             $rc -eq 0 -and
-            $reason -eq 'ok' -and
-            $null -ne $childExit -and [int]$childExit -eq 0 -and
-            $null -ne $survivors -and [int]$survivors -eq 0 -and
-            $cleanupAttempted -eq $true
+            (Test-TerminalSupervisorRecord $supervisorRecord 'survivor_count_after_cleanup')
         )
         $runs.Add([ordered]@{
             command = $cmd
@@ -301,17 +377,74 @@ function Invoke-CheckCommand {
     $head = Resolve-VerificationHead $root $vcs $revision
     if ($head -ne $expectedHead) { Fail 3 "verification head mismatch: expected '$expectedHead', current '$head'" }
     if (-not (Test-Path -LiteralPath $resultFile)) { Fail 4 "verification evidence missing: $resultFile" }
-    try { $record = (Get-Content -LiteralPath $resultFile -Raw) | ConvertFrom-Json } catch { Fail 4 "verification evidence unreadable: $resultFile" }
+    $rawEvidence = Get-Content -LiteralPath $resultFile -Raw
+    if ([string]::IsNullOrWhiteSpace($rawEvidence) -or -not $rawEvidence.TrimStart().StartsWith('{')) {
+        Fail 4 'verification evidence body must be one JSON object'
+    }
+    $dateKindSupported = (Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')
+    try {
+        if ($dateKindSupported) { $record = $rawEvidence | ConvertFrom-Json -DateKind String }
+        else { $record = $rawEvidence | ConvertFrom-Json }
+    } catch { Fail 4 "verification evidence unreadable: $resultFile" }
+    if (-not (Test-JsonObject $record)) { Fail 4 'verification evidence body must be one JSON object' }
     $verificationProfile = Get-Profile $configRoot
-    if ([string](Get-RecordProp $record 'schema') -ne 'orchestra/verification@2') {
+    $requiredStringFields = @(
+        'schema', 'verdict', 'verified_head', 'base', 'profile_fingerprint',
+        'profile_state', 'profile_source', 'environment_fingerprint',
+        'exemption'
+    )
+    foreach ($field in $requiredStringFields) {
+        if (-not (Test-JsonString (Get-RecordProp $record $field))) {
+            Fail 4 "verification evidence field '$field' must be a JSON string scalar"
+        }
+    }
+    $updatedAt = Get-RecordProp $record 'updated_at'
+    $updatedAtIsStringScalar = Test-JsonString $updatedAt
+    $updatedAtIsLegacyParsedString = (
+        -not $dateKindSupported -and $null -ne $updatedAt -and
+        $updatedAt.GetType() -in @([datetime], [datetimeoffset]))
+    if (-not $updatedAtIsStringScalar -and -not $updatedAtIsLegacyParsedString) {
+        Fail 4 "verification evidence field 'updated_at' must be a JSON string scalar"
+    }
+    $schema = Get-RecordProp $record 'schema'
+    if ($schema -cne 'orchestra/verification@2') {
         Fail 4 'verification evidence schema is obsolete or unsupported'
     }
-    if ([string]$record.verified_head -ne $head) { Fail 4 "verification evidence is stale: recorded head '$($record.verified_head)', current '$head'" }
-    if ([string]$record.profile_fingerprint -ne $verificationProfile.fingerprint) { Fail 4 'verification evidence is stale: profile changed since the run' }
-    if ([string](Get-RecordProp $record 'environment_fingerprint') -ne $verificationProfile.environmentFingerprint) {
+    $recordedHead = Get-RecordProp $record 'verified_head'
+    $base = Get-RecordProp $record 'base'
+    $profileFingerprint = Get-RecordProp $record 'profile_fingerprint'
+    $environmentFingerprint = Get-RecordProp $record 'environment_fingerprint'
+    if ($recordedHead -cnotmatch '^[0-9a-f]{40,64}$' -or $recordedHead -cne $head) {
+        Fail 4 "verification evidence is stale: recorded head '$recordedHead', current '$head'"
+    }
+    if ($base -ne '' -and $base -cnotmatch '^[0-9a-f]{40,64}$') {
+        Fail 4 'verification evidence base must be empty or one full commit id'
+    }
+    if ($profileFingerprint -cnotmatch '^[0-9a-f]{64}$' -or
+        $profileFingerprint -cne $verificationProfile.fingerprint) {
+        Fail 4 'verification evidence is stale: profile changed since the run'
+    }
+    if ($environmentFingerprint -cnotmatch '^[0-9a-f]{64}$' -or
+        $environmentFingerprint -cne $verificationProfile.environmentFingerprint) {
         Fail 4 'verification evidence is stale: execution environment changed since the run'
     }
-    $verdict = [string](Get-RecordProp $record 'verdict')
+    if ((Get-RecordProp $record 'profile_state') -cne $verificationProfile.state -or
+        (Get-RecordProp $record 'profile_source') -cne $verificationProfile.source) {
+        Fail 4 'verification evidence profile body differs from the current profile'
+    }
+    if ($updatedAtIsStringScalar -and [string]::IsNullOrWhiteSpace($updatedAt)) {
+        Fail 4 'verification evidence updated_at must be a non-empty JSON string'
+    }
+    $environmentRecord = Get-RecordProp $record 'environment'
+    if (-not (Test-VerificationEnvironmentRecord $environmentRecord $verificationProfile.environment)) {
+        Fail 4 'verification evidence environment body is malformed or stale'
+    }
+    $commandsValue = Get-RecordProp $record 'commands'
+    if (-not (Test-JsonArray $commandsValue)) {
+        Fail 4 'verification evidence commands must be a JSON array'
+    }
+    $verdict = Get-RecordProp $record 'verdict'
+    $exemption = Get-RecordProp $record 'exemption'
     if ($opts.ContainsKey('require-pass') -and $verdict -ne 'pass') {
         Fail 4 "verification evidence is not reusable command evidence (verdict '$verdict')"
     }
@@ -319,24 +452,31 @@ function Invoke-CheckCommand {
         Fail 4 "verification evidence is not terminal green (verdict '$verdict')"
     }
     if ($verdict -eq 'pass') {
-        $runs = @(Get-RecordProp $record 'commands')
+        if ($exemption -cne '') { Fail 4 'verification pass evidence must not carry an exemption' }
+        $runs = $commandsValue
         if ($runs.Count -ne $verificationProfile.commands.Count) {
             Fail 4 'verification evidence command set is incomplete'
         }
         for ($i = 0; $i -lt $verificationProfile.commands.Count; $i++) {
             $run = $runs[$i]
-            if ([string](Get-RecordProp $run 'command') -cne [string]$verificationProfile.commands[$i]) {
+            if (-not (Test-JsonObject $run)) {
+                Fail 4 "verification evidence command $($i + 1) body must be one JSON object"
+            }
+            $recordedCommand = Get-RecordProp $run 'command'
+            if (-not (Test-JsonString $recordedCommand) -or
+                $recordedCommand -cne [string]$verificationProfile.commands[$i]) {
                 Fail 4 "verification evidence command $($i + 1) differs from the current ordered profile"
             }
-            $reason = [string](Get-RecordProp $run 'reason')
-            $exitCode = Get-RecordProp $run 'exit_code'
-            $survivors = Get-RecordProp $run 'survivors'
-            $cleanupAttempted = Get-RecordProp $run 'cleanup_attempted'
-            if ($reason -ne 'ok' -or $null -eq $exitCode -or [int]$exitCode -ne 0 -or
-                $null -eq $survivors -or [int]$survivors -ne 0 -or
-                $cleanupAttempted -ne $true) {
+            if (-not (Test-TerminalSupervisorRecord $run 'survivors')) {
                 Fail 4 "verification evidence command $($i + 1) is not terminal green"
             }
+        }
+    } else {
+        if ($exemption -notin @('docs-only', 'operator-disabled')) {
+            Fail 4 "verification exempt evidence has unsupported exemption '$exemption'"
+        }
+        if ($commandsValue.Count -ne 0) {
+            Fail 4 'verification exempt evidence must not contain command results'
         }
     }
     Emit $record
