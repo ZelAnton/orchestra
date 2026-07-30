@@ -22,6 +22,8 @@ param(
     [int] $MaxParallel = 4,
     [ValidateRange(1, 7200)]
     [int] $TestTimeoutSec = 1800,
+    [ValidateRange(1, 300)]
+    [int] $SupervisorGraceSec = 15,
     [string] $TestDirectory = $PSScriptRoot,
     [string] $SummaryPath = '',
     [string] $SupervisorPath = '',
@@ -199,6 +201,8 @@ function Start-Suite {
             StderrFile = $stderrFile
             SupervisorOut = $supervisorOut
             SupervisorErr = $supervisorErr
+            StartedAt = [DateTime]::UtcNow
+            ParentDeadline = [DateTime]::UtcNow.AddSeconds($TestTimeoutSec + $SupervisorGraceSec)
         }
         $script:active.Add($entry)
         if ($script:active.Count -gt $script:maxObserved) {
@@ -214,11 +218,11 @@ function Start-Suite {
 }
 
 function Complete-Suite {
-    param($Entry)
+    param($Entry, [string]$ForcedReason = '', [bool]$CleanupSucceeded = $false)
     $proc = $Entry.Process
-    $proc.WaitForExit()
+    if (-not $ForcedReason) { $proc.WaitForExit() }
     $proc.Refresh()
-    $supervisorExit = $proc.ExitCode
+    $supervisorExit = if ($proc.HasExited) { $proc.ExitCode } else { $null }
     $stdout = if (Test-Path -LiteralPath $Entry.StdoutFile) {
         Get-Content -LiteralPath $Entry.StdoutFile -Raw -ErrorAction SilentlyContinue
     } else { '' }
@@ -243,6 +247,12 @@ function Complete-Suite {
     $childExit = Get-Prop $record 'exit_code'
     $survivors = Get-Prop $record 'survivor_count_after_cleanup'
     $duration = Get-Prop $record 'duration_ms'
+    if ($ForcedReason) {
+        $recordState = $ForcedReason
+        $childExit = $null
+        $survivors = if ($CleanupSucceeded) { 0 } else { 1 }
+        $duration = [int64]([DateTime]::UtcNow - $Entry.StartedAt).TotalMilliseconds
+    }
     $terminalGreen = (
         $supervisorExit -eq 0 -and
         $recordState -eq 'ok' -and
@@ -269,6 +279,15 @@ function Wait-OneSuite {
         foreach ($entry in @($script:active)) {
             if ($entry.Process.HasExited) {
                 Complete-Suite $entry
+                return
+            }
+            if ([DateTime]::UtcNow -ge $entry.ParentDeadline) {
+                $cleanupSucceeded = $false
+                try {
+                    Stop-ProcessTree $entry.Process
+                    $cleanupSucceeded = $entry.Process.WaitForExit($SupervisorGraceSec * 1000)
+                } catch { }
+                Complete-Suite $entry 'parent-timeout' $cleanupSucceeded
                 return
             }
         }

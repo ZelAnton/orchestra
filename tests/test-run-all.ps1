@@ -41,7 +41,9 @@ function Invoke-Runner {
         [int]$MaxParallel,
         [bool]$FixtureMarkers,
         [string]$Supervisor = '',
-        [bool]$RequireGate = $false
+        [bool]$RequireGate = $false,
+        [int]$TimeoutSec = 30,
+        [int]$GraceSec = 2
     )
     $summary = Join-Path $Directory "$($Mode.ToLowerInvariant()).summary.json"
     $out = Join-Path $Directory "$($Mode.ToLowerInvariant()).runner.out.txt"
@@ -55,7 +57,8 @@ function Invoke-Runner {
         '-File', $Runner,
         '-Mode', $Mode,
         '-MaxParallel', [string]$MaxParallel,
-        '-TestTimeoutSec', '30',
+        '-TestTimeoutSec', [string]$TimeoutSec,
+        '-SupervisorGraceSec', [string]$GraceSec,
         '-TestDirectory', $Directory,
         '-SummaryPath', $summary
     )
@@ -168,6 +171,12 @@ try {
     $optimized = Invoke-Runner $benchmark 'Optimized' 3 $true -RequireGate $true
     $optimizedState = Get-Content -LiteralPath (Join-Path $benchmark 'state.json') -Raw | ConvertFrom-Json
 
+    if ($null -eq $serial.Summary) {
+        throw "serial benchmark summary missing (exit=$($serial.Exit))`nstdout:`n$($serial.Out)`nstderr:`n$($serial.Err)"
+    }
+    if ($null -eq $optimized.Summary) {
+        throw "optimized benchmark summary missing (exit=$($optimized.Exit))`nstdout:`n$($optimized.Out)`nstderr:`n$($optimized.Err)"
+    }
     Assert-Eq 0 $serial.Exit 'serial benchmark runner exits zero'
     Assert-Eq 0 $optimized.Exit 'optimized benchmark runner exits zero'
     Assert-Eq 4 $serial.Summary.discovered 'serial discovery count'
@@ -225,6 +234,45 @@ exit 0
     $survivorResult = Invoke-Runner $survivorRoot 'Serial' 1 $false $fakeSupervisor
     Assert-True ($survivorResult.Exit -ne 0) 'survivors greater than zero fail aggregate runner'
     Assert-Eq 1 $survivorResult.Summary.survivors 'survivor count is preserved in summary'
+
+    # A supervisor process that never emits a result is bounded by the aggregate
+    # parent deadline; its descendant tree is killed and a complete failing summary
+    # is still produced.
+    $hangRoot = New-Root
+    Write-Utf8 (Join-Path $hangRoot 'test-hang.ps1') 'exit 0'
+    $hangPidFile = Join-Path $hangRoot 'hang-child.pid'
+    $env:ORCHESTRA_RUN_ALL_HANG_PID_FILE = $hangPidFile
+    $hangSupervisor = Join-Path $hangRoot 'hang-supervisor.ps1'
+    Write-Utf8 $hangSupervisor @'
+$hostPath = ([Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$child = Start-Process -FilePath $hostPath -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 90') -PassThru
+[IO.File]::WriteAllText($env:ORCHESTRA_RUN_ALL_HANG_PID_FILE, [string]$child.Id)
+Start-Sleep -Seconds 90
+'@
+    try {
+        $hangWatch = [Diagnostics.Stopwatch]::StartNew()
+        # Allow enough startup room for the fake supervisor to publish its descendant PID
+        # even on a loaded Windows host. The assertion remains well below the fake's
+        # 90-second natural completion, so only the runner's parent deadline can pass it.
+        $hangResult = Invoke-Runner $hangRoot 'Serial' 1 $false $hangSupervisor $false 15 3
+        $hangWatch.Stop()
+        Assert-True ($hangWatch.Elapsed.TotalSeconds -lt 60) 'hanging supervisor is bounded by parent deadline and cleanup grace'
+        Assert-True ($hangResult.Exit -ne 0) 'hanging supervisor returns nonzero aggregate exit'
+        Assert-Eq 'fail' $hangResult.Summary.verdict 'hanging supervisor writes failing summary'
+        Assert-Eq 1 @($hangResult.Summary.results).Count 'hanging supervisor preserves complete discovered result set'
+        Assert-Eq 'parent-timeout' $hangResult.Summary.results[0].reason 'hanging supervisor gets explicit parent-timeout reason'
+        Assert-Eq 0 $hangResult.Summary.survivors 'bounded cleanup reports no surviving tree'
+        $pidValue = if (Test-Path -LiteralPath $hangPidFile) { [int](Get-Content -LiteralPath $hangPidFile -Raw) } else { 0 }
+        $goneDeadline = [Diagnostics.Stopwatch]::StartNew()
+        while ($pidValue -gt 0 -and (Get-Process -Id $pidValue -ErrorAction SilentlyContinue) -and
+            $goneDeadline.Elapsed.TotalSeconds -lt 5) {
+            Start-Sleep -Milliseconds 50
+        }
+        Assert-True ($pidValue -gt 0) 'hanging fake published descendant pid'
+        Assert-True (-not (Get-Process -Id $pidValue -ErrorAction SilentlyContinue)) 'hanging fake descendant does not survive aggregate cleanup'
+    } finally {
+        Remove-Item Env:ORCHESTRA_RUN_ALL_HANG_PID_FILE -ErrorAction SilentlyContinue
+    }
 } finally {
     foreach ($root in $Roots) {
         if (Test-Path -LiteralPath $root) {

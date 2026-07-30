@@ -143,6 +143,62 @@ try {
     $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$head); Assert-Eq 4 $x.Exit 'running crash residue is not reusable'
     Write-Utf8 (Join-Path $r '.work/config.md') 'VERIFICATION_COMMANDS: ["git --version"]'; $x=Invoke-Tool @('run','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--base',$base,'--head',$head); Assert-Eq 0 $x.Exit 'fresh profile reruns after crash residue'
     $newHead=Commit-Code $r "new head`n"; $x=Invoke-Tool @('check','--work',(Join-Path $r '.work'),'--root',$r,'--vcs','git','--head',$newHead); Assert-Eq 4 $x.Exit 'evidence from old head is rejected'
+
+    # Parallel runs share the coordination --work but use separate config roots and
+    # result-file-bound invocation artifact roots. Distinct command output must never
+    # cross between them.
+    $configA=Join-Path $r '.work/config-a'; $configB=Join-Path $r '.work/config-b'
+    [void][IO.Directory]::CreateDirectory($configA); [void][IO.Directory]::CreateDirectory($configB)
+    Write-Utf8 (Join-Path $configA 'config.md') 'VERIFICATION_COMMANDS: ["printf A; sleep 1"]'
+    Write-Utf8 (Join-Path $configB 'config.md') 'VERIFICATION_COMMANDS: ["printf B; sleep 1"]'
+    $resultA=Join-Path $r '.work/result-a.json'; $resultB=Join-Path $r '.work/result-b.json'
+    $procs=@()
+    foreach($case in @(@($configA,$resultA,'a'),@($configB,$resultB,'b'))){
+        $outerOut=Join-Path $r ".work/concurrent-$($case[2]).out"
+        $outerErr=Join-Path $r ".work/concurrent-$($case[2]).err"
+        $toolArgs=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$Tool,
+            'run','--work',(Join-Path $r '.work'),'--config-root',$case[0],
+            '--root',$r,'--vcs','git','--base',$base,'--head',$newHead,
+            '--result-file',$case[1])
+        $procs+=Start-Process -FilePath $PsExe -ArgumentList $toolArgs -NoNewWindow -PassThru `
+            -RedirectStandardOutput $outerOut -RedirectStandardError $outerErr
+    }
+    $procs|Wait-Process -Timeout 120
+    foreach($p in $procs){$p.Refresh();Assert-Eq 0 $p.ExitCode 'parallel verification run exits green';$p.Dispose()}
+    $artifactParent=Join-Path $r '.work/.verification-artifacts'
+    $artifactA=@(Get-ChildItem -LiteralPath $artifactParent -Directory -Filter 'result-a.json-*')
+    $artifactB=@(Get-ChildItem -LiteralPath $artifactParent -Directory -Filter 'result-b.json-*')
+    Assert-Eq 1 $artifactA.Count 'result A owns one unique invocation artifact root'
+    Assert-Eq 1 $artifactB.Count 'result B owns one unique invocation artifact root'
+    if($artifactA.Count -eq 1){Assert-Eq 'A' ((Get-Content (Join-Path $artifactA[0].FullName 'command-1.out.txt') -Raw).TrimEnd()) 'artifact A output is isolated'}
+    if($artifactB.Count -eq 1){Assert-Eq 'B' ((Get-Content (Join-Path $artifactB[0].FullName 'command-1.out.txt') -Raw).TrimEnd()) 'artifact B output is isolated'}
+
+    # Jujutsu reviewers verify the sealed bookmark, not the empty WIP workspace @.
+    if(Get-Command jj -ErrorAction SilentlyContinue){
+        $j=New-Repo
+        & jj git init --colocate $j 2>&1|Out-Null
+        & jj -R $j bookmark create task-fixture -r '@-' 2>&1|Out-Null
+        $sealed=(& jj -R $j log -r task-fixture --no-graph -T 'commit_id').Trim()
+        $wip=(& jj -R $j log -r '@' --no-graph -T 'commit_id').Trim()
+        $jbase=(& jj -R $j log -r 'task-fixture-' --no-graph -T 'commit_id').Trim()
+        Assert-True ($sealed -ne $wip) 'jj fixture has sealed parent bookmark and distinct empty WIP child'
+        Write-Utf8 (Join-Path $j '.work/config.md') 'VERIFICATION_COMMANDS: ["git --version"]'
+        $je=Join-Path $j '.work/sealed.json'
+        $x=Invoke-Tool @('run','--work',(Join-Path $j '.work'),'--root',$j,'--vcs','jj',
+            '--revision','task-fixture','--base',$jbase,'--head',$sealed,'--result-file',$je)
+        Assert-Eq 0 $x.Exit 'jj run verifies sealed bookmark while workspace @ is WIP child'
+        $x=Invoke-Tool @('check','--work',(Join-Path $j '.work'),'--root',$j,'--vcs','jj',
+            '--revision','task-fixture','--head',$sealed,'--result-file',$je,'--require-pass')
+        Assert-Eq 0 $x.Exit 'jj check reuses sealed bookmark evidence'
+        $x=Invoke-Tool @('check','--work',(Join-Path $j '.work'),'--root',$j,'--vcs','jj',
+            '--revision','task-fixture','--head',$wip,'--result-file',$je,'--require-pass')
+        Assert-Eq 3 $x.Exit 'jj sealed bookmark rejects neighboring WIP revision'
+        $x=Invoke-Tool @('check','--work',(Join-Path $j '.work'),'--root',$j,'--vcs','jj',
+            '--revision','task-fixture|@','--head',$sealed,'--result-file',$je,'--require-pass')
+        Assert-Eq 2 $x.Exit 'jj revision selector must resolve exactly one commit'
+    } else {
+        Write-Host 'SKIP - jj executable unavailable; sealed-bookmark regression not run.'
+    }
 }
 finally { foreach($d in $Dirs){if(Test-Path $d){Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}} }
 if($Failures.Count){Write-Host "FAILED - $($Failures.Count) assertion(s):"; $Failures|ForEach-Object{Write-Host "  $_"}; exit 1}

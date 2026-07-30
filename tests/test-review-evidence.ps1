@@ -38,8 +38,11 @@ Assert-Contains $processor 'REVIEW_FINAL_CLEAN_PASSES=<2 для strict, инач
 Assert-Contains $processor 'последние два' 'processor preserves two final substantive clean passes'
 Assert-Contains $reviewerTemplate 'два независимых' 'task reviewer repeats independent analysis after fixes'
 Assert-Contains $reviewerTemplate 'Новая находка, сигнал риска' 'task reviewer invalidates reuse on risk/finding'
+Assert-Contains $reviewerTemplate '--revision task/<T-ID>' 'task reviewer seals exact task bookmark instead of workspace @'
 Assert-Contains $fullReviewer 'Reuse не заменяет содержательный анализ' 'integration reviewer never treats evidence as analysis'
 Assert-Contains $fullReviewer 'exempt' 'integration reviewer rejects exempt evidence for reuse'
+Assert-Contains $fullReviewer '--revision integration/<B-id>' 'integration reviewer seals exact integration bookmark'
+Assert-Contains $processor '--revision integration/<B-id>' 'processor checks the sealed integration bookmark'
 
 foreach ($generated in @(
     @($reviewer, 'generated reviewer'),
@@ -51,6 +54,7 @@ foreach ($generated in @(
 )) {
     Assert-Contains $generated[0] '--require-pass' "$($generated[1]) includes exact-SHA evidence contract"
     Assert-Contains $generated[0] 'publish-CI' "$($generated[1]) preserves full publish CI"
+    Assert-Contains $generated[0] '--revision' "$($generated[1]) includes sealed revision contract"
 }
 
 Assert-NotContains $reviewerTemplate 'reuse evidence считается содержательным проходом' 'reviewer template has no analysis-reuse shortcut'

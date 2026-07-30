@@ -169,15 +169,21 @@ function Get-Profile {
         environmentFingerprint = $environment.fingerprint
     }
 }
-function Get-CurrentHead {
-    param([string]$Root, [string]$Vcs)
+function Resolve-VerificationHead {
+    param([string]$Root, [string]$Vcs, [string]$Revision = '')
     if ($Vcs -eq 'jj') {
-        $out = @(& jj -R $Root log -r '@' --no-graph -T 'commit_id' 2>&1)
+        $selector = if ($Revision) { $Revision } else { '@' }
+        $out = @(& jj -R $Root log -r $selector --no-graph -T 'commit_id ++ "\n"' 2>&1)
     } elseif ($Vcs -eq 'git') {
-        $out = @(& git -C $Root rev-parse HEAD 2>&1)
+        $selector = if ($Revision) { "$Revision^{commit}" } else { 'HEAD' }
+        $out = @(& git -C $Root rev-parse $selector 2>&1)
     } else { Fail 2 "--vcs must be git or jj (got '$Vcs')" }
-    if ($LASTEXITCODE -ne 0) { Fail 2 "cannot resolve current $Vcs head under '$Root': $($out -join ' ')" }
-    return ([string]($out | Select-Object -Last 1)).Trim()
+    if ($LASTEXITCODE -ne 0) { Fail 2 "cannot resolve $Vcs revision '$selector' under '$Root': $($out -join ' ')" }
+    $ids = @($out | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    if ($ids.Count -ne 1 -or [string]$ids[0] -cnotmatch '^[0-9a-f]{40,64}$') {
+        Fail 2 "revision '$selector' must resolve to exactly one full commit id"
+    }
+    return [string]$ids[0]
 }
 function Get-ChangedPathList {
     param([string]$Root, [string]$Vcs, [string]$Base, [string]$Head)
@@ -213,12 +219,13 @@ function Invoke-ProfileCommand {
     if ($opts.ContainsKey('json')) { $verificationProfile | ConvertTo-Json -Compress -Depth 8 } else { Write-Output ("verification-profile state={0} mode={1} source={2} commands={3}" -f $verificationProfile.state,$verificationProfile.mode,$verificationProfile.source,$verificationProfile.commands.Count) }
 }
 function Invoke-RunCommand {
-    $work = Get-RequiredOption 'work'; $root = Get-RequiredOption 'root'; $vcs = Get-RequiredOption 'vcs'; $expectedHead = Get-RequiredOption 'head'; $base = Get-Opt 'base'
+    $work = Get-RequiredOption 'work'; $configRoot = Get-Opt 'config-root' $work
+    $root = Get-RequiredOption 'root'; $vcs = Get-RequiredOption 'vcs'; $expectedHead = Get-RequiredOption 'head'; $base = Get-Opt 'base'; $revision = Get-Opt 'revision'
     $resultFile = Get-Opt 'result-file' (Join-Path $work 'verification.json')
     $deadline = Get-Opt 'deadline-sec' '1800'; $maxBytes = Get-Opt 'output-max-bytes' '1048576'
-    $head = Get-CurrentHead $root $vcs
+    $head = Resolve-VerificationHead $root $vcs $revision
     if ($head -ne $expectedHead) { Fail 3 "verification head mismatch: expected '$expectedHead', current '$head'" }
-    $verificationProfile = Get-Profile $work
+    $verificationProfile = Get-Profile $configRoot
     $paths = @(Get-ChangedPathList $root $vcs $base $head)
     $docsOnly = Test-DocsOnly $paths
     # An explicit `VERIFICATION_MODE: disabled` is a deliberate operator override and
@@ -241,10 +248,17 @@ function Invoke-RunCommand {
     $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'running' '' @(); Write-JsonAtomic $resultFile $record
     $supervisor = Join-Path $PSScriptRoot 'supervisor.ps1'
     $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    $resultFull = [System.IO.Path]::GetFullPath($resultFile)
+    $artifactParent = Join-Path (Split-Path -Parent $resultFull) '.verification-artifacts'
+    [void][System.IO.Directory]::CreateDirectory($artifactParent)
+    $safeResultName = ([System.IO.Path]::GetFileName($resultFull) -replace '[^A-Za-z0-9_.-]', '_')
+    $invocationId = [guid]::NewGuid().ToString('N')
+    $artifactRoot = Join-Path $artifactParent "$safeResultName-$invocationId"
+    [void][System.IO.Directory]::CreateDirectory($artifactRoot)
     $i = 0
     foreach ($cmd in $verificationProfile.commands) {
         $i++
-        $prefix = Join-Path $work ("verification-command-{0}" -f $i)
+        $prefix = Join-Path $artifactRoot ("command-{0}" -f $i)
         $supervisorResult = "$prefix.json"; $stdoutFile = "$prefix.out.txt"; $stderrFile = "$prefix.err.txt"
         $null = & $psExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $supervisor run --shell-command $cmd --working-directory $root --deadline-sec $deadline --output-max-bytes $maxBytes --result-file $supervisorResult --stdout-file $stdoutFile --stderr-file $stderrFile --work $work --task-id _integration --role merger --label verification --process-diagnostics 2>&1
         $rc = $LASTEXITCODE
@@ -281,13 +295,14 @@ function Invoke-RunCommand {
     $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'pass' '' @($runs); Write-JsonAtomic $resultFile $record; Emit $record
 }
 function Invoke-CheckCommand {
-    $work = Get-RequiredOption 'work'; $root = Get-RequiredOption 'root'; $vcs = Get-RequiredOption 'vcs'; $expectedHead = Get-RequiredOption 'head'
+    $work = Get-RequiredOption 'work'; $configRoot = Get-Opt 'config-root' $work
+    $root = Get-RequiredOption 'root'; $vcs = Get-RequiredOption 'vcs'; $expectedHead = Get-RequiredOption 'head'; $revision = Get-Opt 'revision'
     $resultFile = Get-Opt 'result-file' (Join-Path $work 'verification.json')
-    $head = Get-CurrentHead $root $vcs
+    $head = Resolve-VerificationHead $root $vcs $revision
     if ($head -ne $expectedHead) { Fail 3 "verification head mismatch: expected '$expectedHead', current '$head'" }
     if (-not (Test-Path -LiteralPath $resultFile)) { Fail 4 "verification evidence missing: $resultFile" }
     try { $record = (Get-Content -LiteralPath $resultFile -Raw) | ConvertFrom-Json } catch { Fail 4 "verification evidence unreadable: $resultFile" }
-    $verificationProfile = Get-Profile $work
+    $verificationProfile = Get-Profile $configRoot
     if ([string](Get-RecordProp $record 'schema') -ne 'orchestra/verification@2') {
         Fail 4 'verification evidence schema is obsolete or unsupported'
     }

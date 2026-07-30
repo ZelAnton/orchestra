@@ -107,6 +107,11 @@ Processor и merger формируют описательные англоязы
   хранит абсолютные пользовательские пути/stdout/stderr/env blobs и считает команду
   reusable только при `reason=ok`, `exit_code=0`, `survivors=0`,
   `cleanup_attempted=true`; `check --require-pass` дополнительно отвергает любой `exempt`.
+  В jj `--revision <bookmark> --head <full commit id>` проверяет запечатанную вершину
+  (не пустой WIP workspace `@`) и fail-closed требует exactly-one full commit id.
+  Config читается из `--config-root` (default `--work`), а transient supervisor-файлы
+  каждого `run` лежат в уникальном invocation-каталоге, привязанном к `--result-file`;
+  параллельные reviewer-вызовы не делят artifacts.
   Processor повторно проверяет evidence перед ff/push и на resume. Missing-profile для исполняемого diff блокирует
   публикацию; допустимы только механический docs-only и operator-owned `disabled` exemptions.
   Перед каждым merge `tools/policy.ps1 guard-revision` связывает branch/bookmark с полным
@@ -119,7 +124,10 @@ Processor и merger формируют описательные англоязы
   Discovery фиксируется до запуска, результаты и вывод сводятся детерминированно по имени,
   а missing/invalid terminal result, nonzero exit или `survivors>0` fail-closed ломают
   aggregate verdict. Reusable in-process worker, affected-scope skipping и меж-SHA cache
-  здесь намеренно отсутствуют.
+  здесь намеренно отсутствуют. У каждого supervisor process есть также parent-side
+  deadline (`suite deadline + bounded grace`): зависший supervisor ограниченно получает
+  tree cleanup, фиксируется как `parent-timeout`, не блокирует сбор остальных results и
+  не оставляет потомков.
 
 ### Полностью Codex-native provider
 

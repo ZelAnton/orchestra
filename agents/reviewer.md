@@ -207,7 +207,7 @@ diff-ом путями и содержанием** правок:
 
 ```
 pwsh -File <resolved tools/verification.ps1> check --work "$WORK" --root <worktree> \
-  --vcs <VCS> --head <полная текущая commit id> \
+  --vcs <VCS> --revision task/<T-ID> --head <полная commit id bookmark task/<T-ID>> \
   --result-file <VERIFICATION_EVIDENCE> --require-pass
 ```
 
@@ -219,11 +219,14 @@ Exit 0 разрешает пропустить **только идентичны
 
 ```
 pwsh -File <resolved tools/verification.ps1> run --work "$WORK" --root <worktree> \
-  --vcs <VCS> --base <BASE> --head <полная текущая commit id> \
+  --vcs <VCS> --revision task/<T-ID> --base <BASE> \
+  --head <полная commit id bookmark task/<T-ID>> \
   --result-file <VERIFICATION_EVIDENCE>
 ```
 
-Оба вызова идут через сам verification runner; вручную evidence не редактируй. Его
+`--revision` обязателен для task-review: в jj он запечатывает bookmark, а не пустой WIP
+workspace `@`; runner fail-closed требует exactly-one full commit id и его точное
+совпадение с `--head`. Оба вызова идут через сам verification runner; вручную evidence не редактируй. Его
 task-local JSON и transient supervisor-файлы — единственное дополнительное исключение из
 разрешённых ниже review-файлов. Сфокусированные проверки можно запускать как прежде.
 Новая находка, сигнал риска, смена SHA/профиля/окружения или невалидное evidence требуют

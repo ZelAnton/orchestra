@@ -140,11 +140,13 @@ reviewer/reviewer_std.** Твоя уникальная
 
 ```
 pwsh -File <resolved tools/verification.ps1> check --work "$WORK" \
-  --root <integration-worktree> --vcs <VCS> --head <полная commit id> \
+  --root <integration-worktree> --vcs <VCS> --revision integration/<B-id> \
+  --head <полная commit id bookmark integration/<B-id>> \
   --result-file "$WORK/verification.json" --require-pass
 ```
 
-Только exit 0 разрешает не повторять идентичные упорядоченные команды: проверяются
+`--revision` запечатывает интеграционный bookmark вместо workspace `@`; runner требует,
+чтобы он резолвился ровно в одну полную commit id и совпадал с `--head`. Только exit 0 разрешает не повторять идентичные упорядоченные команды: проверяются
 `verdict=pass`, exact SHA, команды, стабильный environment fingerprint и каждый
 terminal supervisor-result (`reason=ok`, `exit_code=0`, `survivors=0`). `exempt`,
 `running`/`failed`/`blocked`, чужой SHA, иной профиль/окружение, отсутствующее/битое

@@ -1532,7 +1532,10 @@ usage и флаг `estimated` — как есть из блока). Для **Cla
 task-local `$WORK/tasks/<T-ID>/verification.json`, текущего упорядоченного профиля и
 environment fingerprint; каждый command-result обязан быть terminal-green:
 `reason=ok`, `exit_code=0`, `survivors=0`. Не принимай prose «тесты уже проходили»
-вместо этого гейта.
+вместо этого гейта. Для jj reviewer всегда передаёт
+`--revision task/<T-ID> --head <полная commit id этого bookmark>`: пустой WIP workspace
+`@` не является проверяемой вершиной. Integration reviewer аналогично использует
+`--revision integration/<B-id>`.
 Невалидное/отсутствующее evidence, `exempt`, смена SHA/команд/окружения, новая находка
 или сигнал риска требуют свежего `verification.ps1 run` через supervisor. Reuse не
 уменьшает количество независимых содержательных проходов и не заменяет publish-CI.
@@ -1788,7 +1791,9 @@ branch/bookmark tip должен точно совпасть с полным `Р
 (`merged=<SHA>` — с возможным суффиксом `conflict-resolved`, помечающим ручной шов, —
 или `quarantined=<причина>`; и итоговое состояние сборки). До переходов статусов механически
 вызови `tools/verification.ps1 check --work "$WORK" --root <integration worktree> --vcs
-<git|jj> --head <текущая полная commit id> --result-file "$WORK/verification.json" --json`.
+<git|jj> --revision integration/<B-id>
+--head <полная commit id bookmark integration/<B-id>>
+--result-file "$WORK/verification.json" --json`.
 Только `pass` либо явный `exempt` (`docs-only`/`operator-disabled`) разрешает продолжение.
 Для совместимости также сверяй, что merge_report содержит legacy-маркеры
 `Проверка сборки: SMOKE_CMD | auto | not-configured` и `Проверенная вершина:`; они не
@@ -1977,11 +1982,12 @@ ff) → **не публикуй**: это безопасная остановк�
 **Обязательный verification-гейт непосредственно перед ff/push.** После последнего
 интеграционного F-фикса, отката denylist-задачи, ре-якорения **или линеаризации (при
 `PUBLISH_LINEAR_HISTORY: true` — вершина стала линеаризованной)** вершина могла измениться,
-поэтому ещё раз вызови `tools/verification.ps1 check` против **текущей** полной commit id
-интеграционного worktree (при линеаризации — это линеаризованная вершина, на которую раннер
-уже продвинул `integration/<B-id>`; так SHA-bound verification гоняется против фактически
+поэтому ещё раз вызови `tools/verification.ps1 check --revision integration/<B-id>`
+против **текущей** полной commit id bookmark `integration/<B-id>` (при линеаризации —
+это линеаризованная вершина, на которую раннер уже продвинул `integration/<B-id>`; так SHA-bound verification гоняется против фактически
 публикуемой вершины, а не дореформенной). Устаревший/отсутствующий/nonterminal результат не переиспользуй:
-вызови `verification.ps1 run` с текущими `--base`/`--head`, который выполнит весь профиль
+вызови `verification.ps1 run --revision integration/<B-id>` с текущими `--base`/`--head`,
+который выполнит весь профиль
 через supervisor, затем повтори `check`. Без `pass` либо явного `exempt/docs-only` /
 `exempt/operator-disabled` не делай ни ff-merge, ни push. В `status.md`/`merge_report.md`
 сохрани точные команды, текущую проверенную вершину, verdict и путь к
