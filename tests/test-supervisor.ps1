@@ -417,12 +417,19 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     $first = Start-Spv $callArgs
     $lockPath = "$result.run.lock"
     $wait = [System.Diagnostics.Stopwatch]::StartNew()
-    while ($wait.Elapsed.TotalSeconds -lt 10 -and
-        (-not (Test-Path -LiteralPath $lockPath) -or -not (Test-Path -LiteralPath $counter))) {
+    $counterValue = ''
+    while ($wait.Elapsed.TotalSeconds -lt 10) {
+        if (Test-Path -LiteralPath $counter) {
+            # On Windows the path becomes visible just before Set-Content closes its
+            # exclusive handle. Wait for the committed, readable value rather than
+            # racing ReadAllText against that short create/write/close window.
+            try { $counterValue = (Read-File $counter).Trim() } catch { $counterValue = '' }
+        }
+        if ((Test-Path -LiteralPath $lockPath) -and $counterValue -eq '1') { break }
         Start-Sleep -Milliseconds 50
     }
     Assert-True (Test-Path -LiteralPath $lockPath) 'first logical call exposes its stable result lock while running'
-    Assert-Equal '1' (Read-File $counter).Trim() 'first logical call starts exactly one child'
+    Assert-Equal '1' $counterValue 'first logical call starts exactly one child'
 
     $duplicate = Invoke-Spv $callArgs
     Assert-Exit $duplicate 2 'duplicate logical result-file is rejected before spawning another child'
