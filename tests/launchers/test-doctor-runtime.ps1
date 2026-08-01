@@ -229,11 +229,13 @@ Assert-NotContains $r.Out 'WARN exec permission' 'mirror-form allow-rule: no WAR
 Remove-Case $c
 
 # =============================================================================
-# 4) effective CODEX_*: env fallback for CODEX_CODER labelled "(env)"
+# 4) effective CODEX_*: env fallback accepts all and labels it "(env)"
 # =============================================================================
 $c = New-Case
-$r = Invoke-Doctor -Case $c -Env @{ CODEX_CODER = 'fast' }
-Assert-Contains $r.Out 'CODEX_CODER      = fast (env)' 'env fallback: CODEX_CODER read from env and labelled'
+$r = Invoke-Doctor -Case $c -Env @{ CODEX_CODER = 'all'; CODEX_REVIEWER = 'all' }
+Assert-Contains $r.Out 'CODEX_CODER      = all (env)' 'env fallback: CODEX_CODER all read from env and labelled'
+Assert-Contains $r.Out 'CODEX_REVIEWER   = all (env)' 'env fallback: CODEX_REVIEWER all read from env and labelled'
+Assert-Contains $r.Out 'OK   Codex key values: all set values are within their allowed sets' 'env fallback: all values validate'
 Remove-Case $c
 
 # =============================================================================
@@ -241,8 +243,8 @@ Remove-Case $c
 # =============================================================================
 $c = New-Case
 Set-Config $c (@(
-    'CODEX_CODER: fast+std'
-    'CODEX_REVIEWER: deep'
+    'CODEX_CODER: all'
+    'CODEX_REVIEWER: all'
     'CODEX_CIFIX: on'
     'CODEX_REASONING: high'
     'CODEX_SANDBOX: read-only'
@@ -258,8 +260,8 @@ Remove-Case $c
 # 6) Codex key value validation: an invalid value for each key -> FAIL
 # =============================================================================
 $badValues = [ordered]@{
-    'CODEX_CODER'     = @{ Bad = 'fastest';            Allowed = 'off | fast | fast+std' }
-    'CODEX_REVIEWER'  = @{ Bad = 'deeep';              Allowed = 'off | fast | fast+std | deep' }
+    'CODEX_CODER'     = @{ Bad = 'fastest';            Allowed = 'off | fast | fast+std | all' }
+    'CODEX_REVIEWER'  = @{ Bad = 'deeep';              Allowed = 'off | fast | fast+std | deep | all' }
     'CODEX_CIFIX'     = @{ Bad = 'yes';                Allowed = 'off | on' }
     'CODEX_REASONING' = @{ Bad = 'huge';               Allowed = 'auto | low | medium | high' }
     'CODEX_SANDBOX'   = @{ Bad = 'danger-full-access'; Allowed = 'read-only | workspace-write' }
@@ -462,6 +464,7 @@ Copy-Item -LiteralPath $script:Runtime -Destination (Join-Path $mirrorDir 'docto
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'state-tx.ps1') -Destination (Join-Path $mirrorDir 'state-tx.ps1')
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'common.ps1') -Destination (Join-Path $mirrorDir 'common.ps1')
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'policy-schema.ps1') -Destination (Join-Path $mirrorDir 'policy-schema.ps1')
+Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'processkit-runtime.ps1') -Destination (Join-Path $mirrorDir 'processkit-runtime.ps1')
 Set-Config $c 'CODEX_CMD: codex#mirror # operator note'
 $r = Invoke-Doctor -Case $c -Runtime (Join-Path $mirrorDir 'doctor-runtime.ps1')
 Assert-Contains $r.Out 'OK   orchestrator.lock: owner=OWNER-A role=processor heartbeat ' 'lock lease mirror: owner/role/heartbeat reported'

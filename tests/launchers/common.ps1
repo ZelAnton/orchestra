@@ -138,6 +138,23 @@ function Install-Launcher {
         $dest = Join-Path $Paths.Scripts $n
         [System.IO.File]::WriteAllText($dest, $text, (New-Object System.Text.UTF8Encoding($false)))
 
+        # Provider-aware direct-role launchers resolve the Codex TUI runtime from either
+        # the checkout tools/ directory or the flat cc-sync mirror. The canonical role
+        # prompts live in the sibling ~/.claude/agents mirror.
+        if ($n -in @('cc-thinker.cmd', 'cc-audit.cmd', 'cc-enhance.cmd')) {
+            Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tools/codex-role-runtime.ps1') `
+                -Destination (Join-Path $Paths.Scripts 'codex-role-runtime.ps1') -Force
+            $roleName = switch ($n) {
+                'cc-thinker.cmd' { 'thinker' }
+                'cc-audit.cmd' { 'code_auditor' }
+                'cc-enhance.cmd' { 'enhancement_scout' }
+            }
+            $agentsDir = Join-Path $Paths.Root 'agents'
+            New-Item -ItemType Directory -Force -Path $agentsDir | Out-Null
+            Copy-Item -LiteralPath (Join-Path $script:RepoRoot "agents/$roleName.md") `
+                -Destination (Join-Path $agentsDir "$roleName.md") -Force
+        }
+
         # cc-processor/cc-resume resolve the ProcessKit adapter from either the checkout
         # tools/ directory or the flat cc-sync mirror. Launcher fixtures model the latter,
         # so install that runtime dependency beside the launcher as cc-sync does.
@@ -227,6 +244,7 @@ function Install-FakeCodex {
         [string] $Version = 'codex-fake 0.0.0-test'
     )
     Set-Content -LiteralPath (Join-Path $Paths.Bin 'capture-args.ps1') -Value $script:CaptureArgsScript -Encoding utf8 -Force
+    Set-Content -LiteralPath (Join-Path $Paths.Bin 'codex.ps1') -Value $script:CaptureArgsScript -Encoding utf8 -Force
     # See the matching comment in Install-FakeClaude above for why this stub
     # needs its own "setlocal DisableDelayedExpansion" too.
     $stub = @"
@@ -316,7 +334,11 @@ function Invoke-Launcher {
     $originalPath = $env:PATH
     $originalLocation = Get-Location
     $setEnvVars = @{}
-    $effectiveEnvVars = @{ CC_PROCESSKIT_CLI = 'off'; CC_PROCESSKIT_PYTHON = '' }
+    $effectiveEnvVars = @{
+        CC_PROCESSKIT_CLI = 'off'
+        CC_PROCESSKIT_PYTHON = ''
+        ORCHESTRA_PROVIDER = ''
+    }
     if ($Name -eq 'cc-config.cmd') {
         # cc-config now writes a user-global registry. Keep every launcher fixture fully
         # sandboxed even when an individual scenario does not explicitly pass an override.

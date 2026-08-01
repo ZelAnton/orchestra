@@ -147,7 +147,7 @@ if [ "$PROVIDER" = "codex" ]; then
   fi
   CODEX_LAUNCH+=("${EXTRA_ARGS[@]}")
   if $USE_PROCESSKIT_RUNTIME; then
-    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --work "$PWD/.work" --label processor-start-codex -- "${CODEX_LAUNCH[@]}"
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-start-codex -- "${CODEX_LAUNCH[@]}"
   fi
   exec "${CODEX_LAUNCH[@]}"
 fi

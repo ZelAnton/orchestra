@@ -112,7 +112,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 файла `config.md` нет или ключ в нём не задан, но переменная окружения выставлена в
 непустое значение — берётся она; ключ в `config.md` всегда переопределяет окружение.
 Значение из окружения валидируй так же, как из файла (`CODEX_CODER`: `off`/`fast`/
-`fast+std`; `CODEX_REVIEWER`: `off`/`fast`/`fast+std`/`deep`; `KB`: `on`/`off`);
+`fast+std`/`all`; `CODEX_REVIEWER`: `off`/`fast`/`fast+std`/`deep`/`all`; `KB`: `on`/`off`);
 нераспознанное или пустое — считай незаданным (тогда дефолт этого ключа). Остальные
 ключи читаются только из `config.md`.
 
@@ -121,7 +121,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 форме для валидации на Фазе 1.1 (`tools/check-codex-config-guard.ps1` машинно стережёт, что
 эта форма, таблица `config.example.md` и движок `cc-doctor` (`tools/doctor-runtime.ps1`) не
 разошлись):
-`CODEX_CODER` ∈ {off, fast, fast+std}; `CODEX_REVIEWER` ∈ {off, fast, fast+std, deep};
+`CODEX_CODER` ∈ {off, fast, fast+std, all}; `CODEX_REVIEWER` ∈ {off, fast, fast+std, deep, all};
 `CODEX_CIFIX` ∈ {off, on}; `CODEX_REASONING` ∈ {auto, low, medium, high, xhigh}; `CODEX_SANDBOX` ∈
 {read-only, workspace-write}; `CODEX_NETWORK` ∈ {on, off}. Пустой ключ → его default (для
 `CODEX_CODER`/`CODEX_REVIEWER` — после env-фолбэка); непустое значение **вне** множества —
@@ -158,8 +158,8 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `KB` | on | База знаний (`.work/knowledge/`): `off`/`on` (с фолбэком на `$env:KB` — см. выше). `on` включает чтение KB (planner/coder/reviewer) и Фазу 5.5 (knowledge_curator); `off` отключает — см. «База знаний (KB)» |
 | `KB_TTL` | 8 | knowledge_curator — истечение неподтверждённых одиночных записей (батчей) |
 | `KB_CAP` | 12 | knowledge_curator — максимум записей на область |
-| `CODEX_CODER` | off | Фаза 2.2/2.8 — маршрутизация реализации/`R-`-фиксов в coder_codex: `off`/`fast`/`fast+std` |
-| `CODEX_REVIEWER` | off | Фаза 2 (2.4) — маршрутизация ревью в reviewer_codex: `off`/`fast`/`fast+std`/`deep` (см. «Codex-ревьюер и маршрутизация») |
+| `CODEX_CODER` | off | Фаза 2.2/2.8 — маршрутизация реализации/`R-`-фиксов в coder_codex: `off`/`fast`/`fast+std`/`all`; `all` включает и `coder_deep` |
+| `CODEX_REVIEWER` | off | Фаза 2 (2.4) — маршрутизация ревью в reviewer_codex: `off`/`fast`/`fast+std`/`deep`/`all`; `deep` добавляет augment к Claude-reviewer, `all` заменяет ревью всех уровней (см. «Codex-ревьюер и маршрутизация») |
 | `CODEX_CIFIX` | off | Фазы 4.3/5.4 — точечные CI/сборочные фиксы (Режим 3) через coder_codex: `off`/`on` |
 | `CODEX_MODEL` | (не задано) | codex-агенты — `-m` для codex; пусто → дефолт codex |
 | `CODEX_REASONING` | auto | codex-агенты — `model_reasoning_effort` (coder auto→high; reviewer auto→xhigh) |
@@ -254,6 +254,20 @@ approval ID и classifier-derived причину. Текущий уже пров
 
 # Одновременно — один оркестратор (аренда владельца)
 
+**До проверки VCS и до любой записи в `.work/` проверь аттестацию корневого
+процесса:** переменная `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID` должна уже присутствовать и
+иметь форму `orchestra-<label>-<32 hex>`. Её выставляет только
+`tools/processkit-runtime.ps1` внутри `processkit-cli run`; **никогда не выставляй,
+не исправляй и не копируй её сам**. Нет/невалидна → этот processor запущен напрямую
+(в том числе из Claude Desktop/Cowork) либо через устаревший launcher: остановись до
+захвата аренды и сообщи оператору запустить `cc-sync`, затем `cc-processor` или
+`cc-resume`. Это механически дублирует `state-tx`: `acquire`/`takeover`/`verify` и
+`heartbeat` для `role=processor` без launcher-attestation возвращают код `20`, поэтому
+обход инструкции не создаёт и не продлевает lease. Не пытайся лечить отказ запуском
+`mcp-remote`/`claude` через shell и не убивай процессы по имени: ProcessKit владеет
+только своим адресованным контейнером, а одноимённый MCP может обслуживать живую
+сессию Claude Desktop.
+
 **Сначала проверь VCS** (см. «Определение VCS» ниже) — если репозиторий не
 определился, останавливайся до какого-либо взятия аренды (иначе получишь ложный
 диагноз «занято» вместо «не тот каталог»). Затем возьми **эксклюзивную аренду
@@ -282,6 +296,8 @@ pwsh -File tools/state-tx.ps1 acquire --work "$WORK" --root "$ROOT" \
 
 Разбор кода возврата `state-tx acquire`:
 - `0` — аренда взята, ты владелец; **запомни `owner_id`**. Держи аренду всё время работы.
+- `20` — корневая сессия не аттестована launcher'ом ProcessKit: ничего не мутируй,
+  остановись и потребуй запуск через `cc-processor`/`cc-resume`; переменную сам не ставь.
 - `10` (аренда жива, чужой владелец) — вероятен **второй оркестратор**: остановись,
   ничего не мутируй, сообщи оператору. Не форсируй.
 - `11` (аренда **устарела**) — прежний прогон вероятно мёртв. Молча не бери: реши по
@@ -1574,10 +1590,14 @@ environment fingerprint; каждый command-result обязан быть termi
 `coder_fast`, база **reviewer_std** (sonnet/high); иначе (`coder`/`coder_deep`) — база
 **reviewer** (opus/high). При `REVIEWER_TIERING: false` база — всегда `reviewer`.
    Затем применяй **Codex-маршрутизацию ревью** (см. «Codex-ревьюер и маршрутизация»):
-   при `CODEX_REVIEWER` и условии **независимости** (задачу реализовал Claude, а не
-   codex) базовый ревьюер уровней `coder_fast`/`coder` **заменяется** на `reviewer_codex`
-   (режим `full`); а для `coder_deep` при `CODEX_REVIEWER=deep` перед базовым
-   `reviewer` дополнительно прогоняется `reviewer_codex` в режиме `augment`
+   значения `fast`/`fast+std` (и fast/std-часть `deep`) при условии межпровайдерной
+   **независимости** — задачу реализовал Claude, а не codex — заменяют базовый ревьюер
+   разрешённых уровней на `reviewer_codex` (режим `full`). `CODEX_REVIEWER=all`
+   **заменяет** базовый ревьюер на `reviewer_codex` (`full`) для всех трёх уровней и
+   при любом `implBy`; maker/checker-независимость в этом явном Codex-only режиме
+   обеспечивает отдельный новый checker-вызов/тред `codex exec`, никогда не сессия
+   `coder_codex`. Для `coder_deep` при legacy-значении `CODEX_REVIEWER=deep` и
+   `implBy==Claude` перед базовым `reviewer` дополнительно прогоняется `reviewer_codex` в режиме `augment`
    (диверсити-проход, не заменяет Opus-ревью). `<ревьюер задачи>` ниже = разрешённый
    этим шагом ревьюер. Тиринг ключуется на `Рекомендуемый исполнитель`, которого
    Codex-маршрутизация не трогает.
@@ -1588,7 +1608,8 @@ environment fingerprint; каждый command-result обязан быть termi
 (при чистом завершении — в 2.6, при завершении с находками — на входе в 2.8). Пока
 поле пусто, resume (0.3) знает, что первый полный протокол ещё не пройден, и не
 свалится в пустой узкий проход повторного ревью (см. «Дескриптор и его статус»).
-   **Диверсити-проход (только `coder_deep` при `CODEX_REVIEWER=deep`)**: **до** базового
+   **Диверсити-проход (только `coder_deep` при `CODEX_REVIEWER=deep` и
+   `implBy==Claude`)**: **до** базового
    ревьюера прогони `reviewer_codex` в режиме `augment` (последовательно — они делят
    `review.md`): `Use the reviewer_codex subagent to review task <T-ID>. Ветка
    task/<T-ID>, база <BASE>. WORK=<абс>. Worktree=<абс $WORK/worktrees/<T-ID>>. VCS=<jj|git>.
@@ -2618,17 +2639,20 @@ review SHA>..<вершина ветки>` (где `Previous review SHA` — по
 # Codex-исполнитель (coder_codex) и маршрутизация
 
 `coder_codex` — необязательный ускоритель: адаптер поверх OpenAI Codex CLI, берущий
-реализацию/фиксы задач **низкой и средней** сложности вместо Claude-исполнителя. Гейт —
-config-ключ `CODEX_CODER` (по умолчанию `off`).
+реализацию/фиксы выбранных уровней вместо Claude-исполнителя. Гейт — config-ключ
+`CODEX_CODER` (по умолчанию `off`); значение `all` включает все уровни.
 
 **Резолвер `<исполнитель задачи>`.** Пусть `L` = `Рекомендуемый исполнитель` из `task.md`
 (`coder_fast`/`coder`/`coder_deep`):
 - `CODEX_CODER=off` → `L` (обычный Claude-coder);
 - `CODEX_CODER=fast` → `coder_codex`, если `L==coder_fast`; иначе `L`;
 - `CODEX_CODER=fast+std` → `coder_codex`, если `L ∈ {coder_fast, coder}`; иначе `L`;
-- `L==coder_deep` — **всегда** Claude (`coder_deep`), codex не участвует.
+- `CODEX_CODER=all` → `coder_codex` для любого `L`, включая `coder_deep`.
 
 Подставляется в диспетч Фаз 2.2 (Режим 1) и 2.8 (Режим 2, `R-`).
+Для `L==coder_deep` адаптер независимо от общих `CODEX_MODEL`/`CODEX_REASONING`
+обязан запускать `gpt-5.6-sol` с `xhigh`. `all` не меняет маршрутизацию интеграционных
+`F-` (они по-прежнему Claude) и Режима 3 (его отдельно гейтит `CODEX_CIFIX`).
 
 **Сетевой гейт (поле `Сеть:` в task.md, T-064).** Если дескриптор задачи несёт `Сеть:
 требуется` + `Экосистема: <...>` (проставляет planner — см. `agents/planner.md`,
@@ -2799,17 +2823,19 @@ codex-задача уровня `coder_fast` идёт на `reviewer_std`, ур�
 # Codex-ревьюер (reviewer_codex) и маршрутизация
 
 `reviewer_codex` — независимое ревью одной задачи силами Codex (read-only): снимает ревью
-с дорогого `reviewer` (opus/high) и добавляет **разнообразие моделей** (другая модель
-ловит иные дефекты). Гейт — `CODEX_REVIEWER` (по умолчанию `off`). Контракт и гейт
+с дорогого `reviewer` (opus/high); в legacy-профиле оно также добавляет **разнообразие
+моделей**, а в `all` — изоляцию отдельным checker-тредом. Гейт — `CODEX_REVIEWER`
+(по умолчанию `off`). Контракт и гейт
 `SUMMARY-R` — те же, что у `reviewer`/`reviewer_std`.
 
-**Требование независимости (ключевое).** Ревьюер должен быть «другим умом», чем
-исполнитель. Поэтому `reviewer_codex` применяется **только к задачам, реализованным
-Claude**. Если задачу реализовал `coder_codex` (codex) — ревью остаётся на Claude
-(`reviewer_std`/`reviewer`), даже если `CODEX_REVIEWER` включён. Практическое следствие:
-при обоих флагах на одном уровне каждая задача получает **ровно один** шаг на Codex
-(реализацию **или** ревью) и один — на Claude; «другой ум» гарантированно касается
-каждой задачи.
+**Требование независимости (ключевое).** Ревьюер не должен продолжать сессию исполнителя.
+Для legacy-значений `fast`/`fast+std`/`deep` действует прежняя усиленная граница по
+provider: `reviewer_codex` применяется только к задачам, реализованным Claude; после
+`coder_codex` ревью остаётся на Claude (`reviewer_std`/`reviewer`). Явное значение
+`CODEX_REVIEWER=all` выбирает Codex-only профиль: `reviewer_codex` проверяет все уровни
+даже после `coder_codex`, но каждый его прогон — отдельный новый `codex exec`/checker-тред,
+не resume и не thread исполнителя. Это та же thread-based maker/checker-граница, что у
+полностью Codex-native provider.
 
 **Резолвер `<ревьюер задачи>`** (после выбора базового Claude-уровня из 2.4; `L` =
 `Рекомендуемый исполнитель`, `implBy` = **автор последнего закоммиченного диапазона** —
@@ -2821,13 +2847,19 @@ Claude**. Если задачу реализовал `coder_codex` (codex) — �
 self-review bypass, когда `coder_codex` R-фиксит задачу, реализованную Claude, а ревью
 осталось бы на `reviewer_codex`, проверяющем код того же движка):
 - `CODEX_REVIEWER=off` → базовый Claude-ревьюер (текущее поведение);
-- `implBy==codex` → базовый Claude-ревьюер (независимость), при любом значении флага;
+- `CODEX_REVIEWER=all` → `reviewer_codex` (`full`) для любого `L` и любого `implBy`;
+  запускай новый checker-тред, не продолжай тред `coder_codex`;
+- `implBy==codex` → базовый Claude-ревьюер (межпровайдерная независимость для всех
+  legacy-значений флага);
 - `CODEX_REVIEWER=fast` и `L==coder_fast` и `implBy==Claude` → `reviewer_codex` (`full`);
 - `CODEX_REVIEWER=fast+std` и `L ∈ {coder_fast, coder}` и `implBy==Claude` →
   `reviewer_codex` (`full`);
 - `CODEX_REVIEWER=deep` — как `fast+std`, **плюс** для `L==coder_deep`: диверсити-проход
   `reviewer_codex` (`augment`) **перед** базовым `reviewer` (Opus не заменяется —
   дублируется дешёвой страховкой; см. 2.5).
+
+Для `L==coder_deep` оба режима адаптера — `full` при `all` и `augment` при `deep` —
+независимо от общих `CODEX_MODEL`/`CODEX_REASONING` используют `gpt-5.6-sol` с `xhigh`.
 
 **Codex sandbox-init preflight действует и здесь.** Тот же сессионный preflight (см.
 «Codex-исполнитель (coder_codex) и маршрутизация», T-117) гейтит и `reviewer_codex`: при
@@ -2858,16 +2890,24 @@ Claude-`reviewer`.
 Ключевое: без переизбрания строка 3 осталась бы на `reviewer_codex`, проверяющем
 codex-фикс, — тот самый self-review bypass, который закрывает эта задача (повторный
 проход ревьюит именно диапазон фикса `<Previous>..<вершина>`, поэтому исключать нужно
-автора **последнего** диапазона). `L=coder_deep` в матрицу не входит: его кодят и фиксят
-**всегда** Claude (codex не участвует — см. «Codex-исполнитель»), поэтому все его
-диапазоны — `Claude`, augment-проход `reviewer_codex` не подавляется, а Opus-`reviewer`
-всегда владеет гейтом `SUMMARY-R`. Все четыре сценария resume-детерминированы: `implBy`
+автора **последнего** диапазона). Эта матрица описывает legacy-значения. При
+`CODEX_CODER=all` deep-диапазоны также может писать `coder_codex`; при
+`CODEX_REVIEWER=all` любой диапазон проверяет новый независимый checker-тред
+`reviewer_codex` (`full`) и он владеет гейтом `SUMMARY-R`. При legacy-значении
+`CODEX_REVIEWER=deep` и legacy-значениях `CODEX_CODER` deep-реализация остаётся Claude,
+augment-проход не заменяет Opus-`reviewer`, и гейтом владеет Claude; если же
+`CODEX_CODER=all` сделал последний deep-диапазон, межпровайдерная граница подавляет
+augment и выбирает базовый Claude-`reviewer`. Все четыре сценария выше
+resume-детерминированы: `implBy`
 на любом рестарте берётся из персистентной истории `Реализовано:`, а не из контекста.
 
 **Максимальная экономия Opus.** Комбинация `CODEX_CODER=off` (или `fast`) +
 `CODEX_REVIEWER=fast+std`: задачи уровня `coder` идут Claude-реализация (sonnet/high) +
 Codex-ревью — снимается самый дорогой повторяющийся расход (opus `reviewer`), а
 Opus-квота остаётся под `coder_deep`.
+Если оператор сознательно выбирает полностью Codex-путь, комбинация
+`CODEX_CODER=all` + `CODEX_REVIEWER=all` ведёт все task-level реализации, `R-`-фиксы и
+ревью через Codex; deep-пара всегда `gpt-5.6-sol`/`xhigh`, а фолбэки остаются Claude.
 
 # Codex CI-фиксы (Режим 3) и маршрутизация
 

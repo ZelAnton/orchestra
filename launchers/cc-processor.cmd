@@ -166,10 +166,10 @@ exit /b 12
 :codex_runtime_found
 if not defined USE_PROCESSKIT_RUNTIME goto :run_codex_uncontained
 if defined MODEL_VALUE goto :run_codex_contained_model
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-start-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" %EXTRA_ARGS%
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-start-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :run_codex_contained_model
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-start-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-start-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" start -Root "%PROJECT_ROOT%" -Model "%MODEL_VALUE%" %EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :run_codex_uncontained
 if defined MODEL_VALUE goto :run_codex_uncontained_model

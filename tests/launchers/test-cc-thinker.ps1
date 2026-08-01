@@ -167,4 +167,102 @@ Invoke-Test -Name 'cc-thinker.cmd' -Body {
     finally {
         Remove-Sandbox $paths
     }
+
+    # --- Scenario 6: an explicit codex provider token is consumed and starts the
+    # normal interactive Codex CLI (not `codex exec --json`). The remaining argv is
+    # preserved as the opening topic in the short role bootstrap.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-thinker.cmd'
+        Install-FakeCodex -Paths $paths
+        $captureFile = Join-Path $paths.Root 'codex-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-thinker.cmd' `
+            -LauncherArgs @('codex', 'should', 'we', 'split', 'the', 'runtime?') -EnvVars @{
+                FAKE_ARGS_FILE = $captureFile
+                FAKE_EXIT_CODE = '9'
+                ORCHESTRA_PROVIDER = 'claude'
+            }
+        Assert-Equal 9 $result.ExitCode '[codex provider] exit code'
+
+        $captured = @(Get-CapturedArgs $captureFile)
+        Assert-True (-not ($captured -contains 'exec')) '[codex provider] must open TUI, not codex exec'
+        Assert-True (-not ($captured -contains '--json')) '[codex provider] must not select JSON output'
+        Assert-True ($captured -contains '-C') '[codex provider] project root must be pinned'
+        $bootstrap = [string]$captured[-1]
+        Assert-True ($bootstrap -match 'agents[\\/]thinker\.md') '[codex provider] bootstrap points to canonical thinker prompt'
+        Assert-True ($bootstrap -match 'should we split the runtime\?') '[codex provider] remaining arguments become the opening topic'
+        Assert-True ($bootstrap -notmatch 'topic: codex\b') '[codex provider] provider token is not part of the topic'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 7: the long provider form is also consumed by the Codex runtime.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-thinker.cmd'
+        Install-FakeCodex -Paths $paths
+        $captureFile = Join-Path $paths.Root 'codex-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-thinker.cmd' `
+            -LauncherArgs @('--provider', 'codex', 'review', 'the', 'queue') -EnvVars @{
+                FAKE_ARGS_FILE = $captureFile
+                FAKE_EXIT_CODE = '0'
+            }
+        Assert-Equal 0 $result.ExitCode '[long codex provider] exit code'
+        $bootstrap = [string](Get-CapturedArgs $captureFile)[-1]
+        Assert-True ($bootstrap -match 'review the queue') '[long codex provider] opening topic is preserved'
+        Assert-True ($bootstrap -notmatch 'topic: (--provider|codex)\b') '[long codex provider] selector is not part of the topic'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 8: an explicit Claude override is stripped from the opening topic.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-thinker.cmd'
+        Install-FakeClaude -Paths $paths
+        $captureFile = Join-Path $paths.Root 'claude-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-thinker.cmd' `
+            -LauncherArgs @('--provider', 'claude', 'review', 'the', 'queue') -EnvVars @{
+                FAKE_ARGS_FILE = $captureFile
+                FAKE_EXIT_CODE = '0'
+                ORCHESTRA_PROVIDER = 'codex'
+            }
+        Assert-Equal 0 $result.ExitCode '[explicit claude provider] exit code'
+        $expected = @(
+            '--agent', 'thinker',
+            '--permission-mode', $expectedMode,
+            'Per your system prompt: act as the analytical thinking partner for this project. Opening topic: review the queue'
+        )
+        Assert-ArrayEqual $expected (Get-CapturedArgs $captureFile) '[explicit claude provider] selector is consumed'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 9: under the environment-selected provider, an opening topic may
+    # legitimately begin with the word "codex"; it must not be consumed as a selector.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-thinker.cmd'
+        Install-FakeCodex -Paths $paths
+        $captureFile = Join-Path $paths.Root 'codex-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-thinker.cmd' `
+            -LauncherArgs @('codex design tradeoffs') -EnvVars @{
+                FAKE_ARGS_FILE = $captureFile
+                FAKE_EXIT_CODE = '0'
+                ORCHESTRA_PROVIDER = 'codex'
+            }
+        Assert-Equal 0 $result.ExitCode '[environment codex topic] exit code'
+        $bootstrap = [string](Get-CapturedArgs $captureFile)[-1]
+        Assert-True ($bootstrap -match 'codex design tradeoffs') '[environment codex topic] leading codex word remains topic data'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }

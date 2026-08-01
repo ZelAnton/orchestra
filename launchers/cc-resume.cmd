@@ -138,7 +138,7 @@ exit /b 12
 set "USE_PROCESSKIT_RUNTIME="
 if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
 if not defined USE_PROCESSKIT_RUNTIME goto :codex_resume_uncontained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --work "%PROJECT_ROOT%\.work" --label processor-resume-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-resume-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :codex_resume_uncontained
 pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%

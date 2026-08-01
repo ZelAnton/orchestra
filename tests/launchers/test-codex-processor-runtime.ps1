@@ -22,22 +22,24 @@ function New-Fixture {
     $fakeScript = Join-Path $bin 'fake-codex.ps1'
     @'
 $args | Set-Content -LiteralPath $env:FAKE_ARGS_FILE -Encoding utf8
-[Console]::In.ReadToEnd() | Set-Content -LiteralPath $env:FAKE_STDIN_FILE -Encoding utf8
+$prompt = if ($args.Count -gt 0) { [string]$args[-1] } else { '' }
+$prompt | Set-Content -LiteralPath $env:FAKE_PROMPT_FILE -Encoding utf8
 $id = if ($env:FAKE_THREAD_ID) { $env:FAKE_THREAD_ID } else { '11111111-2222-3333-4444-555555555555' }
-if ($env:FAKE_EMIT_THREAD -ne '0') { Write-Output ('{"type":"thread.started","thread_id":"' + $id + '"}') }
-Write-Output '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'
+if ($env:FAKE_EMIT_THREAD -ne '0') {
+    $now = Get-Date
+    $sessionDir = Join-Path $env:CODEX_HOME (Join-Path 'sessions' (Join-Path $now.ToString('yyyy') (Join-Path $now.ToString('MM') $now.ToString('dd'))))
+    New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
+    $rollout = Join-Path $sessionDir ('rollout-' + $now.ToString('yyyy-MM-ddTHH-mm-ss') + '-' + [guid]::NewGuid().ToString('N') + '.jsonl')
+    @{ timestamp=$now.ToUniversalTime().ToString('o'); type='session_meta'; payload=@{ id=$id; cwd=(Get-Location).Path; originator='codex-tui' } } |
+        ConvertTo-Json -Compress | Set-Content -LiteralPath $rollout -Encoding utf8
+    @{ timestamp=$now.ToUniversalTime().ToString('o'); type='event_msg'; payload=@{ type='user_message'; message=$prompt } } |
+        ConvertTo-Json -Compress | Add-Content -LiteralPath $rollout -Encoding utf8
+}
+Write-Output 'FAKE CODEX TUI'
 $code = if ($env:FAKE_EXIT_CODE) { [int]$env:FAKE_EXIT_CODE } else { 0 }
 exit $code
 '@ | Set-Content -LiteralPath $fakeScript -Encoding utf8
-    if ($onWindows) {
-        $fake = Join-Path $bin 'codex.cmd'
-        "@echo off`r`npwsh -NoProfile -File `"%~dp0fake-codex.ps1`" %*`r`n" | Set-Content -LiteralPath $fake -Encoding ascii -NoNewline
-    } else {
-        $fake = Join-Path $bin 'codex'
-        "#!/bin/sh`nexec pwsh -NoProfile -File `"`$(dirname -- `"`$0`")/fake-codex.ps1`" `"`$@`"`n" | Set-Content -LiteralPath $fake -Encoding utf8 -NoNewline
-        & chmod '+x' $fake
-    }
-    return [pscustomobject]@{ Base=$base; Project=$project; CodexHome=$codexHome; Prompt=$prompt; Fake=$fake; Args=(Join-Path $base 'args.txt'); Stdin=(Join-Path $base 'stdin.txt') }
+    return [pscustomobject]@{ Base=$base; Project=$project; CodexHome=$codexHome; Prompt=$prompt; Fake=$fakeScript; Args=(Join-Path $base 'args.txt'); InitialPrompt=(Join-Path $base 'prompt.txt') }
 }
 function Invoke-Runtime {
     param($Fixture, [string]$Action, [hashtable]$Environment = @{}, [string[]]$Additional = @())
@@ -45,7 +47,7 @@ function Invoke-Runtime {
     $vars = @{
         CODEX_HOME = $Fixture.CodexHome
         FAKE_ARGS_FILE = $Fixture.Args
-        FAKE_STDIN_FILE = $Fixture.Stdin
+        FAKE_PROMPT_FILE = $Fixture.InitialPrompt
         FAKE_THREAD_ID = '11111111-2222-3333-4444-555555555555'
         FAKE_EMIT_THREAD = '1'
         FAKE_EXIT_CODE = '0'
@@ -75,17 +77,18 @@ try {
     $r = Invoke-Runtime $f 'start'
     Assert-True ($r.ExitCode -eq 0) "start exits 0 (got $($r.ExitCode), err=$($r.Err))"
     $capturedArgs = @(Get-Content -LiteralPath $f.Args)
-    Assert-True ($capturedArgs[0] -eq 'exec') 'start invokes codex exec'
+    Assert-True (-not ($capturedArgs -contains 'exec')) 'start invokes the interactive Codex CLI, not codex exec'
     Assert-True ($capturedArgs -contains '-C') 'start pins project root with -C'
     Assert-True ($capturedArgs -contains 'danger-full-access') 'start defaults root processor to danger-full-access'
     Assert-True (($capturedArgs -contains 'approval_policy="never"') -or ($capturedArgs -contains 'approval_policy=never')) 'start disables interactive approvals'
     Assert-True ($capturedArgs -contains 'features.multi_agent=true') 'start explicitly enables multi-agent'
     Assert-True ($capturedArgs -contains 'agents.max_depth=1') 'start keeps leaf agents from recursively spawning'
-    Assert-True ($capturedArgs -contains '--skip-git-repo-check') 'start preserves Orchestra support for pure-jj repositories'
-    Assert-True ($capturedArgs -contains '--json') 'start requests machine-readable thread id'
-    $stdin = Get-Content -LiteralPath $f.Stdin -Raw
-    Assert-True ($stdin.Contains('FULL-PROCESSOR-PROMPT')) 'start sends full processor prompt over stdin'
-    Assert-True ($stdin.Contains('never invoke Claude')) 'start invocation reinforces no-Claude contract'
+    Assert-True (-not ($capturedArgs -contains '--json')) 'start does not expose JSONL instead of the TUI'
+    $initialPrompt = Get-Content -LiteralPath $f.InitialPrompt -Raw
+    Assert-True ($initialPrompt.Contains($f.Prompt)) 'start tells the TUI root to read the canonical processor prompt file'
+    Assert-True (-not $initialPrompt.Contains('FULL-PROCESSOR-PROMPT')) 'start keeps the argv bootstrap short instead of copying the full prompt'
+    Assert-True ($initialPrompt.Contains('never invoke Claude')) 'start invocation reinforces no-Claude contract'
+    Assert-True ($r.Out -match 'FAKE CODEX TUI') 'interactive child inherits the root stdout stream'
     $session = Join-Path $f.Project '.work\codex_processor_session.json'
     Assert-True (Test-Path -LiteralPath $session) 'start persists addressed Codex processor session metadata'
     if (Test-Path -LiteralPath $session) {
@@ -97,13 +100,12 @@ try {
     $r = Invoke-Runtime $f 'resume'
     Assert-True ($r.ExitCode -eq 0) "resume exits 0 (got $($r.ExitCode))"
     $capturedArgs = @(Get-Content -LiteralPath $f.Args)
-    Assert-True ($capturedArgs[0] -eq 'exec' -and $capturedArgs[1] -eq 'resume') 'resume invokes codex exec resume'
+    Assert-True ($capturedArgs[0] -eq 'resume') 'resume invokes the interactive codex resume TUI'
     Assert-True ($capturedArgs -contains '11111111-2222-3333-4444-555555555555') 'resume addresses exact saved thread id'
-    Assert-True (-not ($capturedArgs -ccontains '-C')) 'resume does not pass unsupported -C option'
-    Assert-True ($capturedArgs -contains '--skip-git-repo-check') 'resume preserves Orchestra support for pure-jj repositories'
-    $resumeStdin = Get-Content -LiteralPath $f.Stdin -Raw
-    Assert-True (-not $resumeStdin.Contains('FULL-PROCESSOR-PROMPT')) 'exact resume does not duplicate the full processor prompt into thread context'
-    Assert-True ($resumeStdin.Contains('Continue the exact Codex-native Orchestra processor session')) 'exact resume sends a focused continuation prompt'
+    Assert-True ($capturedArgs -ccontains '-C') 'interactive resume pins the project root with its supported -C option'
+    $resumePrompt = Get-Content -LiteralPath $f.InitialPrompt -Raw
+    Assert-True (-not $resumePrompt.Contains($f.Prompt)) 'exact resume does not ask to reload the full processor prompt into thread context'
+    Assert-True ($resumePrompt.Contains('Continue the exact Codex-native Orchestra processor session')) 'exact resume sends a focused continuation prompt'
 
     $r = Invoke-Runtime $f 'start' @{ ORCHESTRA_CODEX_MAX_THREADS='0' }
     Assert-True ($r.ExitCode -eq 2) 'zero max-thread environment value fails closed'
@@ -119,8 +121,8 @@ try {
     $r = Invoke-Runtime $f 'resume'
     Assert-True ($r.ExitCode -eq 0) 'malformed addressed id triggers cold recovery'
     $capturedArgs = @(Get-Content -LiteralPath $f.Args)
-    Assert-True (-not ($capturedArgs -contains 'resume')) 'malformed addressed id is never passed to codex exec resume'
-    Assert-True ((Get-Content -LiteralPath $f.Stdin -Raw).Contains('FULL-PROCESSOR-PROMPT')) 'cold recovery still receives the full processor prompt'
+    Assert-True (-not ($capturedArgs -contains 'resume')) 'malformed addressed id is never passed to codex resume'
+    Assert-True ((Get-Content -LiteralPath $f.InitialPrompt -Raw).Contains($f.Prompt)) 'cold recovery still points the TUI root at the full processor prompt'
 
     $runtimeLockPath = Join-Path $f.Project '.work\codex-processor-runtime.lock'
     $heldLock = [System.IO.File]::Open($runtimeLockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
@@ -171,4 +173,4 @@ if ($failures.Count -gt 0) {
     foreach ($failure in $failures) { Write-Host "  $failure" }
     exit 1
 }
-Write-Host 'OK - Codex processor runtime starts/resumes exact native sessions, enforces no-prompt autonomy, and validates the complete role package.'
+Write-Host 'OK - Codex processor runtime shows the TUI, starts/resumes exact native sessions, enforces no-prompt autonomy, and validates the complete role package.'

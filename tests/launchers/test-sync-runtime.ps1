@@ -75,6 +75,7 @@ function New-SyntheticRepo {
     # the mirror; sync-runtime.ps1 is present here to prove it is the sole EXCLUSION.
     Write-File (Join-Path $repo 'tools\doctor-runtime.ps1') "doctor-rt-v1`n"
     Write-File (Join-Path $repo 'tools\codex-runtime.ps1') "codex-rt-v1`n"
+    Write-File (Join-Path $repo 'tools\codex-role-runtime.ps1') "codex-role-rt-v1`n"
     Write-File (Join-Path $repo 'tools\state-tx.ps1') "state-tx-v1`n"
     Write-File (Join-Path $repo 'tools\queue-tx.ps1') "queue-tx-v1`n"
     Write-File (Join-Path $repo 'tools\verification.ps1') "verification-v1`n"
@@ -132,6 +133,7 @@ Assert-FileText (Join-Path $dest 'specs\Inbox_Contract.md') "inbox-contract-v1`n
 Assert-FileText (Join-Path $dest 'scripts\codex-processor.md') "codex-processor-v1`n" 'clean: Codex root processor prompt mirrored beside runtimes'
 Assert-FileText (Join-Path $dest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored next to the launchers (so cc-doctor runs from the mirror)'
 Assert-FileText (Join-Path $dest 'scripts\codex-runtime.ps1') "codex-rt-v1`n" 'clean: codex-runtime.ps1 mirrored next to the launchers (so coder_codex/reviewer_codex resolve it from the mirror - T-114)'
+Assert-FileText (Join-Path $dest 'scripts\codex-role-runtime.ps1') "codex-role-rt-v1`n" 'clean: direct-role Codex TUI runtime mirrored next to provider-aware launchers'
 # T-115: the WHOLE tools/*.ps1 folder is mirrored, not a curated allowlist, so the
 # transactional/orchestration runners the agents call directly travel with the mirror too.
 Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'clean: state-tx.ps1 mirrored (whole tools/ folder - T-115)'
@@ -152,6 +154,7 @@ if (Test-Path -LiteralPath $manifestPath) {
     Assert-True (@($mf.managed) -contains 'scripts/config.example.md') 'clean: manifest lists scripts/config.example.md'
     Assert-True (@($mf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: manifest lists scripts/doctor-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/codex-runtime.ps1') 'clean: manifest lists scripts/codex-runtime.ps1'
+    Assert-True (@($mf.managed) -contains 'scripts/codex-role-runtime.ps1') 'clean: manifest lists scripts/codex-role-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/state-tx.ps1') 'clean: manifest lists scripts/state-tx.ps1 (T-115)'
     Assert-True (@($mf.managed) -contains 'scripts/verification.ps1') 'clean: manifest lists scripts/verification.ps1 (T-270)'
     Assert-True (@($mf.managed) -contains 'scripts/codex-processor.md') 'clean: manifest lists Codex processor prompt'

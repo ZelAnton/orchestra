@@ -594,6 +594,17 @@ docs-only. На resume и непосредственно перед ff/push proc
 - `ttl_seconds` — TTL аренды; аренда **устаревает** (`stale`), если `heartbeat` старше TTL.
 - `generation` — монотонный счётчик мутаций аренды (CAS-гард).
 - `taken_over_from` — `owner_id` прежнего владельца при takeover (аудит).
+- `processkit_run_id` — launcher-attestation текущей корневой сессии; новый processor
+  записывает её из внутренней `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`. Поле опционально при
+  чтении для совместимости со старыми lease, но добавляется при следующем takeover/heartbeat.
+
+**Гейт корневого контейнера.** До создания/возобновления аренды `processor` обязан быть
+дочерним процессом `processkit-cli run`: runtime передаёт уникальный run id через внутреннюю
+переменную `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`. `state-tx acquire`/`takeover`/`verify` и
+`heartbeat` для `role=processor` без валидной launcher-attestation возвращают код 20 до
+мутации. Переменная не является operator config; агенту запрещено устанавливать или
+подделывать её. Это закрывает прямой запуск из Claude Desktop/Cowork либо через
+`claude --agent processor`, не затрагивая адресные `status`/`release --force` для ремонта.
 
 **Живость (live vs stale).** Аренда считается живой, если: (а) записан `pid` **и** проверка
 идёт на её `host`, **и** процесс `pid` существует с совпадающим `pid_started` → **live** (pid
@@ -681,7 +692,8 @@ safe запись; повреждённая или противоречивая 
 
 - `acquire --work <…> --root <абс> [--role processor] [--pid N] [--ttl сек] [--session id]
   [--owner id]` — взять аренду (fresh). Отклоняет живую (10), устаревшую (11) и занятую
-  legacy-локом (19, `mkdir`+`info` без `lease.json`, см. §14) аренду; с `--force`
+  legacy-локом (19, `mkdir`+`info` без `lease.json`, см. §14) аренду; processor без
+  launcher-attestation отклоняется кодом 20; с `--force`
   перезаписывает. Печатает `owner=<id>`.
 - `heartbeat --work <…> --owner <id> [--expected-generation N]` — продлить аренду
   (только владелец, код 13 иначе; CAS-мисматч — код 3).
@@ -692,7 +704,8 @@ safe запись; повреждённая или противоречивая 
   [--require-root P] [--require-owner O]` — безопасный takeover (§15): устаревшую/битую
   адоптирует, живую отклоняет (10) без `--force`.
 - `verify --work <…> [--require-root P] [--require-role R] [--owner O]` — адресная проверка
-  для resume (§16): `own-live` (0) / `own-stale` (17) / mismatch (13/15/16) / нет аренды (14).
+  для resume (§16): `own-live` (0) / `own-stale` (17) / mismatch (13/15/16) / нет аренды
+  (14); processor без launcher-attestation получает 20.
 - `status --work <…> [--json]` — снимок аренды с вычисленными `live`/`stale` и возрастом
   heartbeat.
 - `check-transition --kind task|cohort|integration --from <s> --to <s>` — валидировать переход

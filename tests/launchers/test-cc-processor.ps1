@@ -300,6 +300,31 @@ exit 0
         Remove-Sandbox $paths
     }
 
+    # --- Scenario 10b: a contained Codex root inherits the terminal so its TUI stays visible.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-processor.cmd'
+        Install-FakeProcessKitRuntime -Paths $paths
+        "exit 0`n" | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
+        $runtimeCapture = Join-Path $paths.Root 'processkit-codex-runtime-args.txt'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-processor.cmd' -LauncherArgs @('codex') -EnvVars @{
+            FAKE_PROCESSKIT_RUNTIME_ARGS = $runtimeCapture
+            FAKE_PROCESSKIT_RUNTIME_EXIT = '0'
+            CC_PROCESSKIT_CLI = (Join-Path $paths.Root 'selected-processkit-cli.exe')
+        }
+        Assert-Equal 0 $result.ExitCode '[contained codex provider] exit code'
+        $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
+        Assert-True ($captured[0] -eq 'run-root') '[contained codex provider] runtime action is run-root'
+        Assert-True ($captured -contains '--interactive') '[contained codex provider] Codex root requires inherited TUI stdio capability'
+        Assert-True ($captured -contains 'processor-start-codex') '[contained codex provider] Codex lifecycle label is preserved'
+        $separator = [Array]::IndexOf($captured, '--')
+        $hasCodexRuntime = @($captured | Where-Object { $_ -like '*codex-processor-runtime.ps1' }).Count -gt 0
+        Assert-True ($separator -ge 0 -and $hasCodexRuntime -and $captured -contains 'start') '[contained codex provider] native root runtime follows the separator'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
     # --- Scenario 11: standalone CLI selection delegates through the shared
     # ProcessKit runtime and preserves its exit code instead of starting Claude directly.
     $paths = New-Sandbox

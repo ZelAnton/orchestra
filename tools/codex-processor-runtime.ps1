@@ -1,5 +1,5 @@
 <#
-  Headless Codex-native root processor runtime.
+  Interactive Codex-native root processor runtime.
 
   This is deliberately separate from tools/codex-runtime.ps1: that older runtime drives
   one sandboxed leaf adapter inside a Claude processor. This runtime owns the entire
@@ -207,6 +207,94 @@ function Read-SessionId {
     return $null
 }
 
+function Get-CodexRolloutFiles {
+    param([datetime]$StartedLocal)
+    $sessionsRoot = Join-Path (Get-CodexHome) 'sessions'
+    if (-not (Test-Path -LiteralPath $sessionsRoot -PathType Container)) { return @() }
+
+    # Codex partitions rollouts by the local calendar date. Include adjacent dates so a
+    # session started across midnight or on a host with a changing offset is still found.
+    $files = New-Object System.Collections.ArrayList
+    foreach ($offset in @(-1, 0, 1)) {
+        $date = $StartedLocal.Date.AddDays($offset)
+        $dayDir = Join-Path $sessionsRoot (Join-Path $date.ToString('yyyy') (Join-Path $date.ToString('MM') $date.ToString('dd')))
+        if (-not (Test-Path -LiteralPath $dayDir -PathType Container)) { continue }
+        foreach ($file in (Get-ChildItem -LiteralPath $dayDir -File -Filter 'rollout-*.jsonl' -ErrorAction SilentlyContinue)) {
+            [void]$files.Add($file.FullName)
+        }
+    }
+    return @($files)
+}
+
+function Find-InvocationThreadId {
+    param(
+        [datetime]$StartedLocal,
+        [System.Collections.Generic.HashSet[string]]$Baseline,
+        [string]$InvocationMarker
+    )
+    $pathComparison = if ($script:OnWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    foreach ($path in (Get-CodexRolloutFiles -StartedLocal $StartedLocal)) {
+        $fullPath = [System.IO.Path]::GetFullPath($path)
+        if ($Baseline.Contains($fullPath)) { continue }
+        try {
+            $stream = [System.IO.File]::Open($fullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+            try {
+                $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8, $true, 4096, $true)
+                try {
+                    $firstLine = $reader.ReadLine()
+                    if ([string]::IsNullOrWhiteSpace($firstLine)) { continue }
+                    $meta = $firstLine | ConvertFrom-Json -ErrorAction Stop
+                    if ($meta.type -ne 'session_meta' -or [string]$meta.payload.originator -ne 'codex-tui') { continue }
+                    $candidateRoot = [System.IO.Path]::GetFullPath([string]$meta.payload.cwd)
+                    if (-not [string]::Equals($candidateRoot, $script:ResolvedRoot, $pathComparison)) { continue }
+                    $candidateId = [string]$meta.payload.id
+                    if ($candidateId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { continue }
+
+                    # A second TUI may be open in the same repository. The unique marker in
+                    # this invocation's initial user message disambiguates its rollout without
+                    # reading or persisting any transcript content.
+                    $stream.Position = 0
+                    $reader.DiscardBufferedData()
+                    $buffer = New-Object char[] 2097152
+                    $read = $reader.ReadBlock($buffer, 0, $buffer.Length)
+                    if ((New-Object string($buffer, 0, $read)).Contains($InvocationMarker)) {
+                        return $candidateId
+                    }
+                } finally {
+                    $reader.Dispose()
+                }
+            } finally {
+                $stream.Dispose()
+            }
+        } catch {
+            # The TUI may still be creating/flushing the rollout. Poll again while it runs.
+        }
+    }
+    return $null
+}
+
+function Resolve-CodexProcessLaunch {
+    param($CommandInfo, [string[]]$Arguments)
+    $source = [string]$CommandInfo.Source
+    $extension = [System.IO.Path]::GetExtension($source).ToLowerInvariant()
+    if ($extension -eq '.ps1') {
+        $pwsh = Get-Command 'pwsh' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pwsh) { Stop-Runtime 10 'PowerShell 7 is required to launch the Codex TUI wrapper.' }
+        return [pscustomobject]@{ FilePath = $pwsh.Source; Arguments = @('-NoProfile', '-File', $source) + @($Arguments) }
+    }
+    if ($extension -in @('.cmd', '.bat')) {
+        $siblingPowerShell = [System.IO.Path]::ChangeExtension($source, '.ps1')
+        if (-not (Test-Path -LiteralPath $siblingPowerShell -PathType Leaf)) {
+            Stop-Runtime 10 "Codex command '$source' is a batch wrapper without a sibling .ps1 launcher; set CODEX_CMD to a native executable or PowerShell launcher."
+        }
+        $pwsh = Get-Command 'pwsh' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $pwsh) { Stop-Runtime 10 'PowerShell 7 is required to launch the Codex TUI wrapper.' }
+        return [pscustomobject]@{ FilePath = $pwsh.Source; Arguments = @('-NoProfile', '-File', $siblingPowerShell) + @($Arguments) }
+    }
+    return [pscustomobject]@{ FilePath = $source; Arguments = @($Arguments) }
+}
+
 try { $script:ResolvedRoot = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path }
 catch { Stop-Runtime 2 "project root does not exist: $Root" }
 
@@ -252,8 +340,8 @@ $work = Join-Path $script:ResolvedRoot '.work'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 $runtimeLockPath = Join-Path $work 'codex-processor-runtime.lock'
 try {
-    # Serialize the outer Codex process before thread.started can rewrite the
-    # addressed-session pointer. FileShare.None is held by the OS for this process
+    # Serialize the outer Codex process before a new rollout session_meta can rewrite
+    # the addressed-session pointer. FileShare.None is held by the OS for this process
     # lifetime and is released automatically after a crash (no stale lock protocol).
     $runtimeLock = [System.IO.File]::Open($runtimeLockPath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
 } catch {
@@ -281,53 +369,66 @@ $common = @(
 if ($Model) { $common += @('-m', $Model) }
 if ($ExtraArgs) { $common += @($ExtraArgs) }
 
+$invocationMarker = 'orchestra-codex-root-' + [Guid]::NewGuid().ToString('N')
 if ($effectiveAction -eq 'resume') {
-    $argv = @('exec', 'resume') + $common + @('--skip-git-repo-check', '--json', $threadId, '-')
-    $userPrompt = 'Continue the exact Codex-native Orchestra processor session. Reconcile durable .work state using Phase 0, retain ORCHESTRA_PROVIDER=codex, and process the queue to its terminal state without invoking Claude.'
+    $userPrompt = "Orchestra runtime invocation marker: $invocationMarker. Continue the exact Codex-native Orchestra processor session. Reconcile durable .work state using Phase 0, retain ORCHESTRA_PROVIDER=codex, and process the queue to its terminal state without invoking Claude."
+    $argv = @('resume', '-C', $script:ResolvedRoot, '--sandbox', $Sandbox) + $common + @($threadId, $userPrompt)
 } else {
-    # Orchestra supports pure-jj repositories with no colocated .git directory. Codex's
-    # repository guard only recognizes Git, so bypass that guard and let the processor's
-    # own Phase-0 git/jj root validation remain authoritative.
-    $argv = @('exec', '-C', $script:ResolvedRoot, '--sandbox', $Sandbox) + $common + @('--skip-git-repo-check', '--json', '-')
+    # The interactive CLI accepts its initial prompt only as argv. Keep that prompt short
+    # (especially for Windows' command-line limit) and make the canonical generated file
+    # the explicit source the root must read before taking any task action.
     $modeText = if ($Action -eq 'resume') { 'Cold recovery: no valid addressed Codex processor thread was recorded.' } else { 'Start a new Codex-native Orchestra processor session.' }
-    $userPrompt = "$modeText Follow the complete processor instructions, acquire or safely recover the lease, process .work/Tasks_Queue.md end to end, and never invoke Claude."
+    $userPrompt = "Orchestra runtime invocation marker: $invocationMarker. Before any other action, open and read the complete UTF-8 processor instructions at the exact path $promptFile, then follow them for this entire root session. $modeText Acquire or safely recover the lease, process .work/Tasks_Queue.md end to end, and never invoke Claude."
+    $argv = @('-C', $script:ResolvedRoot, '--sandbox', $Sandbox) + $common + @($userPrompt)
 }
 
-if ($effectiveAction -eq 'resume') {
-    # The exact thread already contains the full canonical processor prompt. Re-sending
-    # it on every resume needlessly consumes context and can eventually crowd out the
-    # durable-state recovery work this continuation is meant to perform.
-    $fullPrompt = $userPrompt + "`n"
-} else {
-    $basePrompt = [System.IO.File]::ReadAllText($promptFile)
-    $fullPrompt = $basePrompt.TrimEnd() + "`n`n--- runtime invocation ---`n" + $userPrompt + "`n"
+$startedLocal = [DateTime]::Now
+$pathComparer = if ($script:OnWindows) { [StringComparer]::OrdinalIgnoreCase } else { [StringComparer]::Ordinal }
+$rolloutBaseline = [System.Collections.Generic.HashSet[string]]::new($pathComparer)
+foreach ($path in (Get-CodexRolloutFiles -StartedLocal $startedLocal)) {
+    [void]$rolloutBaseline.Add([System.IO.Path]::GetFullPath($path))
 }
 $observedThread = $threadId
+$launch = Resolve-CodexProcessLaunch -CommandInfo $cmd -Arguments $argv
+$process = $null
+$exitCode = 10
 
 try {
-    Write-Host "Starting Orchestra provider=codex action=$effectiveAction root=$script:ResolvedRoot sandbox=$Sandbox reasoning=$Reasoning threads=$MaxThreads"
-    $fullPrompt | & $cmd.Source @argv 2>&1 | ForEach-Object {
-        $line = [string]$_
-        [Console]::Out.WriteLine($line)
-        if (-not $observedThread) {
-            try {
-                $jsonEvent = $line | ConvertFrom-Json -ErrorAction Stop
-                if ($jsonEvent.type -eq 'thread.started' -and ([string]$jsonEvent.thread_id -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')) {
-                    $observedThread = [string]$jsonEvent.thread_id
-                    Write-SessionMetadata -Path $sessionPath -ThreadId $observedThread -EffectiveAction $effectiveAction
-                }
-            } catch { }
+    Write-Host "Starting Orchestra provider=codex UI=tui action=$effectiveAction root=$script:ResolvedRoot sandbox=$Sandbox reasoning=$Reasoning threads=$MaxThreads"
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $launch.FilePath
+    $startInfo.WorkingDirectory = $script:ResolvedRoot
+    $startInfo.UseShellExecute = $false
+    foreach ($argument in $launch.Arguments) { [void]$startInfo.ArgumentList.Add([string]$argument) }
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw 'process start returned false' }
+
+    do {
+        $candidateThread = Find-InvocationThreadId -StartedLocal $startedLocal -Baseline $rolloutBaseline -InvocationMarker $invocationMarker
+        if ($candidateThread -and $candidateThread -ne $observedThread) {
+            $observedThread = $candidateThread
+            Write-SessionMetadata -Path $sessionPath -ThreadId $observedThread -EffectiveAction $effectiveAction
         }
-    }
-    $exitCode = $LASTEXITCODE
+    } while (-not $process.WaitForExit(100))
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+
+    # The process can finish between its rollout write and the last polling interval.
+    $candidateThread = Find-InvocationThreadId -StartedLocal $startedLocal -Baseline $rolloutBaseline -InvocationMarker $invocationMarker
+    if ($candidateThread) { $observedThread = $candidateThread }
 
     if ($observedThread) {
         Write-SessionMetadata -Path $sessionPath -ThreadId $observedThread -EffectiveAction $effectiveAction
     } elseif ($exitCode -eq 0) {
-        [Console]::Error.WriteLine('codex-processor-runtime: Codex exited successfully but emitted no thread.started id; addressed resume metadata was not written.')
+        [Console]::Error.WriteLine('codex-processor-runtime: Codex TUI exited successfully but no matching session_meta rollout was found; addressed resume metadata was not written.')
         $exitCode = 13
     }
+} catch {
+    [Console]::Error.WriteLine("codex-processor-runtime: failed to launch or monitor Codex TUI: $($_.Exception.Message)")
+    $exitCode = 10
 } finally {
+    if ($process) { $process.Dispose() }
     $runtimeLock.Dispose()
 }
 exit $exitCode

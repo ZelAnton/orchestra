@@ -34,6 +34,9 @@ EOF
 cat > "$MOCK_DIR/pwsh" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$@" > "$PWSH_ARGS_FILE"
+if [ -n "${ORCHESTRA_CODEX_ROLE_TOPIC:-}" ]; then
+    printf 'TOPIC=%s\n' "$ORCHESTRA_CODEX_ROLE_TOPIC" >> "$PWSH_ARGS_FILE"
+fi
 exit 0
 EOF
 chmod +x "$MOCK_DIR/claude" "$MOCK_DIR/codex" "$MOCK_DIR/pwsh"
@@ -159,6 +162,41 @@ run_with_mock_codex_processor() {
     if ! grep -Eq 'codex-processor-runtime\.ps1$' "$PWSH_ARGS_FILE"; then
         fail "$name" "codex-processor-runtime.ps1 was not selected"
         return
+    fi
+    pass "$name"
+}
+
+run_with_mock_codex_role() {
+    local launcher="$1"
+    local role="$2"
+    local name="$launcher (Codex interactive role)"
+    local launcher_path="$REPO_ROOT/launchers/$launcher"
+    local rc
+
+    : > "$PWSH_ARGS_FILE"
+    (
+        cd "$RUN_DIR" || exit 99
+        PATH="$MOCK_DIR:/usr/bin:/bin" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" \
+            ORCHESTRA_PROVIDER=claude "$BASH" "$launcher_path" codex "opening topic"
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "launcher exited $rc"
+        return
+    fi
+    if ! grep -Eq 'codex-role-runtime\.ps1$' "$PWSH_ARGS_FILE"; then
+        fail "$name" "codex-role-runtime.ps1 was not selected"
+        return
+    fi
+    if ! grep -Fxq -- '-Role' "$PWSH_ARGS_FILE" || ! grep -Fxq "$role" "$PWSH_ARGS_FILE"; then
+        fail "$name" "role '$role' was not passed to the Codex runtime"
+        return
+    fi
+    if [ "$role" = 'thinker' ]; then
+        if ! grep -Fxq 'TOPIC=opening topic' "$PWSH_ARGS_FILE"; then
+            fail "$name" "remaining thinker topic was not forwarded through the safe runtime seam"
+            return
+        fi
     fi
     pass "$name"
 }
@@ -315,6 +353,9 @@ test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
 run_with_mock_codex_processor cc-processor.sh start
 run_with_mock_codex_processor cc-resume.sh resume
+run_with_mock_codex_role cc-thinker.sh thinker
+run_with_mock_codex_role cc-audit.sh code_auditor
+run_with_mock_codex_role cc-enhance.sh enhancement_scout
 run_force_lock_via_state_tx
 run_force_lock_raw_fallback_without_pwsh
 test_installed_sync_from_checkout_cwd
@@ -324,4 +365,4 @@ if [ "$FAILURES" -ne 0 ]; then
     exit 1
 fi
 
-printf 'POSIX launcher tests passed: all 26 scenarios succeeded.\n'
+printf 'POSIX launcher tests passed: all 29 scenarios succeeded.\n'

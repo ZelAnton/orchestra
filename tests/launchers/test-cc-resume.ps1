@@ -177,6 +177,31 @@ exit 0
         Remove-Sandbox $paths
     }
 
+    # --- Scenario 5b: a contained Codex resume inherits the terminal for its TUI.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-resume.cmd'
+        Install-FakeProcessKitRuntime -Paths $paths
+        "exit 0`n" | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
+        $runtimeCapture = Join-Path $paths.Root 'processkit-codex-resume-args.txt'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -LauncherArgs @('codex') -EnvVars @{
+            FAKE_PROCESSKIT_RUNTIME_ARGS = $runtimeCapture
+            FAKE_PROCESSKIT_RUNTIME_EXIT = '0'
+            CC_PROCESSKIT_CLI = (Join-Path $paths.Root 'selected-processkit-cli.exe')
+        }
+        Assert-Equal 0 $result.ExitCode '[contained codex resume] exit code'
+        $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
+        Assert-True ($captured[0] -eq 'run-root') '[contained codex resume] runtime action is run-root'
+        Assert-True ($captured -contains '--interactive') '[contained codex resume] Codex root requires inherited TUI stdio capability'
+        Assert-True ($captured -contains 'processor-resume-codex') '[contained codex resume] Codex lifecycle label is preserved'
+        $separator = [Array]::IndexOf($captured, '--')
+        $hasCodexRuntime = @($captured | Where-Object { $_ -like '*codex-processor-runtime.ps1' }).Count -gt 0
+        Assert-True ($separator -ge 0 -and $hasCodexRuntime -and $captured -contains 'resume') '[contained codex resume] addressed runtime follows the separator'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
     # --- Scenario 6: standalone CLI selection wraps the addressed Claude resume.
     $paths = New-Sandbox
     try {

@@ -143,11 +143,14 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
 2. Populate `.work\Tasks_Queue.md` with tasks. Add entries by hand following the
    queue format, or use `cc-queue <source or description>` (`queue_builder`) to
    turn a spec/backlog/description into deduplicated `T-NNN` entries, or
-   `cc-thinker` to work out an idea interactively before it becomes tasks.
+   `cc-thinker` to work out an idea interactively before it becomes tasks. Add the
+   provider token to open the same role in the normal Codex terminal UI, for example
+   `cc-thinker codex "should we split the runtime?"`. The same form works for the
+   autonomous analytical launchers: `cc-audit codex` and `cc-enhance codex`.
 3. Start one provider:
    - `cc-processor` or `cc-processor claude` — legacy Claude root processor;
-   - `cc-processor codex` — fully Codex-native root processor and Codex custom-agent
-     roles, with no Claude process or fallback.
+   - `cc-processor codex` — fully Codex-native root processor in the familiar interactive
+     Codex terminal UI, plus Codex custom-agent roles, with no Claude process or fallback.
 
 The provider can instead be selected for every project in a new terminal:
 
@@ -155,10 +158,13 @@ The provider can instead be selected for every project in a new terminal:
 [Environment]::SetEnvironmentVariable('ORCHESTRA_PROVIDER', 'codex', 'User')
 ```
 
-Allowed values are `claude` and `codex`; an explicit launcher argument wins over the
+Allowed values are `claude` and `codex`; an explicit provider argument to
+`cc-processor`, `cc-resume`, `cc-thinker`, `cc-audit`, or `cc-enhance` wins over the
 environment. `cc-resume codex` resumes the exact Codex processor thread recorded in
 `.work/codex_processor_session.json`; if no valid addressed thread exists it performs
-the normal Phase-0 cold recovery. The Codex root defaults to `high` reasoning,
+the normal Phase-0 cold recovery. Both start and resume keep the TUI attached to the
+launching terminal; Codex event JSONL is no longer printed, while the runtime reads local
+rollout metadata only to preserve addressed resume. The Codex root defaults to `high` reasoning,
 `danger-full-access`, approval policy `never`, and six agent threads. Operator-owned
 overrides are `ORCHESTRA_CODEX_MODEL`, `ORCHESTRA_CODEX_REASONING`,
 `ORCHESTRA_CODEX_SANDBOX`, and `ORCHESTRA_CODEX_MAX_THREADS`.
@@ -176,8 +182,8 @@ artifact, binds it to the current diff and policy, and records
 `decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; it simply does not park the processor.
 Use `off` (or remove the variable) to restore interactive approvals.
 
-Install the standalone `processkit-cli` on `PATH` to enable kernel-backed containment
-automatically for the whole processor session. To pin an exact binary (also useful until a
+Install the standalone `processkit-cli` on `PATH` to provide the required kernel-backed
+containment for the whole processor session. To pin an exact binary (also useful until a
 new terminal sees an updated system `PATH`), set a user/system environment variable:
 
 ```powershell
@@ -188,18 +194,24 @@ An explicit user/machine `CC_PROCESSKIT_CLI` is re-read by the runtime and works
 already-open Windows terminal. A `PATH`-only installation still needs a new terminal.
 `cc-doctor` verifies the versioned probe contract.
 `cc-processor` and `cc-resume` use `processkit-cli run` for noninteractive roots and persist
-lifecycle JSONL under `.work/processes/_processor`. Interactive Claude roots require the
+lifecycle JSONL under `.work/processes/_processor`. Interactive Claude and Codex roots require the
 probe surface `run:--inherit-stdio`; older CLI releases automatically use a direct
-console-attached fallback so the Claude TUI cannot disappear behind redirected stdio.
+console-attached compatibility path so the Claude TUI cannot disappear behind redirected
+stdio, but the processor then refuses to acquire its lease. Every contained root receives a
+per-run `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`; `state-tx` returns exit 20 before creating or
+resuming a processor lease when that launcher attestation is absent. Consequently a direct
+`claude --agent processor`, Claude Desktop/Cowork session, or stale launcher cannot silently
+run Orchestra outside ProcessKit. Never set this internal variable manually.
 ProcessKit CLI 0.3.0 provides that surface and `run:--stdin-file`, so interactive roots and
 supervised calls with mediated input remain contained. For leaf calls, the supervisor also
 feature-detects 0.3.0's `run:--capture-dir`, `run:--capture-max-bytes`, and `run:--no-echo`:
 the configured output ceiling is enforced while the child is producing output instead of
 after an unbounded in-memory read, while JSONL still reports the full produced byte count.
 Explicitly broken backends fail
-closed. Set `CC_PROCESSKIT_CLI=off` to disable standalone
-discovery. `CC_PROCESSKIT_PYTHON` remains a deprecated compatibility fallback when no CLI is
-selected. With or without ProcessKit, those launchers disable
+closed. `CC_PROCESSKIT_CLI=off` disables standalone discovery for diagnostics/leaf fallback,
+but no longer authorizes an uncontained processor lease. `CC_PROCESSKIT_PYTHON` remains a
+deprecated compatibility fallback for leaf supervision when no CLI is selected. With or
+without ProcessKit, those launchers disable
 persistent MSBuild worker/server reuse in their child environment, and leaf build/test
 commands use Orchestra's per-command supervisor cleanup and process diagnostics. They also
 keep the bounded `codex-runtime.ps1` calls in the foreground by supplying 1,900,000 ms Claude
@@ -211,7 +223,8 @@ Other launchers: `cc-resume` continues an interrupted processor session,
 read-only Codex/configuration/orchestration preflight (a thin wrapper, like
 `cc-sync`, over one cross-platform `pwsh` engine, `tools/doctor-runtime.ps1`, so
 Windows and macOS/Linux report identically), `cc-audit` and `cc-enhance` run
-`code_auditor` and `enhancement_scout`, `cc-github` runs `github_sync`, and
+`code_auditor` and `enhancement_scout`; both, like `cc-thinker`, accept `codex` and open
+the inherited Codex TUI instead of `codex exec`/JSONL. `cc-github` runs `github_sync`, and
 `cc-proposal` runs `proposal_curator` to curate the `P-NNN` proposal lane.
 `cc-inbox` performs an on-demand critical inbox pass. Normal processor runs do the same
 cheap actionable check before the first planning wave, before rolling top-up, and after

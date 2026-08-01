@@ -68,6 +68,7 @@
       17  own lease but stale (verify: resume should re-adopt / cold-recover)
       18  corrupt / invalid lease record
       19  a non-structured (legacy/degraded mkdir) lock holds the directory
+      20  processor root is not launcher-attested by ProcessKit
 
 .EXAMPLE
     pwsh -File tools/state-tx.ps1 acquire   --work /abs/.work --root /abs --role processor --pid 12345
@@ -88,6 +89,7 @@ $ErrorActionPreference = 'Stop'
 # Get-PathComparer (K-033): the one platform path comparer (case-insensitive on Windows,
 # case-sensitive elsewhere), reused below so root comparison stays normalized in one place.
 . (Join-Path $PSScriptRoot 'policy-schema.ps1')
+. (Join-Path $PSScriptRoot 'processkit-runtime.ps1')
 $script:ErrPrefix = 'STXERR'          # coded-error tag decoded by the catch dispatcher
 $script:FaultEnv  = 'STATE_TX_FAULT'  # crash-injection hook read by Maybe-Fault
 $script:LockName  = 'state-tx'        # label in the Acquire-Lock failure message
@@ -148,6 +150,16 @@ function Test-SameRoot {
     $an = ([System.IO.Path]::GetFullPath($A)).TrimEnd('\', '/')
     $bn = ([System.IO.Path]::GetFullPath($B)).TrimEnd('\', '/')
     return [string]::Equals($an, $bn, (Get-PathComparer))
+}
+
+function Require-ProcessorRootAttestation {
+    param([string]$Role)
+    if ($Role -ne 'processor') { return '' }
+    $attestation = Get-OrchestraProcessKitRootAttestation
+    if (-not $attestation.Valid) {
+        Fail 20 'processor root is not launcher-attested by ProcessKit; use cc-processor/cc-resume and do not set ORCHESTRA_PROCESSKIT_ROOT_RUN_ID manually'
+    }
+    return [string]$attestation.RunId
 }
 
 # --------------------------------------------------------------------------
@@ -331,9 +343,10 @@ $script:Transitions = @{
 # --------------------------------------------------------------------------
 function Invoke-Acquire {
     param([string]$Mode)   # 'acquire' | 'takeover'
-    $paths = Resolve-Paths
     $root = Require-Opt 'root'
     $role = [string](Opt 'role' 'processor')
+    $processkitRunId = Require-ProcessorRootAttestation -Role $role
+    $paths = Resolve-Paths
     $hostVal = [string](Opt 'host' (Get-HostName))
     $session = [string](Opt 'session' '')
     $ttl = Parse-IntOpt 'ttl' 900 1
@@ -393,6 +406,7 @@ function Invoke-Acquire {
             ttl_seconds     = $ttl
             generation      = $gen
             taken_over_from = $prevOwner
+            processkit_run_id = $processkitRunId
         }
         Write-Lease $paths $rec
         $suffix = ''
@@ -411,6 +425,7 @@ function Cmd-Heartbeat {
         if ($existing.Legacy) { Fail 19 "$($existing.Error); cannot heartbeat a lock you do not structurally own" }
         if (-not $existing.Valid) { Fail 18 "lease is corrupt ($($existing.Error)); cannot renew" }
         $L = $existing.Lease
+        $processkitRunId = Require-ProcessorRootAttestation -Role ([string]$L.role)
         if ($L.owner_id -ne $owner) { Fail 13 "not the owner: lease owned by '$($L.owner_id)', you presented '$owner'" }
         if ($opts.ContainsKey('expected-generation')) {
             $exp = Parse-IntOpt 'expected-generation' 0 0
@@ -432,6 +447,7 @@ function Cmd-Heartbeat {
             ttl_seconds     = $L.ttl_seconds
             generation      = $gen
             taken_over_from = $L.taken_over_from
+            processkit_run_id = $processkitRunId
         }
         Write-Lease $paths $rec
         Write-Output "heartbeat owner=$owner generation=$gen"
@@ -481,6 +497,7 @@ function Cmd-Verify {
     if ($existing.Legacy) { Write-Output "legacy-lock ($($existing.Error))"; exit 19 }
     if (-not $existing.Valid) { Write-Output "corrupt-lease ($($existing.Error))"; exit 18 }
     $L = $existing.Lease
+    [void](Require-ProcessorRootAttestation -Role ([string]$L.role))
     if ($opts.ContainsKey('require-root') -and -not (Test-SameRoot $L.root ([string](Opt 'require-root')))) {
         Write-Output "root-mismatch lease-root=$($L.root)"; exit 15
     }

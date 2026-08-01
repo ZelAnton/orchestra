@@ -384,8 +384,8 @@ foreach ($k in 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'C
 # empty/unset key is NOT an error (documented default); only a non-empty out-of-set value
 # is flagged.
 $codexAllowed = [ordered]@{
-    'CODEX_CODER'     = @('off', 'fast', 'fast+std')
-    'CODEX_REVIEWER'  = @('off', 'fast', 'fast+std', 'deep')
+    'CODEX_CODER'     = @('off', 'fast', 'fast+std', 'all')
+    'CODEX_REVIEWER'  = @('off', 'fast', 'fast+std', 'deep', 'all')
     'CODEX_CIFIX'     = @('off', 'on')
     'CODEX_REASONING' = @('auto', 'low', 'medium', 'high', 'xhigh')
     'CODEX_SANDBOX'   = @('read-only', 'workspace-write')

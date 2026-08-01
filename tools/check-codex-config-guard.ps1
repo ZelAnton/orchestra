@@ -121,7 +121,7 @@ function Compare-KeySet {
 $configLines = Get-Content -LiteralPath $ConfigFile -Encoding utf8
 
 # --- Source of truth: config.example.md validation table --------------------
-# Rows look like: | `CODEX_CODER` | `off` \| `fast` \| `fast+std` | `off` |
+# Rows look like: | `CODEX_CODER` | `off` \| `fast` \| `fast+std` \| `all` | `off` |
 # The value cell's own pipes are markdown-escaped (\|); split cells on an
 # UNescaped pipe so the value cell stays intact.
 $specAllowed = @{}

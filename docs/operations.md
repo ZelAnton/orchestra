@@ -111,12 +111,20 @@ the overlapping task records. On POSIX, a quickly reparented background child ma
 appear under `temporal_candidates` rather than `descendants_before_cleanup`; the supervisor's
 own short-lived `ps` snapshot helper is filtered and must not appear in either count.
 
-For a whole-session Windows backstop, set `CC_PROCESSKIT_PYTHON` to a Python executable with
-`processkit` installed and open a new terminal; `cc-doctor` must report `OK root containment`.
-`cc-processor`/`cc-resume` then fail closed if containment cannot start. Independently, they
+For a whole-session Windows backstop, install standalone `processkit-cli`, open a new terminal,
+and require `cc-doctor` to report `OK process containment`. `cc-processor`/`cc-resume` inject
+a unique root-run attestation only inside that ProcessKit container; `state-tx` refuses
+processor lease acquire/resume/heartbeat with exit 20 when the attestation is absent. A direct
+Claude Desktop/Cowork or `claude --agent processor` session therefore stops before mutating
+`.work/`. Do not work around the gate by setting `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID` manually.
+Independently, the launchers
 always disable MSBuild node reuse/build-server use inside the agent environment.
 The same backend is inherited by the per-command supervisor, so each build/test gets its own
 Job/cgroup boundary; check the verdict's `containment` field when diagnosing a fallback.
+Do not kill `mcp-remote`, `node`, `cmd`, or `conhost` by process name: Claude Desktop can own
+same-named live MCP/native-host processes. Use the addressed ProcessKit run lifecycle and its
+`cleanup_finished.remaining` evidence for Orchestra; Desktop-owned processes end with their
+Desktop session.
 
 **Running without Claude.** Run `cc-sync` once after updating Orchestra, then select Codex
 for one session with `cc-processor codex`, or machine-wide with:
@@ -126,10 +134,26 @@ for one session with `cc-processor codex`, or machine-wide with:
 ```
 
 Open a new terminal and run `cc-doctor`. A Codex-root run dispatches every canonical role
-to a separate `orchestra_*` Codex custom agent and never starts or falls back to Claude.
+to a separate `orchestra_*` Codex custom agent, shows the normal Codex terminal UI for the
+root session, and never starts or falls back to Claude. ProcessKit is invoked with inherited
+stdio for this provider too; without it, a captured root would hide the TUI.
 `cc-resume codex` resumes the exact root thread stored in
 `.work/codex_processor_session.json`; it does not use the ambiguous `--last`. Explicit
 `cc-processor claude`/`cc-resume claude` override the environment for one run.
+
+The directly launched analytical roles use the same provider selection:
+
+```text
+cc-thinker codex "opening topic"
+cc-audit codex
+cc-enhance codex
+```
+
+Each command opens the normal interactive Codex TUI with inherited terminal streams. The
+short bootstrap points Codex at the complete canonical prompt in `agents/`; it does not run
+`codex exec`, print JSONL, start Claude, or fall back to Claude. These sessions are independent
+and use native Codex resume commands rather than `.work/codex_processor_session.json`, which
+belongs only to processor.
 
 The autonomous Codex root defaults to `ORCHESTRA_CODEX_REASONING=high`,
 `ORCHESTRA_CODEX_SANDBOX=danger-full-access`, and six threads. Set

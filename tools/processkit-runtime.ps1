@@ -6,7 +6,8 @@
     Prefers the standalone processkit-cli binary, validates its machine contract with
     `probe`, and runs an Orchestra provider session in a kernel-backed container with a
     durable JSONL lifecycle log. The legacy Python wrapper remains a compatibility
-    fallback when no standalone CLI is available.
+    transport fallback when no standalone CLI is available, but it does not issue
+    the launcher attestation required for a processor lease.
 
     Environment contract:
       CC_PROCESSKIT_CLI     unset = auto-discover processkit-cli on PATH
@@ -20,13 +21,16 @@
 
 .EXAMPLE
     pwsh -File tools/processkit-runtime.ps1 probe --json
+    pwsh -File tools/processkit-runtime.ps1 assert-root --json
     pwsh -File tools/processkit-runtime.ps1 run-root --work .work --label processor -- claude --agent processor
 #>
 
 $script:ProcessKitUtf8 = New-Object System.Text.UTF8Encoding($false)
 $script:ProcessKitRuntimeExitCode = 0
+$script:ProcessKitRootRunIdEnvironment = 'ORCHESTRA_PROCESSKIT_ROOT_RUN_ID'
 $script:ProcessKitRequiredSurfaces = @(
     'run', 'run:--run-id', 'run:--cwd', 'run:--jsonl', 'run:--create-no-window',
+    'run:--env',
     'inspect', 'inspect:--run-id', 'inspect:--json',
     'cancel', 'cancel:--run-id', 'kill', 'kill:--run-id',
     'list', 'list:--json', 'prune', 'prune:--json'
@@ -225,6 +229,19 @@ function New-OrchestraProcessKitEventPath {
     return Join-Path $directory "$safeLabel-$stamp-$nonce.processkit.jsonl"
 }
 
+function Get-OrchestraProcessKitRootAttestation {
+    $runId = [string][Environment]::GetEnvironmentVariable(
+        $script:ProcessKitRootRunIdEnvironment,
+        [EnvironmentVariableTarget]::Process)
+    $valid = (-not [string]::IsNullOrWhiteSpace($runId)) -and
+        $runId -match '^orchestra-[A-Za-z0-9_.-]+-[0-9a-f]{32}$'
+    return [pscustomobject]@{
+        Valid = [bool]$valid
+        RunId = if ($valid) { $runId } else { '' }
+        Environment = $script:ProcessKitRootRunIdEnvironment
+    }
+}
+
 function Invoke-OrchestraRootProcess {
     param(
         [Parameter(Mandatory)][string]$Work,
@@ -243,13 +260,13 @@ function Invoke-OrchestraRootProcess {
         $events = New-OrchestraProcessKitEventPath -Work $Work -Label $Label
         $runId = 'orchestra-' + (($Label -replace '[^A-Za-z0-9_.-]', '_').Trim('.-_')) + '-' + [guid]::NewGuid().ToString('N')
         $cliArgs = @('run', '--run-id', $runId, '--cwd', [System.IO.Path]::GetFullPath((Get-Location).Path),
-            '--jsonl', $events)
+            '--jsonl', $events, '--env', "$($script:ProcessKitRootRunIdEnvironment)=$runId")
         if ($Interactive) { $cliArgs += '--inherit-stdio' } else { $cliArgs += '--create-no-window' }
         $cliArgs += @('--', $target) + @($targetArgs)
         return Invoke-ProcessKitInherited -FilePath $backend.Path -ArgumentList $cliArgs
     }
     if ($Interactive -and $backend.Kind -eq 'cli') {
-        [Console]::Error.WriteLine('processkit-runtime: processkit-cli lacks run:--inherit-stdio; starting the interactive root directly (supervised leaf commands remain contained)')
+        [Console]::Error.WriteLine('processkit-runtime: processkit-cli lacks run:--inherit-stdio; starting a compatibility root that cannot acquire a processor lease (supervised leaf commands remain contained)')
     }
     if ($backend.Kind -eq 'python' -and -not $Interactive) {
         return Invoke-ProcessKitInherited -FilePath $backend.Path -ArgumentList (@('-m', 'processkit', 'run', '--', $target) + @($targetArgs))
@@ -265,6 +282,25 @@ function Invoke-ProcessKitRuntimeCli {
         $asJson = $Argv -contains '--json'
         $backend = Resolve-OrchestraProcessKitBackend
         if ($asJson) { $backend | ConvertTo-Json -Compress } else { "$($backend.Kind): $($backend.Path)" }
+        $script:ProcessKitRuntimeExitCode = 0
+        return
+    }
+    if ($command -eq 'assert-root') {
+        $unknown = @($Argv | Select-Object -Skip 1 | Where-Object { $_ -ne '--json' })
+        if ($unknown.Count -gt 0) { throw "unknown assert-root option '$($unknown[0])'" }
+        $attestation = Get-OrchestraProcessKitRootAttestation
+        if (-not $attestation.Valid) {
+            throw 'processor root is not launcher-attested by ProcessKit; start it with cc-processor or cc-resume'
+        }
+        if ($Argv -contains '--json') {
+            [ordered]@{
+                contained = $true
+                backend = 'processkit-cli'
+                run_id = $attestation.RunId
+            } | ConvertTo-Json -Compress
+        } else {
+            Write-Output "contained backend=processkit-cli run_id=$($attestation.RunId)"
+        }
         $script:ProcessKitRuntimeExitCode = 0
         return
     }

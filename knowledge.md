@@ -83,7 +83,10 @@ Processor и merger формируют описательные англоязы
 единый нормативный источник формата рантайм-артефакта дорожной карты подключённого проекта
 `.work/roadmap.md` (упорядоченные вехи со статусами `запланирована`/`текущая`/`достигнута`,
 проверяемый критерий достижения, связь веха↔`T-ID`), машинно-локального (как `.work/knowledge/`),
-а не сеемого шаблона; на него ссылаются будущие потребители осведомлённости о дорожной карте.
+а не сеемого шаблона; на него ссылаются будущие потребители осведомлённости о дорожной карте;
+`docs/environment-variables.md` — операторский справочник по поддерживаемым переменным
+окружения, их значениям, defaults, приоритету относительно `.work/config.md` и границе
+между публичными настройками и внутренними runtime-переменными.
 
 ### Координация и интеграция
 
@@ -146,29 +149,46 @@ Processor и merger формируют описательные англоязы
   `codex/agents/orchestra_*.toml`. Каталог generated-ролей приводится к точному набору:
   старый namespaced TOML после удаления/rename роли удаляется генератором, затем `cc-sync`
   удаляет его из managed destination. Generated-файлы напрямую не редактируются.
-- `tools/codex-processor-runtime.ps1` запускает самостоятельный `codex exec --json` root,
-  пинит `approval_policy=never`, `multi_agent=true`, `agents.max_depth=1`, sandbox/reasoning/
-  thread cap из operator-owned `ORCHESTRA_CODEX_*`, извлекает `thread.started.thread_id` и
+- `tools/codex-processor-runtime.ps1` запускает самостоятельный интерактивный root через
+  Codex TUI (`codex` / `codex resume <UUID>`), пинит `approval_policy=never`,
+  `multi_agent=true`, `agents.max_depth=1`, sandbox/reasoning/thread cap из operator-owned
+  `ORCHESTRA_CODEX_*` и наследует терминальные stdin/stdout/stderr. Новый start/cold recovery
+  получает короткий bootstrap с точным путём к полному canonical prompt и обязан прочитать
+  его до любых действий; exact resume отправляет только короткий continuation prompt.
+  Runtime находит созданный root rollout под `$CODEX_HOME/sessions`, проверяет
+  `session_meta` (`originator=codex-tui`, точный root и уникальный invocation marker) и
   атомарно сохраняет адресованный `.work/codex_processor_session.json`. `resume` использует
   только этот UUID; при отсутствии/несовпадении root выполняет Phase-0 cold recovery, никогда
-  не `--last`. Exact resume отправляет только короткий continuation prompt (полный canonical
-  prompt уже находится в thread); новый start/cold recovery получает полный prompt. Runtime
-  передаёт `--skip-git-repo-check`, потому что Orchestra валидирует
-  git/jj root самостоятельно и обязана поддерживать pure-jj без `.git`; проверяет структуру
-  и checkout-freshness установленного custom-agent пакета. Project-local либо второй global
+  не `--last`. Структура и checkout-freshness установленного custom-agent пакета остаются
+  обязательным preflight. Project-local либо второй global
   TOML с любым managed `name = "orchestra_*"` считается конфликтом и останавливает preflight:
   Codex идентифицирует роль по `name`, поэтому такое переопределение недетерминированно.
   Новый `start` заранее инвалидирует
   UUID прежней сессии, поэтому ранний сбой не направит последующий `resume` в старый thread.
   Runtime не содержит и не вызывает Claude fallback.
+- `tools/codex-role-runtime.ps1` тем же способом с наследуемыми stdin/stdout/stderr открывает
+  обычный Codex TUI для напрямую запускаемых `thinker`, `code_auditor` и
+  `enhancement_scout`. У top-level Codex CLI нет аналога `claude --agent`, поэтому короткий
+  bootstrap указывает точный полный канонический `agents/<role>.md` (в checkout или
+  sibling-mirror `~/.claude/agents`) и требует прочитать его до действий; полный prompt в
+  argv не копируется. Runtime пинит `approval_policy=never`, применяет operator-owned
+  model/reasoning/sandbox, не использует `codex exec`/JSONL и не имеет Claude fallback.
+  Свободная тема `thinker` пересекает Windows argv-границу во временной process-scoped
+  `ORCHESTRA_CODEX_ROLE_TOPIC`; runtime читает и удаляет её до запуска дочернего Codex,
+  поэтому текст не может перевязать runtime-параметр и не наследуется TUI.
+  Эти одно-ролевые сессии не пишут processor UUID: продолжение выполняется нативными
+  средствами Codex, а `.work/codex_processor_session.json` принадлежит только processor.
 - `ORCHESTRA_PROVIDER=claude|codex` задаёт системный default; литеральный аргумент
-  `cc-processor codex|claude` / `cc-resume codex|claude` имеет приоритет. Default остаётся
-  `claude` для обратной совместимости. В Codex-provider все planner/coder/reviewer/merger/
+  `codex|claude` у `cc-processor`, `cc-resume`, `cc-thinker`, `cc-audit` и `cc-enhance`
+  имеет приоритет. Default остаётся `claude` для обратной совместимости. В Codex-provider
+  processor все planner/coder/reviewer/merger/
   curator-вызовы — отдельные `orchestra_*` Codex threads; старые `coder_codex`/
   `reviewer_codex`, их `CODEX_*` routing и Claude fallback не участвуют.
 - Maker/checker в Codex-provider изолирован отдельным thread: reviewer никогда не является
-  maker-thread. Это provider-specific эквивалент независимости; гибридный Claude-root
-  сохраняет прежнюю cross-provider развязку «Codex сделал — Claude проверяет».
+  maker-thread. Гибридный Claude-root по умолчанию и для legacy-значений
+  `CODEX_REVIEWER=fast|fast+std|deep` сохраняет cross-provider развязку «Codex сделал —
+  Claude проверяет»; явное `CODEX_REVIEWER=all` использует ту же thread-based границу,
+  что native provider: новый checker-вызов Codex без resume maker-треда.
 - `cc-sync` после обычной генерации запускает Codex-генератор, зеркалирует root prompt рядом
   с runtime в `~/.claude/scripts/codex-processor.md` и управляемо устанавливает только
   `orchestra_*.toml` в `$CODEX_HOME/agents` с отдельным manifest. Чужие custom agents не
@@ -192,7 +212,9 @@ Processor и merger формируют описательные англоязы
 - `coder_codex.md` и `reviewer_codex.md` — тонкие адаптеры `codex exec` с обязательным
   fallback на Claude. Codex-coder поддерживает реализацию, `R-` и при
   `CODEX_CIFIX=on` точечный Режим 3, но не интеграционные `F-`. Codex-reviewer работает
-  read-only.
+  read-only. Значение `all` у `CODEX_CODER`/`CODEX_REVIEWER` включает все task-level
+  уровни; для `coder_deep` оба адаптера принудительно используют
+  `gpt-5.6-sol`/`xhigh`, игнорируя общие `CODEX_MODEL`/`CODEX_REASONING`.
 - **Единый исполняемый runtime `tools/codex-runtime.ps1` (T-075).** Механическая часть
   протокола обоих адаптеров вынесена из Markdown-инструкций в тестируемый кросс-платформенный
   pwsh-скрипт (по образцу `tools/queue-tx.ps1`): **безопасная сборка argv** нормализованной
@@ -848,6 +870,8 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
   `cc-status`/`cc-journal` читают состояние, `cc-metrics` агрегирует историю read-only,
   `cc-doctor` проверяет Codex, `cc-queue`,
   `cc-thinker`, `cc-audit`, `cc-enhance`, `cc-github` запускают соответствующие роли;
+  первые три принимают `codex|claude`/`--provider`, а Codex-ветка открывает обычный TUI
+  через `tools/codex-role-runtime.ps1`;
   `cc-inbox` запускает ручной полный проход `inbox_curator`.
 - `cc-processor`/`cc-resume` создают изолированное окружение сборок для обоих provider:
   принудительно экспортируют
@@ -860,11 +884,16 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
   установлен рядом с ними. Resolver fail-closed проверяет `probe` schema 1, reserved band
   100–119 и run/control/list surfaces; legacy `CC_PROCESSKIT_PYTHON` используется только как
   fallback. Неверный явный backend — exit 10. Неинтерактивная корневая сессия получает
-  durable lifecycle `.work/processes/_processor/*.processkit.jsonl`. Интерактивный Claude
-  root передаёт `--interactive`: CLI используется только при probe surface
+  durable lifecycle `.work/processes/_processor/*.processkit.jsonl`. Интерактивные Claude
+  и Codex roots передают `--interactive`: CLI используется только при probe surface
   `run:--inherit-stdio`, иначе runtime предупреждает и запускает root напрямую с консолью;
-  supervisor leaf-команды всё равно остаются kernel-contained. Это capability gate, а не
-  project config.
+  такой compatibility-root не может взять processor lease. Каждый CLI-root получает
+  внутреннюю per-run `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`; `state-tx`
+  acquire/takeover/verify/heartbeat для `role=processor` без валидной launcher-attestation
+  fail-closed возвращают код 20 до мутации. Поэтому прямой Claude Desktop/Cowork либо
+  `claude --agent processor` не запускает Orchestra вне контейнера; агенту запрещено
+  выставлять/копировать marker самому. Supervisor leaf-команды всё равно сохраняют свои
+  fallback. Это runtime gate, а не project config.
   `tools/codex-runtime.ps1` независимо пинит те же две .NET-переменные для каждого `codex
   exec` и уже очищает его дерево после любого исхода.
   `tools/supervisor.ps1` dot-source'ит тот же resolver и оборачивает backend'ом каждый отдельный
@@ -1055,9 +1084,9 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/Github_Sync.md` | таблица соответствия GitHub issues/PR и задач очереди; ведёт `github_sync` |
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
 | `.work/constraints.md` | человекочитаемая политика ограничений проекта (denylist путей, ветки/remotes, push/merge policy, обязательные проверки, пороги, human-review категории); шаблон — `constraints.example.md`, сеет `cc-config`; читают processor/planner/coder/reviewer, нет файла — деградация без ошибок |
-| `.work/orchestrator.lock` | аренда владельца прогона (каталог; защита от двух processor независимо от provider). Содержит `lease.json` — запись аренды (owner/session id, корень, host, heartbeat, TTL, pid+время создания как доказательство живости, поколение); ведётся через `tools/state-tx.ps1`, см. `docs/queue_contract.md`, §14-§16 |
+| `.work/orchestrator.lock` | аренда владельца прогона (каталог; защита от двух processor независимо от provider). Содержит `lease.json` — запись аренды (owner/session id, корень, host, heartbeat, TTL, pid+время создания как доказательство живости, поколение и опциональный `processkit_run_id`); ведётся через `tools/state-tx.ps1`, см. `docs/queue_contract.md`, §14-§16 |
 | `.work/codex_processor_session.json` | адресованный UUID root-thread Codex-provider (`orchestra/codex-processor-session@1`), provider/root/timestamps; атомарно пишет только `tools/codex-processor-runtime.ps1`, читает `cc-resume codex`; не заменяет lease и не используется Claude-provider |
-| `.work/codex-processor-runtime.lock` | OS-held exclusive file lock внешнего Codex root process; сериализует `start`/`resume` до модельного `orchestrator.lock`, чтобы конкурентные `thread.started` не перезаписали addressed UUID. Пустой файл может оставаться, владение определяется только открытым handle и автоматически исчезает при crash |
+| `.work/codex-processor-runtime.lock` | OS-held exclusive file lock внешнего Codex TUI root process; сериализует `start`/`resume` до модельного `orchestrator.lock`, чтобы конкурентные rollout `session_meta` не перезаписали addressed UUID. Пустой файл может оставаться, владение определяется только открытым handle и автоматически исчезает при crash |
 | `.work/orchestrator.lock/lease.json` | запись аренды (`schema: orchestra/lease@1`); мутируется только транзакционно через `tools/state-tx.ps1` (acquire/heartbeat/release/takeover) |
 | `.work/state-tx.lock` | краткоживущий атомарный лок мутации control plane (аренда/поколение состояния); держит `state-tx.ps1` на время одной транзакции; отдельный от `orchestrator.lock` и `queue-tx.lock` |
 | `.work/control_state.json` | счётчик поколения control plane (state-плоскостной аналог `queue_state.json`) для CAS мутаций состояния когорты/задачи; ведёт `tools/state-tx.ps1` |
@@ -1107,15 +1136,20 @@ codex-правилами выше (см. «Резолвинг раннеров `
   всем worktree-ролям. Листовая роль не переопределяет этот выбор: при `VCS=jj` Git
   запрещён даже для чтения, потому что из pure-jj `.work/worktrees/**` он молча адресует
   `.git` основного дерева.
-- Maker/checker должны быть независимы. В гибридном Claude-root режиме, если Codex-адаптер
-  реализовал задачу, Claude её ревьюит. В полностью Codex-native provider ревью выполняет
-  отдельный новый custom-agent thread, который не реализовывал и не исправлял этот diff.
+- Maker/checker должны быть независимы. В гибридном Claude-root режиме legacy-значения
+  после Codex-реализации выбирают Claude-reviewer. Явный `CODEX_REVIEWER=all`, как и
+  полностью Codex-native provider, выполняет ревью отдельным новым checker-thread, который
+  не реализовывал и не исправлял этот diff и не продолжает maker-сессию.
 - `R-NN` относятся к одной задаче, `F-NN` — к интеграции всего батча.
 - В основном дереве точечный CI-фикс коммитится явным списком файлов, не `git add -A`.
 - **Аренда владельца (`.work/orchestrator.lock`) мутируется только через `tools/state-tx.ps1`**
   (acquire/heartbeat/release/takeover, атомарный лок `state-tx.lock` + owner_id + поколение +
   heartbeat/TTL/pid-живость): это механизм синхронизации «один processor», допускающий
   безопасный takeover устаревшей аренды и адресный resume без второго управляющего цикла.
+  Корневая роль `processor` до любой такой операции обязана нести launcher-attestation
+  `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`, созданную `processkit-runtime.ps1` внутри standalone
+  CLI-run; `acquire`/`takeover`/`verify`/`heartbeat` без неё дают код 20 до мутации. Marker
+  не является пользовательской настройкой, и агент не может выставлять его себе сам.
   Продлить/снять аренду может только её владелец (owner_id) — безусловный `rm -rf` каталога в
   обход owner-check не вводите (снял бы чужую свежую аренду после takeover, см.
   `docs/queue_contract.md`, §15). Каталог `orchestrator.lock` с legacy-содержимым (`info` без

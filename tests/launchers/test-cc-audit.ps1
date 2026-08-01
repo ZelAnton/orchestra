@@ -28,4 +28,26 @@ Invoke-Test -Name 'cc-audit.cmd' -Body {
     finally {
         Remove-Sandbox $paths
     }
+
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-audit.cmd'
+        Install-FakeCodex -Paths $paths
+        $captureFile = Join-Path $paths.Root 'codex-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-audit.cmd' `
+            -LauncherArgs @('codex') -EnvVars @{
+                FAKE_ARGS_FILE = $captureFile
+                FAKE_EXIT_CODE = '8'
+                ORCHESTRA_PROVIDER = 'claude'
+            }
+        Assert-Equal 8 $result.ExitCode 'codex exit code must be forwarded'
+        $captured = @(Get-CapturedArgs $captureFile)
+        Assert-True (-not ($captured -contains 'exec')) 'codex path opens TUI instead of codex exec'
+        Assert-True (-not ($captured -contains '--json')) 'codex path does not expose JSONL'
+        Assert-True ([string]$captured[-1] -match 'agents[\\/]code_auditor\.md') 'codex bootstrap points to canonical code_auditor prompt'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }

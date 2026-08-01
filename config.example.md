@@ -19,15 +19,16 @@ Provider всего оркестра выбирается вне `.work/config.m
 себе backend в ходе прогона:
 
 - `ORCHESTRA_PROVIDER=claude|codex` — системный default (`claude`, если переменной нет);
-- `cc-processor codex` / `cc-resume codex` — явное переопределение для одного запуска;
-- `cc-processor claude` / `cc-resume claude` — явный возврат на legacy-provider.
+- `cc-processor codex` / `cc-resume codex` / `cc-thinker codex` / `cc-audit codex` /
+  `cc-enhance codex` — явное переопределение для одного запуска;
+- те же команды с аргументом `claude` — явный возврат на legacy-provider.
 
 `codex` — самостоятельный root processor: все planner/coder/reviewer/merger/curator-роли
 исполняются отдельными namespaced Codex custom-agent threads; Claude не запускается и не
 используется как fallback. `CODEX_CODER`/`CODEX_REVIEWER`/`CODEX_CIFIX` относятся только к
 гибридному Claude-root режиму и в Codex-root режиме игнорируются.
 
-Operator-owned системные настройки Codex-root:
+Operator-owned системные настройки Codex-root и прямых Codex-ролей:
 
 | Переменная | Разрешённые значения | Default |
 |---|---|---|
@@ -36,8 +37,9 @@ Operator-owned системные настройки Codex-root:
 | `ORCHESTRA_CODEX_SANDBOX` | `workspace-write` \| `danger-full-access` | `danger-full-access` |
 | `ORCHESTRA_CODEX_MAX_THREADS` | целое `2..32` | `6` |
 
-Root runtime всегда пинит `approval_policy=never`, `features.multi_agent=true` и
-`agents.max_depth=1`; subagents наследуют выбранный sandbox. `cc-sync` генерирует роли из
+Оба Codex runtime пинят `approval_policy=never`; processor root дополнительно пинит
+`features.multi_agent=true` и `agents.max_depth=1`, а `ORCHESTRA_CODEX_MAX_THREADS`
+относится только к нему. `cc-sync` генерирует роли из
 канонических `agents/*.md` и устанавливает их в `$CODEX_HOME/agents`. `cc-resume codex`
 использует точный UUID из `.work/codex_processor_session.json`, не `--last`; при отсутствии
 валидного UUID запускается холодная Phase-0 recovery.
@@ -111,10 +113,11 @@ REVIEWER_TIERING: true
 # KB_TTL: 8              # истечение неподтверждённых одиночных записей, в батчах
 # KB_CAP: 12             # максимум записей на область
 # --- Codex-агенты (опционально; требуют установленного codex + `codex login`) ---
-# CODEX_CODER: fast+std        # реализация/R--фиксы: off (по умолч.) | fast | fast+std
-# CODEX_REVIEWER: fast+std      # ревью: off (по умолч.) | fast | fast+std | deep
+# CODEX_CODER: fast+std        # реализация/R--фиксы: off (по умолч.) | fast | fast+std | all
+# CODEX_REVIEWER: fast+std      # ревью: off (по умолч.) | fast | fast+std | deep | all
                                # ^ РЕКОМЕНДУЕТСЯ при наличии codex: снимает самый дорогой
                                #   повторяющийся расход (opus reviewer) и ускоряет loop;
+                               #   для полностью Codex task-level пути выставьте оба в all
                                #   без codex — чистый фолбэк на Claude (лишний спавн на задачу).
 # CODEX_CIFIX: on              # точечные CI/сборочные фиксы (Режим 3): off (по умолч.) | on
 # CODEX_MODEL: gpt-5.6-terra   # пусто → модель из ~/.codex/config.toml
@@ -433,8 +436,13 @@ executable/path. Перед запуском `tools/processkit-runtime.ps1` вы
 `probe` (schema 1, reserved exit band 100–119 и поверхности run/inspect/cancel/kill/list/prune),
 а затем использует `processkit-cli run` для неинтерактивных root-сессий. Интерактивный Claude
 root требует probe surface `run:--inherit-stdio`; без него launcher явно запускает root
-напрямую с унаследованной консолью, чтобы TUI не зависал за null stdin/pipe stdout, но все
-supervisor leaf-команды остаются в ProcessKit container. Неверный явный backend
+напрямую с унаследованной консолью, чтобы TUI не зависал за null stdin/pipe stdout, но такой
+processor не пройдёт механический гейт аренды. ProcessKit-root передаёт ребёнку уникальную
+внутреннюю аттестацию `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`; `state-tx` возвращает код 20 до
+создания/возобновления lease, если роль `processor` запущена напрямую (включая Claude
+Desktop/Cowork) или через fallback без этой аттестации. Агентам запрещено выставлять либо
+подделывать переменную самим. Supervisor leaf-команды сохраняют собственные fallback.
+Неверный явный backend
 останавливает launcher с exit 10. На Windows resolver читает process, затем User/Machine
 scope, поэтому полный путь, записанный в системную `CC_PROCESSKIT_CLI`, виден сразу даже из
 уже открытого терминала. Только обновлённый `PATH` по-прежнему требует нового терминала.
@@ -444,9 +452,11 @@ JSONL каждой корневой сессии сохраняется в `.wor
 members/cleanup и terminal `runner_exit`. Живые runs адресуются штатными
 `processkit-cli list/inspect/cancel/kill/wait`; сырой argv по умолчанию не пишется.
 
-`CC_PROCESSKIT_PYTHON` остаётся deprecated-совместимым fallback: точный Python executable с
-`import processkit` используется лишь когда standalone CLI отключён/не найден. Без обоих
-backend поведение обратно совместимо. В любом случае launchers передают всему дереву
+`CC_PROCESSKIT_PYTHON` остаётся deprecated-совместимым fallback для leaf-вызовов: точный
+Python executable с `import processkit` используется лишь когда standalone CLI
+отключён/не найден. Без standalone CLI processor может открыть compatibility root, но не
+может взять/продлить аренду и завершается с инструкцией использовать
+`cc-processor`/`cc-resume` после установки/синхронизации runtime. В любом случае launchers передают всему дереву
 `MSBUILDDISABLENODEREUSE=1` и `DOTNET_CLI_USE_MSBUILD_SERVER=0`.
 Тот же resolver наследует `tools/supervisor.ps1`: каждый внешний вызов получает отдельный
 container. Supervisor читает terminal JSONL, поэтому runner `spawn_error`/`container_error`
@@ -644,8 +654,8 @@ codex, экономя квоту Claude для самых сложных зад�
 
 | Ключ | Допустимые значения | По умолчанию |
 |---|---|---|
-| `CODEX_CODER` | `off` \| `fast` \| `fast+std` | `off` |
-| `CODEX_REVIEWER` | `off` \| `fast` \| `fast+std` \| `deep` | `off` |
+| `CODEX_CODER` | `off` \| `fast` \| `fast+std` \| `all` | `off` |
+| `CODEX_REVIEWER` | `off` \| `fast` \| `fast+std` \| `deep` \| `all` | `off` |
 | `CODEX_CIFIX` | `off` \| `on` | `off` |
 | `CODEX_REASONING` | `auto` \| `low` \| `medium` \| `high` \| `xhigh` | `auto` |
 | `CODEX_SANDBOX` | `read-only` \| `workspace-write` | `workspace-write` |
@@ -817,18 +827,18 @@ cwd с `codex exec -C <WT>` и не создаёт redundant `--add-dir` в `wor
 режимах.
 
 **Что можно делегировать:**
-- **Реализация и `R-`-фиксы** (`coder_codex`, ключ `CODEX_CODER`) — задачи низкой/средней
-  сложности.
-- **Ревью** (`reviewer_codex`, ключ `CODEX_REVIEWER`) — независимое ревью. Даёт не только
-  экономию, но и **разнообразие моделей** (другая модель ловит иные дефекты).
+- **Реализация и `R-`-фиксы** (`coder_codex`, ключ `CODEX_CODER`) — отдельные уровни или
+  все task-level режимы значением `all`.
+- **Ревью** (`reviewer_codex`, ключ `CODEX_REVIEWER`) — независимое ревью. Legacy-режимы
+  дают разнообразие моделей; `all` изолирует checker отдельным Codex-тредом.
 - **Точечные CI/сборочные фиксы** (`coder_codex` Режим 3, ключ `CODEX_CIFIX`) — обычно
   механические (линт/типы/мелкий тест).
 
-**Независимость (важно).** `reviewer_codex` применяется **только к задачам,
-реализованным Claude**; если задачу реализовал codex — ревью остаётся на Claude. Так
-«другой ум» гарантированно касается каждой задачи. Практическое следствие: при обоих
-флагах (`CODEX_CODER`+`CODEX_REVIEWER`) на одном уровне задача получает ровно один шаг на
-codex и один на Claude.
+**Независимость (важно).** Для значений `fast`/`fast+std`/`deep` действует прежняя
+межпровайдерная граница: `reviewer_codex` применяется только к задачам, реализованным
+Claude; после codex-реализации ревью остаётся на Claude. Явное `CODEX_REVIEWER: all`
+выбирает Codex-only профиль: все уровни ревьюит новый отдельный checker-запуск Codex,
+который не продолжает тред `coder_codex`.
 
 **Рекомендуемая комбинация для максимальной экономии Opus:** `CODEX_CODER: off` (или
 `fast`) + `CODEX_REVIEWER: fast+std` — задачи уровня `coder` идут «Claude-реализация +
@@ -836,12 +846,20 @@ Codex-ревью», снимая самый дорогой повторяющи�
 Opus-квота остаётся под `coder_deep`.
 
 - `CODEX_CODER` — какие уровни реализации идут в codex: `off` | `fast` (только
-  `coder_fast`) | `fast+std` (`coder_fast` и `coder`). `coder_deep` — **никогда**.
-  Фолбэк на переменную окружения `CODEX_CODER` (см. ниже).
-- `CODEX_REVIEWER` — какие уровни ревью идут в codex (только для Claude-реализованных
-  задач): `off` | `fast` (`coder_fast`) | `fast+std` (`coder_fast` и `coder`) | `deep`
-  (как `fast+std`, плюс для `coder_deep` — дешёвый диверсити-проход **в дополнение** к
-  Opus-ревью, не вместо него). Фолбэк на переменную окружения `CODEX_REVIEWER` (см. ниже).
+  `coder_fast`) | `fast+std` (`coder_fast` и `coder`) | `all` (включая `coder_deep`).
+  `all` влияет на реализацию и `R-`-фиксы задачи, но не на интеграционные `F-` и не
+  включает Режим 3 без отдельного `CODEX_CIFIX`. Фолбэк на переменную окружения
+  `CODEX_CODER` (см. ниже).
+- `CODEX_REVIEWER` — какие уровни ревью идут в codex: `off` | `fast` (`coder_fast`) |
+  `fast+std` (`coder_fast` и `coder`) | `deep` (как `fast+std`, плюс для
+  Claude-реализованного `coder_deep` — диверсити-проход **в дополнение** к Opus-ревью) |
+  `all` (полная замена ревью всех уровней, включая deep, отдельным новым checker-тредом
+  Codex независимо от provider реализации). Фолбэк на переменную окружения
+  `CODEX_REVIEWER` (см. ниже).
+
+Для `coder_deep` оба адаптера игнорируют общие `CODEX_MODEL`/`CODEX_REASONING` и всегда
+используют `gpt-5.6-sol` с `xhigh`: `coder_codex` при `CODEX_CODER: all`, а
+`reviewer_codex` при `CODEX_REVIEWER: all` (`full`) либо `deep` (`augment`).
 
 **Фолбэк на переменные окружения.** Только `CODEX_CODER` и `CODEX_REVIEWER` (остальные
 ключи — исключительно из `config.md`) разрешаются по цепочке `config.md` → переменная
@@ -850,15 +868,15 @@ Opus-квота остаётся под `coder_deep`.
 
 ```sh
 # POSIX / bash (в профиле или перед запуском)
-export CODEX_CODER=fast
-export CODEX_REVIEWER=fast+std
+export CODEX_CODER=all
+export CODEX_REVIEWER=all
 ```
 ```powershell
 # Windows PowerShell (текущая сессия)
-$env:CODEX_CODER = 'fast'
-$env:CODEX_REVIEWER = 'fast+std'
+$env:CODEX_CODER = 'all'
+$env:CODEX_REVIEWER = 'all'
 # постоянно для пользователя:
-[Environment]::SetEnvironmentVariable('CODEX_REVIEWER', 'fast+std', 'User')
+[Environment]::SetEnvironmentVariable('CODEX_REVIEWER', 'all', 'User')
 ```
 - `CODEX_CIFIX` — `on` включает точечные CI/сборочные фиксы (Режим 3) через codex
   (Фазы 4.3 и 5.4). Интеграционные `F-` (Фаза 5.2) codex не ведёт никогда.

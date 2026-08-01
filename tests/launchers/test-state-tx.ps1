@@ -18,6 +18,7 @@
 #   - transition validation (task/cohort/integration): legal / illegal / unknown
 #   - root comparison (verify + takeover) is normalized (slash direction, trailing
 #     separator) yet still detects a genuinely different root as a mismatch
+#   - processor acquire/resume/heartbeat require a ProcessKit launcher attestation
 #
 # The tool is invoked with pwsh (PowerShell 7) when available AND, in a dedicated
 # cross-host scenario, with the current powershell.exe (Windows PowerShell 5.1),
@@ -30,6 +31,11 @@ $script:PwshHost = 'powershell'
 $script:IsWindowsHost = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
 $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
 if ($pwshCmd) { $script:PwshHost = $pwshCmd.Source }
+
+# state-tx is normally reached from a ProcessKit-contained processor root. The
+# deterministic lease tests model that launcher contract with a syntactically valid
+# per-run attestation; dedicated scenarios below remove/corrupt it fail-closed.
+$env:ORCHESTRA_PROCESSKIT_ROOT_RUN_ID = 'orchestra-state-tx-test-00000000000000000000000000000001'
 
 function New-Work {
     $root = Join-Path $env:TEMP ("orc-statetx-" + [Guid]::NewGuid().ToString('N'))
@@ -561,5 +567,26 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
         $r = Run-Tool @('bump-generation', '--work', $W, '--expected-generation', '0')
         Assert-Equal 0 $r.ExitCode '[strict-cli] valid state CAS mutation remains compatible'
         Assert-Match $r.Output 'generation=1' '[strict-cli] valid state mutation advances generation once'
+    } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
+
+    # --- Scenario 18: a direct/unattested processor cannot acquire or resume a lease.
+    $W = New-Work
+    try {
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--role', 'processor') -EnvVars @{
+            ORCHESTRA_PROCESSKIT_ROOT_RUN_ID = ''
+        }
+        Assert-Equal 20 $r.ExitCode '[root-attestation] direct processor acquire is refused'
+        Assert-Match $r.Output 'not launcher-attested by ProcessKit' '[root-attestation] refusal explains the required entry point'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $W 'orchestrator.lock'))) '[root-attestation] refused acquire creates no lease'
+
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--role', 'processor') -EnvVars @{
+            ORCHESTRA_PROCESSKIT_ROOT_RUN_ID = 'invented'
+        }
+        Assert-Equal 20 $r.ExitCode '[root-attestation] malformed marker is refused'
+
+        $r = Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--role', 'merger') -EnvVars @{
+            ORCHESTRA_PROCESSKIT_ROOT_RUN_ID = ''
+        }
+        Assert-Equal 0 $r.ExitCode '[root-attestation] non-processor lease roles are outside the root gate'
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 }

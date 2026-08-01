@@ -88,6 +88,18 @@ Assert-Equal 0 $probe.ExitCode 'disabled backend probe succeeds'
 $probeObject = $probe.Out | ConvertFrom-Json
 Assert-Equal 'none' $probeObject.Kind 'disabled backend resolves to none'
 
+$unattested = Invoke-Runtime @('assert-root', '--json')
+Assert-Equal 10 $unattested.ExitCode 'direct root without a launcher attestation is refused'
+Assert-True ($unattested.Err -match 'not launcher-attested by ProcessKit') 'direct-root refusal names the required containment path'
+$testRunId = 'orchestra-runtime-test-00000000000000000000000000000001'
+$attested = Invoke-Runtime @('assert-root', '--json') -Environment @{
+    ORCHESTRA_PROCESSKIT_ROOT_RUN_ID = $testRunId
+}
+Assert-Equal 0 $attested.ExitCode 'well-formed launcher attestation is accepted'
+$attestedObject = $attested.Out | ConvertFrom-Json
+Assert-Equal $true ([bool]$attestedObject.contained) 'attestation response is structurally contained=true'
+Assert-Equal $testRunId ([string]$attestedObject.run_id) 'attestation response preserves the exact root run id'
+
 $missing = Invoke-Runtime @('probe', '--json') -Environment @{ CC_PROCESSKIT_CLI = (Join-Path (New-TempDir) 'missing-processkit-cli') }
 Assert-Equal 10 $missing.ExitCode 'missing explicit CLI fails closed'
 Assert-True ($missing.Err -match 'CC_PROCESSKIT_CLI executable not found') 'missing explicit CLI explains the failed contract'
@@ -97,7 +109,7 @@ $worker = Join-Path $work 'worker.ps1'
 $marker = Join-Path $work 'marker.txt'
 [System.IO.File]::WriteAllText($worker, @'
 param([string]$Marker, [int]$Code)
-[System.IO.File]::WriteAllText($Marker, 'ran')
+[System.IO.File]::WriteAllText($Marker, [string]$env:ORCHESTRA_PROCESSKIT_ROOT_RUN_ID)
 Write-Output 'runtime-output'
 exit $Code
 '@, $script:Utf8)
@@ -119,6 +131,9 @@ if (-not [string]::IsNullOrWhiteSpace($realCli)) {
         -Environment @{ CC_PROCESSKIT_CLI = $realCli }
     Assert-Equal 7 $real.ExitCode 'released CLI preserves child exit code'
     Assert-True (Test-Path -LiteralPath $realMarker -PathType Leaf) 'released CLI ran target inside the container'
+    if (Test-Path -LiteralPath $realMarker -PathType Leaf) {
+        Assert-True ((Get-Content -Raw -LiteralPath $realMarker) -match '^orchestra-released-cli-[0-9a-f]{32}$') 'released CLI injects a per-root launcher attestation'
+    }
     $events = @(Get-ChildItem -LiteralPath $realWork -Recurse -Filter '*.processkit.jsonl')
     Assert-Equal 1 $events.Count 'released CLI writes one root lifecycle artifact'
     if ($events.Count -eq 1) {

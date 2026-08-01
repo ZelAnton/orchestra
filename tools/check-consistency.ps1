@@ -124,7 +124,8 @@ if ($defaultKeys.Count -eq 0) {
 # the coder_codex dependency broker, not a .work/config.md key), the launcher->processor
 # session-grant signal (CC_CODEX_EXEC_GRANT, exported by cc-processor/cc-resume and read by
 # the Phase 1.1 gate / cc-doctor as an environment variable, not a .work/config.md key -
-# task T-071), the coder_codex/reviewer_codex local shell variable holding the resolved
+# task T-071), the ProcessKit root attestation (ORCHESTRA_PROCESSKIT_ROOT_RUN_ID, injected
+# per run by processkit-runtime and never operator-configured), the coder_codex/reviewer_codex local shell variable holding the resolved
 # runtime-wrapper path (CODEX_RT) and processor-owned layout handoff (RUNTIME_LAYOUT;
 # checkout vs cc-sync mirror; neither is a .work/config.md key), plan/doc
 # filenames referenced in caps, git-config-via-environment variable names and a Windows
@@ -143,7 +144,7 @@ $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'CC_CODEX_EXEC_GRANT', 'CODEX_FAILED', 'CODEX_RT', 'CODEX_UNAVAILABLE', 'CODEX_REVIEW_MODE', 'DEFAULT_BRANCH',
         'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NEED_IMAGE_VIEW', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
-        'ORCHESTRA_AUTO_APPROVE', 'REVIEW_FINAL_CLEAN_PASSES', 'REVIEW_STRICT', 'RUNTIME_LAYOUT',
+        'ORCHESTRA_AUTO_APPROVE', 'ORCHESTRA_PROCESSKIT_ROOT_RUN_ID', 'REVIEW_FINAL_CLEAN_PASSES', 'REVIEW_STRICT', 'RUNTIME_LAYOUT',
         'OTHER_FAILURE', 'PROMPT_RESUME', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
         'THREAD_ID', 'UPPER_SNAKE_CASE', 'VERIFICATION_EVIDENCE'
     ), [StringComparer]::Ordinal)

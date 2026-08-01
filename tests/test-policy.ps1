@@ -262,6 +262,10 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Write-Utf8 $cfg "CODEX_REASONING: xhigh`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
     Assert-Exit $r 0 'validate-config accepts CODEX_REASONING: xhigh (enum extended in T-100)'
+
+    Write-Utf8 $cfg "CODEX_CODER: all`nCODEX_REVIEWER: all`n"
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 0 'validate-config accepts all-level Codex coder and reviewer routing'
 }.Invoke()
 
 # =============================================================================
