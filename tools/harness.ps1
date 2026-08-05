@@ -93,8 +93,30 @@ $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPla
 $script:PsHost = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 
+# --------------------------------------------------------------------------
+# ProcessKit root attestation for the harness's OWN processor-role tool calls.
+#
+# state-tx.ps1 refuses every `--role processor` lease operation (acquire / takeover /
+# heartbeat / verify) whose process was not launched through cc-processor / cc-resume:
+# the launcher injects a per-run ORCHESTRA_PROCESSKIT_ROOT_RUN_ID and the tool exits 20
+# without it. That gate is correct and is NOT weakened here - the harness is a *simulation*
+# driver that deliberately exercises the processor's lease primitives as itself, over a
+# disposable fixture, so it mints its OWN per-run synthetic attestation (fresh per harness
+# process, never a fixed constant that could be mistaken for a real launcher run id) and
+# merges it into exactly the child calls that need it (see Step-Lease / Guarded-ToolCall),
+# NOT into the harness process's own ambient $env: (a global mutation would leak the
+# synthetic marker into every unrelated child of this process).
+#
+# Format is the one Get-OrchestraProcessKitRootAttestation validates
+# (tools/processkit-runtime.ps1): ^orchestra-[A-Za-z0-9_.-]+-[0-9a-f]{32}$.
+# --------------------------------------------------------------------------
+$script:RootRunIdEnv = 'ORCHESTRA_PROCESSKIT_ROOT_RUN_ID'
+$script:HarnessRootRunId = 'orchestra-harness-' + [guid]::NewGuid().ToString('N')
+function Get-ProcessorAttestationEnv { return @{ $script:RootRunIdEnv = $script:HarnessRootRunId } }
+
 # Runs one of the transaction tools as a child process; returns @{ ExitCode; Out; Err }.
-# $EnvVars lets a caller set a *_FAULT env var for exactly one invocation (crash injection).
+# $EnvVars lets a caller set a *_FAULT env var for exactly one invocation (crash injection)
+# or hand a call the harness's synthetic processor attestation.
 function Invoke-Tool {
     param([string]$Tool, [string[]]$ToolArgs, [hashtable]$EnvVars = @{})
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -108,6 +130,14 @@ function Invoke-Tool {
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
     }
+    # Hermetic environment: the shell that runs the harness may itself be a REAL, attested
+    # cc-processor session carrying a valid ORCHESTRA_PROCESSKIT_ROOT_RUN_ID. Plain inheritance
+    # would let a scenario's processor-role call pass on that ambient credential - masking a
+    # missing harness attestation locally while CI (no launcher, no marker) fails with exit 20.
+    # Strip it from every child first; the calls that legitimately need one re-add the harness's
+    # own synthetic value through $EnvVars below (an empty value reads as unset/invalid to
+    # Get-OrchestraProcessKitRootAttestation, exactly as tests/launchers/test-state-tx.ps1 relies on).
+    $psi.Environment[$script:RootRunIdEnv] = ''
     foreach ($k in $EnvVars.Keys) { $psi.Environment[$k] = [string]$EnvVars[$k] }
     $proc = [System.Diagnostics.Process]::Start($psi)
     $outT = $proc.StandardOutput.ReadToEndAsync()
@@ -605,11 +635,19 @@ function Parse-Fault {
 # Runs a transactional tool call. When the active fault targets THIS step, first runs it
 # with the crash hook (must fail), then reconciles per pre/post-commit semantics before
 # replaying/continuing. $CommittedProbe reports whether the atomic commit is on disk.
+# $EnvVars are extra child-process env vars this step's tool needs on EVERY attempt (e.g.
+# the processor attestation of Step-Lease); the crash hook is merged ON TOP of them, never
+# instead of them - a faulted attempt that lost the attestation would be rejected before it
+# reached the transaction it is supposed to interrupt (exit 20, not the injected crash).
 function Guarded-ToolCall {
-    param($Fx, [string]$StepName, [string]$Tool, [string[]]$ToolArgs, [scriptblock]$CommittedProbe = $null)
+    param($Fx, [string]$StepName, [string]$Tool, [string[]]$ToolArgs, [scriptblock]$CommittedProbe = $null,
+        [hashtable]$EnvVars = @{})
     $f = $Fx.Fault
     if ($f -and $f.Target -eq $StepName) {
-        $r1 = Invoke-Tool $Tool $ToolArgs @{ $f.EnvVar = $f.Stage }
+        $faultEnv = @{}
+        foreach ($k in $EnvVars.Keys) { $faultEnv[$k] = $EnvVars[$k] }
+        $faultEnv[$f.EnvVar] = $f.Stage
+        $r1 = Invoke-Tool $Tool $ToolArgs $faultEnv
         $Fx.FaultFired = $true
         if ($r1.ExitCode -eq 0) { Fail 4 "injected fault '$($f.Stage)' at step '$StepName' did not interrupt the tool (exit 0)" }
         $committed = $false
@@ -621,7 +659,7 @@ function Guarded-ToolCall {
         if ($committed) { Fail 4 "pre-commit fault at '$StepName': mutation landed despite a pre-commit crash (atomicity broken)" }
         # fall through to a clean replay of the transition
     }
-    $r = Invoke-Tool $Tool $ToolArgs
+    $r = Invoke-Tool $Tool $ToolArgs $EnvVars
     if ($r.ExitCode -ne 0) { Fail 4 "step '$StepName' failed: exit $($r.ExitCode) $([string]$r.Err)$([string]$r.Out)" }
     return $r
 }
@@ -660,9 +698,12 @@ function Queue-Status {
 function Step-Lease {
     param($Fx)
     $lease = Join-Path $Fx.Work 'orchestrator.lock/lease.json'
+    # The ONLY harness call that takes a processor-role lease, hence the only one that must
+    # carry the harness's synthetic ProcessKit root attestation (see Get-ProcessorAttestationEnv).
+    # It is scoped to this child process; nothing else the harness spawns receives a marker.
     Guarded-ToolCall $Fx 'lease' $script:StateTx `
         @('acquire', '--work', $Fx.Work, '--root', $Fx.Repo, '--role', 'processor', '--ttl', '900') `
-        { Test-Path -LiteralPath $lease } | Out-Null
+        { Test-Path -LiteralPath $lease } -EnvVars (Get-ProcessorAttestationEnv) | Out-Null
     $Fx.Owner = Lease-Owner $Fx
     if (-not $Fx.Owner) { Fail 4 'lease acquired but owner id unreadable from lease.json' }
 }
