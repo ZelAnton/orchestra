@@ -263,6 +263,12 @@ Hard rules (violation = failure):
   ONE image that already exists on disk. You will be shown that image directly in a follow-up
   turn of this same session so you can inspect it, then continue and finish the task
   (including re-running any smoke command).
+- When adding or updating prose about guarantees, coverage, or conditions (doc-comments,
+  docstrings, README, CHANGELOG): verify claims against the committed code of the baseline
+  revision, not memory or branch intent. Record CHANGELOG/release-notes relative to baseline
+  state. Choose a conditional or narrower formulation when uncertain. Verify equivalence of
+  any A-or-B gating conditions before claiming both paths work. Reuse existing honest
+  formulations instead of creating alternatives.
 - Implement completely — no stubs, no TODO/FIXME left behind.
 - When editing an append-only / changelog-like / list-structured file (many existing lines
   share the same shape, e.g. bullet entries), include enough surrounding context in your
