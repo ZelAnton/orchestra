@@ -1,4 +1,4 @@
-# ci:posix
+﻿# ci:posix
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 

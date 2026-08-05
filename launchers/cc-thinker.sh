@@ -27,7 +27,7 @@ case "$PROVIDER" in
     exec claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: $*"
     ;;
   codex)
-    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
     PROJECT_ROOT="$(pwd -P)"
     CODEX_ROLE_RUNTIME="$SCRIPT_DIR/../tools/codex-role-runtime.ps1"
     if [ ! -f "$CODEX_ROLE_RUNTIME" ]; then

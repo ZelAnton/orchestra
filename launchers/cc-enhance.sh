@@ -18,7 +18,7 @@ case "$PROVIDER" in
     exec claude --agent enhancement_scout --permission-mode auto "Per your system prompt, analyze the project and enqueue development/improvement proposals as separate tasks in .work/Tasks_Queue.md. Start now."
     ;;
   codex)
-    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
     PROJECT_ROOT="$(pwd -P)"
     CODEX_ROLE_RUNTIME="$SCRIPT_DIR/../tools/codex-role-runtime.ps1"
     if [ ! -f "$CODEX_ROLE_RUNTIME" ]; then CODEX_ROLE_RUNTIME="$SCRIPT_DIR/codex-role-runtime.ps1"; fi
