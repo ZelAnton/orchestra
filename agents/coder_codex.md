@@ -269,6 +269,7 @@ Hard rules (violation = failure):
   state. Choose a conditional or narrower formulation when uncertain. Verify equivalence of
   any A-or-B gating conditions before claiming both paths work. Reuse existing honest
   formulations instead of creating alternatives.
+  Additionally, claims about behavior after fixing are checked against post-fix code.
 - Implement completely — no stubs, no TODO/FIXME left behind.
 - When editing an append-only / changelog-like / list-structured file (many existing lines
   share the same shape, e.g. bullet entries), include enough surrounding context in your

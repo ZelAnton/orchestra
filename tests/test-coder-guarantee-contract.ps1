@@ -68,7 +68,8 @@ foreach ($claim in @(
     'committed code of the baseline revision',
     'Record CHANGELOG/release-notes relative to baseline state',
     'Verify equivalence of any A-or-B gating conditions',
-    'Reuse existing honest formulations'
+    'Reuse existing honest formulations',
+    'claims about behavior after fixing are checked against post-fix code'
 )) {
     Assert-Contains $hardRules $claim "coder_codex hard rules include [$claim]"
 }

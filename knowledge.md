@@ -205,9 +205,6 @@ Processor и merger формируют описательные англоязы
   `generate-coders.ps1` создаёт `coder_fast.md`, `coder.md`, `coder_deep.md`; их нельзя
   редактировать по отдельности. Уровни: fast = Sonnet/medium, standard = Sonnet/high,
   deep = Opus/xhigh.
-- `docs/queue_contract.md`, §21 — единый нормативный источник проверки прозы о гарантиях,
-  покрытии и условиях. Режимы 1/2 `coder.template.md` ссылаются на него; `coder_codex.md`
-  передаёт короткий английский эквивалент непосредственно в дочерний prompt.
 - `reviewer_std.md` — дешёвое per-task ревью fast-задач; `reviewer.md` — полное ревью
   standard/deep; оба ведут `R-NN` в task-local `review.md`.
 - `full_reviewer.md` — ревью совокупного результата в `_integration`, ведёт `F-NN` в
