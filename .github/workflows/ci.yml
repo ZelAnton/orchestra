@@ -282,6 +282,20 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check coder guarantee contract
+        # K-007: tests/test-*.ps1 files are not discovered automatically, so this wiring is
+        # explicit; without it the coder guarantee contract test never runs.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-coder-guarantee-contract.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check event outbox
         # tests/test-outbox.ps1 (T-089/T-248): drives tools/outbox.ps1 - the transactional,
         # validated, idempotent, torn-tail-safe single-writer for the durable event outbox
