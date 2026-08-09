@@ -577,8 +577,9 @@ foreach ($marker in @(
 # validate the suffix against the committed BASE. The adapters are hand-written and
 # therefore are not covered by the Codex-role generator's drift checks.
 $kbPullConsumers = [ordered]@{
-    'agents/planner.md'       = $plannerKbText
-    'agents/coder_codex.md'   = Get-Content -LiteralPath (Join-Path $AgentsDir 'coder_codex.md') -Raw -Encoding utf8
+    'agents/planner.md'        = $plannerKbText
+    'agents/processor.md'      = Get-Content -LiteralPath (Join-Path $AgentsDir 'processor.md') -Raw -Encoding utf8
+    'agents/coder_codex.md'    = Get-Content -LiteralPath (Join-Path $AgentsDir 'coder_codex.md') -Raw -Encoding utf8
     'agents/reviewer_codex.md' = Get-Content -LiteralPath (Join-Path $AgentsDir 'reviewer_codex.md') -Raw -Encoding utf8
 }
 foreach ($entry in $kbPullConsumers.GetEnumerator()) {
