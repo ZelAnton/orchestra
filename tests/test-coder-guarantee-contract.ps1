@@ -50,6 +50,23 @@ function Assert-CoderModes {
     }
 }
 
+function Get-RadiusLine {
+    param([string]$Descriptor)
+    return @($Descriptor -split '\r?\n' | Where-Object { $_ -match '^\s*Ограничение радиуса:\s*\S' })
+}
+
+function Build-Mode1PromptFixture {
+    param([string]$Descriptor)
+    $sections = [System.Collections.Generic.List[string]]::new()
+    foreach ($heading in @('## Описание', '## Критерии выполнения', '## План выполнения')) {
+        $match = [regex]::Match($Descriptor, "(?ms)^$([regex]::Escape($heading))$.*?(?=^## |\z)")
+        if ($match.Success) { [void]$sections.Add($match.Value.Trim()) }
+    }
+    $radius = @(Get-RadiusLine $Descriptor)
+    if ($radius.Count -eq 1) { [void]$sections.Add($radius[0].Trim()) }
+    return ($sections -join "`n`n")
+}
+
 $contract = Read-Text 'docs/queue_contract.md'
 Assert-Contains $contract '## 21. Нормативное правило проверяемости прозы о гарантиях' 'queue contract defines section 21'
 Assert-Contains $contract 'базовой ревизии (`BASE`)' 'section 21 verifies claims against committed BASE code'
@@ -59,6 +76,11 @@ Assert-Contains $contract 'переиспользуй её' 'section 21 reuses h
 
 $coderTemplate = Read-Text 'agents/coder.template.md'
 Assert-CoderModes $coderTemplate 'coder template'
+$templateMode1 = Get-Section $coderTemplate '## Режим 1 — реализация задачи' '## Режим 2 — устранение находок'
+Assert-Contains $templateMode1 'Если в `task.md` присутствует metadata-строка `Ограничение радиуса:`' 'coder template makes an existing radius metadata line mandatory'
+Assert-Contains $templateMode1 'правь минимально необходимое в указанном файле, символе или заголовке' 'coder template binds radius to the specified file or anchor'
+Assert-Contains $templateMode1 'не расширяй diff за это место, на остальной файл, блок или соседние модули без отдельного критерия выполнения' 'coder template forbids unqualified radius expansion'
+Assert-Contains $templateMode1 'Если строки нет (в том числе при `KB=off`), не выдумывай и не добавляй такое ограничение' 'coder template preserves absent-radius and KB-off behavior'
 
 foreach ($relative in @(
     'agents/coder.md',
@@ -69,6 +91,10 @@ foreach ($relative in @(
 }
 
 $adapter = Read-Text 'agents/coder_codex.md'
+$adapterMode1 = Get-Section $adapter '# Построение промпта codex' '**Режим 2**'
+Assert-Contains $adapterMode1 'Если descriptor содержит metadata-строку `Ограничение радиуса:`, prompt builder обязан передать её целиком' 'coder_codex transmits a present radius line verbatim'
+Assert-Contains $adapterMode1 'Если строки нет (в том числе при `KB=off`), не добавляй её и не выдумывай ограничение' 'coder_codex omits an absent radius line including KB-off'
+Assert-Contains $adapterMode1 'без расширения diff без отдельного критерия выполнения' 'coder_codex transmits the radius obligation'
 $hardRules = Get-Section $adapter 'Hard rules (violation = failure):' '```'
 foreach ($claim in @(
     'When adding or updating prose about guarantees, coverage, or conditions',
@@ -92,6 +118,40 @@ foreach ($marker in @(
     'При `KB=off` или отсутствии каталога — пропусти')) {
     Assert-Contains $adapter $marker "coder_codex anchored KB contract includes [$marker]"
 }
+
+# Hermetic descriptor/prompt fixture: presence is sourced from task.md, transmission is
+# verbatim, and absence (including KB=off descriptors) does not manufacture a radius.
+$descriptorWithRadius = @"
+Ограничение радиуса: KB K-42 (agents/example.md::ExampleSymbol): тронуть минимально необходимое место.
+
+## Описание
+Implement the focused fix.
+
+## Критерии выполнения
+- The focused behavior is covered.
+
+## План выполнения
+- [ ] Этап 1: implement
+"@
+$descriptorWithoutRadius = @"
+## Описание
+Implement the focused fix.
+
+## Критерии выполнения
+- The focused behavior is covered.
+
+## План выполнения
+- [ ] Этап 1: implement
+"@
+$descriptorKbOff = $descriptorWithoutRadius
+$radiusLine = @(Get-RadiusLine $descriptorWithRadius)
+$promptWithRadius = Build-Mode1PromptFixture $descriptorWithRadius
+$promptWithoutRadius = Build-Mode1PromptFixture $descriptorWithoutRadius
+$promptKbOff = Build-Mode1PromptFixture $descriptorKbOff
+Assert-True ($radiusLine.Count -eq 1) 'descriptor fixture distinguishes a present radius metadata line'
+Assert-True ($promptWithRadius.Contains($radiusLine[0].Trim())) 'present descriptor radius is transmitted verbatim to the mode-1 prompt'
+Assert-True (-not $promptWithoutRadius.Contains('Ограничение радиуса:')) 'descriptor without radius does not transmit a radius line'
+Assert-True (-not $promptKbOff.Contains('Ограничение радиуса:')) 'KB-off descriptor does not manufacture or transmit a radius line'
 
 # Hermetic reference fixture for the shared normalization rule. This deliberately
 # exercises anchored components, comma-separated paths, and an unanchored glob scope.

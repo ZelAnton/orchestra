@@ -203,8 +203,10 @@ Processor и merger формируют описательные англоязы
 
 - `coder.template.md` — **единственный источник** общей логики Claude-coder.
   `generate-coders.ps1` создаёт `coder_fast.md`, `coder.md`, `coder_deep.md`; их нельзя
-  редактировать по отдельности. Уровни: fast = Sonnet/medium, standard = Sonnet/high,
-  deep = Opus/xhigh.
+  редактировать по отдельности. В Режиме 1 уже существующая строка `Ограничение радиуса:`
+  в `task.md` обязательна для минимального diff в указанном файле, символе или заголовке;
+  `coder_codex` передаёт её в prompt только при наличии, включая отсутствие при `KB=off`.
+  Уровни: fast = Sonnet/medium, standard = Sonnet/high, deep = Opus/xhigh.
 - `reviewer_std.md` — дешёвое per-task ревью fast-задач; `reviewer.md` — полное ревью
   standard/deep; оба ведут `R-NN` в task-local `review.md`.
 - `full_reviewer.md` — ревью совокупного результата в `_integration`, ведёт `F-NN` в
