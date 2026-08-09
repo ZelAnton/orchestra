@@ -82,6 +82,10 @@ foreach ($v in $script:Variants) {
     Assert-True (-not ($bytes -contains 0x0D)) "$v has LF-only line endings (no CR)"
     $text = [System.Text.Encoding]::UTF8.GetString($bytes)
     Assert-True (-not [regex]::IsMatch($text, '\{\{[A-Za-z_]+\}\}')) "$v has no leftover {{PLACEHOLDER}}"
+
+    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+        Assert-True ($text.Contains($marker)) "$v preserves the anchored KB scope contract marker '$marker'"
+    }
 }
 
 # =============================================================================

@@ -17,16 +17,22 @@ function Get-Sha256 {
     finally { $sha.Dispose() }
 }
 function Write-Agent {
-    param([string]$Name, [string]$Description = 'fixture role')
-    $text = "---`nname: $Name`ndescription: $Description`nmodel: sonnet`ntools: Read, Bash`npermissionMode: auto`n---`n`n# Role $Name`n`nBODY-$Name`n"
+    param([string]$Name, [string]$Description = 'fixture role', [string]$Body = '')
+    if ([string]::IsNullOrEmpty($Body)) { $Body = "BODY-$Name" }
+    $text = "---`nname: $Name`ndescription: $Description`nmodel: sonnet`ntools: Read, Bash`npermissionMode: auto`n---`n`n# Role $Name`n`n$Body`n"
     [System.IO.File]::WriteAllText((Join-Path $root "agents\$Name.md"), $text, $utf8)
 }
 
 try {
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'agents') | Out-Null
     Copy-Item -LiteralPath $sourceGenerator -Destination (Join-Path $root 'generate-codex-agents.ps1')
+    $kbScopeContract = 'scope_file; до первого `::`; path intersection; committed `BASE`'
     foreach ($role in @('planner','executor','coder_fast','coder','coder_deep','reviewer_std','reviewer','full_reviewer','merger','knowledge_curator','inbox_curator','dependency_curator','processor')) {
-        Write-Agent -Name $role
+        if ($role -in @('coder', 'reviewer')) {
+            Write-Agent -Name $role -Body "$kbScopeContract`nBODY-$role"
+        } else {
+            Write-Agent -Name $role
+        }
     }
 
     & pwsh -NoProfile -File (Join-Path $root 'generate-codex-agents.ps1') *> $null
@@ -39,6 +45,9 @@ try {
     Assert-True ($coderText.Contains('model_reasoning_effort = "high"')) 'generated coder carries configured reasoning tier'
     Assert-True ($coderText.Contains('BODY-coder')) 'generated TOML embeds canonical role body'
     Assert-True ($coderText.Contains('Never invoke `claude`')) 'generated leaf carries no-Claude provider overlay'
+    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+        Assert-True ($coderText.Contains($marker)) "generated coder preserves anchored KB scope contract marker '$marker'"
+    }
     $bytes = [System.IO.File]::ReadAllBytes($coder)
     Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) 'generated TOML is UTF-8 without BOM'
 
@@ -49,6 +58,11 @@ try {
     Assert-True ($processorText.Contains('orchestra_dependency_curator')) 'processor overlay maps the dependency curator role'
     Assert-True ($processorText.Contains('BODY-processor')) 'processor prompt embeds canonical processor body'
     Assert-True ($processorText.Contains('without falling back to Claude')) 'processor overlay forbids provider fallback'
+    $reviewer = Join-Path $root 'codex\agents\orchestra_reviewer.toml'
+    $reviewerText = [System.IO.File]::ReadAllText($reviewer)
+    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+        Assert-True ($reviewerText.Contains($marker)) "generated reviewer preserves anchored KB scope contract marker '$marker'"
+    }
 
     $hashBefore = Get-Sha256 $coder
     $staleRole = Join-Path $root 'codex\agents\orchestra_removed_role.toml'
