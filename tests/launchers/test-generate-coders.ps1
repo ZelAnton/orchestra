@@ -83,7 +83,7 @@ foreach ($v in $script:Variants) {
     $text = [System.Text.Encoding]::UTF8.GetString($bytes)
     Assert-True (-not [regex]::IsMatch($text, '\{\{[A-Za-z_]+\}\}')) "$v has no leftover {{PLACEHOLDER}}"
 
-    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+    foreach ($marker in @('scope_paths', 'по запятым', 'каждый компонент', 'path intersection', 'широкими', 'Ограничение радиуса', 'committed `BASE`')) {
         Assert-True ($text.Contains($marker)) "$v preserves the anchored KB scope contract marker '$marker'"
     }
 }

@@ -197,9 +197,12 @@ function Assert-Equal {
 $reviewerContract = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\agents\reviewer_codex.md') -Raw -Encoding utf8
 $normalizedReviewerContract = [regex]::Replace($reviewerContract, '\s+', ' ')
 foreach ($marker in @(
-    'scope_file',
-    'до первого `::`',
+    'scope_paths',
+    'по запятым',
+    'каждый компонент',
     'path intersection',
+    'широкими',
+    'Ограничение радиуса',
     'committed `BASE`',
     'live worktree',
     'При `KB=off` или отсутствии каталога — пропусти')) {
@@ -209,6 +212,41 @@ Assert-True $normalizedReviewerContract.Contains('This is a READ-ONLY review') `
     'reviewer_codex keeps the read-only boundary while pulling KB data'
 Assert-True $normalizedReviewerContract.Contains('Never read, create, or modify anything under any `.work/` directory') `
     'reviewer_codex keeps the .work single-writer boundary'
+
+# Hermetic reference fixture for the KB scope normalizer used by the adapter.
+function Normalize-ScopeFixture {
+    param([Parameter(Mandatory)][string]$Scope)
+    $components = @($Scope -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $paths = @(
+        foreach ($component in $components) {
+            $separator = $component.IndexOf('::', [System.StringComparison]::Ordinal)
+            if ($separator -gt 0) {
+                $suffix = $component.Substring($separator + 2)
+                if ($suffix.StartsWith('heading:', [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $suffix -match '^[A-Za-z_][A-Za-z0-9_.-]*$') {
+                    $component.Substring(0, $separator)
+                    continue
+                }
+            }
+            $component
+        }
+    )
+    [pscustomobject]@{
+        Paths = $paths
+        Broad = ($components.Count -gt 1 -or (@($paths | Where-Object { $_ -match '[*?\[\]]' }).Count -gt 0))
+    }
+}
+$anchoredScope = Normalize-ScopeFixture 'agents/reviewer.md::Invoke-Review'
+Assert-True (@($anchoredScope.Paths).Count -eq 1 -and $anchoredScope.Paths[0] -eq 'agents/reviewer.md' -and -not $anchoredScope.Broad) `
+    'reviewer scope fixture strips an anchor only for a single component'
+$commaScope = Normalize-ScopeFixture 'agents/reviewer.md, agents/reviewer_std.md'
+Assert-True (@($commaScope.Paths).Count -eq 2 -and $commaScope.Paths[0] -eq 'agents/reviewer.md' -and
+    $commaScope.Paths[1] -eq 'agents/reviewer_std.md' -and $commaScope.Broad) `
+    'reviewer scope fixture preserves trimmed comma-separated paths without radius narrowing'
+$globScope = Normalize-ScopeFixture 'agents/*.md, codex/**'
+Assert-True (@($globScope.Paths).Count -eq 2 -and $globScope.Paths[0] -eq 'agents/*.md' -and
+    $globScope.Paths[1] -eq 'codex/**' -and $globScope.Broad) `
+    'reviewer scope fixture keeps multi-path/glob scopes broad and relevant'
 
 # --- Scenario 1: partial success (RECHECK skipped or duplicated) not counted --
 

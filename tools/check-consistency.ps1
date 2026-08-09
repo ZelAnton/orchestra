@@ -535,7 +535,9 @@ function Require-KbContractMarker {
         [Parameter(Mandatory)][string]$Marker,
         [Parameter(Mandatory)][string]$Case
     )
-    if ($Text.IndexOf($Marker, [System.StringComparison]::Ordinal) -lt 0) {
+    $normalizedText = [regex]::Replace($Text, '\s+', ' ')
+    $normalizedMarker = [regex]::Replace($Marker, '\s+', ' ')
+    if ($normalizedText.IndexOf($normalizedMarker, [System.StringComparison]::Ordinal) -lt 0) {
         Add-Finding -FileRef $FileRef -Check 'kb-radius-boundary' `
             -Detail "$Case is missing marker '$Marker'"
     }
@@ -548,6 +550,12 @@ foreach ($marker in @(
         'scope` — единственное поле формата',
         'path/to/file.ext::SymbolName',
         'path/to/document.ext::heading:',
+        '`scope_paths`',
+        'раздели по запятым',
+        'каждый компонент',
+        'path intersection',
+        'glob',
+        'не дают `Ограничение радиуса:`',
         'occurrences++',
         'occurrences≥2',
         'Не добавляй параллельное поле `anchor`',
@@ -560,7 +568,11 @@ foreach ($marker in @(
 # explicitly left without a radius restriction.
 foreach ($marker in @(
         'Ограничение радиуса:',
-        'occurrences` — целое число `≥ 2`',
+        '`scope_paths`',
+        'раздели его по запятым',
+        'каждый компонент',
+        'glob',
+        'occurrences',
         'file::SymbolName',
         'file::heading:<заголовок>',
         'каталог, glob, список нескольких',
@@ -573,19 +585,74 @@ foreach ($marker in @(
     Require-KbContractMarker 'agents/planner.md' $plannerKbText $marker 'planner KB radius contract'
 }
 
-# Every KB pull consumer must normalize anchored scopes before path intersection and
-# validate the suffix against the committed BASE. The adapters are hand-written and
-# therefore are not covered by the Codex-role generator's drift checks.
+# Every KB pull/invalidation/routing consumer must normalize comma-separated scopes before
+# path intersection and validate anchors against the committed BASE. The adapters are
+# hand-written and therefore are not covered by the Codex-role generator's drift checks.
 $kbPullConsumers = [ordered]@{
-    'agents/planner.md'        = $plannerKbText
-    'agents/processor.md'      = Get-Content -LiteralPath (Join-Path $AgentsDir 'processor.md') -Raw -Encoding utf8
-    'agents/coder_codex.md'    = Get-Content -LiteralPath (Join-Path $AgentsDir 'coder_codex.md') -Raw -Encoding utf8
-    'agents/reviewer_codex.md' = Get-Content -LiteralPath (Join-Path $AgentsDir 'reviewer_codex.md') -Raw -Encoding utf8
+    'agents/planner.md'          = $plannerKbText
+    'agents/knowledge_curator.md' = $curatorKbText
+    'agents/processor.md'        = Get-Content -LiteralPath (Join-Path $AgentsDir 'processor.md') -Raw -Encoding utf8
+    'agents/coder.template.md'   = Get-Content -LiteralPath (Join-Path $AgentsDir 'coder.template.md') -Raw -Encoding utf8
+    'agents/reviewer.template.md'= Get-Content -LiteralPath (Join-Path $AgentsDir 'reviewer.template.md') -Raw -Encoding utf8
+    'agents/coder_codex.md'      = Get-Content -LiteralPath (Join-Path $AgentsDir 'coder_codex.md') -Raw -Encoding utf8
+    'agents/reviewer_codex.md'   = Get-Content -LiteralPath (Join-Path $AgentsDir 'reviewer_codex.md') -Raw -Encoding utf8
 }
 foreach ($entry in $kbPullConsumers.GetEnumerator()) {
-    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`', 'live worktree')) {
+    foreach ($marker in @(
+            'scope_paths',
+            'по запятым',
+            'каждый компонент',
+            'path intersection',
+            'широкими',
+            'Ограничение радиуса',
+            'committed `BASE`',
+            'live worktree')) {
         Require-KbContractMarker $entry.Key $entry.Value $marker 'anchored KB pull contract'
     }
+}
+
+# Reference fixtures keep the normalization contract executable: comma-separated scopes
+# must retain every trimmed component, while a single anchored component may shed only its
+# anchor suffix. A list or glob remains broad and therefore cannot produce a radius limit.
+function Normalize-KbScopeFixture {
+    param([Parameter(Mandatory)][string]$Scope)
+    $components = @($Scope -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $paths = @(
+        foreach ($component in $components) {
+            $separator = $component.IndexOf('::', [System.StringComparison]::Ordinal)
+            if ($separator -gt 0) {
+                $suffix = $component.Substring($separator + 2)
+                if ($suffix.StartsWith('heading:', [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $suffix -match '^[A-Za-z_][A-Za-z0-9_.-]*$') {
+                    $component.Substring(0, $separator)
+                    continue
+                }
+            }
+            $component
+        }
+    )
+    [pscustomobject]@{
+        Paths = $paths
+        Broad = ($components.Count -gt 1 -or (@($paths | Where-Object { $_ -match '[*?\[\]]' }).Count -gt 0))
+    }
+}
+
+$singleAnchor = Normalize-KbScopeFixture 'agents/planner.md::Invoke-Plan'
+if (@($singleAnchor.Paths).Count -ne 1 -or $singleAnchor.Paths[0] -ne 'agents/planner.md' -or $singleAnchor.Broad) {
+    Add-Finding -FileRef 'tools/check-consistency.ps1' -Check 'kb-scope-fixture' `
+        -Detail 'single anchored scope must strip only its suffix and remain eligible for narrow handling'
+}
+$multiPath = Normalize-KbScopeFixture 'agents/planner.md, agents/thinker.md'
+if (@($multiPath.Paths).Count -ne 2 -or $multiPath.Paths[0] -ne 'agents/planner.md' -or
+    $multiPath.Paths[1] -ne 'agents/thinker.md' -or -not $multiPath.Broad) {
+    Add-Finding -FileRef 'tools/check-consistency.ps1' -Check 'kb-scope-fixture' `
+        -Detail 'comma-separated scope must preserve trimmed components and remain broad'
+}
+$multiGlob = Normalize-KbScopeFixture 'agents/*.md, codex/**'
+if (@($multiGlob.Paths).Count -ne 2 -or $multiGlob.Paths[0] -ne 'agents/*.md' -or
+    $multiGlob.Paths[1] -ne 'codex/**' -or -not $multiGlob.Broad) {
+    Add-Finding -FileRef 'tools/check-consistency.ps1' -Check 'kb-scope-fixture' `
+        -Detail 'multi-path/glob scope must remain relevant and broad'
 }
 
 # =============================================================================

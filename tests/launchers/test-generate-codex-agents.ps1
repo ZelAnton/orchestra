@@ -26,7 +26,7 @@ function Write-Agent {
 try {
     New-Item -ItemType Directory -Force -Path (Join-Path $root 'agents') | Out-Null
     Copy-Item -LiteralPath $sourceGenerator -Destination (Join-Path $root 'generate-codex-agents.ps1')
-    $kbScopeContract = 'scope_file; до первого `::`; path intersection; committed `BASE`'
+    $kbScopeContract = 'scope_paths; scope_file; по запятым; каждый компонент; path intersection; широкими; Ограничение радиуса; committed `BASE`'
     foreach ($role in @('planner','executor','coder_fast','coder','coder_deep','reviewer_std','reviewer','full_reviewer','merger','knowledge_curator','inbox_curator','dependency_curator','processor')) {
         if ($role -in @('planner', 'coder', 'reviewer')) {
             Write-Agent -Name $role -Body "$kbScopeContract`nBODY-$role"
@@ -45,12 +45,12 @@ try {
     Assert-True ($coderText.Contains('model_reasoning_effort = "high"')) 'generated coder carries configured reasoning tier'
     Assert-True ($coderText.Contains('BODY-coder')) 'generated TOML embeds canonical role body'
     Assert-True ($coderText.Contains('Never invoke `claude`')) 'generated leaf carries no-Claude provider overlay'
-    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+    foreach ($marker in @('scope_paths', 'по запятым', 'каждый компонент', 'path intersection', 'широкими', 'Ограничение радиуса', 'committed `BASE`')) {
         Assert-True ($coderText.Contains($marker)) "generated coder preserves anchored KB scope contract marker '$marker'"
     }
     $planner = Join-Path $root 'codex\agents\orchestra_planner.toml'
     $plannerText = [System.IO.File]::ReadAllText($planner)
-    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+    foreach ($marker in @('scope_paths', 'по запятым', 'каждый компонент', 'path intersection', 'широкими', 'Ограничение радиуса', 'committed `BASE`')) {
         Assert-True ($plannerText.Contains($marker)) "generated planner preserves anchored KB scope contract marker '$marker'"
     }
     $bytes = [System.IO.File]::ReadAllBytes($coder)
@@ -65,7 +65,7 @@ try {
     Assert-True ($processorText.Contains('without falling back to Claude')) 'processor overlay forbids provider fallback'
     $reviewer = Join-Path $root 'codex\agents\orchestra_reviewer.toml'
     $reviewerText = [System.IO.File]::ReadAllText($reviewer)
-    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+    foreach ($marker in @('scope_paths', 'по запятым', 'каждый компонент', 'path intersection', 'широкими', 'Ограничение радиуса', 'committed `BASE`')) {
         Assert-True ($reviewerText.Contains($marker)) "generated reviewer preserves anchored KB scope contract marker '$marker'"
     }
 

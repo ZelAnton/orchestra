@@ -81,9 +81,12 @@ foreach ($claim in @(
     Assert-Contains $hardRules $claim "coder_codex hard rules include [$claim]"
 }
 foreach ($marker in @(
-    'scope_file',
-    'до первого `::`',
+    'scope_paths',
+    'по запятым',
+    'каждый компонент',
     'path intersection',
+    'широкими',
+    'Ограничение радиуса',
     'committed `BASE`',
     'live worktree',
     'При `KB=off` или отсутствии каталога — пропусти')) {
@@ -91,18 +94,44 @@ foreach ($marker in @(
 }
 
 # Hermetic reference fixture for the shared normalization rule. This deliberately
-# exercises an anchored scalar, a heading anchor, and an unanchored broad scope.
-function Get-ScopeFile {
+# exercises anchored components, comma-separated paths, and an unanchored glob scope.
+function Normalize-ScopeFixture {
     param([Parameter(Mandatory)][string]$Scope)
-    $separator = $Scope.IndexOf('::', [System.StringComparison]::Ordinal)
-    if ($separator -lt 0) { return $Scope }
-    return $Scope.Substring(0, $separator)
+    $components = @($Scope -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $paths = @(
+        foreach ($component in $components) {
+            $separator = $component.IndexOf('::', [System.StringComparison]::Ordinal)
+            if ($separator -gt 0) {
+                $suffix = $component.Substring($separator + 2)
+                if ($suffix.StartsWith('heading:', [System.StringComparison]::OrdinalIgnoreCase) -or
+                    $suffix -match '^[A-Za-z_][A-Za-z0-9_.-]*$') {
+                    $component.Substring(0, $separator)
+                    continue
+                }
+            }
+            $component
+        }
+    )
+    [pscustomobject]@{
+        Paths = $paths
+        Broad = ($components.Count -gt 1 -or (@($paths | Where-Object { $_ -match '[*?\[\]]' }).Count -gt 0))
+    }
 }
-Assert-True ((Get-ScopeFile 'agents/planner.md::Invoke-Plan') -eq 'agents/planner.md') `
+ $singleAnchor = Normalize-ScopeFixture 'agents/planner.md::Invoke-Plan'
+Assert-True (@($singleAnchor.Paths).Count -eq 1 -and $singleAnchor.Paths[0] -eq 'agents/planner.md' -and -not $singleAnchor.Broad) `
     'scope_file fixture strips a symbol anchor before path intersection'
-Assert-True ((Get-ScopeFile 'docs/guide.md::heading:Safety') -eq 'docs/guide.md') `
+ $headingAnchor = Normalize-ScopeFixture 'docs/guide.md::heading:Safety'
+Assert-True (@($headingAnchor.Paths).Count -eq 1 -and $headingAnchor.Paths[0] -eq 'docs/guide.md' -and -not $headingAnchor.Broad) `
     'scope_file fixture strips a heading anchor before path intersection'
-Assert-True ((Get-ScopeFile 'agents/*.md') -eq 'agents/*.md') `
+ $multiPath = Normalize-ScopeFixture 'agents/planner.md, agents/thinker.md'
+Assert-True (@($multiPath.Paths).Count -eq 2 -and $multiPath.Paths[0] -eq 'agents/planner.md' -and
+    $multiPath.Paths[1] -eq 'agents/thinker.md' -and $multiPath.Broad) `
+    'scope_paths fixture preserves trimmed comma-separated components and broadness'
+ $multiGlob = Normalize-ScopeFixture 'agents/*.md, codex/**'
+Assert-True (@($multiGlob.Paths).Count -eq 2 -and $multiGlob.Paths[0] -eq 'agents/*.md' -and
+    $multiGlob.Paths[1] -eq 'codex/**' -and $multiGlob.Broad) `
+    'scope_paths fixture keeps multi-path/glob scopes relevant but broad'
+Assert-True ((Normalize-ScopeFixture 'agents/*.md').Broad) `
     'scope_file fixture preserves a broad unanchored scope'
 
 foreach ($relative in @(
