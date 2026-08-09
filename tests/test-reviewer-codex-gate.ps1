@@ -194,6 +194,22 @@ function Assert-Equal {
     }
 }
 
+$reviewerContract = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\agents\reviewer_codex.md') -Raw -Encoding utf8
+$normalizedReviewerContract = [regex]::Replace($reviewerContract, '\s+', ' ')
+foreach ($marker in @(
+    'scope_file',
+    'до первого `::`',
+    'path intersection',
+    'committed `BASE`',
+    'live worktree',
+    'При `KB=off` или отсутствии каталога — пропусти')) {
+    Assert-True $normalizedReviewerContract.Contains($marker) "reviewer_codex anchored KB contract includes [$marker]"
+}
+Assert-True $normalizedReviewerContract.Contains('This is a READ-ONLY review') `
+    'reviewer_codex keeps the read-only boundary while pulling KB data'
+Assert-True $normalizedReviewerContract.Contains('Never read, create, or modify anything under any `.work/` directory') `
+    'reviewer_codex keeps the .work single-writer boundary'
+
 # --- Scenario 1: partial success (RECHECK skipped or duplicated) not counted --
 
 $scenario1Missing = @('RECHECK R-01: resolved', 'NEW: none')  # R-02 never answered

@@ -271,10 +271,16 @@ git-команды в `WT` запрещены: в pure-jj workspace они мо�
 3. **Перепроверка** (только `full`): тексты записей исправлено/отклонено с их `R-ID`.
 4. **Уже открытые заголовки** (для дедупликации).
 5. **Ловушки KB** (при наличии `$WORK/knowledge/`): подбери из `INDEX.md` записи `pitfall`
-   с `confidence: med|high`, чей `scope` пересекается с изменёнными файлами, и добавь
-   блоком `Known pitfalls in this area (check the diff against these):` (по строке на
-   ловушку). `architecture`/`convention` не навязывай — не авторитетны. Нет каталога —
-   пропусти.
+   с `confidence: med|high`, чей нормализованный `scope_file` пересекается с изменёнными
+   файлами, и добавь блоком `Known pitfalls in this area (check the diff against these):`
+   (по строке на ловушку). Перед сравнением `scope` сначала вычисли `scope_file` как
+   подстроку `scope` до первого `::`: для обычного файла/каталога это весь `scope`, для
+   `file::SymbolName` и `file::heading:<...>` только `file`; anchored-суффикс никогда не
+   участвует в path intersection. Если точный `::SymbolName`/`::heading:<...>` нужен для
+   проверки узкого сигнала, сверяй файл и якорь с переданным committed `BASE` через VCS, а не
+   только с live worktree; неподтверждённый в `BASE` якорь не считай валидным и не выдумывай
+   замену. `architecture`/`convention` не навязывай — не авторитетны. При `KB=off` или
+   отсутствии каталога — пропусти.
 6. Несущий constraints-блок (дословно):
 ```
 Hard rules (violation = failure):

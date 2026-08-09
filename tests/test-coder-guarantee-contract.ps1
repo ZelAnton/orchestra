@@ -20,6 +20,13 @@ function Assert-Contains {
     }
 }
 
+function Assert-True {
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) {
+        $Failures.Add("FAIL - $Message")
+    }
+}
+
 function Get-Section {
     param([string]$Text, [string]$Start, [string]$End)
     $startIndex = $Text.IndexOf($Start, [StringComparison]::Ordinal)
@@ -73,6 +80,30 @@ foreach ($claim in @(
 )) {
     Assert-Contains $hardRules $claim "coder_codex hard rules include [$claim]"
 }
+foreach ($marker in @(
+    'scope_file',
+    'до первого `::`',
+    'path intersection',
+    'committed `BASE`',
+    'live worktree',
+    'При `KB=off` или отсутствии каталога — пропусти')) {
+    Assert-Contains $adapter $marker "coder_codex anchored KB contract includes [$marker]"
+}
+
+# Hermetic reference fixture for the shared normalization rule. This deliberately
+# exercises an anchored scalar, a heading anchor, and an unanchored broad scope.
+function Get-ScopeFile {
+    param([Parameter(Mandatory)][string]$Scope)
+    $separator = $Scope.IndexOf('::', [System.StringComparison]::Ordinal)
+    if ($separator -lt 0) { return $Scope }
+    return $Scope.Substring(0, $separator)
+}
+Assert-True ((Get-ScopeFile 'agents/planner.md::Invoke-Plan') -eq 'agents/planner.md') `
+    'scope_file fixture strips a symbol anchor before path intersection'
+Assert-True ((Get-ScopeFile 'docs/guide.md::heading:Safety') -eq 'docs/guide.md') `
+    'scope_file fixture strips a heading anchor before path intersection'
+Assert-True ((Get-ScopeFile 'agents/*.md') -eq 'agents/*.md') `
+    'scope_file fixture preserves a broad unanchored scope'
 
 foreach ($relative in @(
     'codex/agents/orchestra_coder.toml',

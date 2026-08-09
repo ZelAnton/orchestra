@@ -573,6 +573,20 @@ foreach ($marker in @(
     Require-KbContractMarker 'agents/planner.md' $plannerKbText $marker 'planner KB radius contract'
 }
 
+# Every KB pull consumer must normalize anchored scopes before path intersection and
+# validate the suffix against the committed BASE. The adapters are hand-written and
+# therefore are not covered by the Codex-role generator's drift checks.
+$kbPullConsumers = [ordered]@{
+    'agents/planner.md'       = $plannerKbText
+    'agents/coder_codex.md'   = Get-Content -LiteralPath (Join-Path $AgentsDir 'coder_codex.md') -Raw -Encoding utf8
+    'agents/reviewer_codex.md' = Get-Content -LiteralPath (Join-Path $AgentsDir 'reviewer_codex.md') -Raw -Encoding utf8
+}
+foreach ($entry in $kbPullConsumers.GetEnumerator()) {
+    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`', 'live worktree')) {
+        Require-KbContractMarker $entry.Key $entry.Value $marker 'anchored KB pull contract'
+    }
+}
+
 # =============================================================================
 # Report
 # =============================================================================

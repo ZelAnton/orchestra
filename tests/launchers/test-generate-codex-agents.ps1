@@ -28,7 +28,7 @@ try {
     Copy-Item -LiteralPath $sourceGenerator -Destination (Join-Path $root 'generate-codex-agents.ps1')
     $kbScopeContract = 'scope_file; до первого `::`; path intersection; committed `BASE`'
     foreach ($role in @('planner','executor','coder_fast','coder','coder_deep','reviewer_std','reviewer','full_reviewer','merger','knowledge_curator','inbox_curator','dependency_curator','processor')) {
-        if ($role -in @('coder', 'reviewer')) {
+        if ($role -in @('planner', 'coder', 'reviewer')) {
             Write-Agent -Name $role -Body "$kbScopeContract`nBODY-$role"
         } else {
             Write-Agent -Name $role
@@ -47,6 +47,11 @@ try {
     Assert-True ($coderText.Contains('Never invoke `claude`')) 'generated leaf carries no-Claude provider overlay'
     foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
         Assert-True ($coderText.Contains($marker)) "generated coder preserves anchored KB scope contract marker '$marker'"
+    }
+    $planner = Join-Path $root 'codex\agents\orchestra_planner.toml'
+    $plannerText = [System.IO.File]::ReadAllText($planner)
+    foreach ($marker in @('scope_file', 'до первого `::`', 'path intersection', 'committed `BASE`')) {
+        Assert-True ($plannerText.Contains($marker)) "generated planner preserves anchored KB scope contract marker '$marker'"
     }
     $bytes = [System.IO.File]::ReadAllBytes($coder)
     Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) 'generated TOML is UTF-8 without BOM'
