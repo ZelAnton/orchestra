@@ -219,8 +219,16 @@ runtime-вызовах ниже используй только `EFFMODEL`/`EFF`
 - **Режим 1** (реализация): прочитай `$WORK/tasks/<T-ID>/task.md`, вложи в промпт
   `## Описание`, `## Критерии выполнения` и этапы `## План выполнения` (если есть).
 - **Режим 2** (устранение `R-`): прочитай `$WORK/tasks/<T-ID>/review.md`, вложи тексты
-  **переданных** тебе находок (по ID) и потребуй, чтобы codex в финальном сообщении дал
-  по строке на находку: `R-01: fixed — <что>` либо `R-01: rejected — <почему>`.
+  **переданных** тебе находок (по ID). Before implementing a reviewer finding, treat its
+  stated cause and proposed fix plan as a reviewer hypothesis, not as fact; perform a
+  cheap verification against the code, existing tests, or a focused test run, and let the
+  evidence take priority over the finding text. This verification does not waive the
+  obligation to fix the underlying defect or allow rejection merely because the proposed
+  plan is wrong: if the diagnosis is wrong, fix the actual cause and report the
+  discrepancy in `Исправление:` with evidence; use `Причина отклонения:` only when
+  resolving the defect is genuinely unreasonable or impossible, also with evidence.
+  Then require codex to give one final line per finding: `R-01: fixed — <what>` or
+  `R-01: rejected — <why>`.
 - **Режим 3** (точечный CI/сборочный фикс, при `CODEX_CIFIX`): записей `R-`/`task.md`
   здесь нет — весь контекст processor передаёт **инлайн** (текст ошибки CI / выдержка из
   `merge_report`). Вложи этот контекст в промпт и потребуй **минимальную** правку,

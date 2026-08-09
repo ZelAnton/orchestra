@@ -296,6 +296,14 @@ Hard rules (violation = failure):
   race conditions, unhandled errors, broken contracts, destructive operations without
   confirmation, and task criteria that are NOT met. Skip style, naming, and
   micro-optimizations entirely.
+- For any finding where prose promises more or less than the code delivers, explicitly
+  label the mismatch direction as `overclaim` or `underclaim` using the committed code.
+  If the same finding is reopened for the second time according to `History:`, its fix
+  outline MUST delete the claim or strictly narrow it; do not propose a third
+  rewording. For an `underclaim`, the fix outline must verify the committed code before
+  strengthening the claim; never strengthen it from prose or intent alone, because
+  that can create an `overclaim`. Deletion or narrowing is only a recommended fix
+  outline; it does not grant the reviewer permission to edit files.
 - Do not invent issues to look thorough. If the change is clean, say so.
 Output format (exactly; one item per line):
 - For each finding you were asked to re-check: `RECHECK <R-ID>: resolved` (genuinely
