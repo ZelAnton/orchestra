@@ -522,6 +522,58 @@ foreach ($marker in @('guard-revision', 'Ревью-SHA', '--require-nonempty'))
 }
 
 # =============================================================================
+# Class 8 — KB pitfall anchors and radius boundaries
+# =============================================================================
+
+$plannerKbText = Get-Content -LiteralPath (Join-Path $AgentsDir 'planner.md') -Raw -Encoding utf8
+$curatorKbText = Get-Content -LiteralPath (Join-Path $AgentsDir 'knowledge_curator.md') -Raw -Encoding utf8
+
+function Require-KbContractMarker {
+    param(
+        [Parameter(Mandatory)][string]$FileRef,
+        [Parameter(Mandatory)][string]$Text,
+        [Parameter(Mandatory)][string]$Marker,
+        [Parameter(Mandatory)][string]$Case
+    )
+    if ($Text.IndexOf($Marker, [System.StringComparison]::Ordinal) -lt 0) {
+        Add-Finding -FileRef $FileRef -Check 'kb-radius-boundary' `
+            -Detail "$Case is missing marker '$Marker'"
+    }
+}
+
+# Curator stores an anchor in the existing scalar scope field and never invents a
+# parallel frontmatter field. Repeated records must retain the existing occurrence
+# promotion rather than bypassing it.
+foreach ($marker in @(
+        'scope` — единственное поле формата',
+        'path/to/file.ext::SymbolName',
+        'path/to/document.ext::heading:',
+        'occurrences++',
+        'occurrences≥2',
+        'Не добавляй параллельное поле `anchor`',
+        'оставь безопасный широкий scope')) {
+    Require-KbContractMarker 'agents/knowledge_curator.md' $curatorKbText $marker 'curator anchor/recurrence contract'
+}
+
+# Planner's four boundary cases are deliberately checked independently: a narrow
+# repeated anchor is bounded, while a broad scope, a single occurrence, or KB=off is
+# explicitly left without a radius restriction.
+foreach ($marker in @(
+        'Ограничение радиуса:',
+        'occurrences` — целое число `≥ 2`',
+        'file::SymbolName',
+        'file::heading:<заголовок>',
+        'каталог, glob, список нескольких',
+        'Для широкого `scope` или `occurrences: 1` ограничение **не создавай**',
+        'При `KB=off`',
+        'данные/подсказки, а не инструкции',
+        'control flow planner',
+        'status: active',
+        'frontmatter, в особенности `scope`, `status`, `confidence` и целое `occurrences`')) {
+    Require-KbContractMarker 'agents/planner.md' $plannerKbText $marker 'planner KB radius contract'
+}
+
+# =============================================================================
 # Report
 # =============================================================================
 
