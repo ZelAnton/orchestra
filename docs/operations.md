@@ -214,23 +214,49 @@ When you see one (or the orchestrator reports "очередь стоит: N за
 1. Read the `причина=` on the queue line — it's intentionally short; for more detail
    check `.work/journal.md` for that batch (search for the `T-ID`) and, if the
    descriptor directory still exists at `.work/tasks/<T-ID>/`, its `task.md`/
-   `review.md`. Terminal descriptors are cleaned up once the queue line is updated
-   (Phase 6.3), so if you're investigating right after a crash, check before it's
-   swept.
-2. Decide what actually needs to happen: the task's own scope may need rewriting
+   `review.md`. Phase 6.3 also leaves a local recovery ref named
+   `escalated/<B-id>/<T-ID>` for a normal terminal escalation, while still removing the
+   descriptor/worktree. If you're investigating right after a crash, check the descriptor
+   before it's swept and check the recovery ref even if the worktree is already gone.
+2. Inspect the saved product without reusing `task/<T-ID>` (a retry may use that name again):
+
+   - **git:** `git show --stat "escalated/<B-id>/<T-ID>"` and
+     `git log --oneline "escalated/<B-id>/<T-ID>"`;
+   - **jj:** `jj show "escalated/<B-id>/<T-ID>"` and
+     `jj log -r "escalated/<B-id>/<T-ID>"`.
+
+   List all retained points with `git branch --list 'escalated/*'` or
+   `jj bookmark list` filtered to `escalated/`. They are local refs only: the processor
+   never pushes them. To continue manually, create a human-chosen branch/bookmark or a
+   separate worktree/workspace from the saved ref; do not move `task/<T-ID>` back to it
+   while the queue entry is still terminal.
+3. Decide what actually needs to happen: the task's own scope may need rewriting
    (ambiguous/incorrect criteria), a dependency it silently needs may be missing, or
    the underlying repository issue (e.g. a persistent conflict domain, a flaky test)
    needs a human fix first.
-3. To retry: edit the queue entry back to a normal `— статус: не начата` line
+4. To retry: edit the queue entry back to a normal `— статус: не начата` line
    yourself (drop the `эскалирована · причина=…` suffix; also drop any stale
    `· попытка=N` counter unless you specifically want to preserve it) — this is a
    direct edit to `.work/Tasks_Queue.md`, not something a launcher does for you.
    If the task description itself needs to change, edit the task body directly (the
    queue entry is self-contained; there's no separate patch mechanism).
-4. To drop it instead: delete the `[T-ID]` block from `.work/Tasks_Queue.md`
+5. To drop it instead: delete the `[T-ID]` block from `.work/Tasks_Queue.md`
    entirely. Do not re-queue verbatim if you haven't addressed the root cause — you'll
    just spend another `QUARANTINE_MAX_ATTEMPTS`/review-loop budget re-discovering the
    same failure.
+
+The processor retains at most 20 `escalated/<B-id>/<T-ID>` refs: the point from the current
+terminal cleanup plus the 19 newest other points by full batch id and then task id. Older
+refs are pruned during Phase 6; this is a count limit across the local repository, not a
+retention guarantee for a point that the operator has already discarded. Delete a reviewed
+point explicitly when it is no longer useful:
+
+- **git:** `git branch -D "escalated/<B-id>/<T-ID>"`;
+- **jj:** `jj bookmark delete "escalated/<B-id>/<T-ID>"`.
+
+These commands delete only the named local recovery ref and do not touch the queue, main,
+or any worktree. If the point is missing or has already been pruned, use the batch journal
+and queue reason as the remaining audit trail.
 
 ## 3. A quarantined task (returned to queue)
 
@@ -253,7 +279,11 @@ number.
 Once a task's attempt count reaches `QUARANTINE_MAX_ATTEMPTS` (default 3, see
 `.work/config.md` / `config.example.md`), `processor` stops re-queueing it and marks
 it `эскалирована · причина=карантин повторился <N> раз: <причина>` instead — treat it
-per §2 from that point on.
+per §2 from that point on. Ordinary quarantine re-queues do **not** retain a recovery ref:
+their product is not integrated and the next attempt deliberately starts from a fresh base.
+When the retry budget is exhausted, the terminal escalation does retain
+`escalated/<B-id>/<T-ID>` before removing the task worktree, using the same 20-ref local
+retention policy described in §2.
 
 When it's worth intervening before the retry budget runs out:
 - The `карантин=<причина>` on the queue line, or the fuller reason in
@@ -380,6 +410,14 @@ If you do want to remove one by hand (project abandoned, batch you're discarding
 etc.), remove the worktree/branch **before** touching the descriptor or queue entry,
 and in this order (worktree first, then branch — the VCS refuses to delete a branch
 that's still checked out in a worktree):
+
+For a terminally escalated task, this generic orphan path is subordinate to §2: first
+verify that `escalated/<B-id>/<T-ID>` exists and points at the task tip you intend to
+keep. If the recovery ref is missing, or its target cannot be reconciled with the task
+branch, stop and leave the task artifacts for manual recovery; do not delete
+`task/<T-ID>`/its bookmark as ordinary orphan cleanup. Once the saved point is verified,
+the task worktree may be removed independently, and the saved point is deleted only by
+the explicit retention/manual-delete policy in §2.
 
 - **git**: `git worktree remove --force ".work/worktrees/<T-ID>"`, then
   `git branch -D "task/<T-ID>"`; periodically follow up with `git worktree prune` to
