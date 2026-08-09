@@ -1,4 +1,4 @@
-<#
+﻿<#
   Fixture tests for generate-coders.ps1 - the template-driven generator that produces
   agents/coder.md, coder_fast.md, coder_deep.md (from coder.template.md) and
   agents/reviewer.md, reviewer_std.md (from reviewer.template.md), task T-090.

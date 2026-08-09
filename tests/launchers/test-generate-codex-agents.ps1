@@ -1,4 +1,4 @@
-# ci:posix
+﻿# ci:posix
 <# Hermetic cross-platform coverage for generate-codex-agents.ps1. #>
 
 Set-StrictMode -Version Latest
