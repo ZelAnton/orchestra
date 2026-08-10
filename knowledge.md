@@ -366,7 +366,10 @@ Processor и merger формируют описательные англоязы
   но со схемой разойтись не может. Класс 1 того же guard отличает operator config от
   производных reviewer-handoff полей: `REVIEW_STRICT`, `REVIEW_FINAL_CLEAN_PASSES` и
   `VERIFICATION_EVIDENCE` входят в явный non-key allow-list, а не раздувают публичную
-  config-схему. Тесты — `tests/test-policy.ps1`.
+  config-схему. Класс 9 проверяет каждый Markdown-абзац шаблона dispatch в
+  `agents/processor.md`: если он передаёт `SMOKE_CMD=`, в той же инструкции обязательны
+  `CALL_DEADLINE_SEC=` и `CALL_OUTPUT_MAX_BYTES=`. Положительный и отрицательные фикстурные
+  случаи выполняет `tests/test-consistency.ps1`. Тесты policy — `tests/test-policy.ps1`.
   В полностью автономном режиме operator-owned переменная ОС
   `ORCHESTRA_AUTO_APPROVE=on` заранее разрешает внутренние human gates во всех проектах:
   `approval-request` всё равно сохраняет обычный одноразовый артефакт, fingerprint кода,

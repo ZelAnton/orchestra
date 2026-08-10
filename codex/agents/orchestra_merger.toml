@@ -159,9 +159,11 @@ exec`). Единый источник правила — `knowledge.md` / `docs/
 
 **Изоляция сборок и диагностика процессов.** `SMOKE_CMD` и любую самостоятельно выбранную
 сборку/тест запускай через тот же резолвленный `tools/supervisor.ps1`, не напрямую. Для
-`SMOKE_CMD` используй `run --shell-command <строка>`, передавая `--working-directory
-<интеграционный worktree> --deadline-sec <CALL_DEADLINE_SEC, default 1800>
---output-max-bytes <CALL_OUTPUT_MAX_BYTES, default 1048576> --work "$WORK" --task-id
+`SMOKE_CMD` используй `run --shell-command <строка>`. Эффективные `CALL_DEADLINE_SEC` и
+`CALL_OUTPUT_MAX_BYTES` бери из промпта processor; только если соответствующее значение в
+промпте не передано, используй fallback `1800` и `1048576`. Передавай `--working-directory
+<интеграционный worktree> --deadline-sec <эффективный CALL_DEADLINE_SEC>
+--output-max-bytes <эффективный CALL_OUTPUT_MAX_BYTES> --work "$WORK" --task-id
 _integration --role merger --label smoke --process-diagnostics` и task-local result/stdout/
 stderr-файлы. Прочитай транзиентный вывод после возврата; verdict `error` означает красную
 сборку по алгоритму ниже. Supervisor очищает дочернее дерево после `ok` тоже и сохраняет

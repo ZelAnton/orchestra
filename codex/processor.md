@@ -1516,7 +1516,8 @@ KB=<on|off>.` Planner уже сам исключает T-ID активных з�
 уже идущих в ревью задач** (это императив, не опция — параллельный fan-out даёт до
 ~3× выигрыша по времени при нулевой разнице в стоимости): `Use the <исполнитель
  задачи> subagent to implement task <T-ID>. Worktree=<абс $WORK/worktrees/<T-ID>>.
- WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>.` (`<исполнитель задачи>` = уровень `L` или
+ WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>. CALL_DEADLINE_SEC=<из конфига>.
+ CALL_OUTPUT_MAX_BYTES=<из конфига>.` (`<исполнитель задачи>` = уровень `L` или
 `coder_codex` по `CODEX_CODER` — см. «Codex-исполнитель и маршрутизация»; для
 `coder_codex` обязательно добавь `RUNTIME_LAYOUT=<checkout|mirror>`.) Раунд
 блокируется до возврата всех его вызовов (неизбежное свойство одного сообщения
@@ -1738,7 +1739,8 @@ task/<T-ID>`; для jj — `commit_id` bookmark'а): это вершина, к�
 resume). Запусти исполнителя в режиме устранения находок (Режим 2, в её worktree) с
 ID открытых `R-` и `SMOKE_CMD` (без него самопроверка фикса деградирует): `Use the
 <исполнитель задачи> subagent to address review findings R-01, R-03 for task <T-ID>.
-Worktree=<абс>. WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>.` Для
+Worktree=<абс>. WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>.
+CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.` Для
 `coder_codex` добавь `RUNTIME_LAYOUT=<checkout|mirror>`. (codex-сентинел `ЭСКАЛАЦИЯ codex:
 …` → перезапусти фикс на Claude-исполнителе уровня `L`, см. маршрутизацию.) По
 возврату — guard (см. «Guard перед `add -A` в worktree задачи»; тот же перед каждым
@@ -1852,7 +1854,8 @@ workspace merger/full_reviewer можно только после точного
 
 4.2. Вызови **merger**: `Use the merger subagent to integrate the ready task branches
  of this batch into integration/<B-id> in <абс $WORK/worktrees/_integration>. WORK=<абс
- $WORK>. VCS=<jj|git>. SMOKE_CMD=<если задан>. VERIFICATION_MODE=<значение>.
+ $WORK>. VCS=<jj|git>. SMOKE_CMD=<если задан>. CALL_DEADLINE_SEC=<из конфига>.
+ CALL_OUTPUT_MAX_BYTES=<из конфига>. VERIFICATION_MODE=<значение>.
  VERIFICATION_COMMANDS=<JSON, если задан>.` (передавай **абсолютные** пути — merger, как и
 любой субагент, не пересчитывает их сам. «Ready» merger определяет сам, читая
 `Статус: готова к слиянию` в `task.md` задач из `batch.md` — не из поля в `batch.md`,
@@ -1982,7 +1985,8 @@ resume): та же сигнатура повторилась → `Стагнац
 `jj new`, либо ещё не закоммиченные правки исполнителя с прерванного прогона) — условие
 `-n "$D"` не выполняется, повторный `jj new` не делается. См. таблицу git↔jj, строка
 «Коммит интеграционного F-фикса». Исполнитель в интеграционном worktree (Режим 2,
-записи `F-` из `review_integration.md`), T-ID=`_integration`, `SMOKE_CMD=<если задан>`
+записи `F-` из `review_integration.md`), T-ID=`_integration`, `SMOKE_CMD=<если задан>`,
+`CALL_DEADLINE_SEC=<из конфига>`, `CALL_OUTPUT_MAX_BYTES=<из конфига>`
 — используй **coder_deep**, если хотя бы одна из затронутых находкой задач батча была
 уровня `coder_deep` или находка касается архитектуры/нескольких модулей; иначе
 **coder** достаточно. → **новый коммит** на интеграционную ветку. **(jj-специфика,

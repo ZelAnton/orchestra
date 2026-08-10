@@ -92,7 +92,8 @@ jobs:
         # tools/check-consistency.ps1 (T-017): UPPER_SNAKE_CASE config keys vs
         # config.example.md, processor phase references vs processor.md, runtime-artifact
         # names vs knowledge.md, the cc-doctor config-key allowlist (now in
-        # tools/doctor-runtime.ps1) and the policy schema.
+        # tools/doctor-runtime.ps1), the policy schema, and complete supervisor-budget
+        # handoffs on every processor SMOKE_CMD dispatch.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -102,6 +103,8 @@ jobs:
             exit 1
           }
           & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "./tests/test-consistency.ps1"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check Codex sandbox fail-closed contract

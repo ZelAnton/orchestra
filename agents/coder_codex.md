@@ -35,10 +35,13 @@ processor перезапускает ту же задачу на эквивал�
 
 processor передаёт абсолютный `WORK` (каталог `.work/` основного дерева), явный
 `VCS=jj|git`, `T-ID`,
-абсолютный `Worktree` (далее `WT`) и, если задан, `SMOKE_CMD`; в Режиме 2 — ID находок
-(`R-…`). **Используй переданные `WORK` и `VCS`. Один не передан — не вычисляй сам: останови работу
-и верни «WORK/VCS не передан processor».** Координацию (`status.md`, статусы находок,
-чекбоксы `task.md`) пишешь по `WORK`; **код codex правит только в `WT`**.
+абсолютный `Worktree` (далее `WT`) и, если задан, `SMOKE_CMD`, а также эффективные
+`CALL_DEADLINE_SEC` и `CALL_OUTPUT_MAX_BYTES`; в Режиме 2 — ID находок (`R-…`). Значения
+этих двух бюджетов бери из промпта processor; только если соответствующее значение в
+промпте не передано, используй fallback `1800` и `1048576`. **Используй переданные `WORK`
+и `VCS`. Один не передан — не вычисляй сам: останови работу и верни «WORK/VCS не передан
+processor».** Координацию (`status.md`, статусы находок, чекбоксы `task.md`) пишешь по
+`WORK`; **код codex правит только в `WT`**.
 
 Важно: `WORK` (`.work/`) — в **основном** дереве и **не виден изнутри worktree** (он
 gitignored и физически там отсутствует). Поэтому весь контекст задачи ты **вкладываешь
@@ -578,11 +581,17 @@ processor их сам закоммитит (`git add -A && commit` / jj `describ
 
 # Самопроверка (SMOKE_CMD)
 
-`SMOKE_CMD` задан → прогони его в worktree независимым гейтом: `( cd "$WT" &&
-<SMOKE_CMD> )`. Упал → **сперва** просей вывод smoke на сигнатуры средового лимита. Класс
-даёт runtime, а не глазомер: `pwsh -File $CODEX_RT classify --rc <rc> --out-file
-"$WORK/tasks/<T-ID>/codex_out.md" --stderr-file "$WORK/tasks/<T-ID>/codex_err.txt"` (или
-`--text "<вывод smoke>"`) → JSON `{class, envLimit, broker, recoverable}`. `envLimit=true` →
+`SMOKE_CMD` задан → прогони его в `WT` независимым гейтом через резолвленный по общему
+checkout-vs-mirror правилу `tools/supervisor.ps1`, не напрямую: `run --shell-command
+<SMOKE_CMD> --working-directory "$WT" --deadline-sec <эффективный CALL_DEADLINE_SEC>
+--output-max-bytes <эффективный CALL_OUTPUT_MAX_BYTES> --work "$WORK" --task-id <T-ID>
+--role coder_codex --label smoke --process-diagnostics` плюс стабильные task-local
+`--result-file`, `--stdout-file` и `--stderr-file`. Нет supervisor/permission отклонён —
+эскалация, не прямой повтор команды. Гейт упал → **сперва** просей его транзиентные
+stdout/stderr на сигнатуры средового лимита. Класс даёт runtime, а не глазомер: `pwsh -File
+$CODEX_RT classify --rc <rc> --out-file <smoke stdout-file> --stderr-file <smoke
+stderr-file>` (или `--text "<вывод smoke>"`) → JSON `{class, envLimit, broker,
+recoverable}`. `envLimit=true` →
 **не** множь повторы, реагируй по классу немедленно (см. «Классификация средовых сбоев
 (ENV_LIMIT)»). Не средовой признак (`class=ordinary`, падение по существу кода) → повторный
 `run` с добавленным в промпт выводом smoke; максимум **3** адаптерных итерации; всё ещё

@@ -188,7 +188,7 @@ These scripts protect machine-verifiable copies of repository contracts:
 |---|---|
 | [`generate-coders.ps1`](../generate-coders.ps1) plus the CI drift check | Generated coder and reviewer variants are byte-for-byte derived from their templates and variant metadata. |
 | [`tools/validate-agents.ps1`](../tools/validate-agents.ps1) | Agent encoding, byte-zero frontmatter, required fields, filename/name agreement, snake_case, and `permissionMode: auto`. |
-| [`tools/check-consistency.ps1`](../tools/check-consistency.ps1) | Agent config-key references, processor phase references, runtime artifacts in `knowledge.md`, Doctor's key allowlist, and policy-schema/documentation parity. |
+| [`tools/check-consistency.ps1`](../tools/check-consistency.ps1) | Agent config-key references, processor phase references, runtime artifacts in `knowledge.md`, Doctor's key allowlist, policy-schema/documentation parity, and complete deadline/output-budget handoffs on processor `SMOKE_CMD` dispatches. |
 | [`tools/check-codex-config-guard.ps1`](../tools/check-codex-config-guard.ps1) | Bounded Codex allowed values and defaults across `config.example.md`, `processor.md`, and Doctor. |
 | [`tools/check-codex-runtime-path-guard.ps1`](../tools/check-codex-runtime-path-guard.ps1) | Checkout/mirror Codex runtime commands, paired allow-rules, literal-tilde handling, and matching adapter/documentation guidance. |
 | [`tools/check-codex-sandbox-guard.ps1`](../tools/check-codex-sandbox-guard.ps1) | `approval_policy=never`, sandbox arguments, and fail-closed `ENV_LIMIT/sandbox-init` escalation in both Codex adapters and their documentation. |

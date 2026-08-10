@@ -20,8 +20,19 @@
                               review_integration.md, merge_report.md, cohort_state.md)
                               referenced in an agent file appears in the runtime-artifact
                               table of knowledge.md.
+      4. Doctor allowlist    — cc-doctor's standalone config-key allowlist matches the
+                               documented defaults table.
+      5. Policy schema       — schema config keys and bounded Codex enums match the
+                               documentation.
       6. Worktree/build      — worktree roles retain the explicit VCS handoff, and
-                              merger/processor retain final build-evidence markers.
+                               merger/processor retain final build-evidence markers.
+      7. Committed/reviewed  — task claims stay anchored to committed BASE, and merger
+                               retains the reviewed-tip guard.
+      8. KB radius           — KB anchors, broad scopes and radius forwarding retain
+                               their canonical boundaries.
+      9. Smoke budgets       — every processor dispatch instruction that passes
+                               SMOKE_CMD= also passes CALL_DEADLINE_SEC= and
+                               CALL_OUTPUT_MAX_BYTES= in the same Markdown paragraph.
 
     "Agent files" = the *.md files under the agents/ directory that start with a YAML
     frontmatter block (`---` as the very first line) — i.e. the actual role definitions
@@ -33,10 +44,6 @@
     On any discrepancy, prints one line per finding in the form
     "<file> — <check> — <detail>" and exits with a non-zero code. With nothing to
     report, prints a short summary and exits 0.
-
-.NOTES
-    Manual, ad-hoc tool for now (see task T-017) — CI/cc-sync integration is out of
-    scope here (tracked separately, e.g. T-019).
 
 .EXAMPLE
     pwsh -File tools/check-consistency.ps1
@@ -80,6 +87,47 @@ function Strip-InlineCode {
     # prose references (e.g. an `rg -n "Фаза N"` example quoted in documentation).
     param([string]$Line)
     return [regex]::Replace($Line, '`[^`]*`', '')
+}
+
+function Get-SmokeBudgetHandoffIssues {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines)
+
+    $issues = [System.Collections.Generic.List[object]]::new()
+    $paragraphLines = [System.Collections.Generic.List[string]]::new()
+    $paragraphStart = 0
+
+    # Processor call templates are Markdown instructions that may wrap across physical
+    # lines. A blank line ends an instruction paragraph; checking physical lines would
+    # reject the canonical wrapped form or let a newly wrapped omission escape.
+    for ($i = 0; $i -le $Lines.Count; $i++) {
+        $atEnd = ($i -eq $Lines.Count)
+        $line = if ($atEnd) { '' } else { [string]$Lines[$i] }
+        if (-not $atEnd -and -not [string]::IsNullOrWhiteSpace($line)) {
+            if ($paragraphLines.Count -eq 0) { $paragraphStart = $i + 1 }
+            $paragraphLines.Add($line)
+            continue
+        }
+
+        if ($paragraphLines.Count -eq 0) { continue }
+        $instruction = $paragraphLines -join "`n"
+        if ($instruction.IndexOf('SMOKE_CMD=', [System.StringComparison]::Ordinal) -ge 0) {
+            $missing = [System.Collections.Generic.List[string]]::new()
+            foreach ($required in @('CALL_DEADLINE_SEC=', 'CALL_OUTPUT_MAX_BYTES=')) {
+                if ($instruction.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
+                    $missing.Add($required)
+                }
+            }
+            if ($missing.Count -gt 0) {
+                $issues.Add([pscustomobject]@{
+                        Line = $paragraphStart
+                        Missing = @($missing)
+                    })
+            }
+        }
+        $paragraphLines.Clear()
+    }
+
+    return $issues
 }
 
 # --- Discover agent files (frontmatter-bearing .md files at repo root) -----
@@ -202,7 +250,7 @@ $phasePattern = 'Фаза\s*(\d+(?:\.\d+)?)'
 # All phase labels processor.md itself uses (section headings and inline sub-phase
 # references, e.g. "Фаза 4.3", "Фаза 5.4") — processor.md is authoritative, so whatever
 # label it uses anywhere in its own body counts as "existing".
-$processorLines = Get-Content -LiteralPath $ProcessorFile -Encoding utf8
+$processorLines = [string[]]@(Get-Content -LiteralPath $ProcessorFile -Encoding utf8)
 $knownProcessorPhases = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($line in $processorLines) {
     foreach ($m in [regex]::Matches((Strip-InlineCode $line), $phasePattern)) {
@@ -656,11 +704,21 @@ if (@($multiGlob.Paths).Count -ne 2 -or $multiGlob.Paths[0] -ne 'agents/*.md' -o
 }
 
 # =============================================================================
+# Class 9 — processor SMOKE_CMD dispatches carry effective supervisor budgets
+# =============================================================================
+
+foreach ($issue in @(Get-SmokeBudgetHandoffIssues -Lines $processorLines)) {
+    Add-Finding -FileRef "agents/processor.md:$($issue.Line)" `
+        -Check 'smoke-budget-handoff' `
+        -Detail "SMOKE_CMD= dispatch instruction is missing $($issue.Missing -join ', ')"
+}
+
+# =============================================================================
 # Report
 # =============================================================================
 
 if ($findings.Count -eq 0) {
-    Write-Host "OK - no cross-agent contract inconsistencies found (config keys, processor phases, runtime artifacts, policy schema, VCS/build evidence)."
+    Write-Host "OK - no cross-agent contract inconsistencies found (config keys, processor phases, runtime artifacts, policy schema, VCS/build evidence, KB radius, smoke budget handoffs)."
     exit 0
 }
 

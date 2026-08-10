@@ -150,9 +150,11 @@ processor). **Используй переданные `WORK` и `VCS`. Если 
 `tools/supervisor.ps1` (в зеркале — `~/.claude/scripts/supervisor.ps1`). Для произвольной,
 заранее заданной оператором строки `SMOKE_CMD` используй `run --shell-command <строка>`;
 для известного argv предпочтительнее `run --exe <program> --args-json <JSON-массив>`.
-Всегда передавай `--working-directory <worktree> --deadline-sec
-<CALL_DEADLINE_SEC, по умолчанию 1800> --output-max-bytes <CALL_OUTPUT_MAX_BYTES, по умолчанию
-1048576> --work "$WORK" --task-id <T-ID|_integration> --role coder --label <smoke|build|test>
+Эффективные `CALL_DEADLINE_SEC` и `CALL_OUTPUT_MAX_BYTES` бери из промпта processor;
+только если соответствующее значение в промпте не передано, используй fallback `1800` и
+`1048576`. Всегда передавай `--working-directory <worktree> --deadline-sec
+<эффективный CALL_DEADLINE_SEC> --output-max-bytes <эффективный CALL_OUTPUT_MAX_BYTES>
+--work "$WORK" --task-id <T-ID|_integration> --role coder --label <smoke|build|test>
 --process-diagnostics`, а также task-local `--result-file`, `--stdout-file` и
 `--stderr-file`. После возврата прочитай транзиентные stdout/stderr (особенно при ненулевом
 вердикте), но не копируй сырой вывод в долговечные журнал/статус без redaction.
