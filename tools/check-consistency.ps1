@@ -32,7 +32,10 @@
                                their canonical boundaries.
       9. Smoke budgets       — every processor dispatch instruction that passes
                                SMOKE_CMD= also passes CALL_DEADLINE_SEC= and
-                               CALL_OUTPUT_MAX_BYTES= in the same Markdown paragraph.
+                               CALL_OUTPUT_MAX_BYTES= in that same instruction. The unit
+                               is one uninterrupted run of KEY= handoff fields, not the
+                               whole Markdown paragraph: budgets carried by a neighbouring
+                               dispatch of the same paragraph do not satisfy it.
 
     "Agent files" = the *.md files under the agents/ directory that start with a YAML
     frontmatter block (`---` as the very first line) — i.e. the actual role definitions
@@ -89,6 +92,56 @@ function Strip-InlineCode {
     return [regex]::Replace($Line, '`[^`]*`', '')
 }
 
+# A dispatch handoff field: an UPPER_SNAKE_CASE key carrying a value, e.g.
+# `SMOKE_CMD=<если задан>` or `CALL_DEADLINE_SEC=<из конфига>` (same key shape as Class 1).
+# The lookbehind keeps the match anchored at a key start, so no suffix of a longer word
+# can pose as a handoff key.
+$DispatchFieldPattern = '(?<![\p{L}\p{N}_])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+='
+
+function Get-DispatchHandoffUnits {
+    # Splits one Markdown paragraph into individual dispatch instructions ("handoff
+    # units"), each returned as its list of KEY= field matches.
+    #
+    # A processor dispatch template is an uninterrupted run of handoff fields written as
+    # inline code - either one span ("`Use the <role> subagent ... SMOKE_CMD=<если задан>.
+    # CALL_DEADLINE_SEC=<из конфига>.`", Phases 2.2/2.8/4.2) or several adjacent spans
+    # joined by commas (Phase 5.2). Two fields belong to the same instruction only when
+    # nothing but separators stands between them once inline-code spans are masked out;
+    # prose in between means the next field belongs to a *different* instruction.
+    #
+    # This sub-paragraph split is the point of the unit: a blank-line paragraph regularly
+    # holds more than one dispatch (Phase 2.8 keeps the R-fix coder dispatch and the
+    # re-review reviewer dispatch in a single paragraph), and paragraph-wide matching let
+    # the reviewer dispatch's budgets stand in for a coder dispatch that carried none.
+    param([Parameter(Mandatory)][string]$Paragraph)
+
+    # Mask inline code with spaces of equal length (offsets stay valid) so only prose
+    # *outside* code separates instructions - the field values themselves ("<если задан>")
+    # live inside those spans and must not be mistaken for prose. A handoff written
+    # without backticks therefore splits into single-field units: the check then reports
+    # it, which fails closed (rewrite it as one inline-code instruction) rather than
+    # silently accepting an unbudgeted dispatch.
+    $prose = [regex]::Replace($Paragraph, '`[^`]*`', { param($m) ' ' * $m.Value.Length })
+
+    $units = [System.Collections.Generic.List[object]]::new()
+    $current = $null
+    $previousEnd = -1
+    foreach ($field in [regex]::Matches($Paragraph, $DispatchFieldPattern)) {
+        if ($null -ne $current) {
+            $gap = $prose.Substring($previousEnd, $field.Index - $previousEnd)
+            if ($gap -match '[\p{L}\p{N}]') { $current = $null }
+        }
+        if ($null -eq $current) {
+            $current = [pscustomobject]@{ Fields = [System.Collections.Generic.List[object]]::new() }
+            $units.Add($current)
+        }
+        $current.Fields.Add($field)
+        $previousEnd = $field.Index + $field.Length
+    }
+
+    return $units
+}
+
 function Get-SmokeBudgetHandoffIssues {
     param([Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines)
 
@@ -97,8 +150,10 @@ function Get-SmokeBudgetHandoffIssues {
     $paragraphStart = 0
 
     # Processor call templates are Markdown instructions that may wrap across physical
-    # lines. A blank line ends an instruction paragraph; checking physical lines would
-    # reject the canonical wrapped form or let a newly wrapped omission escape.
+    # lines. A blank line always ends an instruction; checking physical lines would reject
+    # the canonical wrapped form or let a newly wrapped omission escape. Within a
+    # paragraph, Get-DispatchHandoffUnits isolates each dispatch, so every SMOKE_CMD= is
+    # judged on the budgets of its own instruction.
     for ($i = 0; $i -le $Lines.Count; $i++) {
         $atEnd = ($i -eq $Lines.Count)
         $line = if ($atEnd) { '' } else { [string]$Lines[$i] }
@@ -109,20 +164,25 @@ function Get-SmokeBudgetHandoffIssues {
         }
 
         if ($paragraphLines.Count -eq 0) { continue }
-        $instruction = $paragraphLines -join "`n"
-        if ($instruction.IndexOf('SMOKE_CMD=', [System.StringComparison]::Ordinal) -ge 0) {
+        $paragraph = $paragraphLines -join "`n"
+        foreach ($unit in @(Get-DispatchHandoffUnits -Paragraph $paragraph)) {
+            $keys = @($unit.Fields | ForEach-Object { $_.Value })
+            $smoke = @($unit.Fields | Where-Object { $_.Value -ceq 'SMOKE_CMD=' })
+            if ($smoke.Count -eq 0) { continue }
+
             $missing = [System.Collections.Generic.List[string]]::new()
             foreach ($required in @('CALL_DEADLINE_SEC=', 'CALL_OUTPUT_MAX_BYTES=')) {
-                if ($instruction.IndexOf($required, [System.StringComparison]::Ordinal) -lt 0) {
-                    $missing.Add($required)
-                }
+                if ($keys -cnotcontains $required) { $missing.Add($required) }
             }
-            if ($missing.Count -gt 0) {
-                $issues.Add([pscustomobject]@{
-                        Line = $paragraphStart
-                        Missing = @($missing)
-                    })
-            }
+            if ($missing.Count -eq 0) { continue }
+
+            # Report the line of the offending SMOKE_CMD= itself, not the paragraph start:
+            # a paragraph can hold several dispatches and only some of them may be short.
+            $lineOffset = ([regex]::Matches($paragraph.Substring(0, $smoke[0].Index), "`n")).Count
+            $issues.Add([pscustomobject]@{
+                    Line = $paragraphStart + $lineOffset
+                    Missing = @($missing)
+                })
         }
         $paragraphLines.Clear()
     }

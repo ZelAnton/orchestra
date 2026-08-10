@@ -7,11 +7,16 @@
     Copies the repository into disposable roots, appends dispatch-instruction fixtures to
     the COPIED agents/processor.md and then runs the real validator end to end - the same
     entry point CI runs, with every class active. The positive fixture proves that a
-    complete, line-wrapped handoff stays clean; the negative fixture proves that a newly
-    added dispatch template omitting either budget - or both - is reported as a
-    "<file>:<line> - smoke-budget-handoff - <detail>" finding with a non-zero exit code.
-    Driving the production entry point (rather than a test-only mode) is deliberate: it
-    also proves Class 9 is wired into the main flow. No repository file is modified.
+    complete, line-wrapped handoff stays clean, in both shapes the real file uses (one
+    inline-code span, and adjacent spans joined by commas as in Phase 5.2); the negative
+    fixture proves that a newly added dispatch template omitting either budget - or both -
+    is reported as a "<file>:<line> - smoke-budget-handoff - <detail>" finding with a
+    non-zero exit code. The mixed fixture pins the sub-paragraph granularity: two
+    dispatches in ONE Markdown paragraph (as in Phase 2.8, where the R-fix coder dispatch
+    and the re-review reviewer dispatch share a paragraph) are judged separately, so a
+    complete neighbour cannot vouch for an unbudgeted dispatch. Driving the production
+    entry point (rather than a test-only mode) is deliberate: it also proves Class 9 is
+    wired into the main flow. No repository file is modified.
 #>
 
 Set-StrictMode -Version Latest
@@ -34,12 +39,33 @@ if ([string]::IsNullOrWhiteSpace($PwshExe)) { $PwshExe = 'pwsh' }
 # fixture is a copy of the whole checkout minus VCS and runtime state.
 $SkipTopLevel = @('.git', '.jj', '.work', 'node_modules', 'target')
 
-# A complete instruction that wraps across physical lines: the check must accept it, since
-# every real processor dispatch template is wrapped this way.
+# Complete instructions in both shapes the real file uses: one inline-code span that wraps
+# across physical lines (Phases 2.2/2.8/4.2), and the same handoff spelled as adjacent
+# inline-code spans joined by commas across a line break (Phase 5.2). The check must accept
+# both - splitting the second one per code span would be a false positive.
 $CompleteDispatch = @'
 9.9. Fixture dispatch appended by tests/test-consistency.ps1: `Use the coder subagent
 to implement task <T-ID>. Worktree=<abs>. WORK=<abs>. VCS=<jj|git>.
 SMOKE_CMD=<if set>. CALL_DEADLINE_SEC=<from config>. CALL_OUTPUT_MAX_BYTES=<from config>.`
+
+9.10. Fixture dispatch appended by tests/test-consistency.ps1 (Phase 5.2 shape - one
+handoff spread over adjacent inline-code spans): executor in the integration worktree
+(mode 2), T-ID=`_integration`, `SMOKE_CMD=<if set>`,
+`CALL_DEADLINE_SEC=<from config>`, `CALL_OUTPUT_MAX_BYTES=<from config>`
+'@
+
+# Two dispatches inside ONE Markdown paragraph, separated by prose only - the Phase 2.8
+# shape (R-fix coder dispatch, then the re-review reviewer dispatch). Paragraph-wide
+# matching accepted this: the reviewer dispatch's budgets covered the coder dispatch that
+# carried none. Exactly one finding is expected, on the incomplete dispatch's own line.
+$MixedParagraphMarker = 'mixed-paragraph-fixture'
+$MixedParagraphDispatches = @'
+9.6. Fixture dispatch appended by tests/test-consistency.ps1: `Use the coder subagent to
+address review findings R-01 for task <T-ID>. Worktree=<abs>. WORK=<abs>.
+VCS=<jj|git>. SMOKE_CMD=<if set>.` Then (mixed-paragraph-fixture), as a separate
+instruction of the very same paragraph, the re-review dispatch carrying full budgets:
+`Use the reviewer subagent to re-review task <T-ID> after fixes. WORK=<abs>.
+VCS=<jj|git>. CALL_DEADLINE_SEC=<from config>. CALL_OUTPUT_MAX_BYTES=<from config>.`
 '@
 
 # Three regressions in one fixture: a brand-new dispatch template with no budget at all,
@@ -72,6 +98,17 @@ function New-RepoFixture {
     $original = [System.IO.File]::ReadAllText($processor)
     [System.IO.File]::WriteAllText($processor, ($original + "`n`n" + $AppendToProcessor + "`n"), $Utf8NoBom)
     return $root
+}
+
+function Get-FixtureLine {
+    # 1-based line number of the unique marker inside the fixture's processor.md, so the
+    # reported finding can be pinned to the offending dispatch instead of the paragraph.
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Marker)
+    $lines = [System.IO.File]::ReadAllLines((Join-Path $Root $ProcessorRelPath))
+    for ($i = 0; $i -lt $lines.Length; $i++) {
+        if ($lines[$i].Contains($Marker)) { return $i + 1 }
+    }
+    throw "Marker '$Marker' not found in the fixture copy of $ProcessorRelPath"
 }
 
 function Invoke-Checker {
@@ -115,6 +152,18 @@ try {
         "omitting only the output budget is reported; findings=$($found -join ' // ')"
     Assert-Equal 3 @($found | Where-Object { $_ -match '^agents/processor\.md:\d+ - ' }).Count `
         "findings keep the '<file>:<line> - <check> - <detail>' shape; findings=$($found -join ' // ')"
+
+    # Sub-paragraph granularity: a complete dispatch sharing the paragraph must not vouch
+    # for the incomplete one (the Phase 2.8 shape that paragraph-wide matching let pass).
+    $mixedRoot = New-RepoFixture -AppendToProcessor $MixedParagraphDispatches
+    $mixedLine = Get-FixtureLine -Root $mixedRoot -Marker $MixedParagraphMarker
+    $mixed = Invoke-Checker -Root $mixedRoot
+    $mixedFound = @($mixed.Lines | Where-Object { $_ -match ' - smoke-budget-handoff - ' })
+    Assert-Equal 1 $mixed.ExitCode 'an incomplete dispatch sharing a paragraph with a complete one fails the validator'
+    Assert-Equal 1 $mixedFound.Count `
+        "the incomplete dispatch is reported even though the same paragraph holds a complete one; findings=$($mixedFound -join ' // ')"
+    Assert-Equal "agents/processor.md:$mixedLine - smoke-budget-handoff - SMOKE_CMD= dispatch instruction is missing CALL_DEADLINE_SEC=, CALL_OUTPUT_MAX_BYTES=" `
+        $mixedFound[0] 'the finding points at the offending dispatch line and names both missing budgets'
 }
 finally {
     foreach ($dir in $TempRoots) {
@@ -130,5 +179,5 @@ if ($Failures.Count -gt 0) {
     exit 1
 }
 
-Write-Host 'OK - consistency Class 9 accepts a complete wrapped dispatch and reports every dispatch missing either supervisor budget.'
+Write-Host 'OK - consistency Class 9 accepts complete dispatches in both wrapped shapes and reports every single dispatch missing either supervisor budget, including one sharing a paragraph with a complete dispatch.'
 exit 0
