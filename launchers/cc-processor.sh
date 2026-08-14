@@ -5,6 +5,8 @@
 # Optional flags (any order, before the remaining arguments):
 #   claude|codex     explicit provider (also --provider <claude|codex>).
 #                    Otherwise ORCHESTRA_PROVIDER is used; default is claude.
+#   ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions selects the
+#                    Claude-root permission mode; default is auto.
 #   --force-lock     operator force-takeover of the lease: remove the lease directory
 #                    .work/orchestrator.lock (with its lease.json) before starting -
 #                    only if you are sure the previous processor is no longer running.
@@ -114,6 +116,14 @@ if [ "$PROVIDER" != "claude" ] && [ "$PROVIDER" != "codex" ]; then
   exit 2
 fi
 
+if [ "$PROVIDER" = "claude" ]; then
+  CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+  case "$CLAUDE_PERMISSION_MODE" in
+    auto|bypassPermissions) ;;
+    *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
+  esac
+fi
+
 USE_PROCESSKIT_RUNTIME=false
 if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
   USE_PROCESSKIT_RUNTIME=true
@@ -169,8 +179,8 @@ fi
 #     CC_CODEX_EXEC_GRANT names and that the Phase 1.1 gate / cc-doctor / cc-config settings
 #     rule still key off; harmless when codex is not invoked as a bare Bash command directly.
 # The grants sit BEFORE --permission-mode: --allowedTools is variadic and, with no
-# following flag to stop it, would swallow the positional prompt. --permission-mode auto is
-# kept unchanged.
+# following flag to stop it, would swallow the positional prompt. The effective mode is
+# validated above.
 #
 # CC_CODEX_EXEC_GRANT="codex exec": an explicit, verifiable signal that this session
 # pre-granted autonomous codex above via --allowedTools. This is the single
@@ -183,6 +193,6 @@ fi
 # search.
 export CC_CODEX_EXEC_GRANT="codex exec"
 if $USE_PROCESSKIT_RUNTIME; then
-  exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-start-claude -- claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+  exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-start-claude -- claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 fi
-exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."

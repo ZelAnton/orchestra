@@ -216,6 +216,17 @@ switch ($autoApprove) {
     'on'    { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment) - fresh approval requests are audit-recorded and auto-approved' }
     default { Write-Host ("FAIL ORCHESTRA_AUTO_APPROVE: invalid value '$autoApprove' (allowed: on | off); policy.ps1 fails closed") }
 }
+$claudePermissionMode = [Environment]::GetEnvironmentVariable('ORCHESTRA_CLAUDE_PERMISSION_MODE')
+if ([string]::IsNullOrEmpty($claudePermissionMode)) { $claudePermissionMode = 'auto' }
+switch -CaseSensitive ($claudePermissionMode) {
+    'auto' { Write-Host 'OK   ORCHESTRA_CLAUDE_PERMISSION_MODE = auto (default; classifier remains active)' }
+    'bypassPermissions' {
+        Write-Host 'WARN ORCHESTRA_CLAUDE_PERMISSION_MODE = bypassPermissions - Claude permission checks are disabled for root and spawned subagents'
+    }
+    default {
+        Write-Host ("FAIL ORCHESTRA_CLAUDE_PERMISSION_MODE: invalid value '$claudePermissionMode' (allowed: auto | bypassPermissions); Claude launchers fail closed")
+    }
+}
 Write-Host ''
 
 Write-Host '== Codex-native processor provider =='

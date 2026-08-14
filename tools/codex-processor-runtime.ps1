@@ -10,10 +10,11 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'resume', 'check')]
+    [ValidateSet('start', 'resume', 'handoff', 'check')]
     [string]$Action = 'start',
 
     [string]$Root = (Get-Location).Path,
+    [string]$HandoffFrom,
     [string]$PromptPath,
     [string]$CodexCmd,
     [string]$Model,
@@ -207,6 +208,76 @@ function Read-SessionId {
     return $null
 }
 
+function Test-HasDurableRecoveryState {
+    param([string]$Work)
+
+    foreach ($name in @('batch.md', 'cohort_state.md', 'integration_state.md', 'merge_report.md', 'review_integration.md')) {
+        if (Test-Path -LiteralPath (Join-Path $Work $name) -PathType Leaf) { return $true }
+    }
+    if (Test-Path -LiteralPath (Join-Path $Work 'orchestrator.lock')) { return $true }
+
+    $tasks = Join-Path $Work 'tasks'
+    if (Test-Path -LiteralPath $tasks -PathType Container) {
+        if (Get-ChildItem -LiteralPath $tasks -Recurse -File -Filter 'task.md' -ErrorAction SilentlyContinue | Select-Object -First 1) {
+            return $true
+        }
+    }
+
+    $worktrees = Join-Path $Work 'worktrees'
+    if (Test-Path -LiteralPath $worktrees -PathType Container) {
+        if (Get-ChildItem -LiteralPath $worktrees -Directory -ErrorAction SilentlyContinue | Select-Object -First 1) {
+            return $true
+        }
+    }
+
+    # Covers the narrow crash window after executor marked a queue item but before the
+    # processor durably completed the task/cohort descriptor set.
+    $queue = Join-Path $Work 'Tasks_Queue.md'
+    if (Test-Path -LiteralPath $queue -PathType Leaf) {
+        try {
+            if ([System.IO.File]::ReadAllText($queue) -match '(?im)статус\s*:\s*в работе(?:\s|·|$)') { return $true }
+        } catch { }
+    }
+    return $false
+}
+
+function Assert-HandoffLeaseSafe {
+    param([string]$Work)
+
+    $stateTx = Join-Path $PSScriptRoot 'state-tx.ps1'
+    if (-not (Test-Path -LiteralPath $stateTx -PathType Leaf)) {
+        Stop-Runtime 15 'provider handoff cannot prove processor lease safety because state-tx.ps1 is missing; run cc-sync.'
+    }
+
+    $pwsh = Get-Command 'pwsh' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $pwsh) { Stop-Runtime 15 'provider handoff cannot inspect the processor lease because PowerShell 7 is unavailable.' }
+    $statusOutput = @(& $pwsh.Source -NoProfile -File $stateTx status --work $Work --json 2>&1)
+    $statusCode = $LASTEXITCODE
+    $statusText = (($statusOutput | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    if ($statusCode -eq 14) { return }
+    if ($statusCode -ne 0) {
+        Stop-Runtime 15 "provider handoff refused: processor lease state is not safely readable (state-tx exit $statusCode): $statusText"
+    }
+
+    try { $status = $statusText | ConvertFrom-Json -ErrorAction Stop }
+    catch { Stop-Runtime 15 "provider handoff refused: state-tx returned invalid JSON: $statusText" }
+    if (-not [bool]$status.present) { return }
+    if (-not [bool]$status.valid) { Stop-Runtime 15 'provider handoff refused: processor lease is invalid.' }
+    if ([string]$status.role -ne 'processor') {
+        Stop-Runtime 15 "provider handoff refused: the existing lease belongs to role '$($status.role)', not processor."
+    }
+    try { $leaseRoot = [System.IO.Path]::GetFullPath([string]$status.root) }
+    catch { Stop-Runtime 15 'provider handoff refused: the existing processor lease has an invalid root.' }
+    $comparison = if ($script:OnWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if (-not [string]::Equals($leaseRoot, $script:ResolvedRoot, $comparison)) {
+        Stop-Runtime 15 "provider handoff refused: processor lease root '$leaseRoot' does not match '$($script:ResolvedRoot)'."
+    }
+    if ([bool]$status.live) {
+        Stop-Runtime 15 "provider handoff refused: a live processor lease still exists (owner=$($status.owner_id), $($status.reason)). Stop the Claude processor first."
+    }
+    Write-Host "Provider handoff preflight: stale processor lease is safe to recover in Phase 0 (owner=$($status.owner_id), generation=$($status.generation))."
+}
+
 function Get-CodexRolloutFiles {
     param([datetime]$StartedLocal)
     $sessionsRoot = Join-Path (Get-CodexHome) 'sessions'
@@ -297,6 +368,12 @@ function Resolve-CodexProcessLaunch {
 
 try { $script:ResolvedRoot = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path }
 catch { Stop-Runtime 2 "project root does not exist: $Root" }
+if ($Action -eq 'handoff') {
+    if (-not $HandoffFrom) { Stop-Runtime 2 'handoff requires -HandoffFrom claude' }
+    if ($HandoffFrom -ne 'claude') { Stop-Runtime 2 "unsupported handoff source '$HandoffFrom' (allowed: claude)" }
+} elseif ($HandoffFrom) {
+    Stop-Runtime 2 '-HandoffFrom is valid only with the handoff action'
+}
 
 $CodexCmd = Resolve-EffectiveValue $CodexCmd 'CODEX_CMD' 'codex'
 $Model = Resolve-EffectiveValue $Model 'ORCHESTRA_CODEX_MODEL' ''
@@ -349,12 +426,22 @@ try {
 }
 $sessionPath = Join-Path $work 'codex_processor_session.json'
 $threadId = if ($Action -eq 'resume') { Read-SessionId -Path $sessionPath } else { $null }
-$effectiveAction = if ($Action -eq 'resume' -and $threadId) { 'resume' } else { 'start' }
+$effectiveAction = if ($Action -eq 'resume' -and $threadId) {
+    'resume'
+} elseif ($Action -eq 'handoff' -or ($Action -eq 'resume' -and (Test-HasDurableRecoveryState -Work $work))) {
+    'handoff'
+} else {
+    'start'
+}
 
-# An explicit start supersedes any previous addressed root thread. Invalidate the old
-# pointer before spawning so an auth/config/spawn failure cannot make a later cc-resume
-# silently attach to the superseded run.
-if ($Action -eq 'start' -and (Test-Path -LiteralPath $sessionPath -PathType Leaf)) {
+if ($effectiveAction -eq 'handoff') {
+    Assert-HandoffLeaseSafe -Work $work
+}
+
+# A start or provider handoff supersedes any previous addressed Codex root thread.
+# Invalidate the old pointer only after the handoff lease preflight, but before spawning,
+# so a later cc-resume cannot silently attach to a session from before the provider switch.
+if ($effectiveAction -in @('start', 'handoff') -and (Test-Path -LiteralPath $sessionPath -PathType Leaf)) {
     Remove-Item -LiteralPath $sessionPath -Force
 }
 
@@ -377,7 +464,14 @@ if ($effectiveAction -eq 'resume') {
     # The interactive CLI accepts its initial prompt only as argv. Keep that prompt short
     # (especially for Windows' command-line limit) and make the canonical generated file
     # the explicit source the root must read before taking any task action.
-    $modeText = if ($Action -eq 'resume') { 'Cold recovery: no valid addressed Codex processor thread was recorded.' } else { 'Start a new Codex-native Orchestra processor session.' }
+    $modeText = if ($effectiveAction -eq 'handoff') {
+        $sourceText = if ($HandoffFrom) { "the terminated $HandoffFrom processor" } else { 'an interrupted processor whose Codex thread is unavailable' }
+        "Operator-authorized provider handoff from $sourceText. No conversation transcript is imported: durable .work artifacts and VCS are the source of truth. Reconcile the complete in-flight cohort in Phase 0, preserve existing worktrees, branches, task descriptors, and uncommitted work, and do not restart or discard work merely because another provider created it."
+    } elseif ($Action -eq 'resume') {
+        'Cold recovery: no valid addressed Codex processor thread and no durable in-flight Orchestra state were found.'
+    } else {
+        'Start a new Codex-native Orchestra processor session.'
+    }
     $userPrompt = "Orchestra runtime invocation marker: $invocationMarker. Before any other action, open and read the complete UTF-8 processor instructions at the exact path $promptFile, then follow them for this entire root session. $modeText Acquire or safely recover the lease, process .work/Tasks_Queue.md end to end, and never invoke Claude."
     $argv = @('-C', $script:ResolvedRoot, '--sandbox', $Sandbox) + $common + @($userPrompt)
 }

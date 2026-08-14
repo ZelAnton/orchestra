@@ -158,8 +158,17 @@ Processor и merger формируют описательные англоязы
   Runtime находит созданный root rollout под `$CODEX_HOME/sessions`, проверяет
   `session_meta` (`originator=codex-tui`, точный root и уникальный invocation marker) и
   атомарно сохраняет адресованный `.work/codex_processor_session.json`. `resume` использует
-  только этот UUID; при отсутствии/несовпадении root выполняет Phase-0 cold recovery, никогда
-  не `--last`. Структура и checkout-freshness установленного custom-agent пакета остаются
+  только этот UUID, никогда не `--last`. Если UUID невалиден/не совпадает с root, runtime
+  механически ищет durable in-flight markers (`batch`/cohort/integration state, task
+  descriptors/worktrees, processor lease, queue `в работе`): при их наличии выбирает новый
+  Codex thread с `last_action=handoff`, без них — обычный Phase-0 cold recovery. Явный
+  `cc-resume codex --from claude` выбирает `handoff` даже при старом валидном UUID.
+  Перед handoff read-only `state-tx status` fail-closed запрещает live, legacy, corrupt,
+  wrong-role/root lease; matching stale lease не удаляется и передаётся Phase 0 для
+  повторного `verify` и безопасного `takeover`. Только после preflight runtime инвалидирует
+  прежний Codex UUID. Transcript Claude не импортируется: prompt объявляет `.work/`, VCS,
+  существующие worktree/ветки и WIP источником истины и запрещает отбрасывать начатую работу
+  из-за смены provider. Структура и checkout-freshness установленного custom-agent пакета остаются
   обязательным preflight. Project-local либо второй global
   TOML с любым managed `name = "orchestra_*"` считается конфликтом и останавливает preflight:
   Codex идентифицирует роль по `name`, поэтому такое переопределение недетерминированно.
@@ -184,6 +193,22 @@ Processor и merger формируют описательные англоязы
   processor все planner/coder/reviewer/merger/
   curator-вызовы — отдельные `orchestra_*` Codex threads; старые `coder_codex`/
   `reviewer_codex`, их `CODEX_*` routing и Claude fallback не участвуют.
+  Provider не переключает себя внутри живого root run. Единственный межprovider-переход —
+  operator-owned cold-recovery handoff от уже остановленного Claude через
+  `cc-resume codex --from claude` (либо автоматический эквивалент без Codex UUID при durable
+  in-flight state).
+- `ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions` — operator-owned режим
+  всех Claude-launcher’ов; default `auto`, любое иное значение fail-closed останавливает
+  launcher до старта Claude. Режим родителя `bypassPermissions` имеет приоритет
+  над frontmatter subagent’а и наследуется всеми создаваемыми ролями, поэтому
+  канонический `agents/*.md` и mirror по-прежнему хранят `permissionMode: auto`.
+  Opt-in предназначен только для изолированного контейнера/ВМ; агенту запрещено
+  выставлять его или перезапускать себя для саморасширения прав. На внутренние
+  `policy.ps1` gates этот Claude-режим не влияет; Codex-native runtime его не использует.
+  Windows-resolver в `cc-common.cmd` читает ещё невалидированное значение только через
+  delayed expansion, материализует в дочернее окружение один из двух фиксированных
+  литералов и держит результат под `setlocal`: cmd-метасимволы не исполняются, а внутренний
+  `CLAUDE_PERMISSION_MODE` не утекает в вызывающий shell.
 - Maker/checker в Codex-provider изолирован отдельным thread: reviewer никогда не является
   maker-thread. Гибридный Claude-root по умолчанию и для legacy-значений
   `CODEX_REVIEWER=fast|fast+std|deep` сохраняет cross-provider развязку «Codex сделал —
@@ -876,7 +901,8 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
   (`.work/constraints.md`): denylist путей, ветки/remotes, push/merge policy, обязательные
   проверки, пороги размера, human-review категории. Сеется целиком через `cc-config`.
 - `cc-processor` запускает цикл выбранного provider, `cc-resume` адресно продолжает
-  Claude processor lease/session либо точный Codex thread,
+  Claude processor lease/session либо точный Codex thread; `cc-resume codex --from claude`
+  безопасно открывает новый Codex thread поверх durable state остановленного Claude root,
   `cc-status`/`cc-journal` читают состояние, `cc-metrics` агрегирует историю read-only,
   `cc-doctor` проверяет Codex, `cc-queue`,
   `cc-thinker`, `cc-audit`, `cc-enhance`, `cc-github` запускают соответствующие роли;
@@ -946,7 +972,9 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
   иначе может направить Codex runtime в чужой каталог.
 - В `cc-resume.cmd` остаточные аргументы Codex после разбора provider собираются заново из
   сдвигаемых `%1`…`%9`: batch-команда `shift` не меняет `%*`, поэтому прямой проброс `%*`
-  повторно передал бы уже потреблённый токен `codex` в `codex exec resume`.
+  повторно передал бы уже потреблённый токен `codex` в runtime. Launcher-owned пара
+  `--from claude` тем же разбором превращается в runtime action `handoff -HandoffFrom
+  claude` и не утекает в произвольные Codex args.
 
 ## Резолвинг раннеров `tools/*.ps1` (чекаут vs зеркало)
 
@@ -1054,6 +1082,10 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 codex-правилами выше (см. «Резолвинг раннеров `tools/*.ps1`»).
 
 **Политика «согласие — заранее» (единая для всех автономных Bash-операций всех ролей).**
+- Режим `ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions` — явный
+  operator-owned opt-in всей Claude-сессии, а не грант от агента. Он отключает
+  permission-проверки и наследуется subagent’ам, но не отменяет `policy.ps1`.
+  Ролям запрещено устанавливать переменную или порождать новую bypass-сессию.
 - Разрешения на рискованные операции выдаёт **пользователь заранее** — через launchers
   (сессионный `--allowedTools`) и/или настройки (`.claude/settings*`, сеет `cc-config`), а
   не агент по ходу прогона.
@@ -1068,7 +1100,7 @@ codex-правилами выше (см. «Резолвинг раннеров `
   сообщением оператору «требуется ручное вмешательство: <операция> отклонена classifier'ом»;
   для листовых coder/reviewer — эскалация в отчёте processor. Это **дополняет**, а не
   заменяет известные сентинелы (`CODEX_UNAVAILABLE`/`CODEX_FAILED`).
-- **Согласие не наследуется через субагента.** Classifier не принимает согласие
+- **В `auto` согласие не наследуется через субагента.** Classifier не принимает согласие
   пользователя, пересказанное родителем-processor'ом субагенту: эмпирика T-057 — `merger`
   не смог финализировать грант-несущий мёрдж по «переданному» согласию, потребовалось, чтобы
   `/permissions`-подтверждение было видно в контексте самого финализирующего вызова.
@@ -1095,8 +1127,8 @@ codex-правилами выше (см. «Резолвинг раннеров `
 | `.work/config.md` | локальные переопределения, ключи `UPPER_SNAKE_CASE` |
 | `.work/constraints.md` | человекочитаемая политика ограничений проекта (denylist путей, ветки/remotes, push/merge policy, обязательные проверки, пороги, human-review категории); шаблон — `constraints.example.md`, сеет `cc-config`; читают processor/planner/coder/reviewer, нет файла — деградация без ошибок |
 | `.work/orchestrator.lock` | аренда владельца прогона (каталог; защита от двух processor независимо от provider). Содержит `lease.json` — запись аренды (owner/session id, корень, host, heartbeat, TTL, pid+время создания как доказательство живости, поколение и опциональный `processkit_run_id`); ведётся через `tools/state-tx.ps1`, см. `docs/queue_contract.md`, §14-§16 |
-| `.work/codex_processor_session.json` | адресованный UUID root-thread Codex-provider (`orchestra/codex-processor-session@1`), provider/root/timestamps; атомарно пишет только `tools/codex-processor-runtime.ps1`, читает `cc-resume codex`; не заменяет lease и не используется Claude-provider |
-| `.work/codex-processor-runtime.lock` | OS-held exclusive file lock внешнего Codex TUI root process; сериализует `start`/`resume` до модельного `orchestrator.lock`, чтобы конкурентные rollout `session_meta` не перезаписали addressed UUID. Пустой файл может оставаться, владение определяется только открытым handle и автоматически исчезает при crash |
+| `.work/codex_processor_session.json` | адресованный UUID root-thread Codex-provider (`orchestra/codex-processor-session@1`), provider/root/timestamps и `last_action=start\|resume\|handoff`; атомарно пишет только `tools/codex-processor-runtime.ps1`, читает `cc-resume codex`; handoff инвалидирует старый UUID после lease-preflight и записывает новый thread, файл не заменяет lease и не используется Claude-provider |
+| `.work/codex-processor-runtime.lock` | OS-held exclusive file lock внешнего Codex TUI root process; сериализует `start`/`resume`/`handoff` до модельного `orchestrator.lock`, чтобы конкурентные rollout `session_meta` не перезаписали addressed UUID. Пустой файл может оставаться, владение определяется только открытым handle и автоматически исчезает при crash |
 | `.work/orchestrator.lock/lease.json` | запись аренды (`schema: orchestra/lease@1`); мутируется только транзакционно через `tools/state-tx.ps1` (acquire/heartbeat/release/takeover) |
 | `.work/state-tx.lock` | краткоживущий атомарный лок мутации control plane (аренда/поколение состояния); держит `state-tx.ps1` на время одной транзакции; отдельный от `orchestrator.lock` и `queue-tx.lock` |
 | `.work/control_state.json` | счётчик поколения control plane (state-плоскостной аналог `queue_state.json`) для CAS мутаций состояния когорты/задачи; ведёт `tools/state-tx.ps1` |

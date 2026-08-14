@@ -33,6 +33,8 @@ if /I not "%PROVIDER%"=="claude" (
   echo Недопустимый provider "%PROVIDER%". Разрешены: claude, codex.
   exit /b 2
 )
+call "%LAUNCHER_DIR%cc-common.cmd" resolve_permission_mode
+if errorlevel 1 exit /b %ERRORLEVEL%
 set "USE_PROCESSKIT_RUNTIME="
 if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
 if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_PYTHON (
@@ -71,7 +73,7 @@ rem запускаем ЯВНОЕ холодное восстановление 
 rem возобновляем произвольную последнюю сессию. Точную сверку корня/owner id делает
 rem Фаза 0 processor'а через tools\state-tx.ps1 verify (docs\queue_contract.md, §16).
 rem --allowedTools (грант): предвыданный сессионный грант на автономный запуск codex
-rem адаптерами (тот же набор, что в cc-processor.cmd) — иначе classifier auto-режима
+rem адаптерами (тот же набор, что в cc-processor.cmd) — иначе classifier default auto-режима
 rem отклонит вызов посреди возобновлённого прогона. Передаём два префиксных гранта:
 rem   Bash(pwsh -File tools/codex-runtime.ps1:*) — строка, которую РЕАЛЬНО исполняет
 rem     Bash-инструмент: адаптеры гонят codex через runtime-обёртку
@@ -81,7 +83,7 @@ rem     процессом и через permission-гейт Bash он не пр
 rem   Bash(codex exec:*) — канонический якорь codex-автономии, который называет
 rem     CC_CODEX_EXEC_GRANT и от которого отталкиваются гейт Фазы 1.1 / cc-doctor / cc-config.
 rem Стоят перед флагом permission-mode (вариативный флаг не должен поглотить следующие
-rem токены). Режим auto и --continue сохранены.
+rem токены). Режим валидируется выше; --continue сохранён.
 rem CC_CODEX_EXEC_GRANT="codex exec": тот же единый контракт launcher->processor, что и в
 rem cc-processor.cmd — явный признак уже выданного сессионного гранта, который читают гейт
 rem Фазы 1.1 processor.md и cc-doctor; значение остаётся каноническим префиксом `codex exec`,
@@ -100,18 +102,18 @@ if not exist "%LEASE%" goto :coldstart
 findstr /C:"\"role\"" "%LEASE%" >nul 2>&1 || goto :coldstart
 findstr /C:"\"processor\"" "%LEASE%" >nul 2>&1 || goto :coldstart
 if defined USE_PROCESSKIT_RUNTIME goto :resume_contained
-claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 goto :done
 :resume_contained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 goto :done
 :coldstart
 echo No addressed processor lease (.work\orchestrator.lock\lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session.
 if defined USE_PROCESSKIT_RUNTIME goto :coldstart_contained
-claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 goto :done
 :coldstart_contained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 goto :done
 :done
 exit /b %ERRORLEVEL%
@@ -120,10 +122,32 @@ exit /b %ERRORLEVEL%
 rem SHIFT updates %%1..%%9 but never rewrites %%*. Rebuild the remaining argv explicitly;
 rem otherwise `cc-resume codex` forwards the consumed provider token to the PowerShell
 rem runtime, where it becomes an extra positional argument to `codex exec resume`.
-set CODEX_EXTRA_ARGS=
+rem `--from claude` is a launcher-owned provider-handoff selector and is never forwarded
+rem as an arbitrary Codex option.
+set "CODEX_ACTION=resume"
+set "CODEX_HANDOFF_FROM="
+set "CODEX_LABEL=processor-resume-codex"
+set "CODEX_EXTRA_ARGS="
 :collect_codex_args_loop
 if "%~1"=="" goto :codex_resume
+if /I "%~1"=="--from" goto :collect_codex_from
 set CODEX_EXTRA_ARGS=%CODEX_EXTRA_ARGS% %1
+shift
+goto :collect_codex_args_loop
+
+:collect_codex_from
+if "%~2"=="" (
+  echo Флаг --from требует значение claude.
+  exit /b 2
+)
+if /I not "%~2"=="claude" (
+  echo Недопустимый источник handoff "%~2". Разрешён: claude.
+  exit /b 2
+)
+set "CODEX_ACTION=handoff"
+set "CODEX_HANDOFF_FROM=claude"
+set "CODEX_LABEL=processor-handoff-claude-to-codex"
+shift
 shift
 goto :collect_codex_args_loop
 
@@ -137,9 +161,11 @@ exit /b 12
 :codex_runtime_found
 set "USE_PROCESSKIT_RUNTIME="
 if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
+set "CODEX_HANDOFF_ARGS="
+if defined CODEX_HANDOFF_FROM set "CODEX_HANDOFF_ARGS=-HandoffFrom %CODEX_HANDOFF_FROM%"
 if not defined USE_PROCESSKIT_RUNTIME goto :codex_resume_uncontained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-resume-codex -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label %CODEX_LABEL% -- pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" %CODEX_ACTION% -Root "%PROJECT_ROOT%" %CODEX_HANDOFF_ARGS% %CODEX_EXTRA_ARGS%
 exit /b %ERRORLEVEL%
 :codex_resume_uncontained
-pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" resume -Root "%PROJECT_ROOT%" %CODEX_EXTRA_ARGS%
+pwsh -NoProfile -File "%CODEX_PROCESSOR_RUNTIME%" %CODEX_ACTION% -Root "%PROJECT_ROOT%" %CODEX_HANDOFF_ARGS% %CODEX_EXTRA_ARGS%
 exit /b %ERRORLEVEL%

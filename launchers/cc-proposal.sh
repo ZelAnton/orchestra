@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# Run proposal_curator in the current folder (Claude Code, auto mode).
+# Run proposal_curator in the current folder (Claude Code).
 # Batch-curates the new P-NNN proposals (kind: proposal) in the backlog: decides one
 # outcome for each proposed proposal and creates tasks from the converted ones.
-exec claude --agent proposal_curator --permission-mode auto "Per your system prompt, curate the new P-NNN proposals in .work/Tasks_Queue.md and decide one outcome for each proposed proposal. Start now."
+CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+case "$CLAUDE_PERMISSION_MODE" in
+  auto|bypassPermissions) ;;
+  *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
+esac
+exec claude --agent proposal_curator --permission-mode "$CLAUDE_PERMISSION_MODE" "Per your system prompt, curate the new P-NNN proposals in .work/Tasks_Queue.md and decide one outcome for each proposed proposal. Start now."

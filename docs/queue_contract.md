@@ -639,7 +639,10 @@ docs-only. На resume и непосредственно перед ff/push proc
   (degraded-режим не умеет судить о живости аренды по heartbeat/TTL/pid).
 
 Смена режима для одного `.work` требует, чтобы прежний держатель снялся начисто (owner-checked
-`state-tx release` / удаление legacy-каталога) либо операторского `--force`/`--force-lock`.
+`state-tx release` / удаление legacy-каталога), либо операторского `--force`/`--force-lock`.
+Узкое исключение — operator-authorized provider handoff: launcher read-only доказывает, что
+структурированная аренда не жива, а новый processor повторно сверяет root/role и выполняет
+обычный безопасный `takeover`. Живую, legacy- или повреждённую аренду handoff не забирает.
 
 ## 15. Безопасный takeover и гонка поздней очистки
 
@@ -665,7 +668,8 @@ fallback'ом launcher'а на случай, когда `pwsh` (PowerShell 7) н
 
 ## 16. Адресное возобновление (resume)
 
-`launchers/cc-resume.*` возобновляет прерванную сессию `processor`, но `--continue` берёт
+В Claude-provider `launchers/cc-resume.*` возобновляет прерванную сессию `processor`, но
+`--continue` берёт
 **последнюю** сессию каталога, какой бы она ни была. Чтобы не подхватить чужую (другой
 роли/проекта) сессию, resume делает **адресную** проверку: аренда `.work/orchestrator.lock`
 существует и её `role=processor` (принадлежность именно processor'у этого каталога) →
@@ -676,6 +680,22 @@ crash-recovery Фазы 0 из `agents/processor.md`, без `--continue`), а �
 адоптировать свою устаревшую / холодный старт» processor доводит в Фазе 0 через
 `state-tx verify` (коды `own-live`/`own-stale`/mismatch), что делает выбор детерминированным и
 одинаковым до и после краша.
+
+В Codex-provider адресом служит точный UUID из `.work/codex_processor_session.json`:
+`cc-resume codex` передаёт его в `codex resume <UUID>` и никогда не использует `--last`.
+Если валидного UUID нет, но `batch.md`, task descriptor/worktree, аренда или другой durable
+in-flight state показывает незавершённую работу, runtime автоматически открывает новый
+Codex thread в режиме provider-handoff recovery. Если нет ни UUID, ни такого состояния,
+это обычный холодный старт Фазы 0.
+
+Явный `cc-resume codex --from claude` — operator-authorized переход от **остановленного**
+Claude root. Он намеренно игнорирует старый Codex UUID, сначала через read-only `state-tx
+status` отказывает при live/legacy/corrupt/mismatched lease, а после успешного preflight
+инвалидирует UUID и запускает новый Codex thread. Stale matching processor lease не
+удаляется launcher'ом: Codex root повторно делает `verify --require-root/--require-role` и
+безопасный `takeover`. Transcript между provider не импортируется; источники истины —
+`.work/`, VCS, task worktree/ветки и незакоммиченное состояние. Уже выполненная Claude
+работа не перезапускается и не отбрасывается только из-за смены provider.
 
 ## 17. Транзакционный интерфейс control plane (`tools/state-tx.ps1`)
 

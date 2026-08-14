@@ -42,6 +42,8 @@ if /I not "%PROVIDER%"=="claude" (
   echo Invalid provider "%PROVIDER%". Allowed: claude, codex.
   exit /b 2
 )
+call "%~dp0cc-common.cmd" resolve_permission_mode
+if errorlevel 1 exit /b %ERRORLEVEL%
 
 rem Strip an explicit provider prefix before preserving the historical free-form topic
 rem behavior. ARGS was captured before delayed expansion, so literal ! remains intact.
@@ -64,12 +66,12 @@ if "!PROVIDER_TOKEN_COUNT!"=="2" (
 )
 call "%~dp0cc-common.cmd" sanitize
 if defined ARGS (
-  claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: !ARGS!"
+  claude --agent thinker --permission-mode !CLAUDE_PERMISSION_MODE! "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: !ARGS!"
 )
 exit /b %ERRORLEVEL%
 
 :run_claude_bare
-claude --agent thinker --permission-mode auto
+claude --agent thinker --permission-mode %CLAUDE_PERMISSION_MODE%
 exit /b %ERRORLEVEL%
 
 :run_codex

@@ -67,6 +67,25 @@ function Invoke-Runtime {
         foreach ($key in $old.Keys) { [Environment]::SetEnvironmentVariable($key, $old[$key]) }
     }
 }
+function Write-ProcessorLease {
+    param($Fixture, [datetime]$Heartbeat, [int]$TtlSeconds = 900)
+    $lockDir = Join-Path $Fixture.Project '.work\orchestrator.lock'
+    New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+    $lease = [ordered]@{
+        schema = 'orchestra/lease@1'
+        role = 'processor'
+        owner_id = 'fixture-owner'
+        session_id = 'fixture-session'
+        root = $Fixture.Project
+        host = 'fixture-remote-host'
+        pid = $null
+        acquired = $Heartbeat.ToUniversalTime().ToString('o')
+        heartbeat = $Heartbeat.ToUniversalTime().ToString('o')
+        ttl_seconds = $TtlSeconds
+        generation = 4
+    }
+    [System.IO.File]::WriteAllText((Join-Path $lockDir 'lease.json'), ($lease | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+}
 
 $f = New-Fixture
 try {
@@ -106,6 +125,52 @@ try {
     $resumePrompt = Get-Content -LiteralPath $f.InitialPrompt -Raw
     Assert-True (-not $resumePrompt.Contains($f.Prompt)) 'exact resume does not ask to reload the full processor prompt into thread context'
     Assert-True ($resumePrompt.Contains('Continue the exact Codex-native Orchestra processor session')) 'exact resume sends a focused continuation prompt'
+
+    # An explicit cross-provider handoff starts a new Codex thread and supersedes the
+    # previously addressed Codex session instead of accidentally resuming it.
+    $handoffThreadId = '66666666-7777-8888-9999-aaaaaaaaaaaa'
+    $r = Invoke-Runtime $f 'handoff' @{ FAKE_THREAD_ID=$handoffThreadId } @('-HandoffFrom', 'claude')
+    Assert-True ($r.ExitCode -eq 0) "explicit Claude handoff exits 0 (got $($r.ExitCode), err=$($r.Err))"
+    $capturedArgs = @(Get-Content -LiteralPath $f.Args)
+    Assert-True (-not ($capturedArgs -contains 'resume')) 'explicit provider handoff starts a new interactive Codex thread'
+    $handoffPrompt = Get-Content -LiteralPath $f.InitialPrompt -Raw
+    Assert-True ($handoffPrompt.Contains('Operator-authorized provider handoff from the terminated claude processor')) 'explicit handoff identifies its source and operator authorization'
+    Assert-True ($handoffPrompt.Contains('No conversation transcript is imported')) 'handoff states the cross-provider transcript boundary'
+    Assert-True ($handoffPrompt.Contains('preserve existing worktrees')) 'handoff protects existing in-flight work'
+    $meta = Get-Content -LiteralPath $session -Raw | ConvertFrom-Json
+    Assert-True ($meta.thread_id -eq $handoffThreadId) 'explicit handoff replaces the superseded addressed Codex UUID'
+    Assert-True ($meta.last_action -eq 'handoff') 'explicit handoff persists handoff provenance on the new addressed thread'
+
+    # No addressed Codex thread plus durable cohort state automatically selects the
+    # same provider-handoff recovery contract.
+    Remove-Item -LiteralPath $session -Force
+    Set-Content -LiteralPath (Join-Path $f.Project '.work\batch.md') -Value 'Batch: fixture' -Encoding utf8
+    $r = Invoke-Runtime $f 'resume'
+    Assert-True ($r.ExitCode -eq 0) "durable-state auto handoff exits 0 (got $($r.ExitCode), err=$($r.Err))"
+    $capturedArgs = @(Get-Content -LiteralPath $f.Args)
+    Assert-True (-not ($capturedArgs -contains 'resume')) 'auto handoff does not address an unrelated or missing Codex thread'
+    $autoPrompt = Get-Content -LiteralPath $f.InitialPrompt -Raw
+    Assert-True ($autoPrompt.Contains('Operator-authorized provider handoff')) 'durable-state recovery is explicitly framed as a provider handoff'
+    $meta = Get-Content -LiteralPath $session -Raw | ConvertFrom-Json
+    Assert-True ($meta.last_action -eq 'handoff') 'auto handoff persists handoff as the effective action'
+    Remove-Item -LiteralPath (Join-Path $f.Project '.work\batch.md') -Force
+
+    # A provider handoff must never create a second control loop while the old provider
+    # still holds a live lease. It may recover that lease only after it is stale.
+    Write-ProcessorLease -Fixture $f -Heartbeat ([DateTime]::UtcNow)
+    Remove-Item -LiteralPath $f.Args -Force -ErrorAction SilentlyContinue
+    $savedBeforeRefusal = Get-Content -LiteralPath $session -Raw
+    $r = Invoke-Runtime $f 'handoff' @{} @('-HandoffFrom', 'claude')
+    Assert-True ($r.ExitCode -eq 15) 'provider handoff refuses a live processor lease'
+    Assert-True ($r.Err -match 'live processor lease still exists') 'live-lease refusal explains that Claude must be stopped first'
+    Assert-True (-not (Test-Path -LiteralPath $f.Args)) 'live-lease refusal happens before Codex is invoked'
+    Assert-True ((Get-Content -LiteralPath $session -Raw) -eq $savedBeforeRefusal) 'refused handoff preserves the existing addressed Codex pointer'
+
+    Write-ProcessorLease -Fixture $f -Heartbeat ([DateTime]::UtcNow.AddHours(-2)) -TtlSeconds 1
+    $r = Invoke-Runtime $f 'handoff' @{} @('-HandoffFrom', 'claude')
+    Assert-True ($r.ExitCode -eq 0) "provider handoff accepts a stale processor lease (got $($r.ExitCode), err=$($r.Err))"
+    Assert-True ([string]$r.Out -match 'stale processor lease is safe to recover') 'stale lease path is visible in runtime diagnostics'
+    Remove-Item -LiteralPath (Join-Path $f.Project '.work\orchestrator.lock') -Recurse -Force
 
     $r = Invoke-Runtime $f 'start' @{ ORCHESTRA_CODEX_MAX_THREADS='0' }
     Assert-True ($r.ExitCode -eq 2) 'zero max-thread environment value fails closed'

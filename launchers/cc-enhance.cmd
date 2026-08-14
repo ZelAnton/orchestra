@@ -23,7 +23,7 @@ if /I not "%PROVIDER%"=="claude" (
   echo Invalid provider "%PROVIDER%". Allowed: claude, codex.
   exit /b 2
 )
-call "%~dp0cc-common.cmd" run enhancement_scout auto "Per your system prompt, analyze the project and enqueue development/improvement proposals as separate tasks in .work/Tasks_Queue.md. Start now."
+call "%~dp0cc-common.cmd" run enhancement_scout "Per your system prompt, analyze the project and enqueue development/improvement proposals as separate tasks in .work/Tasks_Queue.md. Start now."
 exit /b %ERRORLEVEL%
 
 :run_codex

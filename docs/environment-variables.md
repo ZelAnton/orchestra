@@ -9,6 +9,7 @@ env-фолбэк, по-прежнему задаются в `.work/config.md`.
 | Переменная | Значения / default | Назначение |
 |---|---|---|
 | `ORCHESTRA_PROVIDER` | `claude` / `codex`; default `claude` | Выбирает provider для поддерживающих его launchers во всех проектах. Аргумент `codex\|claude` у `cc-processor`, `cc-resume`, `cc-thinker`, `cc-audit` или `cc-enhance` имеет приоритет. |
+| `ORCHESTRA_CLAUDE_PERMISSION_MODE` | `auto` / `bypassPermissions`; default `auto` | Задаёт `--permission-mode` всех Claude-launcher’ов. `bypassPermissions` наследуется создаваемыми subagent’ами; любое другое значение блокирует запуск до Claude. На Codex-native runtime не влияет. |
 | `ORCHESTRA_AUTO_APPROVE` | `on` / `off`; default `off` | Автоматически подтверждает внутренние gates `human-review`, `force-lock` и `policy-bypass`. Это не разрешения Claude/Codex. Любое другое значение вызывает fail-closed. |
 | `CODEX_CODER` | `off`, `fast`, `fast+std`, `all`; default `off` | В Claude-root режиме направляет реализацию соответствующих уровней в Codex; `all` включает `coder_deep`. |
 | `CODEX_REVIEWER` | `off`, `fast`, `fast+std`, `deep`, `all`; default `off` | В Claude-root режиме направляет ревью соответствующих уровней в Codex; `deep` добавляет augment, `all` полностью заменяет ревью всех уровней. |
@@ -27,6 +28,18 @@ checker-тредом Codex.
 В Codex-root режиме `CODEX_CODER` и `CODEX_REVIEWER` игнорируются, поскольку все роли
 там уже исполняются как Codex-native custom agents. Полный контракт env-фолбэка описан
 в [`config.example.md`](../config.example.md).
+
+`ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions` полностью отключает permission-
+проверки Claude для root-сессии и её subagent’ов. Используйте его только в
+изолированном контейнере/ВМ и задавайте как оператор до запуска. Агентам
+запрещено выставлять эту переменную или перезапускать себя ради расширения прав.
+Внутренние `policy.ps1` gates не отключаются этим режимом.
+
+Включить bypass для текущей PowerShell-сессии:
+
+```powershell
+$env:ORCHESTRA_CLAUDE_PERMISSION_MODE = 'bypassPermissions'
+```
 
 ## Настройки Codex-native сессий
 

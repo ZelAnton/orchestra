@@ -32,9 +32,13 @@ provider contract at higher precedence whenever provider-specific wording confli
    an Anthropic call.
 7. Do not modify `.claude/settings*`, `.codex/config.toml`, or `.codex/agents` during a
    run. Provider configuration belongs to `cc-sync`, the launcher, and the operator.
-8. `ORCHESTRA_PROVIDER=codex` is an external runtime fact. Do not change it and do not
-   switch providers mid-cohort. On a role failure, follow the canonical bounded retry,
-   requeue, quarantine, or escalation path without falling back to Claude.
+8. `ORCHESTRA_PROVIDER=codex` is an external runtime fact. Do not change it, self-switch
+   providers, or fall back to Claude during this Codex root run. An operator-authorized
+   cold-recovery handoff from a terminated Claude root may precede this run. When the
+   runtime prompt identifies that handoff, continue the existing cohort from durable
+   `.work/` and VCS state; do not discard or restart work because Claude created it. On a
+   role failure, follow the canonical bounded retry, requeue, quarantine, or escalation
+   path without falling back to Claude.
 
 --- canonical processor instructions ---
 
@@ -333,8 +337,9 @@ pwsh -File tools/state-tx.ps1 acquire --work "$WORK" --root "$ROOT" \
 - `10` (аренда жива, чужой владелец) — вероятен **второй оркестратор**: остановись,
   ничего не мутируй, сообщи оператору. Не форсируй.
 - `11` (аренда **устарела**) — прежний прогон вероятно мёртв. Молча не бери: реши по
-  контексту запуска (см. ниже) — свой прерванный прогон → адресный resume; иначе →
-  операторское подтверждение `--force-lock`.
+  контексту запуска (см. ниже) — свой прерванный прогон → адресный resume;
+  operator-authorized provider handoff после launcher-preflight → безопасный takeover;
+  иначе → операторское подтверждение `--force-lock`.
 
 **Продлевай heartbeat** (`pwsh -File tools/state-tx.ps1 heartbeat --work "$WORK"
 --owner <owner_id>`) на границах фаз/раундов — там же, где пересобираешь `status.md` и
@@ -360,6 +365,17 @@ release с чужим owner_id получает отказ (код 13) — эт�
   "$PPID" --require-root "$ROOT" --require-role processor` (получишь новый owner_id,
   `generation` продолжится), затем crash-recovery. Mismatch по корню/роли (15/16) —
   аренда не твоя: **не** адоптируй, уйди в чистое холодное восстановление.
+- **Provider handoff Claude → Codex** (runtime-prompt от
+  `cc-resume codex --from claude`, либо автоматический handoff при отсутствии валидного
+  Codex UUID и наличии durable in-flight state): launcher уже выполнил read-only
+  preflight аренды, но в Фазе 0 всё равно повторно вызови `verify --require-root "$ROOT"
+  --require-role processor`. Свежая аренда (`own-live` или чужая live) означает, что
+  прежний управляющий цикл ещё может работать: остановись, ничего не мутируй. Совпадающую
+  по root/role **устаревшую** аренду адоптируй через тот же `takeover`, что выше; при
+  отсутствии аренды выполни обычный `acquire`. Затем восстанови **всю существующую
+  когорту** из `.work/`, VCS, task worktree/веток и незакоммиченного состояния. Transcript
+  другого provider не импортируется, поэтому durable state — источник истины. Не удаляй,
+  не перезапускай и не возвращай задачу в очередь только потому, что её начал Claude.
 - **Иначе** (аренда свежая и чужая / verify дал own-live не твоей сессии) —
   остановись: вероятен второй оркестратор. Операторский force-takeover — `--force-lock`
   launcher'а (см. `docs/operations.md`), только убедившись, что прежний processor мёртв.
@@ -2687,6 +2703,11 @@ F-циклы, Codex attempts (итог + причины, дедуп по `event_
 `rm -rf "$WORK/…"`, запуск `codex exec` через адаптеры, а также permission-гейт Фазы 1.1),
 эта политика обязывает:
 
+- `ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions` может выбрать только оператор
+  до запуска launcher’а. Такой режим родителя наследуют вызванные тобой
+  Claude-subagent’ы; не меняй их `permissionMode: auto`. Тебе запрещено самому
+  выставлять эту переменную или перезапускать себя ради расширения прав. Этот
+  Claude-режим не отменяет ни одного внутреннего gate `policy.ps1`.
 - **Согласие выдаётся пользователем заранее** — сессионным грантом launcher'ов
   (`--allowedTools`) и/или настройками (`.claude/settings*`, сеет `cc-config`). Тебе
   **категорически запрещено** самостоятельно расширять свои полномочия: не редактируй
@@ -2700,7 +2721,7 @@ F-циклы, Codex attempts (итог + причины, дедуп по `event_
   ручное вмешательство: <операция> отклонена auto-mode classifier'ом», оставь согласованное
   состояние (уже запушенное не откатывай). Это **дополняет** известные сентинелы
   codex-адаптеров (`CODEX_UNAVAILABLE`/`CODEX_FAILED`), а не заменяет их.
-- **Согласие не наследуется через субагента.** Classifier не принимает согласие
+- **В `auto` согласие не наследуется через субагента.** Classifier не принимает согласие
   пользователя, пересказанное тобой субагенту (эмпирика T-057: `merger` не смог
   финализировать грант-несущий мёрдж по переданному согласию — потребовалось, чтобы
   `/permissions`-подтверждение было видно в контексте самого финализирующего вызова).

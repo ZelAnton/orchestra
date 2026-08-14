@@ -121,6 +121,7 @@ $parallelSafeNames = @(
     'test-cc-status.ps1',
     'test-cc-thinker.ps1',
     'test-cc-unpause.ps1',
+    'test-claude-permission-mode.ps1',
     'test-codex-all-routing.ps1',
     'test-codex-processor-runtime.ps1',
     'test-codex-role-runtime.ps1',

@@ -49,11 +49,11 @@ only to sandboxed *copies* of the launchers:
   historically needed the same treatment; since T-090 it is a thin wrapper with no
   embedded non-ASCII and needs no fixup.)
 
-Per T-018's constraint, the tests never hardcode the literal value of the
-`--permission-mode` flag (it is expected to change independently in a
-parallel task): `Get-ExpectedPermissionMode` extracts whatever value is
-currently in a launcher's own source and asserts that the launcher actually
-forwards it, rather than asserting a fixed string.
+The per-launcher suites assert the compatibility default resolved by
+`Get-ExpectedPermissionMode`. `test-claude-permission-mode.ps1` separately drives every
+Windows Claude launcher with `ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions` and an
+invalid value, proving both propagation and fail-closed behavior. The POSIX launcher suite
+performs the same checks for every `.sh` Claude launcher.
 
 ## `cc-sync` launcher and runtime coverage
 

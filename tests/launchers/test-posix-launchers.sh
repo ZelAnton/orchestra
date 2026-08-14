@@ -80,7 +80,8 @@ run_with_mock_claude() {
     (
         cd "$RUN_DIR" || exit 99
         PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
-            CLAUDE_EXIT_CODE=0 "$BASH" "$launcher_path" "$@"
+            CLAUDE_EXIT_CODE=0 ORCHESTRA_CLAUDE_PERMISSION_MODE= \
+            "$BASH" "$launcher_path" "$@"
     )
     rc=$?
 
@@ -112,7 +113,8 @@ run_without_claude() {
     local rc
 
     set +e
-    output=$(cd "$RUN_DIR" && PATH="$MISSING_PATH" "$BASH" "$launcher_path" 2>&1)
+    output=$(cd "$RUN_DIR" && PATH="$MISSING_PATH" ORCHESTRA_CLAUDE_PERMISSION_MODE= \
+        "$BASH" "$launcher_path" 2>&1)
     rc=$?
     set -e
 
@@ -128,6 +130,52 @@ run_without_claude() {
     pass "$name"
 }
 
+run_with_bypass_permissions() {
+    local launcher="$1"
+    local agent="$2"
+    local name="$launcher (bypassPermissions opt-in)"
+    local launcher_path="$REPO_ROOT/launchers/$launcher"
+    local rc
+
+    : > "$ARGS_FILE"
+    : > "$RC_FILE"
+    (
+        cd "$RUN_DIR" || exit 99
+        PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
+            CLAUDE_EXIT_CODE=0 ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions \
+            "$BASH" "$launcher_path"
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! contains_argument_pair --agent "$agent" || \
+        ! contains_argument_pair --permission-mode bypassPermissions; then
+        fail "$name" "launcher did not forward the validated bypassPermissions mode"
+        return
+    fi
+    pass "$name"
+}
+
+run_with_invalid_permission_mode() {
+    local launcher="$1"
+    local name="$launcher (invalid permission mode)"
+    local launcher_path="$REPO_ROOT/launchers/$launcher"
+    local output
+    local rc
+
+    : > "$ARGS_FILE"
+    set +e
+    output=$(cd "$RUN_DIR" && PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" \
+        CLAUDE_RC_FILE="$RC_FILE" ORCHESTRA_CLAUDE_PERMISSION_MODE=unsafe \
+        "$BASH" "$launcher_path" 2>&1)
+    rc=$?
+    set -e
+    if [ "$rc" -ne 2 ] || [ -s "$ARGS_FILE" ] || \
+        ! printf '%s\n' "$output" | grep -Fq 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE'; then
+        fail "$name" "invalid mode did not fail closed before Claude start (rc=$rc; output=$output)"
+        return
+    fi
+    pass "$name"
+}
+
 test_launcher() {
     local launcher="$1"
     local agent="$2"
@@ -135,12 +183,15 @@ test_launcher() {
     run_with_mock_claude "$launcher" "$agent" "no arguments"
     run_with_mock_claude "$launcher" "$agent" "with arguments" --test-argument "two words"
     run_without_claude "$launcher"
+    run_with_bypass_permissions "$launcher" "$agent"
+    run_with_invalid_permission_mode "$launcher"
 }
 
 run_with_mock_codex_processor() {
     local launcher="$1"
     local action="$2"
-    local name="$launcher (Codex-native provider)"
+    shift 2
+    local name="$launcher (Codex-native provider, $action)"
     local launcher_path="$REPO_ROOT/launchers/$launcher"
     local rc
 
@@ -148,7 +199,7 @@ run_with_mock_codex_processor() {
     (
         cd "$RUN_DIR" || exit 99
         PATH="$MOCK_DIR" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" ORCHESTRA_PROVIDER=claude \
-            "$BASH" "$launcher_path" codex
+            "$BASH" "$launcher_path" codex "$@"
     )
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -162,6 +213,16 @@ run_with_mock_codex_processor() {
     if ! grep -Eq 'codex-processor-runtime\.ps1$' "$PWSH_ARGS_FILE"; then
         fail "$name" "codex-processor-runtime.ps1 was not selected"
         return
+    fi
+    if [ "$action" = "handoff" ]; then
+        if ! grep -Fxq -- '-HandoffFrom' "$PWSH_ARGS_FILE" || ! grep -Fxq 'claude' "$PWSH_ARGS_FILE"; then
+            fail "$name" "Claude handoff source was not passed to the native runtime"
+            return
+        fi
+        if grep -Fxq -- '--from' "$PWSH_ARGS_FILE"; then
+            fail "$name" "launcher-owned --from selector leaked into native runtime arguments"
+            return
+        fi
     fi
     pass "$name"
 }
@@ -345,14 +406,18 @@ run_force_lock_raw_fallback_without_pwsh() {
 }
 
 test_launcher cc-audit.sh code_auditor
+test_launcher cc-deps.sh dependency_curator
 test_launcher cc-enhance.sh enhancement_scout
 test_launcher cc-github.sh github_sync
+test_launcher cc-inbox.sh inbox_curator
 test_launcher cc-processor.sh processor
+test_launcher cc-proposal.sh proposal_curator
 test_launcher cc-queue.sh queue_builder
 test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
 run_with_mock_codex_processor cc-processor.sh start
 run_with_mock_codex_processor cc-resume.sh resume
+run_with_mock_codex_processor cc-resume.sh handoff --from claude
 run_with_mock_codex_role cc-thinker.sh thinker
 run_with_mock_codex_role cc-audit.sh code_auditor
 run_with_mock_codex_role cc-enhance.sh enhancement_scout
@@ -365,4 +430,4 @@ if [ "$FAILURES" -ne 0 ]; then
     exit 1
 fi
 
-printf 'POSIX launcher tests passed: all 29 scenarios succeeded.\n'
+printf 'POSIX launcher tests passed: all 58 scenarios succeeded.\n'

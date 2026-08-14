@@ -202,6 +202,57 @@ exit 0
         Remove-Sandbox $paths
     }
 
+    # --- Scenario 5c: explicit Claude -> Codex handoff is launcher-owned.
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-resume.cmd'
+        $runtimeCapture = Join-Path $paths.Root 'codex-runtime-handoff-args.txt'
+        @'
+$args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -LauncherArgs @('codex', '--from', 'claude', '-Model', 'gpt-test') -EnvVars @{
+            FAKE_CODEX_PROCESSOR_ARGS = $runtimeCapture
+            ORCHESTRA_PROVIDER = ''
+        }
+        Assert-Equal 0 $result.ExitCode '[codex handoff] exit code'
+        $captured = @(Get-Content -LiteralPath $runtimeCapture -Encoding utf8)
+        Assert-True ($captured[0] -eq 'handoff') '[codex handoff] runtime action is handoff'
+        $fromIndex = [Array]::IndexOf($captured, '-HandoffFrom')
+        Assert-True ($fromIndex -ge 0 -and $captured[$fromIndex + 1] -eq 'claude') '[codex handoff] source provider is explicit'
+        Assert-True (-not ($captured -contains '--from')) '[codex handoff] launcher selector is not forwarded as an arbitrary Codex argument'
+        Assert-True ($captured -contains '-Model' -and $captured -contains 'gpt-test') '[codex handoff] remaining runtime arguments are preserved'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 5d: malformed handoff selectors fail before runtime start.
+    $invalidHandoffCases = @(
+        [pscustomobject]@{ Args = @('codex', '--from') }
+        [pscustomobject]@{ Args = @('codex', '--from', 'other') }
+    )
+    foreach ($invalidCase in $invalidHandoffCases) {
+        $paths = New-Sandbox
+        try {
+            Install-Launcher -Paths $paths -Names 'cc-resume.cmd'
+            $runtimeCapture = Join-Path $paths.Root 'codex-runtime-invalid-handoff.txt'
+            @'
+$args | Set-Content -LiteralPath $env:FAKE_CODEX_PROCESSOR_ARGS -Encoding utf8
+exit 0
+'@ | Set-Content -LiteralPath (Join-Path $paths.Scripts 'codex-processor-runtime.ps1') -Encoding utf8
+            $result = Invoke-Launcher -Paths $paths -Name 'cc-resume.cmd' -LauncherArgs $invalidCase.Args -EnvVars @{
+                FAKE_CODEX_PROCESSOR_ARGS = $runtimeCapture
+                ORCHESTRA_PROVIDER = ''
+            }
+            Assert-Equal 2 $result.ExitCode '[invalid codex handoff] launcher fails closed'
+            Assert-NoFileExists $runtimeCapture '[invalid codex handoff] runtime is not invoked'
+        }
+        finally {
+            Remove-Sandbox $paths
+        }
+    }
+
     # --- Scenario 6: standalone CLI selection wraps the addressed Claude resume.
     $paths = New-Sandbox
     try {

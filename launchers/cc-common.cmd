@@ -4,7 +4,8 @@ rem "batch library" of callable subroutines, never meant to be run directly:
 rem it is always invoked from another launcher via "call", with the desired
 rem subroutine name as the first argument:
 rem
-rem   call "%~dp0cc-common.cmd" run <agent> <permission-mode> "<prompt>"
+rem   call "%~dp0cc-common.cmd" run <agent> "<prompt>"
+rem   call "%~dp0cc-common.cmd" resolve_permission_mode
 rem   call "%~dp0cc-common.cmd" sanitize
 rem
 rem "goto :%1" below jumps straight to the matching label; an unset/unknown
@@ -12,18 +13,49 @@ rem first argument is a caller bug, not something this file guards against.
 goto :%1
 
 :run
-rem Runs "chcp 65001" then invokes claude with a fixed agent/permission-mode/
-rem prompt combination - the pattern shared verbatim by cc-audit.cmd,
+rem Runs "chcp 65001" then invokes claude with a fixed agent/prompt
+rem combination - the pattern shared verbatim by cc-audit.cmd,
 rem cc-enhance.cmd and cc-github.cmd before this task. %2=agent,
-rem %3=permission-mode, %4=prompt. The caller must pass the prompt as a
+rem %3=prompt. ORCHESTRA_CLAUDE_PERMISSION_MODE selects the mode after strict
+rem validation. The caller must pass the prompt as a
 rem single already-quoted argument, exactly as those three launchers do -
 rem none of their prompt texts contain a literal " or % that would need
 rem further escaping. (Runtime user input DOES need that kind of escaping -
 rem see :sanitize below, used only by the two launchers that accept a
 rem command-line argument.)
+setlocal
 chcp 65001 >nul
-claude --agent %2 --permission-mode %3 %4
+call :resolve_permission_mode
+if errorlevel 1 exit /b %ERRORLEVEL%
+claude --agent %2 --permission-mode %CLAUDE_PERMISSION_MODE% %3
 exit /b %errorlevel%
+
+:resolve_permission_mode
+rem Operator-owned opt-in for Claude launchers. Keep the committed agent
+rem frontmatter on auto: a bypassPermissions parent takes precedence for every
+rem spawned subagent, so changing installed role definitions is unnecessary. Delayed
+rem expansion is intentional: the environment value is untrusted command text until it
+rem has matched one of the two literals, so percent-expanding it would let a quote plus
+rem cmd metacharacters execute before the fail-closed branch.
+setlocal EnableExtensions EnableDelayedExpansion
+set "CANDIDATE_CLAUDE_PERMISSION_MODE=!ORCHESTRA_CLAUDE_PERMISSION_MODE!"
+if not defined CANDIDATE_CLAUDE_PERMISSION_MODE set "CANDIDATE_CLAUDE_PERMISSION_MODE=auto"
+if "!CANDIDATE_CLAUDE_PERMISSION_MODE!"=="auto" goto :permission_mode_auto
+if "!CANDIDATE_CLAUDE_PERMISSION_MODE!"=="bypassPermissions" goto :permission_mode_bypass
+endlocal
+echo Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE. Allowed: auto, bypassPermissions. 1>&2
+set "CLAUDE_PERMISSION_MODE="
+exit /b 2
+
+:permission_mode_auto
+endlocal
+set "CLAUDE_PERMISSION_MODE=auto"
+exit /b 0
+
+:permission_mode_bypass
+endlocal
+set "CLAUDE_PERMISSION_MODE=bypassPermissions"
+exit /b 0
 
 :sanitize
 rem Shared tail end of the ARGS-sanitization block duplicated (before this

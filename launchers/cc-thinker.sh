@@ -21,10 +21,15 @@ esac
 
 case "$PROVIDER" in
   claude)
+    CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+    case "$CLAUDE_PERMISSION_MODE" in
+      auto|bypassPermissions) ;;
+      *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
+    esac
     if [ "$#" -eq 0 ]; then
-      exec claude --agent thinker --permission-mode auto
+      exec claude --agent thinker --permission-mode "$CLAUDE_PERMISSION_MODE"
     fi
-    exec claude --agent thinker --permission-mode auto "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: $*"
+    exec claude --agent thinker --permission-mode "$CLAUDE_PERMISSION_MODE" "Per your system prompt: act as the analytical thinking partner for this project. Opening topic: $*"
     ;;
   codex)
     SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"

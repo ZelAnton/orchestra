@@ -29,7 +29,7 @@
 #   Bash(codex exec:*) - the canonical codex-autonomy anchor CC_CODEX_EXEC_GRANT names and
 #     that the Phase 1.1 gate / cc-doctor / cc-config settings rule key off.
 # They sit BEFORE --permission-mode (the variadic flag must not swallow the following
-# tokens). --permission-mode auto and --continue unchanged.
+# tokens). The effective mode is validated below; --continue is unchanged.
 # CC_CODEX_EXEC_GRANT="codex exec": the same single launcher->processor contract as in
 # cc-processor.sh - an explicit signal of the already-issued session grant that the Phase
 # 1.1 gate and cc-doctor read; its value stays the canonical "codex exec" prefix they
@@ -50,6 +50,14 @@ fi
 if [ "$PROVIDER" != "claude" ] && [ "$PROVIDER" != "codex" ]; then
   echo "Invalid provider '$PROVIDER'. Allowed: claude, codex." >&2
   exit 2
+fi
+
+if [ "$PROVIDER" = "claude" ]; then
+  CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+  case "$CLAUDE_PERMISSION_MODE" in
+    auto|bypassPermissions) ;;
+    *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
+  esac
 fi
 
 export CC_CODEX_EXEC_GRANT="codex exec"
@@ -87,9 +95,32 @@ if [ "$PROVIDER" = "codex" ]; then
     echo "Codex processor runtime is missing; run cc-sync from the Orchestra checkout." >&2
     exit 12
   fi
-  CODEX_LAUNCH=(pwsh -NoProfile -File "$CODEX_PROCESSOR_RUNTIME" resume -Root "$PWD" "$@")
+  CODEX_ACTION=resume
+  CODEX_LABEL=processor-resume-codex
+  CODEX_HANDOFF_ARGS=()
+  CODEX_EXTRA_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--from" ]; then
+      if [ "$#" -lt 2 ]; then
+        echo "Flag --from requires claude." >&2
+        exit 2
+      fi
+      if [ "$2" != "claude" ]; then
+        printf "Invalid handoff source '%s'. Allowed: claude.\n" "$2" >&2
+        exit 2
+      fi
+      CODEX_ACTION=handoff
+      CODEX_LABEL=processor-handoff-claude-to-codex
+      CODEX_HANDOFF_ARGS=(-HandoffFrom claude)
+      shift 2
+      continue
+    fi
+    CODEX_EXTRA_ARGS+=("$1")
+    shift
+  done
+  CODEX_LAUNCH=(pwsh -NoProfile -File "$CODEX_PROCESSOR_RUNTIME" "$CODEX_ACTION" -Root "$PWD" "${CODEX_HANDOFF_ARGS[@]}" "${CODEX_EXTRA_ARGS[@]}")
   if $USE_PROCESSKIT_RUNTIME; then
-    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-resume-codex -- "${CODEX_LAUNCH[@]}"
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label "$CODEX_LABEL" -- "${CODEX_LAUNCH[@]}"
   fi
   exec "${CODEX_LAUNCH[@]}"
 fi
@@ -100,13 +131,13 @@ fi
 LEASE=".work/orchestrator.lock/lease.json"
 if [ -f "$LEASE" ] && grep -Eq '"role"[[:space:]]*:[[:space:]]*"processor"' "$LEASE"; then
   if $USE_PROCESSKIT_RUNTIME; then
-    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
   fi
-  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 else
   echo "No addressed processor lease (.work/orchestrator.lock/lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session."
   if $USE_PROCESSKIT_RUNTIME; then
-    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
   fi
-  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 fi

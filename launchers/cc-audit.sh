@@ -15,7 +15,12 @@ case "${1:-}" in
 esac
 case "$PROVIDER" in
   claude)
-    exec claude --agent code_auditor --permission-mode auto "Per your system prompt, audit the repository source code and enqueue each issue you find as a separate task in .work/Tasks_Queue.md. Start now."
+    CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+    case "$CLAUDE_PERMISSION_MODE" in
+      auto|bypassPermissions) ;;
+      *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
+    esac
+    exec claude --agent code_auditor --permission-mode "$CLAUDE_PERMISSION_MODE" "Per your system prompt, audit the repository source code and enqueue each issue you find as a separate task in .work/Tasks_Queue.md. Start now."
     ;;
   codex)
     SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"

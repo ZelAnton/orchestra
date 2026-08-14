@@ -23,7 +23,7 @@ if /I not "%PROVIDER%"=="claude" (
   echo Invalid provider "%PROVIDER%". Allowed: claude, codex.
   exit /b 2
 )
-call "%~dp0cc-common.cmd" run code_auditor auto "Per your system prompt, audit the repository source code and enqueue each issue you find as a separate task in .work/Tasks_Queue.md. Start now."
+call "%~dp0cc-common.cmd" run code_auditor "Per your system prompt, audit the repository source code and enqueue each issue you find as a separate task in .work/Tasks_Queue.md. Start now."
 exit /b %ERRORLEVEL%
 
 :run_codex

@@ -141,6 +141,21 @@ stdio for this provider too; without it, a captured root would hide the TUI.
 `.work/codex_processor_session.json`; it does not use the ambiguous `--last`. Explicit
 `cc-processor claude`/`cc-resume claude` override the environment for one run.
 
+To move an interrupted cohort from Claude to Codex, first stop/terminate the Claude root,
+then run:
+
+```text
+cc-resume codex --from claude
+```
+
+This is a cold-recovery handoff, not a transcript transfer. The runtime starts a fresh
+Codex thread, treats `.work/`, task worktrees/branches, and VCS state as authoritative,
+and removes any older addressed Codex UUID only after its lease preflight. A live processor
+lease refuses the handoff; a matching stale lease is left for the processor's safe Phase-0
+`verify`/`takeover`. Plain `cc-resume codex` still resumes an exact valid Codex UUID; when
+there is no UUID but durable in-flight state exists, it selects the same handoff recovery
+automatically. With neither UUID nor in-flight state it performs an ordinary cold recovery.
+
 The directly launched analytical roles use the same provider selection:
 
 ```text
@@ -161,6 +176,21 @@ The autonomous Codex root defaults to `ORCHESTRA_CODEX_REASONING=high`,
 `ORCHESTRA_CODEX_MAX_THREADS` only as operator-owned User/Machine environment variables.
 The runtime pins approval policy `never`; agents must not modify these values or
 `.codex/agents` during a run.
+
+**Claude permission mode.** Claude launchers use `auto` by default. To run the Claude root
+and every subagent it creates with permission checks disabled, an operator may set:
+
+```powershell
+[Environment]::SetEnvironmentVariable('ORCHESTRA_CLAUDE_PERMISSION_MODE', 'bypassPermissions', 'User')
+```
+
+Open a new terminal, run `cc-sync`, and check that `cc-doctor` prints the explicit warning.
+The launchers accept only `auto` and `bypassPermissions`; an invalid value stops before
+Claude starts. Set `auto` or remove the variable to restore the guarded default. Claude
+gives the parent's `bypassPermissions` mode precedence over subagent frontmatter, so the
+committed agent definitions remain `permissionMode: auto`. This mode does not skip
+Orchestra's separate `policy.ps1` gates. Use it only in an isolated container/VM, and never
+let an agent set the variable or relaunch itself to widen its permissions.
 
 **Repeated approval for `codex-runtime.ps1 … &`.** The trailing `&` is the cause: it lets
 the process outlive Claude Code's permission-time safety check, so the foreground allow rule

@@ -86,6 +86,7 @@ function Invoke-Doctor {
         CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = ''
         CC_PROCESSKIT_CLI = 'off'; CC_PROCESSKIT_PYTHON = ''
         ORCHESTRA_AUTO_APPROVE = ''; ORCHESTRA_PROVIDER = ''
+        ORCHESTRA_CLAUDE_PERMISSION_MODE = ''
         ORCHESTRA_CODEX_MODEL = ''; ORCHESTRA_CODEX_REASONING = ''
         ORCHESTRA_CODEX_SANDBOX = ''; ORCHESTRA_CODEX_MAX_THREADS = ''
         CODEX_HOME = (Join-Path $Case.Home '.codex')
@@ -157,6 +158,12 @@ $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'on' }
 Assert-Contains $r.Out 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment)' 'auto-approve on: doctor reports effective machine-wide pre-consent'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'maybe' }
 Assert-Contains $r.Out "FAIL ORCHESTRA_AUTO_APPROVE: invalid value 'maybe'" 'auto-approve invalid: doctor reports fail-closed value'
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_CLAUDE_PERMISSION_MODE = 'bypassPermissions' }
+Assert-Contains $r.Out 'WARN ORCHESTRA_CLAUDE_PERMISSION_MODE = bypassPermissions' 'Claude bypass: doctor reports disabled permission checks'
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_CLAUDE_PERMISSION_MODE = 'unsafe' }
+Assert-Contains $r.Out "FAIL ORCHESTRA_CLAUDE_PERMISSION_MODE: invalid value 'unsafe'" 'Claude mode invalid: doctor reports fail-closed value'
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_CLAUDE_PERMISSION_MODE = ' bypassPermissions' }
+Assert-Contains $r.Out "FAIL ORCHESTRA_CLAUDE_PERMISSION_MODE: invalid value ' bypassPermissions'" 'Claude mode whitespace: doctor matches strict launcher validation'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_PROVIDER = 'codex' }
 Assert-Contains $r.Out 'OK   ORCHESTRA_PROVIDER = codex (Claude-free native Codex root processor)' 'provider codex: doctor reports full native provider'
 Assert-Contains $r.Out 'FAIL Codex-native processor preflight exited' 'provider codex: incomplete native package fails preflight visibly'

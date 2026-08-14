@@ -28,6 +28,16 @@ Provider всего оркестра выбирается вне `.work/config.m
 используется как fallback. `CODEX_CODER`/`CODEX_REVIEWER`/`CODEX_CIFIX` относятся только к
 гибридному Claude-root режиму и в Codex-root режиме игнорируются.
 
+## Системный permission mode Claude
+
+`ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions` задаёт режим всех
+Claude-launcher’ов вне `.work/config.md`; default — `auto`. Значение
+`bypassPermissions` отключает permission-проверки root-сессии Claude и всех
+создаваемых ею subagent’ов; любое другое значение даёт fail-closed до запуска
+Claude. Это только operator-owned opt-in для изолированного контейнера/ВМ:
+агенты не выставляют его сами, а внутренние `policy.ps1` gates продолжают
+действовать. На Codex-native runtime переменная не влияет.
+
 Operator-owned системные настройки Codex-root и прямых Codex-ролей:
 
 | Переменная | Разрешённые значения | Default |
@@ -41,8 +51,12 @@ Operator-owned системные настройки Codex-root и прямых 
 `features.multi_agent=true` и `agents.max_depth=1`, а `ORCHESTRA_CODEX_MAX_THREADS`
 относится только к нему. `cc-sync` генерирует роли из
 канонических `agents/*.md` и устанавливает их в `$CODEX_HOME/agents`. `cc-resume codex`
-использует точный UUID из `.work/codex_processor_session.json`, не `--last`; при отсутствии
-валидного UUID запускается холодная Phase-0 recovery.
+использует точный UUID из `.work/codex_processor_session.json`, не `--last`. Если UUID нет,
+но остался durable in-flight state, runtime автоматически запускает provider-handoff
+recovery; без обоих — обычную холодную Phase-0 recovery. Для явного перехода от уже
+остановленного Claude (в том числе поверх старого Codex UUID) используется
+`cc-resume codex --from claude`: transcript не переносится, источниками истины служат
+`.work/` и VCS, а живая аренда processor блокирует переключение.
 
 `launchers/cc-config.cmd` сеет `.work/config.md` из блока ниже, ограниченного
 маркерами `# >>> config.md seed start >>>` / `# <<< config.md seed end <<<`, —

@@ -63,6 +63,9 @@ try {
     Assert-True ($processorText.Contains('orchestra_dependency_curator')) 'processor overlay maps the dependency curator role'
     Assert-True ($processorText.Contains('BODY-processor')) 'processor prompt embeds canonical processor body'
     Assert-True ($processorText.Contains('without falling back to Claude')) 'processor overlay forbids provider fallback'
+    Assert-True ($processorText.Contains('operator-authorized')) 'processor overlay permits only an operator-authorized provider handoff'
+    Assert-True ($processorText.Contains('continue the existing cohort from durable')) 'processor overlay preserves in-flight work across provider handoff'
+    Assert-True ($processorText.Contains('Do not change it, self-switch')) 'processor overlay forbids model-initiated provider switching'
     $reviewer = Join-Path $root 'codex\agents\orchestra_reviewer.toml'
     $reviewerText = [System.IO.File]::ReadAllText($reviewer)
     foreach ($marker in @('scope_paths', 'по запятым', 'каждый компонент', 'path intersection', 'широкими', 'Ограничение радиуса', 'committed `BASE`')) {

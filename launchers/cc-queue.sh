@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run queue_builder in the current folder (Claude Code, auto mode).
+# Run queue_builder in the current folder (Claude Code).
 # Enqueues tasks into .work/Tasks_Queue.md. The source can be passed as an argument:
 #   cc-queue docs/roadmap.md      or     cc-queue "add rate limiting to the API"
 #
@@ -8,9 +8,14 @@
 # single string without breaking the prompt's quoting. Contents of the argument
 # (including any "$VAR" text) are NOT re-expanded, so quotes and special characters in
 # typical input are preserved. Quote the argument so the shell keeps it as one token.
+CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+case "$CLAUDE_PERMISSION_MODE" in
+  auto|bypassPermissions) ;;
+  *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
+esac
 if [ "$#" -eq 0 ]; then
   # No predefined prompt: the agent launches and waits for the task in chat.
-  exec claude --agent queue_builder --permission-mode auto
+  exec claude --agent queue_builder --permission-mode "$CLAUDE_PERMISSION_MODE"
 else
-  exec claude --agent queue_builder --permission-mode auto "Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: $*"
+  exec claude --agent queue_builder --permission-mode "$CLAUDE_PERMISSION_MODE" "Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: $*"
 fi

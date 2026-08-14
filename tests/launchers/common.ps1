@@ -173,6 +173,10 @@ function Install-Launcher {
             $dep = $m.Groups[1].Value
             if (-not $installed.Contains($dep)) { $queue.Enqueue($dep) }
         }
+        foreach ($m in [regex]::Matches($text, 'call\s+"%LAUNCHER_DIR%([A-Za-z0-9_.-]+\.cmd)"')) {
+            $dep = $m.Groups[1].Value
+            if (-not $installed.Contains($dep)) { $queue.Enqueue($dep) }
+        }
     }
 }
 
@@ -338,6 +342,7 @@ function Invoke-Launcher {
         CC_PROCESSKIT_CLI = 'off'
         CC_PROCESSKIT_PYTHON = ''
         ORCHESTRA_PROVIDER = ''
+        ORCHESTRA_CLAUDE_PERMISSION_MODE = ''
     }
     if ($Name -eq 'cc-config.cmd') {
         # cc-config now writes a user-global registry. Keep every launcher fixture fully
@@ -393,29 +398,25 @@ function Invoke-Launcher {
     }
 }
 
-# Extracts the literal value that currently follows "--permission-mode" in a
-# real launcher's source file. Tests must use this instead of hardcoding a
-# literal (e.g. "auto") so they stay correct across changes to that flag's
-# value (see task T-018 / T-007 note) while still verifying the launcher
-# actually forwards whatever value its source currently specifies.
+# Resolves the permission mode expected when the operator override is absent.
+# Launchers now pass a validated runtime variable, while their compatibility
+# default remains `auto`.
 function Get-ExpectedPermissionMode {
     param([Parameter(Mandatory)] [string] $LauncherName)
     $src = Get-Content -LiteralPath (Join-Path $script:LaunchersDir $LauncherName) -Raw
     $m = [regex]::Match($src, '--permission-mode\s+(\S+)')
     if ($m.Success) {
-        return $m.Groups[1].Value
+        $value = $m.Groups[1].Value.Trim('"')
+        if ($value -in @('%CLAUDE_PERMISSION_MODE%', '!CLAUDE_PERMISSION_MODE!')) {
+            return 'auto'
+        }
+        return $value
     }
-    # Some launchers (cc-audit.cmd, cc-enhance.cmd, cc-github.cmd, T-037) do
-    # not invoke claude directly - they forward to the shared
-    # launchers\cc-common.cmd ":run" helper as
-    #   call "%~dp0cc-common.cmd" run <agent> <permission-mode> "<prompt>"
-    # where the literal "--permission-mode" flag itself lives in
-    # cc-common.cmd, not in the launcher's own source. In that case the
-    # permission-mode value is the second whitespace-separated token after
-    # "run" (the first is the agent name).
-    $m = [regex]::Match($src, 'cc-common\.cmd"\s+run\s+\S+\s+(\S+)\s')
+    # Shared-helper launchers do not invoke Claude directly. Their runtime
+    # default is the same validated `auto` default implemented by cc-common.cmd.
+    $m = [regex]::Match($src, 'cc-common\.cmd"\s+run\s+\S+\s+"')
     if ($m.Success) {
-        return $m.Groups[1].Value
+        return 'auto'
     }
     throw "Could not find --permission-mode in $LauncherName"
 }

@@ -161,13 +161,39 @@ The provider can instead be selected for every project in a new terminal:
 Allowed values are `claude` and `codex`; an explicit provider argument to
 `cc-processor`, `cc-resume`, `cc-thinker`, `cc-audit`, or `cc-enhance` wins over the
 environment. `cc-resume codex` resumes the exact Codex processor thread recorded in
-`.work/codex_processor_session.json`; if no valid addressed thread exists it performs
-the normal Phase-0 cold recovery. Both start and resume keep the TUI attached to the
-launching terminal; Codex event JSONL is no longer printed, while the runtime reads local
-rollout metadata only to preserve addressed resume. The Codex root defaults to `high` reasoning,
+`.work/codex_processor_session.json`. If no valid addressed thread exists but durable
+in-flight `.work/` state remains, it automatically opens a new Codex thread in provider-
+handoff recovery mode; with no such state it performs the normal Phase-0 cold recovery.
+To deliberately continue work left by a stopped Claude processor—even when an older
+Codex UUID is still recorded—run:
+
+```text
+cc-resume codex --from claude
+```
+
+The handoff imports no Claude conversation: `.work/`, task worktrees/branches, and VCS
+state are authoritative. It refuses to start while the old processor lease is live and
+invalidates the superseded Codex UUID only after that safety check. Both start and resume
+keep the TUI attached to the launching terminal; Codex event JSONL is no longer printed,
+while the runtime reads local rollout metadata only to preserve addressed resume. The Codex
+root defaults to `high` reasoning,
 `danger-full-access`, approval policy `never`, and six agent threads. Operator-owned
 overrides are `ORCHESTRA_CODEX_MODEL`, `ORCHESTRA_CODEX_REASONING`,
 `ORCHESTRA_CODEX_SANDBOX`, and `ORCHESTRA_CODEX_MAX_THREADS`.
+
+Claude launchers default to the guarded `auto` permission mode. An operator can opt an
+isolated machine or container into permission bypass for the Claude root and every spawned
+subagent:
+
+```powershell
+[Environment]::SetEnvironmentVariable('ORCHESTRA_CLAUDE_PERMISSION_MODE', 'bypassPermissions', 'User')
+```
+
+Open a new terminal, run `cc-sync`, and verify the warning with `cc-doctor`. Set the value
+back to `auto` or remove it to restore the default. Any other value fails before Claude is
+started. Agents must never set this variable themselves. This does not bypass Orchestra's
+separate `policy.ps1` approval gates; use it only in an isolated environment where the
+Claude process cannot damage the host.
 
 For a fully unattended machine, the operator can pre-grant all fresh Orchestra human
 approval gates once, for every target project:

@@ -113,9 +113,13 @@ provider contract at higher precedence whenever provider-specific wording confli
    an Anthropic call.
 7. Do not modify `.claude/settings*`, `.codex/config.toml`, or `.codex/agents` during a
    run. Provider configuration belongs to `cc-sync`, the launcher, and the operator.
-8. `ORCHESTRA_PROVIDER=codex` is an external runtime fact. Do not change it and do not
-   switch providers mid-cohort. On a role failure, follow the canonical bounded retry,
-   requeue, quarantine, or escalation path without falling back to Claude.
+8. `ORCHESTRA_PROVIDER=codex` is an external runtime fact. Do not change it, self-switch
+   providers, or fall back to Claude during this Codex root run. An operator-authorized
+   cold-recovery handoff from a terminated Claude root may precede this run. When the
+   runtime prompt identifies that handoff, continue the existing cohort from durable
+   `.work/` and VCS state; do not discard or restart work because Claude created it. On a
+   role failure, follow the canonical bounded retry, requeue, quarantine, or escalation
+   path without falling back to Claude.
 
 --- canonical processor instructions ---
 '@

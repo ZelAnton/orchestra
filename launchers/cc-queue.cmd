@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-rem Запуск queue_builder в текущей папке (Claude Code, auto-режим).
+rem Запуск queue_builder в текущей папке (Claude Code).
 rem Ставит задачи в .work/Tasks_Queue.md. Источник можно передать аргументом:
 rem   cc-queue docs\roadmap.md      или     cc-queue "add rate limiting to the API"
 rem
@@ -24,9 +24,11 @@ setlocal
 set "ARGS=%*"
 setlocal EnableDelayedExpansion
 call "%~dp0cc-common.cmd" sanitize
+call "%~dp0cc-common.cmd" resolve_permission_mode
+if errorlevel 1 exit /b %ERRORLEVEL%
 if "%~1"=="" (
   rem Без предопределённого промпта: агент запускается и ждёт указания задачи в чате.
-  claude --agent queue_builder --permission-mode auto
+  claude --agent queue_builder --permission-mode !CLAUDE_PERMISSION_MODE!
 ) else (
-  claude --agent queue_builder --permission-mode auto "Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: !ARGS!"
+  claude --agent queue_builder --permission-mode !CLAUDE_PERMISSION_MODE! "Per your system prompt, add tasks to .work/Tasks_Queue.md. Task source or description: !ARGS!"
 )

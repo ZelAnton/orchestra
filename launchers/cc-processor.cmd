@@ -7,6 +7,8 @@ rem Необязательные флаги (в любом порядке, пе�
 rem   claude|codex       явный provider (также: --provider <claude|codex>).
 rem                      Если не задан, читается системная ORCHESTRA_PROVIDER;
 rem                      default = claude.
+rem   ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions задаёт
+rem                      permission mode для Claude-root; default = auto.
 rem   --force-lock       операторский force-takeover аренды: удалить каталог аренды
 rem                      .work\orchestrator.lock (вместе с lease.json) перед стартом —
 rem                      только если точно знаешь, что предыдущий processor уже не
@@ -114,9 +116,11 @@ if /I not "%PROVIDER%"=="claude" (
   echo Недопустимый provider "%PROVIDER%". Разрешены: claude, codex.
   exit /b 2
 )
+call "%LAUNCHER_DIR%cc-common.cmd" resolve_permission_mode
+if errorlevel 1 exit /b %ERRORLEVEL%
 rem --allowedTools (грант): предвыданный сессионный грант на автономный запуск codex
 rem адаптерами (coder_codex/reviewer_codex). Запуск launcher'а пользователем и есть
-rem выдача согласия; без покрывающего гранта classifier auto-режима отклоняет вызов
+rem выдача согласия; без покрывающего гранта classifier default auto-режима отклоняет вызов
 rem посреди прогона как «запуск автономного агента» (см. agents\coder_codex.md). Передаём
 rem два префиксных гранта (правило матчится по литеральному началу Bash-строки команды):
 rem   Bash(pwsh -File tools/codex-runtime.ps1:*) — строка, которую РЕАЛЬНО исполняет
@@ -131,7 +135,7 @@ rem   Bash(codex exec:*) — сохранён как канонический я
 rem     CC_CODEX_EXEC_GRANT и от которого отталкиваются гейт Фазы 1.1 / cc-doctor / правило
 rem     cc-config в settings; безвреден, когда codex не зовётся голой Bash-командой напрямую.
 rem Гранты стоят перед флагом permission-mode: --allowedTools вариативен и без следующего
-rem флага-ограничителя поглотил бы промпт. Режим auto сохранён без изменений.
+rem флага-ограничителя поглотил бы промпт. Эффективный режим валидируется выше.
 rem
 rem CC_CODEX_EXEC_GRANT="codex exec": явный, проверяемый признак того, что сессия выше
 rem предвыдала автономный codex через --allowedTools. Это единый контракт
@@ -149,10 +153,10 @@ rem provider session. processkit-runtime validates probe schema/surfaces, writes
 rem JSONL under .work\processes\_processor, and falls back to CC_PROCESSKIT_PYTHON only
 rem when no CLI is selected. Explicitly broken backends fail closed with exit 10.
 if not defined USE_PROCESSKIT_RUNTIME goto :run_uncontained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-start-claude -- claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-start-claude -- claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 exit /b %ERRORLEVEL%
 :run_uncontained
-claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode auto "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 exit /b %ERRORLEVEL%
 
 :run_codex
