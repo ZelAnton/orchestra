@@ -60,7 +60,8 @@ $script:PolicySchemaVersion = 'orchestra/policy-schema@1'
 #   default     - human default string (matches config.example.md's defaults table prose).
 #   enum        - allowed value set for 'enum' (else $null).
 #   min         - inclusive lower bound for 'int' (else $null); ints have no explicit max.
-#   envFallback - $true only for the three keys that also resolve from the OS environment.
+#   envFallback - $true for the keys that also resolve from the OS environment (CODEX_CODER,
+#                 CODEX_REVIEWER, KB and the per-tier coder/reviewer model keys).
 #   sensitivity - 'low' | 'medium' | 'high' (how much a wrong value can widen blast radius).
 function New-ConfigKey {
     param(
@@ -112,10 +113,19 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'KB'                      'enum'   'on'     -Enum @('on', 'off')                         -EnvFallback $true)
         (New-ConfigKey 'KB_TTL'                  'int'    '8'                                -Min 1)
         (New-ConfigKey 'KB_CAP'                  'int'    '12'                               -Min 1)
+        (New-ConfigKey 'CLAUDE_CODER_FAST_MODEL'   'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_CODER_MODEL'        'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_CODER_DEEP_MODEL'   'enum' 'opus'   -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_REVIEWER_STD_MODEL' 'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_REVIEWER_MODEL'     'enum' 'opus'   -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_CODER'             'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'all')          -EnvFallback $true -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_REVIEWER'          'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'deep', 'all')  -EnvFallback $true -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_CIFIX'             'enum'   'off'    -Enum @('off', 'on')                        -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_MODEL'             'string' 'unset')
+        (New-ConfigKey 'CODEX_CODER_MODEL'         'string' 'unset'       -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_CODER_DEEP_MODEL'    'string' 'gpt-5.6-sol' -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_REVIEWER_MODEL'      'string' 'unset'       -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_REVIEWER_DEEP_MODEL' 'string' 'gpt-5.6-sol' -EnvFallback $true -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_REASONING'         'enum'   'auto'   -Enum @('auto', 'low', 'medium', 'high', 'xhigh'))
         (New-ConfigKey 'CODEX_SANDBOX'           'enum'   'workspace-write' -Enum @('read-only', 'workspace-write') -Sensitivity 'high')
         (New-ConfigKey 'CODEX_NETWORK'           'enum'   'on'     -Enum @('on', 'off')                        -Sensitivity 'high')

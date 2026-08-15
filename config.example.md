@@ -4,14 +4,18 @@
 отсутствующий ключ означает значение по умолчанию (сводка дефолтов — в таблице
 ниже) — необязательно копировать все ключи, только те, что хотите переопределить.
 
-**Исключение — `CODEX_CODER`, `CODEX_REVIEWER` и `KB`** читаются с фолбэком на переменные
-окружения ОС: `config.md` → переменная окружения (`CODEX_CODER` / `CODEX_REVIEWER` /
-`KB`) → дефолт (`off` для `CODEX_CODER`/`CODEX_REVIEWER`, `on` для `KB`). Если файла нет
+**Исключение — ключи с фолбэком на переменные окружения ОС:** `CODEX_CODER`,
+`CODEX_REVIEWER`, `KB` и **модельные ключи ролей** `CLAUDE_CODER_FAST_MODEL`,
+`CLAUDE_CODER_MODEL`, `CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`,
+`CLAUDE_REVIEWER_MODEL`, `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`,
+`CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL`. Порядок разрешения:
+`config.md` → одноимённая переменная окружения → дефолт ключа. Если файла нет
 или ключ в нём не задан, но выставлена одноимённая переменная окружения — берётся её
 значение; ключ в `config.md` всегда переопределяет окружение. Значение из окружения
 валидируется так же, как из файла — нераспознанное/пустое считается незаданным (тогда
-дефолт этого ключа). Удобно включить codex или выключить KB глобально (в профиле/CI) без
-правки `config.md` каждого проекта. Остальные ключи — только из `config.md`.
+дефолт этого ключа). Удобно включить codex, выключить KB или сменить модель исполнителей/
+ревьюеров глобально (в профиле/CI) без правки `config.md` каждого проекта. Остальные
+ключи — только из `config.md`.
 
 ## Системный выбор корневого provider
 
@@ -117,6 +121,14 @@ CI_WATCH: true
                                  # опциональная operator-owned shell-команда: получает event и
                                  # уже redacted короткий текст двумя последними argv; пусто = off
 REVIEWER_TIERING: true
+# --- Модели Claude-ролей coder/reviewer (пусто → модель из frontmatter агента) ---
+# CLAUDE_CODER_FAST_MODEL: sonnet   # haiku | sonnet | opus | fable; дефолт sonnet
+# CLAUDE_CODER_MODEL: sonnet        # haiku | sonnet | opus | fable; дефолт sonnet
+# CLAUDE_CODER_DEEP_MODEL: opus     # haiku | sonnet | opus | fable; дефолт opus
+# CLAUDE_REVIEWER_STD_MODEL: sonnet # haiku | sonnet | opus | fable; дефолт sonnet
+# CLAUDE_REVIEWER_MODEL: opus       # haiku | sonnet | opus | fable; дефолт opus
+                                    # ^ у всех пяти есть фолбэк на одноимённую переменную
+                                    #   окружения ОС (см. «Фолбэк на переменные окружения»)
 # MAIN_BRANCH: main      # по умолчанию — автоопределение (см. ниже)
 # --- Событийный outbox (.work/events.jsonl) ---
 # EVENTS_OUTBOX: off     # on (по умолч.) | off — писать ли машинные события в
@@ -135,6 +147,17 @@ REVIEWER_TIERING: true
                                #   без codex — чистый фолбэк на Claude (лишний спавн на задачу).
 # CODEX_CIFIX: on              # точечные CI/сборочные фиксы (Режим 3): off (по умолч.) | on
 # CODEX_MODEL: gpt-5.6-terra   # пусто → модель из ~/.codex/config.toml
+# CODEX_CODER_MODEL: gpt-5.6-terra      # модель coder_codex (fast/std + Режим 3);
+                                        #   пусто → CODEX_MODEL → дефолт codex
+# CODEX_CODER_DEEP_MODEL: gpt-5.6-sol   # модель coder_codex для coder_deep;
+                                        #   пусто → gpt-5.6-sol (CODEX_MODEL сюда не течёт)
+# CODEX_REVIEWER_MODEL: gpt-5.6-terra   # модель reviewer_codex (fast/std);
+                                        #   пусто → CODEX_MODEL → дефолт codex
+# CODEX_REVIEWER_DEEP_MODEL: gpt-5.6-sol
+                                        # модель reviewer_codex для coder_deep
+                                        #   (full и augment); пусто → gpt-5.6-sol
+                                        # ^ у всех четырёх есть фолбэк на одноимённую
+                                        #   переменную окружения ОС
 # CODEX_REASONING: auto        # auto | low | medium | high | xhigh
 # CODEX_SANDBOX: workspace-write
 # CODEX_NETWORK: on            # сеть в песочнице coder_codex: on (по умолч.) | off
@@ -172,6 +195,11 @@ REVIEWER_TIERING: true
 | `APPROVAL_DEADLINE_SEC` | 86400 |
 | `NOTIFY_CMD` | не задан (уведомления отключены) |
 | `REVIEWER_TIERING` | true |
+| `CLAUDE_CODER_FAST_MODEL` | sonnet (или env-переменная `CLAUDE_CODER_FAST_MODEL`) |
+| `CLAUDE_CODER_MODEL` | sonnet (или env-переменная `CLAUDE_CODER_MODEL`) |
+| `CLAUDE_CODER_DEEP_MODEL` | opus (или env-переменная `CLAUDE_CODER_DEEP_MODEL`) |
+| `CLAUDE_REVIEWER_STD_MODEL` | sonnet (или env-переменная `CLAUDE_REVIEWER_STD_MODEL`) |
+| `CLAUDE_REVIEWER_MODEL` | opus (или env-переменная `CLAUDE_REVIEWER_MODEL`) |
 | `MAIN_BRANCH` | автоопределение |
 | `EVENTS_OUTBOX` | on |
 | `KB` | on |
@@ -181,6 +209,10 @@ REVIEWER_TIERING: true
 | `CODEX_REVIEWER` | off (или env-переменная `CODEX_REVIEWER`) |
 | `CODEX_CIFIX` | off |
 | `CODEX_MODEL` | не задано (дефолт codex) |
+| `CODEX_CODER_MODEL` | не задано (тогда `CODEX_MODEL`, затем дефолт codex; или env-переменная `CODEX_CODER_MODEL`) |
+| `CODEX_CODER_DEEP_MODEL` | gpt-5.6-sol (или env-переменная `CODEX_CODER_DEEP_MODEL`) |
+| `CODEX_REVIEWER_MODEL` | не задано (тогда `CODEX_MODEL`, затем дефолт codex; или env-переменная `CODEX_REVIEWER_MODEL`) |
+| `CODEX_REVIEWER_DEEP_MODEL` | gpt-5.6-sol (или env-переменная `CODEX_REVIEWER_DEEP_MODEL`) |
 | `CODEX_REASONING` | auto |
 | `CODEX_SANDBOX` | workspace-write |
 | `CODEX_NETWORK` | on |
@@ -344,6 +376,24 @@ REVIEWER_TIERING: true
   всегда использует полный `reviewer` (opus/high) независимо от уровня
   исполнителя задачи. Включено по умолчанию — экономит существенную часть
   затрат на очередях из простых задач.
+- `CLAUDE_CODER_FAST_MODEL` / `CLAUDE_CODER_MODEL` / `CLAUDE_CODER_DEEP_MODEL` /
+  `CLAUDE_REVIEWER_STD_MODEL` / `CLAUDE_REVIEWER_MODEL` — модель Claude-роли
+  соответствующего тира (`coder_fast` / `coder` / `coder_deep` / `reviewer_std` /
+  `reviewer`). Допустимые значения — `haiku` | `sonnet` | `opus` | `fable`; непустое
+  значение вне этого множества в `config.md` останавливает когорту на Фазе 1.1
+  (fail-closed, без молчаливой подмены дефолта), а из окружения — считается незаданным.
+  Пустой/незаданный ключ означает «модель из frontmatter агента» (`sonnet` для
+  `coder_fast`/`coder`/`reviewer_std`, `opus` для `coder_deep`/`reviewer`), а не
+  безмодельный вызов: processor просто не передаёт переопределение. Заданное значение
+  processor передаёт параметром `model` инструмента `Agent(...)` при **каждом** вызове
+  этой роли — реализация, `R-`-фиксы, интеграционные `F-`-фиксы, CI-фиксы, первое и
+  повторное ревью. Ключи не меняют тиринг (`REVIEWER_TIERING` и `Рекомендуемый
+  исполнитель` по-прежнему выбирают роль) и не влияют на `planner`, `merger`,
+  `full_reviewer`, кураторов и остальные роли — только на модель уже выбранной роли.
+  Тир `coder_deep` дороже прочих; понижение его модели снижает и качество самой
+  ответственной работы. Фолбэк на одноимённые переменные окружения — см. абзац
+  «Исключение — ключи с фолбэком на переменные окружения ОС» в начале файла (раздел
+  «Codex-агенты» ниже описывает env-фолбэк только своих, `CODEX_*`, ключей).
 - `MAIN_BRANCH` — имя магистральной ветки (trunk), в которую processor ff-мержит
   и пушит. По умолчанию — **автоопределение**: в git — `origin/HEAD` → `main` →
   `master`; в jj — `main` → `master`. Задавайте явно для репозиториев, чей trunk
@@ -692,8 +742,10 @@ codex, экономя квоту Claude для самых сложных зад�
   split writable-root set); в `read-only` runtime добавляет только этот узкий внутренний
   `--add-dir`. Путь VCS-ignored, доступ к профилю/соседним проектам не расширяется; package
   homes (`CARGO_HOME`, `NUGET_PACKAGES`) не подменяются.
-- `CODEX_MODEL` и `CODEX_CMD` — свободнозначные строки (имя модели / бинаря), множеством
-  не ограничены и в этой валидации не участвуют. Для `CODEX_MODEL` это не только
+- `CODEX_MODEL`, четыре пер-ролевых модельных ключа (`CODEX_CODER_MODEL`,
+  `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL`) и
+  `CODEX_CMD` — свободнозначные строки (имя модели / бинаря), множеством
+  не ограничены и в этой валидации не участвуют. Для модельных ключей это не только
   «свободный формат», но и принципиальное ограничение: в отличие от шести ключей выше,
   допустимость конкретной модели зависит от тира codex-аккаунта и не определяется офлайн
   (см. расшифровку ключа `CODEX_MODEL` ниже, в этом же разделе).
@@ -871,19 +923,25 @@ Opus-квота остаётся под `coder_deep`.
   Codex независимо от provider реализации). Фолбэк на переменную окружения
   `CODEX_REVIEWER` (см. ниже).
 
-Для `coder_deep` оба адаптера игнорируют общие `CODEX_MODEL`/`CODEX_REASONING` и всегда
-используют `gpt-5.6-sol` с `xhigh`: `coder_codex` при `CODEX_CODER: all`, а
-`reviewer_codex` при `CODEX_REVIEWER: all` (`full`) либо `deep` (`augment`).
+Для `coder_deep` оба адаптера игнорируют общие `CODEX_MODEL`/`CODEX_REASONING`: reasoning
+всегда `xhigh`, а модель по умолчанию — `gpt-5.6-sol` (`coder_codex` при `CODEX_CODER: all`,
+`reviewer_codex` при `CODEX_REVIEWER: all` (`full`) либо `deep` (`augment`)). Этот пин —
+**дефолт, а не запрет**: непустой `CODEX_CODER_DEEP_MODEL` / `CODEX_REVIEWER_DEEP_MODEL`
+(из `config.md` или окружения) выигрывает у него для своего адаптера. Общий `CODEX_MODEL`
+в deep-ветку по-прежнему **не** течёт — только явный deep-ключ.
 
-**Фолбэк на переменные окружения.** Только `CODEX_CODER` и `CODEX_REVIEWER` (остальные
-ключи — исключительно из `config.md`) разрешаются по цепочке `config.md` → переменная
-окружения ОС → дефолт `off`. Значение из окружения проходит ту же валидизацию, что и из
-файла; пустое/нераспознанное — как незаданное. Выставить окружение:
+**Фолбэк на переменные окружения.** По цепочке `config.md` → переменная окружения ОС →
+дефолт ключа разрешаются `CODEX_CODER`, `CODEX_REVIEWER` и четыре модельных ключа
+адаптеров (`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
+`CODEX_REVIEWER_DEEP_MODEL`); остальные Codex-ключи — исключительно из `config.md`.
+Значение из окружения проходит ту же валидизацию, что и из файла; пустое/нераспознанное —
+как незаданное. Выставить окружение:
 
 ```sh
 # POSIX / bash (в профиле или перед запуском)
 export CODEX_CODER=all
 export CODEX_REVIEWER=all
+export CODEX_CODER_MODEL=gpt-5.6-terra
 ```
 ```powershell
 # Windows PowerShell (текущая сессия)
@@ -891,6 +949,7 @@ $env:CODEX_CODER = 'all'
 $env:CODEX_REVIEWER = 'all'
 # постоянно для пользователя:
 [Environment]::SetEnvironmentVariable('CODEX_REVIEWER', 'all', 'User')
+[Environment]::SetEnvironmentVariable('CODEX_REVIEWER_MODEL', 'gpt-5.6-terra', 'User')
 ```
 - `CODEX_CIFIX` — `on` включает точечные CI/сборочные фиксы (Режим 3) через codex
   (Фазы 4.3 и 5.4). Интеграционные `F-` (Фаза 5.2) codex не ведёт никогда.
@@ -919,6 +978,20 @@ $env:CODEX_REVIEWER = 'all'
   `CODEX_MODEL` должно совпадать с одним из `slug` в выводе, у которого
   `"supported_in_api": true`; иначе верни ключ к пустому значению (дефолт из
   `~/.codex/config.toml`) или на `gpt-5.6-terra`.
+- `CODEX_CODER_MODEL` / `CODEX_REVIEWER_MODEL` — модель codex для **не-deep** вызовов
+  соответствующего адаптера: `coder_codex` (уровни `coder_fast`/`coder` и Режим 3 —
+  точечный CI-фикс) и `reviewer_codex` (уровни `coder_fast`/`coder`). Цепочка разрешения —
+  ключ роли → общий `CODEX_MODEL` → модель из `~/.codex/config.toml`; так общий ключ
+  остаётся рабочим дефолтом для обоих адаптеров, а пер-ролевой нужен, только когда
+  реализация и ревью должны идти на разных моделях (например, дешевле реализовывать и
+  дороже проверять). Свободнозначные строки с теми же тирными оговорками, что у
+  `CODEX_MODEL` (диагностика — `codex debug models`).
+- `CODEX_CODER_DEEP_MODEL` / `CODEX_REVIEWER_DEEP_MODEL` — модель codex для уровня
+  `coder_deep`: `coder_codex` при `CODEX_CODER: all`, `reviewer_codex` при
+  `CODEX_REVIEWER: all` (`full`) либо `deep` (`augment`). Пусто → `gpt-5.6-sol`
+  (исторический пин deep-уровня); общий `CODEX_MODEL` в эту ветку **не** течёт, поэтому
+  сменить deep-модель можно только этими ключами. Reasoning для deep остаётся `xhigh`
+  независимо от значения ключа — переопределяется только модель.
 - `CODEX_REASONING` — усилие рассуждения (`model_reasoning_effort`): `auto` (реализация
   codex-coder: `→high`; ревью codex-reviewer: `→xhigh`) | `low` | `medium` | `high` |
   `xhigh`. `xhigh` — максимальная подтверждённая ступень усилия рассуждения codex CLI

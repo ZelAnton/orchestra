@@ -240,8 +240,25 @@ Processor и merger формируют описательные англоязы
   fallback на Claude. Codex-coder поддерживает реализацию, `R-` и при
   `CODEX_CIFIX=on` точечный Режим 3, но не интеграционные `F-`. Codex-reviewer работает
   read-only. Значение `all` у `CODEX_CODER`/`CODEX_REVIEWER` включает все task-level
-  уровни; для `coder_deep` оба адаптера принудительно используют
-  `gpt-5.6-sol`/`xhigh`, игнорируя общие `CODEX_MODEL`/`CODEX_REASONING`.
+  уровни; для `coder_deep` оба адаптера игнорируют общие `CODEX_MODEL`/`CODEX_REASONING`:
+  reasoning всегда `xhigh`, модель — `gpt-5.6-sol`, если не задан соответствующий
+  deep-ключ (следующий пункт).
+- **Модели ролей coder/reviewer настраиваются оператором (ключи `config.md` с
+  env-фолбэком).** Пять `CLAUDE_*_MODEL` (`CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
+  `CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL`;
+  `haiku|sonnet|opus|fable`) processor резолвит один раз на Фазе 1.1 и передаёт
+  параметром `model` инструмента `Agent(...)` при каждом вызове роли — frontmatter
+  сгенерированных `agents/*.md` при этом **не** переписывается (пустой ключ = модель
+  frontmatter). Четыре `CODEX_*_MODEL` (`CODEX_CODER_MODEL`/`CODEX_CODER_DEEP_MODEL`,
+  `CODEX_REVIEWER_MODEL`/`CODEX_REVIEWER_DEEP_MODEL`) читают сами адаптеры: не-deep
+  разрешается «ключ роли → `CODEX_MODEL` → дефолт codex», deep — «deep-ключ роли →
+  `gpt-5.6-sol`», общий `CODEX_MODEL` в deep-ветку не течёт. Тиринг и маршрутизацию эти
+  ключи не меняют — только модель уже выбранной роли; `planner`/`merger`/`full_reviewer`/
+  кураторов не затрагивают. Копии контракта `CLAUDE_*` живут в `tools/doctor-runtime.ps1`
+  (`$claudeModelAllowed` — допустимые значения, `$claudeModelFrontmatter` — модель роли
+  при пустом ключе) и машинно сверяются в `check-consistency.ps1` (Class 4) с enum'ами и
+  дефолтами `tools/policy-schema.ps1`, а фолбэк-модели — ещё и с `model:` во frontmatter
+  самих ролей.
 - **Единый исполняемый runtime `tools/codex-runtime.ps1` (T-075).** Механическая часть
   протокола обоих адаптеров вынесена из Markdown-инструкций в тестируемый кросс-платформенный
   pwsh-скрипт (по образцу `tools/queue-tx.ps1`): **безопасная сборка argv** нормализованной
@@ -398,8 +415,10 @@ Processor и merger формируют описательные англоязы
   Markdown-абзац целиком: в одном абзаце их регулярно два (Фаза 2.8 держит R-фикс
   исполнителя и повторное ревью рядом), и бюджеты соседнего вызова за неполный dispatch не
   отвечают. Положительный, отрицательные и смешанный (неполный и полный dispatch в одном
-  абзаце) фикстурные случаи выполняет `tests/test-consistency.ps1`. Тесты policy —
-  `tests/test-policy.ps1`.
+  абзаце) фикстурные случаи выполняет `tests/test-consistency.ps1`; дрейф копий класса 4,
+  которые схема (а не `config.example.md`) держит единственным источником —
+  `$script:EnvFallbackKeys`, `$claudeModelAllowed`, `$claudeModelFrontmatter`, — ловит
+  `tests/test-consistency-model-keys.ps1`. Тесты policy — `tests/test-policy.ps1`.
   В полностью автономном режиме operator-owned переменная ОС
   `ORCHESTRA_AUTO_APPROVE=on` заранее разрешает внутренние human gates во всех проектах:
   `approval-request` всё равно сохраняет обычный одноразовый артефакт, fingerprint кода,

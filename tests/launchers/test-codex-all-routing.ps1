@@ -20,6 +20,13 @@ function Assert-NotContains {
     if ($Text.Contains($Needle)) { $script:failures.Add("$Name - forbidden: $Needle") }
 }
 
+# Prose and PowerShell tables wrap across lines, so phrase-level assertions match a
+# pattern whose runs of whitespace are flexible instead of a fixed literal.
+function Assert-Match {
+    param([string]$Text, [string]$Pattern, [string]$Name)
+    if (-not [regex]::IsMatch($Text, $Pattern)) { $script:failures.Add("$Name - no match: $Pattern") }
+}
+
 $processor = Read-RepoText 'agents\processor.md'
 $generatedProcessor = Read-RepoText 'codex\processor.md'
 $coder = Read-RepoText 'agents\coder_codex.md'
@@ -41,8 +48,26 @@ Assert-Contains $reviewer '${EFFMODEL:+--model "$EFFMODEL"}' 'reviewer runtime u
 Assert-NotContains $reviewer '${CODEX_MODEL:+--model "$CODEX_MODEL"}' 'reviewer runtime must not bypass deep override'
 Assert-Contains $reviewer 'отдельным новым `codex exec`/checker-' 'reviewer all uses a fresh checker invocation'
 
+# The deep pin is the DEFAULT model, not a hard block: an explicit per-role deep key wins
+# over gpt-5.6-sol, while xhigh reasoning stays pinned and the general CODEX_MODEL still
+# never reaches the deep branch.
+Assert-Contains $coder '`EFFMODEL=CODEX_CODER_DEEP_MODEL`' 'coder deep model key overrides the pin'
+Assert-Contains $coder '`EFFMODEL=CODEX_CODER_MODEL`' 'coder non-deep model key precedes CODEX_MODEL'
+Assert-Contains $reviewer '`EFFMODEL=CODEX_REVIEWER_DEEP_MODEL`' 'reviewer deep model key overrides the pin'
+Assert-Contains $reviewer '`EFFMODEL=CODEX_REVIEWER_MODEL`' 'reviewer non-deep model key precedes CODEX_MODEL'
+foreach ($text in @($coder, $reviewer)) {
+    Assert-Match $text 'Общий\s+`CODEX_MODEL`\s+в эту ветку не течёт' `
+        'adapter still states the general CODEX_MODEL does not reach the deep branch'
+    Assert-Contains $text '`EFF=xhigh`' 'adapter keeps xhigh pinned for deep'
+}
+
 Assert-Contains $schema "@('off', 'fast', 'fast+std', 'all')" 'schema accepts CODEX_CODER all'
 Assert-Contains $schema "@('off', 'fast', 'fast+std', 'deep', 'all')" 'schema accepts CODEX_REVIEWER all'
+foreach ($key in @('CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL')) {
+    Assert-Contains $schema ("'" + $key + "'") "schema declares $key"
+}
+Assert-Match $schema "'CODEX_CODER_DEEP_MODEL'\s+'string'\s+'gpt-5\.6-sol'" 'schema documents the deep default model'
+Assert-Match $schema "'CODEX_REVIEWER_DEEP_MODEL'\s+'string'\s+'gpt-5\.6-sol'" 'schema documents the deep default review model'
 
 if ($failures.Count -gt 0) {
     Write-Host "test-codex-all-routing: $($failures.Count) failure(s):"

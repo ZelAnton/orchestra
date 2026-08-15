@@ -177,6 +177,18 @@ The autonomous Codex root defaults to `ORCHESTRA_CODEX_REASONING=high`,
 The runtime pins approval policy `never`; agents must not modify these values or
 `.codex/agents` during a run.
 
+**Models of the coder/reviewer tiers.** In the hybrid Claude-root mode, the model of each
+implementer and per-task reviewer tier is operator-owned per provider:
+`CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`, `CLAUDE_CODER_DEEP_MODEL`,
+`CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL` (`haiku|sonnet|opus|fable`) and, for
+the Codex adapters, `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
+`CODEX_REVIEWER_DEEP_MODEL` (free-form model ids). Each resolves `.work/config.md` → the
+same-named environment variable → its default, so a machine-wide default needs no per-project
+edit. They select the model of an already chosen role only — routing and tiering are
+unchanged — and `cc-doctor` prints the effective values. In the Codex-native root mode they
+do not apply: every role runs as a native custom agent under `ORCHESTRA_CODEX_MODEL`.
+Details: [`environment-variables.md`](environment-variables.md).
+
 **Claude permission mode.** Claude launchers use `auto` by default. To run the Claude root
 and every subagent it creates with permission checks disabled, an operator may set:
 

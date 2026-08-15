@@ -104,15 +104,20 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 ключей — `config.example.md` рядом с этим файлом). Отсутствующий файл или ключ —
 используй значение по умолчанию, указанное здесь же:
 
-**Фолбэк на переменные окружения (только `CODEX_CODER`, `CODEX_REVIEWER` и `KB`).** Для
-этих трёх ключей порядок разрешения такой: значение из `$WORK/config.md` → иначе
-одноимённая переменная окружения ОС (прочитай через shell: `$CODEX_CODER` /
-`$env:CODEX_CODER`, `$CODEX_REVIEWER` / `$env:CODEX_REVIEWER`, `$KB` / `$env:KB`) →
-иначе дефолт (`off` для `CODEX_CODER`/`CODEX_REVIEWER`, `on` для `KB`). То есть если
-файла `config.md` нет или ключ в нём не задан, но переменная окружения выставлена в
-непустое значение — берётся она; ключ в `config.md` всегда переопределяет окружение.
-Значение из окружения валидируй так же, как из файла (`CODEX_CODER`: `off`/`fast`/
-`fast+std`/`all`; `CODEX_REVIEWER`: `off`/`fast`/`fast+std`/`deep`/`all`; `KB`: `on`/`off`);
+**Фолбэк на переменные окружения (`CODEX_CODER`, `CODEX_REVIEWER`, `KB` и девять
+модельных ключей ролей).** Для этих ключей порядок разрешения такой: значение из
+`$WORK/config.md` → иначе одноимённая переменная окружения ОС (прочитай через shell:
+`$CODEX_CODER` / `$env:CODEX_CODER`, `$CODEX_REVIEWER` / `$env:CODEX_REVIEWER`, `$KB` /
+`$env:KB`, и так же для модельных ключей `CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
+`CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL`,
+`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
+`CODEX_REVIEWER_DEEP_MODEL`) → иначе дефолт ключа (`off` для `CODEX_CODER`/
+`CODEX_REVIEWER`, `on` для `KB`, для модельных — см. «Модели ролей coder/reviewer» ниже).
+То есть если файла `config.md` нет или ключ в нём не задан, но переменная окружения
+выставлена в непустое значение — берётся она; ключ в `config.md` всегда переопределяет
+окружение. Значение из окружения валидируй так же, как из файла (`CODEX_CODER`: `off`/`fast`/
+`fast+std`/`all`; `CODEX_REVIEWER`: `off`/`fast`/`fast+std`/`deep`/`all`; `KB`: `on`/`off`;
+`CLAUDE_*_MODEL`: `haiku`/`sonnet`/`opus`/`fable`; `CODEX_*_MODEL` — свободные строки);
 нераспознанное или пустое — считай незаданным (тогда дефолт этого ключа). Остальные
 ключи читаются только из `config.md`.
 
@@ -128,8 +133,9 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 ошибка конфигурации, обрабатываемая fail-closed на Фазе 1.1 (см. ниже), а не молчаливо
 заменяемая default. `CODEX_SANDBOX` намеренно исключает `danger-full-access` и любое иное
 значение, расширяющее запись за пределы рабочей копии задачи; `reviewer_codex` при этом
-всегда принудительно read-only. `CODEX_MODEL`/`CODEX_CMD` — свободные строки, множеством не
-ограничены.
+всегда принудительно read-only. `CODEX_MODEL`, `CODEX_CMD` и четыре модельных ключа
+адаптеров (`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
+`CODEX_REVIEWER_DEEP_MODEL`) — свободные строки, множеством не ограничены.
 
 | Ключ | По умолчанию | Где используется |
 |------|--------------|-------------------|
@@ -154,6 +160,11 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `APPROVAL_DEADLINE_SEC` | 86400 | Фаза 5.3/5.4 — срок действия запроса на human approval (нет ответа = отказ, fail-closed) |
 | `NOTIFY_CMD` | (не задано) | Одноразовый best-effort operator notification для `task.escalated`, свежего `approval.pending` и красного required CI; команда operator-owned, перед ней текст redacted |
 | `REVIEWER_TIERING` | true | Фаза 2 (2.4) — выбор reviewer vs reviewer_std |
+| `CLAUDE_CODER_FAST_MODEL` | sonnet (env-фолбэк) | модель `coder_fast` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_CODER_MODEL` | sonnet (env-фолбэк) | модель `coder` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_CODER_DEEP_MODEL` | opus (env-фолбэк) | модель `coder_deep` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_REVIEWER_STD_MODEL` | sonnet (env-фолбэк) | модель `reviewer_std` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_REVIEWER_MODEL` | opus (env-фолбэк) | модель `reviewer` при dispatch — см. «Модели ролей coder/reviewer» |
 | `EVENTS_OUTBOX` | on | Событийный outbox `.work/events.jsonl`: `on`/`off`. `on` (по умолчанию) — дописывать машинные события на границах фаз/раундов, при захвате/смене статуса задачи, карантине/эскалации, слиянии и публикации; `off` — не писать (Markdown-артефакты остаются как есть). См. «Событийный outbox (`.work/events.jsonl`)» |
 | `KB` | on | База знаний (`.work/knowledge/`): `off`/`on` (с фолбэком на `$env:KB` — см. выше). `on` включает чтение KB (planner/coder/reviewer) и Фазу 5.5 (knowledge_curator); `off` отключает — см. «База знаний (KB)» |
 | `KB_TTL` | 8 | knowledge_curator — истечение неподтверждённых одиночных записей (батчей) |
@@ -162,10 +173,55 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `CODEX_REVIEWER` | off | Фаза 2 (2.4) — маршрутизация ревью в reviewer_codex: `off`/`fast`/`fast+std`/`deep`/`all`; `deep` добавляет augment к Claude-reviewer, `all` заменяет ревью всех уровней (см. «Codex-ревьюер и маршрутизация») |
 | `CODEX_CIFIX` | off | Фазы 4.3/5.4 — точечные CI/сборочные фиксы (Режим 3) через coder_codex: `off`/`on` |
 | `CODEX_MODEL` | (не задано) | codex-агенты — `-m` для codex; пусто → дефолт codex |
+| `CODEX_CODER_MODEL` | (не задано → `CODEX_MODEL`; env-фолбэк) | `coder_codex` на уровнях `coder_fast`/`coder` и в Режиме 3 |
+| `CODEX_CODER_DEEP_MODEL` | gpt-5.6-sol (env-фолбэк) | `coder_codex` на уровне `coder_deep`; `CODEX_MODEL` в эту ветку не течёт |
+| `CODEX_REVIEWER_MODEL` | (не задано → `CODEX_MODEL`; env-фолбэк) | `reviewer_codex` на уровнях `coder_fast`/`coder` |
+| `CODEX_REVIEWER_DEEP_MODEL` | gpt-5.6-sol (env-фолбэк) | `reviewer_codex` на уровне `coder_deep` (`full` и `augment`) |
 | `CODEX_REASONING` | auto | codex-агенты — `model_reasoning_effort` (coder auto→high; reviewer auto→xhigh) |
 | `CODEX_SANDBOX` | workspace-write | coder_codex — `--sandbox` codex (reviewer_codex — всегда read-only) |
 | `CODEX_NETWORK` | on | Фазы 2.2/2.8 — сетевой гейт маршрутизации в coder_codex для задач с полем `Сеть:` (см. «Codex-исполнитель и маршрутизация»); внутри coder_codex — сеть песочницы codex |
 | `CODEX_CMD` | codex | codex-агенты — бинарь/команда codex |
+
+## Модели ролей coder/reviewer
+
+Оператор задаёт модель каждого тира исполнителя и пер-таск ревьюера ключами
+`config.md` с фолбэком на одноимённые переменные окружения ОС (порядок разрешения —
+«Фолбэк на переменные окружения» выше). Ключи меняют **только модель уже выбранной
+роли**: выбор роли (тиринг `REVIEWER_TIERING`, поле `Рекомендуемый исполнитель`,
+Codex-маршрутизация) они не трогают, `planner`/`merger`/`full_reviewer`/кураторов/
+`executor` не затрагивают.
+
+| Роль | Ключ | Пусто → |
+|------|------|---------|
+| `coder_fast` | `CLAUDE_CODER_FAST_MODEL` | модель из frontmatter (`sonnet`) |
+| `coder` | `CLAUDE_CODER_MODEL` | модель из frontmatter (`sonnet`) |
+| `coder_deep` | `CLAUDE_CODER_DEEP_MODEL` | модель из frontmatter (`opus`) |
+| `reviewer_std` | `CLAUDE_REVIEWER_STD_MODEL` | модель из frontmatter (`sonnet`) |
+| `reviewer` | `CLAUDE_REVIEWER_MODEL` | модель из frontmatter (`opus`) |
+
+Допустимые значения `CLAUDE_*_MODEL` — `haiku`, `sonnet`, `opus`, `fable`.
+
+**Как применяешь.** Резолвнутое непустое значение передавай **параметром `model`
+инструмента `Agent(...)`** при каждом вызове этой роли: реализация (2.2), `R-`-фиксы
+(2.8), интеграционные `F-`-фиксы (5.2), точечные CI/сборочные фиксы Режима 3 (4.3 и 5.4),
+первое ревью (2.6) и повторное ревью (2.8). Ключ пуст → параметр `model` **не передавай**
+вовсе: роль исполняется на модели своего frontmatter (это дефолт, а не «модель по
+умолчанию провайдера»). Значение одно и то же на всю когорту — резолвится один раз в
+Фазе 1.1, а не перед каждым вызовом.
+Если конкретная версия инструмента `Agent(...)` отвергает параметр `model`, повтори тот
+же dispatch **без** него, отметь один раз в `journal.md` строкой
+`модельный override недоступен: <роль>=<значение>` и продолжай когорту — переопределение
+модели не является гейтом безопасности и когорту не блокирует.
+
+Модели Codex-адаптеров задаются отдельными ключами `CODEX_CODER_MODEL`/
+`CODEX_CODER_DEEP_MODEL` (для `coder_codex`) и `CODEX_REVIEWER_MODEL`/
+`CODEX_REVIEWER_DEEP_MODEL` (для `reviewer_codex`); их читают сами адаптеры из
+`config.md`/окружения — ты их в промпт не пересылаешь и в `-m` не подставляешь.
+К самим адаптерам `coder_codex`/`reviewer_codex` параметр `model` тоже не применяй:
+`CLAUDE_*_MODEL` задают модель тирной Claude-роли, а не модель адаптера (когда задача
+ушла в codex, тирный ключ не используется вовсе).
+Для уровня `coder_deep` deep-ключ переопределяет исторический пин `gpt-5.6-sol`;
+reasoning deep-уровня остаётся `xhigh` в любом случае.
 
 # Резолвинг раннеров `tools/*.ps1` (чекаут vs зеркало)
 
@@ -560,6 +616,7 @@ append-only инварианта `batch.md`. Подробности — «Рол
 - Батч: <B-id> · активно N / cap <MAX_PARALLEL> · приём: открыт (волна K) | закрыт (<причина>)
 - Codex: CODEX_CODER=<резолвленное значение> · CODEX_REVIEWER=<резолвленное значение> · CODEX_CIFIX=<резолвленное значение> · permission=<ok (сессионный грант) | ok (settings) | не проверялось (все три off)>
 - Codex attempts: <successes> ok, <fallbacks> fallback (<reason>=N, …), <failures> failed
+- Модели: <ключ>=<резолвленное значение>[ (env)] · … (только явно заданные модельные ключи)
 
 | Задача | Название | Агент | Этап | Ветка | Worktree |
 |--------|----------|-------|------|-------|----------|
@@ -582,6 +639,11 @@ append-only инварианта `batch.md`. Подробности — «Рол
 трём ключам. Отсутствия разрешения при включённой маршрутизации в этой строке не бывает: в
 таком случае processor не открывает когорту вовсе (см. «Гейт permission» в Фазе 1.1) и
 обзор с таблицей не строит.
+Строка `Модели` появляется там же, с Фазы 1.4, и несёт **только** те из девяти модельных
+ключей ролей (`CLAUDE_*_MODEL`, `CODEX_*_MODEL` — см. «Модели ролей coder/reviewer»),
+которые резолвнулись в непустое значение, с пометкой источника `(env)` для взятых из
+окружения. Ни один ключ не задан — строку опусти целиком (это и есть «все роли на своих
+дефолтных моделях»).
 Строку `Codex attempts` показывай рядом со строкой `Codex` начиная с Фазы 1.4 и
 пересчитывай при каждой штатной пересборке обзора только по **завершённым**
 `codex.attempt` текущего `B-id`, дедуплицированным по `event_id`; незавершённую
@@ -1058,10 +1120,25 @@ lock и заверши работу, сообщив оператору **клю�
 невалидное значение молчаливым default и **не** захватывай задачи с ним: `CODEX_SANDBOX`
 охраняет границу записи песочницы (значение вроде `danger-full-access` расширило бы её за
 пределы рабочей копии), а неверный `CODEX_NETWORK`/маршрутный ключ создал бы расхождение
-промпта и фактической песочницы либо тихо отключил бы нужную маршрутизацию. `CODEX_MODEL`/
-`CODEX_CMD` — свободные строки, этой проверке не подлежат. Диагностировать те же нарушения
-заранее (до запуска processor) можно `launchers/cc-doctor` — он классифицирует их тем же
-множеством и тем же сообщением по существу.
+промпта и фактической песочницы либо тихо отключил бы нужную маршрутизацию. `CODEX_MODEL`,
+`CODEX_CMD` и четыре модельных ключа адаптеров (`CODEX_CODER_MODEL`,
+`CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL`) — свободные
+строки, этой проверке не подлежат. Диагностировать те же нарушения заранее (до запуска
+processor) можно `launchers/cc-doctor` — он классифицирует их тем же множеством и тем же
+сообщением по существу.
+   **Модельные ключи Claude-ролей (в том же под-шаге).** Резолвь пять ключей
+`CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`, `CLAUDE_CODER_DEEP_MODEL`,
+`CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL` (`config.md` → одноимённая переменная
+окружения → пусто) и запомни на всю когорту — при dispatch их не перечитывают (см. «Модели
+ролей coder/reviewer»). Непустое значение **вне** множества `haiku`/`sonnet`/`opus`/`fable`:
+из `config.md` — та же fail-closed ошибка конфигурации, что и у Codex-ключей выше (когорту
+не открывай, сообщи ключ, значение и список допустимых); из окружения — считай ключ
+незаданным (роль пойдёт на модели своего frontmatter) и отметь это одной строкой в
+`journal.md`. Там же резолвь — **только для строки обзора**, без валидации (свободные
+строки) — четыре модельных ключа адаптеров `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`,
+`CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL`: применяют их сами адаптеры, ты их
+никуда не передаёшь. Все резолвленные непустые значения зафиксируй в обзоре `status.md`
+рядом с Codex-ключами.
    **Гейт permission на `codex exec` (разовый на сессию, отдельный ритм от резолва
 выше).** Гейт **активен**, если резолвленное значение хотя бы одного из `CODEX_CODER`,
 `CODEX_REVIEWER` **или** `CODEX_CIFIX` ≠ `off` (логическое ИЛИ по всем трём
@@ -1541,7 +1618,9 @@ KB=<on|off>.` Planner уже сам исключает T-ID активных з�
  WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>. CALL_DEADLINE_SEC=<из конфига>.
  CALL_OUTPUT_MAX_BYTES=<из конфига>.` (`<исполнитель задачи>` = уровень `L` или
 `coder_codex` по `CODEX_CODER` — см. «Codex-исполнитель и маршрутизация»; для
-`coder_codex` обязательно добавь `RUNTIME_LAYOUT=<checkout|mirror>`.) Раунд
+`coder_codex` обязательно добавь `RUNTIME_LAYOUT=<checkout|mirror>`.) Для
+Claude-исполнителя, у которого резолвнут непустой модельный ключ его тира, передай
+`model` инструмента `Agent(...)` — см. «Модели ролей coder/reviewer». Раунд
 блокируется до возврата всех его вызовов (неизбежное свойство одного сообщения
 инструментов, не барьер по всей когорте — задачи других волн/на других шагах цикла
 ревью продолжаются своим ходом в том же раунде и следующих).
@@ -1685,7 +1764,9 @@ environment fingerprint; каждый command-result обязан быть termi
    CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.
    VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` — для
    `reviewer_codex` добавь `Worktree=<абс $WORK/worktrees/<T-ID>>.
-   RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`
+   RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`; для Claude-ревьюера с
+   непустым модельным ключом его тира — передай `model` инструмента `Agent(...)`
+   (см. «Модели ролей coder/reviewer»), в том числе на повторных вызовах в 2.8.
    **Сентинел `ЭСКАЛАЦИЯ codex: <…>`** от `reviewer_codex` (режим `full`) → перезапусти
    ревью этой задачи на эквивалентном **Claude**-ревьюере (базовый уровень из 2.4:
    `reviewer_std`/`reviewer`) тем же промптом фазы, дальше веди как обычно. (Ветка уже
@@ -2746,8 +2827,10 @@ review SHA>..<вершина ветки>` (где `Previous review SHA` — по
 
 Подставляется в диспетч Фаз 2.2 (Режим 1) и 2.8 (Режим 2, `R-`).
 Для `L==coder_deep` адаптер независимо от общих `CODEX_MODEL`/`CODEX_REASONING`
-обязан запускать `gpt-5.6-sol` с `xhigh`. `all` не меняет маршрутизацию интеграционных
-`F-` (они по-прежнему Claude) и Режима 3 (его отдельно гейтит `CODEX_CIFIX`).
+обязан запускать `gpt-5.6-sol` с `xhigh`; `gpt-5.6-sol` здесь — дефолт: непустой
+`CODEX_CODER_DEEP_MODEL` его переопределяет (только модель, `xhigh` остаётся всегда).
+`all` не меняет маршрутизацию интеграционных `F-` (они по-прежнему Claude) и Режима 3
+(его отдельно гейтит `CODEX_CIFIX`).
 
 **Сетевой гейт (поле `Сеть:` в task.md, T-064).** Если дескриптор задачи несёт `Сеть:
 требуется` + `Экосистема: <...>` (проставляет planner — см. `agents/planner.md`,
@@ -2961,7 +3044,8 @@ self-review bypass, когда `coder_codex` R-фиксит задачу, реа
   дублируется дешёвой страховкой; см. 2.5).
 
 Для `L==coder_deep` оба режима адаптера — `full` при `all` и `augment` при `deep` —
-независимо от общих `CODEX_MODEL`/`CODEX_REASONING` используют `gpt-5.6-sol` с `xhigh`.
+независимо от общих `CODEX_MODEL`/`CODEX_REASONING` используют `gpt-5.6-sol` с `xhigh`
+(модель переопределяет только `CODEX_REVIEWER_DEEP_MODEL`; `xhigh` остаётся всегда).
 
 **Codex sandbox-init preflight действует и здесь.** Тот же сессионный preflight (см.
 «Codex-исполнитель (coder_codex) и маршрутизация», T-117) гейтит и `reviewer_codex`: при
@@ -3009,7 +3093,8 @@ Codex-ревью — снимается самый дорогой повторя
 Opus-квота остаётся под `coder_deep`.
 Если оператор сознательно выбирает полностью Codex-путь, комбинация
 `CODEX_CODER=all` + `CODEX_REVIEWER=all` ведёт все task-level реализации, `R-`-фиксы и
-ревью через Codex; deep-пара всегда `gpt-5.6-sol`/`xhigh`, а фолбэки остаются Claude.
+ревью через Codex; deep-пара всегда `xhigh` и по умолчанию `gpt-5.6-sol` (модель меняют
+ключи `CODEX_CODER_DEEP_MODEL`/`CODEX_REVIEWER_DEEP_MODEL`), а фолбэки остаются Claude.
 
 # Codex CI-фиксы (Режим 3) и маршрутизация
 

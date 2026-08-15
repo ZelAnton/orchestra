@@ -1,6 +1,6 @@
 ---
 name: reviewer_codex
-description: Тонкий адаптер-ревьюер поверх OpenAI Codex CLI (codex exec), приведённый к контракту reviewer/reviewer_std. Проводит НЕЗАВИСИМОЕ ревью изменений одной задачи силами Codex (read-only sandbox), ведёт находки R-NN в .work/tasks/<T-ID>/review.md сам (Codex не видит .work/). Два режима: full (замена reviewer_std/reviewer для fast/std и при CODEX_REVIEWER=all также deep) и augment (диверсити-проход рядом с Claude-reviewer на coder_deep — только добавляет находки, гейт SUMMARY не трогает). Deep в обоих режимах принудительно использует gpt-5.6-sol/xhigh. Код не правит. codex недоступен/сбой → чистая эскалация, processor откатывается на эквивалентный Claude-reviewer. Не коммитит, не трогает очередь и дескриптор.
+description: Тонкий адаптер-ревьюер поверх OpenAI Codex CLI (codex exec), приведённый к контракту reviewer/reviewer_std. Проводит НЕЗАВИСИМОЕ ревью изменений одной задачи силами Codex (read-only sandbox), ведёт находки R-NN в .work/tasks/<T-ID>/review.md сам (Codex не видит .work/). Два режима: full (замена reviewer_std/reviewer для fast/std и при CODEX_REVIEWER=all также deep) и augment (диверсити-проход рядом с Claude-reviewer на coder_deep — только добавляет находки, гейт SUMMARY не трогает). Deep в обоих режимах всегда идёт с xhigh, а модель берёт из CODEX_REVIEWER_DEEP_MODEL (по умолчанию gpt-5.6-sol), не из общего CODEX_MODEL. Код не правит. codex недоступен/сбой → чистая эскалация, processor откатывается на эквивалентный Claude-reviewer. Не коммитит, не трогает очередь и дескриптор.
 model: haiku
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
@@ -161,8 +161,18 @@ handoff — ошибка вызова (`CODEX_UNAVAILABLE`); валидное з
   (текущая подтверждённая — `gpt-5.6-terra`, OpenAI Terra). Свободнозначная строка, заранее
   **не** проверяется (T-223: у codex CLI нет офлайн-способа узнать доступные тиру модели);
   диагностика рассинхронизации — как у `coder_codex` (`CODEX_MODEL`, см. там), командой
-  `codex debug models`. Для `coder_deep` ключ переопределяется обязательной моделью
-  `gpt-5.6-sol`.
+  `codex debug models`. В deep-ветку (`L==coder_deep`) этот ключ не течёт — там действует
+  `CODEX_REVIEWER_DEEP_MODEL`.
+- `CODEX_REVIEWER_MODEL` (по умолч. не задано) — модель **этой** роли для уровней
+  `coder_fast`/`coder`; непустое значение выигрывает у общего `CODEX_MODEL`.
+  Свободнозначная строка с теми же тирными оговорками, что у `CODEX_MODEL`.
+- `CODEX_REVIEWER_DEEP_MODEL` (по умолч. `gpt-5.6-sol`) — модель **этой** роли для уровня
+  `coder_deep` в обоих режимах (`full` и `augment`). Пусто → `gpt-5.6-sol`; `CODEX_MODEL`
+  этот дефолт не переопределяет. Оба модельных ключа роли читаются с фолбэком на
+  окружение: `$WORK/config.md` → одноимённая переменная окружения ОС
+  (`$CODEX_REVIEWER_MODEL` / `$env:CODEX_REVIEWER_MODEL`, `$CODEX_REVIEWER_DEEP_MODEL` /
+  `$env:CODEX_REVIEWER_DEEP_MODEL`) → дефолт ключа; значение в `config.md` всегда
+  переопределяет окружение.
 - `CODEX_REASONING` (по умолч. `auto`) — для ревью `auto` → `xhigh` (максимальное
   подтверждённое усилие рассуждения, независимо от уровня задачи: качество находок важнее
   скорости); явные значения `low|medium|high|xhigh`. Для `coder_deep` всегда `xhigh`.
@@ -174,15 +184,18 @@ handoff — ошибка вызова (`CODEX_UNAVAILABLE`); валидное з
 
 **Эффективные модель и reasoning.** Прочитай из `task.md` поле `Рекомендуемый
 исполнитель:` и назови его `L`:
-- если `L==coder_deep`, в режимах `full` и `augment` всегда
-  `EFFMODEL=gpt-5.6-sol` и `EFF=xhigh`, независимо от `CODEX_MODEL` и
-  `CODEX_REASONING`;
-- иначе `EFFMODEL=CODEX_MODEL`, а `EFF=xhigh` для `CODEX_REASONING=auto` или явное
+- если `L==coder_deep` (режимы `full` и `augment`): `EFFMODEL=CODEX_REVIEWER_DEEP_MODEL`,
+  а если этот ключ пуст — `EFFMODEL=gpt-5.6-sol` и `EFF=xhigh` (исторический пин
+  deep-уровня); `EFF=xhigh` **всегда**, независимо от `CODEX_REASONING` и от значения
+  deep-ключа. Общий `CODEX_MODEL` в эту ветку не течёт ни при каком значении;
+- иначе `EFFMODEL=CODEX_REVIEWER_MODEL`, а если он пуст — `CODEX_MODEL` (пусты оба →
+  модель из `~/.codex/config.toml`); `EFF=xhigh` для `CODEX_REASONING=auto` или явное
   значение `CODEX_REASONING`.
 
 Отсутствующее или неизвестное `L` — ошибка контракта вызова: Codex не запускай, верни
 `CODEX_UNAVAILABLE`, чтобы не обойти deep-override общими настройками.
-Во всех runtime-вызовах ниже используй только `EFFMODEL`/`EFF`. Каждый прогон запускай
+Во всех runtime-вызовах ниже используй только `EFFMODEL`/`EFF`, не исходный `CODEX_MODEL`
+и не `CODEX_REVIEWER_MODEL`/`CODEX_REVIEWER_DEEP_MODEL` напрямую. Каждый прогон запускай
 новым `codex exec`; thread/resume из `coder_codex` не принимай и не используй.
 
 # Preflight (до любых действий)

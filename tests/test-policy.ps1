@@ -191,7 +191,32 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 39 $schema.config.Count 'schema has 39 config keys'
+    Assert-Equal 48 $schema.config.Count 'schema has 48 config keys'
+
+    # Per-tier coder/reviewer models: five enum-validated Claude keys and four free-form
+    # Codex adapter keys, all resolving config.md -> OS environment -> default.
+    $roleModelKeys = [ordered]@{
+        'CLAUDE_CODER_FAST_MODEL'   = @{ Type = 'enum';   Default = 'sonnet' }
+        'CLAUDE_CODER_MODEL'        = @{ Type = 'enum';   Default = 'sonnet' }
+        'CLAUDE_CODER_DEEP_MODEL'   = @{ Type = 'enum';   Default = 'opus' }
+        'CLAUDE_REVIEWER_STD_MODEL' = @{ Type = 'enum';   Default = 'sonnet' }
+        'CLAUDE_REVIEWER_MODEL'     = @{ Type = 'enum';   Default = 'opus' }
+        'CODEX_CODER_MODEL'         = @{ Type = 'string'; Default = 'unset' }
+        'CODEX_CODER_DEEP_MODEL'    = @{ Type = 'string'; Default = 'gpt-5.6-sol' }
+        'CODEX_REVIEWER_MODEL'      = @{ Type = 'string'; Default = 'unset' }
+        'CODEX_REVIEWER_DEEP_MODEL' = @{ Type = 'string'; Default = 'gpt-5.6-sol' }
+    }
+    foreach ($k in $roleModelKeys.Keys) {
+        $d = $schema.config | Where-Object { $_.name -eq $k } | Select-Object -First 1
+        Assert-True ([bool]$d) "schema has role model key $k"
+        if (-not $d) { continue }
+        Assert-Equal $roleModelKeys[$k].Type $d.type "$k has the expected type"
+        Assert-Equal $roleModelKeys[$k].Default $d.default "$k has the documented default"
+        Assert-True ([bool]$d.envFallback) "$k resolves from the OS environment too"
+        if ($roleModelKeys[$k].Type -eq 'enum') {
+            Assert-Equal 'fable,haiku,opus,sonnet' ((@($d.enum) | Sort-Object) -join ',') "$k allows exactly the Claude model aliases"
+        }
+    }
 
     # T-095: the publish-gate tuning keys and the CI-required-checks policy section exist.
     foreach ($k in @('COHORT_TOKEN_BUDGET', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD')) {
@@ -266,6 +291,26 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Write-Utf8 $cfg "CODEX_CODER: all`nCODEX_REVIEWER: all`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
     Assert-Exit $r 0 'validate-config accepts all-level Codex coder and reviewer routing'
+
+    # Per-tier role models: the Claude keys are enum-validated, the Codex adapter keys are
+    # free-form model ids (their availability depends on the account tier, so an offline
+    # value set would reject legitimate models).
+    Write-Utf8 $cfg ("CLAUDE_CODER_FAST_MODEL: haiku`nCLAUDE_CODER_MODEL: sonnet`n" +
+        "CLAUDE_CODER_DEEP_MODEL: opus`nCLAUDE_REVIEWER_STD_MODEL: fable`n" +
+        "CLAUDE_REVIEWER_MODEL: opus`nCODEX_CODER_MODEL: gpt-5.6-terra`n" +
+        "CODEX_CODER_DEEP_MODEL: gpt-5.6-sol`nCODEX_REVIEWER_MODEL: gpt-5.6-terra`n" +
+        "CODEX_REVIEWER_DEEP_MODEL: gpt-5.6-sol`n")
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 0 'validate-config accepts every per-tier coder/reviewer model key'
+
+    Write-Utf8 $cfg "CLAUDE_REVIEWER_MODEL: gpt-4o`n"
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 3 'validate-config rejects a non-Claude model alias for a Claude role'
+    Assert-OutMatch $r 'haiku' 'validate-config: Claude model enum reported'
+
+    Write-Utf8 $cfg "CLAUDE_CODER_MODEL:`n"
+    $r = Invoke-Policy @('validate-config', '--file', $cfg)
+    Assert-Exit $r 0 'validate-config treats an empty role model key as unset (frontmatter default)'
 }.Invoke()
 
 # =============================================================================

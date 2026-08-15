@@ -181,6 +181,31 @@ root defaults to `high` reasoning,
 overrides are `ORCHESTRA_CODEX_MODEL`, `ORCHESTRA_CODEX_REASONING`,
 `ORCHESTRA_CODEX_SANDBOX`, and `ORCHESTRA_CODEX_MAX_THREADS`.
 
+In the Claude-root (hybrid) mode, the model of each implementer and per-task reviewer tier
+is operator-configurable, per provider, through `.work/config.md` keys that also fall back
+to same-named system environment variables (`config.md` → environment → default). The
+Codex-native root above is unaffected: there every role runs under `ORCHESTRA_CODEX_MODEL`.
+
+```powershell
+# Claude roles: haiku | sonnet | opus | fable
+[Environment]::SetEnvironmentVariable('CLAUDE_CODER_FAST_MODEL', 'haiku', 'User')
+[Environment]::SetEnvironmentVariable('CLAUDE_CODER_MODEL', 'sonnet', 'User')
+[Environment]::SetEnvironmentVariable('CLAUDE_CODER_DEEP_MODEL', 'opus', 'User')
+[Environment]::SetEnvironmentVariable('CLAUDE_REVIEWER_STD_MODEL', 'sonnet', 'User')
+[Environment]::SetEnvironmentVariable('CLAUDE_REVIEWER_MODEL', 'opus', 'User')
+# Codex adapters: any model id the account's tier serves
+[Environment]::SetEnvironmentVariable('CODEX_CODER_MODEL', 'gpt-5.6-terra', 'User')
+[Environment]::SetEnvironmentVariable('CODEX_CODER_DEEP_MODEL', 'gpt-5.6-sol', 'User')
+[Environment]::SetEnvironmentVariable('CODEX_REVIEWER_MODEL', 'gpt-5.6-terra', 'User')
+[Environment]::SetEnvironmentVariable('CODEX_REVIEWER_DEEP_MODEL', 'gpt-5.6-sol', 'User')
+```
+
+Unset keys keep today's behaviour: the Claude roles run on the model in their own
+frontmatter, and the Codex adapters fall back to `CODEX_MODEL` (deep tiers to
+`gpt-5.6-sol`). These keys change only the model of an already selected role — never
+which role or provider is selected — and `cc-doctor` prints the effective values. See
+[`docs/environment-variables.md`](docs/environment-variables.md).
+
 Claude launchers default to the guarded `auto` permission mode. An operator can opt an
 isolated machine or container into permission bypass for the Claude root and every spawned
 subagent:

@@ -79,11 +79,16 @@ function Invoke-Doctor {
         [string]$PowerShellHost = $script:Pwsh.Source
     )
     # Env vars the runtime consults from the process environment (CODEX_CODER/
-    # CODEX_REVIEWER env fallback, CC_CODEX_EXEC_GRANT session grant). Set them on the
-    # parent so the spawned child inherits them, then restore. Unset ambient routing by
-    # default so a machine with real CODEX_* set cannot make these scenarios flaky.
+    # CODEX_REVIEWER and the nine per-role model keys via env fallback, CC_CODEX_EXEC_GRANT
+    # session grant). Set them on the parent so the spawned child inherits them, then
+    # restore. Unset ambient routing by default so a machine with real CODEX_* set cannot
+    # make these scenarios flaky.
     $defaults = @{
         CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = ''
+        CLAUDE_CODER_FAST_MODEL = ''; CLAUDE_CODER_MODEL = ''; CLAUDE_CODER_DEEP_MODEL = ''
+        CLAUDE_REVIEWER_STD_MODEL = ''; CLAUDE_REVIEWER_MODEL = ''
+        CODEX_CODER_MODEL = ''; CODEX_CODER_DEEP_MODEL = ''
+        CODEX_REVIEWER_MODEL = ''; CODEX_REVIEWER_DEEP_MODEL = ''
         CC_PROCESSKIT_CLI = 'off'; CC_PROCESSKIT_PYTHON = ''
         ORCHESTRA_AUTO_APPROVE = ''; ORCHESTRA_PROVIDER = ''
         ORCHESTRA_CLAUDE_PERMISSION_MODE = ''
@@ -238,11 +243,48 @@ Remove-Case $c
 # =============================================================================
 # 4) effective CODEX_*: env fallback accepts all and labels it "(env)"
 # =============================================================================
+# Key/value alignment is padded, so match the pair rather than a fixed column width.
 $c = New-Case
 $r = Invoke-Doctor -Case $c -Env @{ CODEX_CODER = 'all'; CODEX_REVIEWER = 'all' }
-Assert-Contains $r.Out 'CODEX_CODER      = all (env)' 'env fallback: CODEX_CODER all read from env and labelled'
-Assert-Contains $r.Out 'CODEX_REVIEWER   = all (env)' 'env fallback: CODEX_REVIEWER all read from env and labelled'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_CODER\s+=\s+all \(env\)')) 'env fallback: CODEX_CODER all read from env and labelled'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_REVIEWER\s+=\s+all \(env\)')) 'env fallback: CODEX_REVIEWER all read from env and labelled'
 Assert-Contains $r.Out 'OK   Codex key values: all set values are within their allowed sets' 'env fallback: all values validate'
+Remove-Case $c
+
+# =============================================================================
+# 4a) per-role model keys: config wins over env, env fallback is labelled "(env)",
+#     an unset Claude key shows the role's frontmatter model, and a bad value FAILs
+# =============================================================================
+$c = New-Case
+Set-Config $c (@(
+    'CLAUDE_CODER_DEEP_MODEL: sonnet'
+    'CODEX_REVIEWER_MODEL: gpt-5.6-terra'
+) -join "`n")
+$r = Invoke-Doctor -Case $c -Env @{
+    CLAUDE_CODER_DEEP_MODEL = 'opus'          # config.md must win over the environment
+    CLAUDE_REVIEWER_MODEL   = 'sonnet'        # env-only -> labelled (env)
+    CODEX_CODER_DEEP_MODEL  = 'gpt-5.6-terra' # env-only -> labelled (env)
+}
+Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_CODER_DEEP_MODEL\s+=\s+sonnet(?! \(env\))')) 'role models: config.md value wins over the same-named env var'
+Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_REVIEWER_MODEL\s+=\s+sonnet \(env\)')) 'role models: Claude key read from env and labelled'
+Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_CODER_FAST_MODEL\s+=\s+sonnet \(frontmatter default\)')) 'role models: an unset Claude key shows the frontmatter model'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_REVIEWER_MODEL\s+=\s+gpt-5\.6-terra')) 'role models: Codex adapter key printed from config.md'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_CODER_DEEP_MODEL\s+=\s+gpt-5\.6-terra \(env\)')) 'role models: Codex deep key read from env and labelled'
+Assert-NotContains $r.Out 'FAIL CLAUDE_' 'role models: valid values produce no FAIL'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'CLAUDE_REVIEWER_MODEL: gpt-4o'
+$r = Invoke-Doctor -Case $c
+Assert-Contains $r.Out "FAIL CLAUDE_REVIEWER_MODEL: invalid value 'gpt-4o' ->" 'role models: out-of-set config value names key and value, without an (env) source'
+Assert-Contains $r.Out 'allowed: haiku | sonnet | opus | fable' 'role models: FAIL lists the allowed set'
+Remove-Case $c
+
+# The same bad value from the environment is only ignored (the role keeps its frontmatter
+# model), so the FAIL line must name the source the operator has to fix.
+$c = New-Case
+$r = Invoke-Doctor -Case $c -Env @{ CLAUDE_REVIEWER_MODEL = 'gpt-4o' }
+Assert-Contains $r.Out "FAIL CLAUDE_REVIEWER_MODEL: invalid value 'gpt-4o' (env) ->" 'role models: out-of-set env value is labelled (env)'
 Remove-Case $c
 
 # =============================================================================

@@ -1,6 +1,6 @@
 ---
 name: coder_codex
-description: Тонкий адаптер-исполнитель поверх OpenAI Codex CLI (codex exec), приведённый к контракту листового coder'а. Для уровней coder_fast/coder и, при CODEX_CODER=all, coder_deep; deep принудительно использует gpt-5.6-sol/xhigh. Строит промпт из task.md (Режим 1), из переданных находок R- (Режим 2) или из инлайн-описания поломки (Режим 3, при включённом CODEX_CIFIX); запускает codex exec в рабочей копии задачи (worktree, либо в Режиме 3 Фазы 5.4 — основном рабочем дереве; workspace-write, сеть по ключу CODEX_NETWORK — дефолт on, без коммитов), самопроверяется через SMOKE_CMD, гарантирует отсутствие коммитов и возвращает отчёт. codex недоступен/сбой → чистая эскалация, processor откатывается на эквивалентного Claude-coder'а. Не коммитит, не гоняет ревью, не трогает очередь. Режим 3 поддерживает при CODEX_CIFIX=on; интеграционные F- не поддерживает.
+description: Тонкий адаптер-исполнитель поверх OpenAI Codex CLI (codex exec), приведённый к контракту листового coder'а. Для уровней coder_fast/coder и, при CODEX_CODER=all, coder_deep; deep всегда идёт с xhigh, а модель берёт из CODEX_CODER_DEEP_MODEL (по умолчанию gpt-5.6-sol), не из общего CODEX_MODEL. Строит промпт из task.md (Режим 1), из переданных находок R- (Режим 2) или из инлайн-описания поломки (Режим 3, при включённом CODEX_CIFIX); запускает codex exec в рабочей копии задачи (worktree, либо в Режиме 3 Фазы 5.4 — основном рабочем дереве; workspace-write, сеть по ключу CODEX_NETWORK — дефолт on, без коммитов), самопроверяется через SMOKE_CMD, гарантирует отсутствие коммитов и возвращает отчёт. codex недоступен/сбой → чистая эскалация, processor откатывается на эквивалентного Claude-coder'а. Не коммитит, не гоняет ревью, не трогает очередь. Режим 3 поддерживает при CODEX_CIFIX=on; интеграционные F- не поддерживает.
 model: haiku
 effort: medium
 tools: Read, Grep, Glob, Edit, Write, Bash
@@ -145,8 +145,17 @@ mirror-формы (в кавычках `~` тоже не раскрываетс�
   систематически идёт `CODEX_FAILED`, заподозри рассинхронизацию модели с тиром аккаунта
   и сверься командой `codex debug models` (сетевой вызов, обновляет каталог с бэкенда) —
   значение ключа должно совпадать с одним из `slug` с `"supported_in_api": true`.
-  Для `coder_deep` этот ключ намеренно переопределяется обязательной моделью
-  `gpt-5.6-sol` (см. вычисление эффективных настроек ниже).
+  В deep-ветку (`L==coder_deep`) этот ключ не течёт — там действует
+  `CODEX_CODER_DEEP_MODEL` (см. вычисление эффективных настроек ниже).
+- `CODEX_CODER_MODEL` (по умолч. не задано) — модель **этой** роли для уровней
+  `coder_fast`/`coder` и Режима 3; непустое значение выигрывает у общего `CODEX_MODEL`.
+  Свободнозначная строка с теми же тирными оговорками, что у `CODEX_MODEL`.
+- `CODEX_CODER_DEEP_MODEL` (по умолч. `gpt-5.6-sol`) — модель **этой** роли для уровня
+  `coder_deep`. Пусто → `gpt-5.6-sol`; `CODEX_MODEL` этот дефолт не переопределяет.
+  Оба модельных ключа роли читаются с фолбэком на окружение: `$WORK/config.md` →
+  одноимённая переменная окружения ОС (`$CODEX_CODER_MODEL` / `$env:CODEX_CODER_MODEL`,
+  `$CODEX_CODER_DEEP_MODEL` / `$env:CODEX_CODER_DEEP_MODEL`) → дефолт ключа; значение в
+  `config.md` всегда переопределяет окружение.
 - `CODEX_SANDBOX` (по умолч. `workspace-write`) — `--sandbox`. **Допустимо только
   `read-only` или `workspace-write`** (единый источник — таблица «Допустимые значения
   Codex-ключей» в `config.example.md`); значение `danger-full-access` или любое иное,
@@ -172,15 +181,20 @@ mirror-формы (в кавычках `~` тоже не раскрываетс�
 
 **Эффективные модель и reasoning.** В Режимах 1–2 прочитай из `task.md` точное поле
 `Рекомендуемый исполнитель:` и назови его `L`:
-- если `L==coder_deep`, всегда `EFFMODEL=gpt-5.6-sol` и `EFF=xhigh`, независимо от
-  `CODEX_MODEL` и `CODEX_REASONING`;
-- иначе `EFFMODEL=CODEX_MODEL`, а `EFF=high` для `CODEX_REASONING=auto` или явное
+- если `L==coder_deep`: `EFFMODEL=CODEX_CODER_DEEP_MODEL`, а если этот ключ пуст —
+  `EFFMODEL=gpt-5.6-sol` и `EFF=xhigh` (исторический пин deep-уровня); `EFF=xhigh`
+  **всегда**, независимо от `CODEX_REASONING` и от значения deep-ключа. Общий
+  `CODEX_MODEL` в эту ветку не течёт ни при каком значении — сменить deep-модель можно
+  только ключом `CODEX_CODER_DEEP_MODEL`;
+- иначе `EFFMODEL=CODEX_CODER_MODEL`, а если он пуст — `CODEX_MODEL` (пусты оба →
+  модель из `~/.codex/config.toml`); `EFF=high` для `CODEX_REASONING=auto` или явное
   значение `CODEX_REASONING`.
 
 Отсутствующее или неизвестное `L` в Режимах 1–2 — ошибка контракта вызова: Codex не
 запускай, верни `CODEX_UNAVAILABLE`, чтобы не обойти deep-override общими настройками.
 В Режиме 3 `task.md` нет, поэтому применяй общие настройки второй ветки. Во всех
-runtime-вызовах ниже используй только `EFFMODEL`/`EFF`, не исходный `CODEX_MODEL`.
+runtime-вызовах ниже используй только `EFFMODEL`/`EFF`, не исходный `CODEX_MODEL` и не
+`CODEX_CODER_MODEL`/`CODEX_CODER_DEEP_MODEL` напрямую.
 
 # Preflight (до любых правок)
 

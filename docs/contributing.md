@@ -78,10 +78,17 @@ Treat the key as one contract propagated through this chain:
 5. Add the key to the hardcoded `$known` table in
    [`tools/doctor-runtime.ps1`](../tools/doctor-runtime.ps1). Doctor must work from the
    standalone `cc-sync` mirror, so it cannot load `config.example.md` from a checkout. Add
-   fail-closed value validation there when the key has an enum or range.
+   fail-closed value validation there when the key has an enum or range. If the key also
+   resolves from the OS environment, add it to `$script:EnvFallbackKeys` there, and if it
+   is a per-tier coder/reviewer model key, to `$claudeModelAllowed` and
+   `$claudeModelFrontmatter` as well.
 6. Extend the appropriate machine guard. `tools/check-consistency.ps1` Class 4 compares
-   Doctor's allowlist with the documented defaults; Class 5 compares schema key names and
-   Codex enums with the documentation. If the key joins the bounded Codex set, also update
+   Doctor's allowlist with the documented defaults and its per-tier role-model tables with
+   the schema enums, the schema defaults and the roles' own `model:` frontmatter (a new
+   role-model key also needs a row in `$roleModelAgents` there), and its
+   `$script:EnvFallbackKeys` list with the schema's `envFallback` flags; Class 5 compares
+   schema key names and Codex enums with the documentation. If the key joins the bounded
+   Codex set, also update
    [`tools/check-codex-config-guard.ps1`](../tools/check-codex-config-guard.ps1) and the
    processor validation form it checks.
 7. Add validation, default, invalid-value, precedence, and migration cases to

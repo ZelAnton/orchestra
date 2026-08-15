@@ -442,7 +442,9 @@ foreach ($name in $artifactLocations.Keys) {
 # exactly (task T-043) — this check catches drift between the two without
 # requiring cc-doctor to parse config.example.md at runtime (its engine must keep
 # working when mirrored standalone into ~/.claude/scripts, see the comments in
-# tools/doctor-runtime.ps1).
+# tools/doctor-runtime.ps1). The same class also guards the engine's other local copies of
+# the same schema — $script:EnvFallbackKeys, $claudeModelAllowed and
+# $claudeModelFrontmatter — against tools/policy-schema.ps1.
 
 $DoctorRuntimeFile = Join-Path $RepoRoot 'tools/doctor-runtime.ps1'
 
@@ -473,6 +475,173 @@ foreach ($key in $defaultKeys) {
     if (-not $doctorKeys.Contains($key)) {
         Add-Finding -FileRef $srcName -Check 'cc-doctor-allowlist' `
             -Detail "'$key' is in the defaults table in config.example.md but missing from the allowlist"
+    }
+}
+
+# cc-doctor's remaining local copies of the schema must not drift from it either. Three
+# are guarded below, in this order (tools/policy-schema.ps1 is the single source of all
+# three; the copies exist only so the engine keeps working when mirrored standalone into
+# ~/.claude/scripts):
+#   $script:EnvFallbackKeys - the keys that also resolve from the OS environment, vs the
+#                             schema's envFallback flags.
+#   $claudeModelAllowed     - allowed value set per key, vs the schema enums.
+#   $claudeModelFrontmatter - the model each role falls back to when its key is unset, vs
+#                             the schema default AND vs the `model:` frontmatter of the
+#                             role itself (cc-doctor prints it as "(frontmatter default)",
+#                             so a stale entry would report a model the runtime never uses;
+#                             checking both ends also pins schema default == frontmatter).
+# Parsed here rather than in Class 5 because the source being guarded is the doctor
+# runtime, exactly like the allowlist above. The schema itself is loaded in Class 5 below,
+# so read it independently here to keep the two classes order-independent. Only the
+# per-tier role-model keys (CLAUDE_*_MODEL) participate in the two model tables: an
+# unrelated future CLAUDE_* key has nothing to do with them.
+$roleModelAgents = [ordered]@{
+    'CLAUDE_CODER_FAST_MODEL'   = 'coder_fast'
+    'CLAUDE_CODER_MODEL'        = 'coder'
+    'CLAUDE_CODER_DEEP_MODEL'   = 'coder_deep'
+    'CLAUDE_REVIEWER_STD_MODEL' = 'reviewer_std'
+    'CLAUDE_REVIEWER_MODEL'     = 'reviewer'
+}
+$roleModelKeyPattern = '^CLAUDE_[A-Z0-9_]*_MODEL$'
+
+function Read-DoctorTable {
+    # Parses one [ordered]@{ 'KEY' = <value> } table out of the doctor runtime source.
+    param([Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][string]$ValuePattern)
+    $block = [regex]::Match($rtContent, ('\$' + $Name + '\s*=\s*\[ordered\]@\{(?<body>[^}]*)\}'))
+    if (-not $block.Success) { return $null }
+    $table = [ordered]@{}
+    foreach ($m in [regex]::Matches($block.Groups['body'].Value, "'(CLAUDE_[A-Z0-9_]+)'\s*=\s*$ValuePattern")) {
+        $table[$m.Groups[1].Value] = $m.Groups[2].Value
+    }
+    return $table
+}
+
+$schemaForModels = $null
+try {
+    . (Join-Path $PSScriptRoot 'policy-schema.ps1')
+    $schemaForModels = Get-OrchestraSchema
+} catch {
+    Write-Error "Could not load tools/policy-schema.ps1 for the Claude model-set check: $($_.Exception.Message)"
+    exit 2
+}
+$schemaRoleModels = [ordered]@{}
+foreach ($desc in $schemaForModels.config) {
+    if ([string]$desc.name -match $roleModelKeyPattern) { $schemaRoleModels[[string]$desc.name] = $desc }
+}
+
+# The third doctor copy: the keys that also resolve from the OS environment. cc-doctor
+# labels exactly these "(env)" and falls back to the environment for them, so a schema key
+# marked envFallback that never reaches this list would be honoured by the runtime but
+# reported as unset by the doctor.
+$envFallbackMatch = [regex]::Match($rtContent, '\$script:EnvFallbackKeys\s*=\s*@\((?<body>[^)]*)\)')
+if (-not $envFallbackMatch.Success) {
+    Add-Finding -FileRef $srcName -Check 'cc-doctor-env-fallback' `
+        -Detail 'could not find the $script:EnvFallbackKeys list - format may have changed'
+} else {
+    $doctorEnvKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($m in [regex]::Matches($envFallbackMatch.Groups['body'].Value, "'([A-Za-z0-9_]+)'")) {
+        [void]$doctorEnvKeys.Add($m.Groups[1].Value)
+    }
+    $schemaEnvKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($desc in $schemaForModels.config) {
+        if ($desc.envFallback) { [void]$schemaEnvKeys.Add([string]$desc.name) }
+    }
+    foreach ($key in $schemaEnvKeys) {
+        if (-not $doctorEnvKeys.Contains($key)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-env-fallback' `
+                -Detail "'$key' resolves from the OS environment per tools/policy-schema.ps1 but is missing from `$script:EnvFallbackKeys"
+        }
+    }
+    foreach ($key in $doctorEnvKeys) {
+        if (-not $schemaEnvKeys.Contains($key)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-env-fallback' `
+                -Detail "'$key' is in `$script:EnvFallbackKeys but tools/policy-schema.ps1 does not mark it envFallback"
+        }
+    }
+}
+
+$doctorClaudeModels = Read-DoctorTable -Name 'claudeModelAllowed' -ValuePattern '@\(([^)]*)\)'
+if ($null -eq $doctorClaudeModels) {
+    Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-models' `
+        -Detail 'could not find the $claudeModelAllowed hashtable - format may have changed'
+} else {
+    foreach ($name in @($doctorClaudeModels.Keys)) {
+        $vals = @()
+        foreach ($vm in [regex]::Matches($doctorClaudeModels[$name], "'([^']+)'")) { $vals += $vm.Groups[1].Value }
+        $doctorClaudeModels[$name] = ($vals | Sort-Object)
+    }
+    foreach ($name in $schemaRoleModels.Keys) {
+        if (-not $doctorClaudeModels.Contains($name)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-models' `
+                -Detail "'$name' is a schema config key but missing from `$claudeModelAllowed"
+            continue
+        }
+        $want = (@($schemaRoleModels[$name].enum | Sort-Object) -join ' | ')
+        $got = ($doctorClaudeModels[$name] -join ' | ')
+        if ($want -cne $got) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-models' `
+                -Detail "'$name' allowed set is [$got] but tools/policy-schema.ps1 says [$want]"
+        }
+    }
+    foreach ($name in $doctorClaudeModels.Keys) {
+        if (-not $schemaRoleModels.Contains($name)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-models' `
+                -Detail "'$name' is in `$claudeModelAllowed but is no per-tier role-model key in tools/policy-schema.ps1"
+        }
+    }
+}
+
+$doctorFrontmatterModels = Read-DoctorTable -Name 'claudeModelFrontmatter' -ValuePattern "'([^']*)'"
+if ($null -eq $doctorFrontmatterModels) {
+    Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+        -Detail 'could not find the $claudeModelFrontmatter hashtable - format may have changed'
+} else {
+    foreach ($name in $schemaRoleModels.Keys) {
+        if (-not $doctorFrontmatterModels.Contains($name)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+                -Detail "'$name' is a schema config key but missing from `$claudeModelFrontmatter"
+            continue
+        }
+        $got = [string]$doctorFrontmatterModels[$name]
+        $wantSchema = [string]$schemaRoleModels[$name].default
+        if ($got -cne $wantSchema) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+                -Detail "'$name' falls back to '$got' but tools/policy-schema.ps1 defaults it to '$wantSchema'"
+        }
+        if (-not $roleModelAgents.Contains($name)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+                -Detail "'$name' has no role mapped in tools/check-consistency.ps1 - add it to `$roleModelAgents"
+            continue
+        }
+        $agentFile = Join-Path $AgentsDir ($roleModelAgents[$name] + '.md')
+        if (-not (Test-Path -LiteralPath $agentFile)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+                -Detail "'$name' maps to agents/$($roleModelAgents[$name]).md, which does not exist"
+            continue
+        }
+        # Only the first-byte YAML frontmatter counts: a `model:` line further down is
+        # prose from the role prompt, not the model the runtime dispatches on.
+        $agentText = (Get-Content -LiteralPath $agentFile -Raw -Encoding utf8).Replace("`r`n", "`n")
+        $frontmatter = [regex]::Match($agentText, '\A---\n(?<fm>[\s\S]*?)\n---\n')
+        $fmModel = if ($frontmatter.Success) {
+            [regex]::Match($frontmatter.Groups['fm'].Value, '(?m)^model:\s*(\S+)\s*$')
+        } else { $null }
+        if (-not $fmModel -or -not $fmModel.Success) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+                -Detail "agents/$($roleModelAgents[$name]).md has no 'model:' frontmatter to compare '$name' against"
+            continue
+        }
+        if ($got -cne $fmModel.Groups[1].Value) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+                -Detail ("'$name' falls back to '$got' but agents/$($roleModelAgents[$name]).md runs on " +
+                    "'$($fmModel.Groups[1].Value)'")
+        }
+    }
+    foreach ($name in $doctorFrontmatterModels.Keys) {
+        if (-not $schemaRoleModels.Contains($name)) {
+            Add-Finding -FileRef $srcName -Check 'cc-doctor-claude-model-defaults' `
+                -Detail "'$name' is in `$claudeModelFrontmatter but is no per-tier role-model key in tools/policy-schema.ps1"
+        }
     }
 }
 

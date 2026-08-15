@@ -104,6 +104,13 @@ provider contract at higher precedence whenever provider-specific wording confli
    selected outside the model by the launcher. Choose the canonical tier, then dispatch
    its `orchestra_*` role. Integration `F-` fixes use a fresh `orchestra_coder` or
    `orchestra_coder_deep` thread exactly as the canonical tier resolver requires.
+   The per-role model keys are equally out of scope here: `CLAUDE_*_MODEL` selects a
+   Claude model for an `Agent(...)` dispatch that this provider never performs, and
+   `CODEX_CODER_MODEL`/`CODEX_CODER_DEEP_MODEL`/`CODEX_REVIEWER_MODEL`/
+   `CODEX_REVIEWER_DEEP_MODEL` configure the `codex exec` adapters, not native custom
+   agents. Model and reasoning effort of every native role come from the runtime
+   (`ORCHESTRA_CODEX_MODEL`/`ORCHESTRA_CODEX_REASONING`) and the role TOML; do not read,
+   validate or apply those config keys, and never let a missing one stop a cohort.
 5. Maker/checker independence is thread-based in this provider: the reviewing custom
    agent must be a new thread that did not implement or fix the reviewed change. Record
    implementation source as `codex`; a separate Codex reviewer satisfies the provider's

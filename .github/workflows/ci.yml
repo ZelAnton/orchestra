@@ -91,9 +91,10 @@ jobs:
       - name: Check cross-agent contract consistency
         # tools/check-consistency.ps1 (T-017): UPPER_SNAKE_CASE config keys vs
         # config.example.md, processor phase references vs processor.md, runtime-artifact
-        # names vs knowledge.md, the cc-doctor config-key allowlist (now in
-        # tools/doctor-runtime.ps1), the policy schema, and complete supervisor-budget
-        # handoffs on every processor SMOKE_CMD dispatch.
+        # names vs knowledge.md, the cc-doctor config-key allowlist plus its env-fallback
+        # and per-tier role-model copies (now in tools/doctor-runtime.ps1), the policy
+        # schema, and complete supervisor-budget handoffs on every processor SMOKE_CMD
+        # dispatch.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -105,6 +106,8 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
           & "./tests/test-consistency.ps1"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "./tests/test-consistency-model-keys.ps1"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Check Codex sandbox fail-closed contract

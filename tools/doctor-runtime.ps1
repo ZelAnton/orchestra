@@ -25,7 +25,9 @@
                                 whether Codex routing is on.
     3. Effective CODEX_*      - the resolved CODEX_* values (.work/config.md, with the
                                 documented config-then-env fallback for CODEX_CODER/
-                                CODEX_REVIEWER).
+                                CODEX_REVIEWER and the four adapter model keys), followed
+                                by the per-tier Claude role models (CLAUDE_*_MODEL, same
+                                fallback; blank = the role's frontmatter model).
     4. Codex key validation   - fail-closed classification of the six value-constrained
                                 Codex keys against their allowed sets ($codexAllowed).
     5. KB status              - the resolved KB mode (.work/config.md, with the same
@@ -54,10 +56,15 @@
     - $codexAllowed  - the six value-constrained Codex key sets. Guarded by
                        tools/check-codex-config-guard.ps1 against config.example.md's
                        validation table and agents/processor.md.
+    - $claudeModelAllowed / $claudeModelFrontmatter - the per-tier Claude role model
+                       sets and the model each role falls back to when its key is unset.
+                       Guarded by tools/check-consistency.ps1 (Class 4) against the enums
+                       and defaults in tools/policy-schema.ps1 and, for the fallback
+                       models, against the `model:` frontmatter of the roles themselves.
     - $known         - the recognized .work/config.md keys. Guarded by
                        tools/check-consistency.ps1 (Class 4) against config.example.md's
                        defaults table.
-  Both are kept hardcoded here (not read from config.example.md at runtime) because
+  All of them are kept hardcoded here (not read from config.example.md at runtime) because
   cc-doctor must keep working when this runtime is mirrored standalone into
   ~/.claude/scripts by cc-sync, where a reliable checkout of tools/ + config.example.md
   is not guaranteed to be present.
@@ -189,11 +196,22 @@ function Get-EnvTrimmed {
     return ''
 }
 
+# The config keys that also resolve from the OS environment when config.md leaves them
+# empty (documented contract: config.md -> env -> default). Kept as one list so the
+# effective-value printout, the value validation and Get-EffCodex cannot disagree.
+$script:EnvFallbackKeys = @(
+    'CODEX_CODER', 'CODEX_REVIEWER', 'KB',
+    'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL',
+    'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL',
+    'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL',
+    'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL'
+)
+
 function Get-EffCodex {
-    # Effective CODEX_CODER/CODEX_REVIEWER: config.md wins, else the same-named env var.
+    # Effective value of an env-fallback key: config.md wins, else the same-named env var.
     param([string]$Key)
     $v = Get-Cfg $Key
-    if (-not $v) { $v = Get-EnvTrimmed $Key }
+    if (-not $v -and $script:EnvFallbackKeys -contains $Key) { $v = Get-EnvTrimmed $Key }
     return $v
 }
 
@@ -372,16 +390,67 @@ if (-not $codexRoutingOn) {
 # =============================================================================
 
 Write-Host ''
-Write-Host '== Effective CODEX_* (.work/config.md; CODEX_CODER/CODEX_REVIEWER fall back to env; blank = default) =='
-foreach ($k in 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD') {
+Write-Host '== Effective CODEX_* (.work/config.md; keys marked (env) fall back to the OS environment; blank = default) =='
+foreach ($k in 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD') {
     $val = Get-Cfg $k
     $src = ''
-    if (-not $val -and ($k -eq 'CODEX_CODER' -or $k -eq 'CODEX_REVIEWER')) {
+    if (-not $val -and $script:EnvFallbackKeys -contains $k) {
         $ev = Get-EnvTrimmed $k
         if ($ev) { $val = $ev; $src = ' (env)' }
     }
     if (-not $val) { $val = '(default)' }
-    Write-Host ('  ' + $k.PadRight(16) + ' = ' + $val + $src)
+    Write-Host ('  ' + $k.PadRight(25) + ' = ' + $val + $src)
+}
+
+# =============================================================================
+# 2b. Effective Claude role models
+# =============================================================================
+#
+# Per-tier model of the Claude coder/reviewer roles. The processor passes a resolved
+# non-empty value as the Agent(...) `model` parameter; empty means "use the model from
+# the role's own frontmatter" (printed as "(frontmatter default)" below, with the model
+# from $claudeModelFrontmatter). Both tables are launcher-local copies of the single
+# source of truth (the enum and the default of these keys in tools/policy-schema.ps1,
+# itself checked against config.example.md by tools/check-consistency.ps1).
+$claudeModelAllowed = [ordered]@{
+    'CLAUDE_CODER_FAST_MODEL'   = @('haiku', 'sonnet', 'opus', 'fable')
+    'CLAUDE_CODER_MODEL'        = @('haiku', 'sonnet', 'opus', 'fable')
+    'CLAUDE_CODER_DEEP_MODEL'   = @('haiku', 'sonnet', 'opus', 'fable')
+    'CLAUDE_REVIEWER_STD_MODEL' = @('haiku', 'sonnet', 'opus', 'fable')
+    'CLAUDE_REVIEWER_MODEL'     = @('haiku', 'sonnet', 'opus', 'fable')
+}
+$claudeModelFrontmatter = [ordered]@{
+    'CLAUDE_CODER_FAST_MODEL'   = 'sonnet'
+    'CLAUDE_CODER_MODEL'        = 'sonnet'
+    'CLAUDE_CODER_DEEP_MODEL'   = 'opus'
+    'CLAUDE_REVIEWER_STD_MODEL' = 'sonnet'
+    'CLAUDE_REVIEWER_MODEL'     = 'opus'
+}
+Write-Host ''
+Write-Host '== Effective Claude role models (.work/config.md, then the OS environment; blank = model from the agent frontmatter) =='
+$claudeModelInvalid = $false
+foreach ($k in $claudeModelAllowed.Keys) {
+    $val = Get-Cfg $k
+    $src = ''
+    if (-not $val -and $script:EnvFallbackKeys -contains $k) {
+        $ev = Get-EnvTrimmed $k
+        if ($ev) { $val = $ev; $src = ' (env)' }
+    }
+    if (-not $val) {
+        Write-Host ('  ' + $k.PadRight(25) + ' = ' + $claudeModelFrontmatter[$k] + ' (frontmatter default)')
+        continue
+    }
+    if ($claudeModelAllowed[$k] -notcontains $val) {
+        # Name the source: a bad value in config.md blocks the cohort, the same value in
+        # the environment is only ignored - the operator must be able to tell which.
+        $claudeModelInvalid = $true
+        Write-Host ('FAIL ' + $k + ': invalid value ' + [char]39 + $val + [char]39 + $src + ' -> allowed: ' + ($claudeModelAllowed[$k] -join ' | '))
+        continue
+    }
+    Write-Host ('  ' + $k.PadRight(25) + ' = ' + $val + $src)
+}
+if ($claudeModelInvalid) {
+    Write-Host '  -> fix .work/config.md (or the env var): a value set in config.md blocks the cohort at Phase 1.1; a bad env value is ignored and the role falls back to its frontmatter model'
 }
 
 # =============================================================================
@@ -407,7 +476,7 @@ Write-Host '== Codex key value validation =='
 $codexInvalid = $false
 foreach ($k in $codexAllowed.Keys) {
     $v = Get-Cfg $k
-    if (-not $v -and ($k -eq 'CODEX_CODER' -or $k -eq 'CODEX_REVIEWER')) {
+    if (-not $v -and $script:EnvFallbackKeys -contains $k) {
         $v = Get-EnvTrimmed $k
     }
     if (-not $v) { continue }
@@ -528,7 +597,7 @@ if (Test-Path -LiteralPath $qf) {
     Write-Host 'OK   .work/Tasks_Queue.md not found (nothing to validate)'
 }
 
-$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'COHORT_TOKEN_BUDGET', 'COHORT_TOKEN_BUDGET_STRICT', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD', 'REVIEWER_TIERING', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
+$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'COHORT_TOKEN_BUDGET', 'COHORT_TOKEN_BUDGET_STRICT', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD', 'REVIEWER_TIERING', 'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL', 'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
 if (Test-Path -LiteralPath $script:ConfigFile) {
     $hasSmoke = $false
     $verificationMode = 'auto'

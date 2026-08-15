@@ -15,19 +15,21 @@ env-фолбэк, по-прежнему задаются в `.work/config.md`.
 | `CODEX_REVIEWER` | `off`, `fast`, `fast+std`, `deep`, `all`; default `off` | В Claude-root режиме направляет ревью соответствующих уровней в Codex; `deep` добавляет augment, `all` полностью заменяет ревью всех уровней. |
 | `KB` | `on` / `off`; default `on` | Включает или отключает чтение и обновление `.work/knowledge/`. |
 
-Для `CODEX_CODER`, `CODEX_REVIEWER` и `KB` действует следующий приоритет:
+Для `CODEX_CODER`, `CODEX_REVIEWER`, `KB` и девяти модельных переменных ролей (см.
+«Модели ролей coder и reviewer» ниже) действует следующий приоритет:
 
 ```text
 .work/config.md -> environment -> default
 ```
 
 Значение из `.work/config.md` всегда переопределяет одноимённую переменную окружения.
-При `all` deep-исполнитель и deep-ревьюер всегда используют `gpt-5.6-sol`/`xhigh`,
-игнорируя общие `CODEX_MODEL`/`CODEX_REASONING`; ревью запускается отдельным новым
-checker-тредом Codex.
-В Codex-root режиме `CODEX_CODER` и `CODEX_REVIEWER` игнорируются, поскольку все роли
-там уже исполняются как Codex-native custom agents. Полный контракт env-фолбэка описан
-в [`config.example.md`](../config.example.md).
+При `all` deep-исполнитель и deep-ревьюер игнорируют общие `CODEX_MODEL`/`CODEX_REASONING`:
+reasoning всегда `xhigh`, модель — `CODEX_CODER_DEEP_MODEL`/`CODEX_REVIEWER_DEEP_MODEL`, а
+если они не заданы — `gpt-5.6-sol`; ревью запускается отдельным новым checker-тредом Codex.
+В Codex-root режиме `CODEX_CODER`, `CODEX_REVIEWER` и все девять модельных переменных
+игнорируются, поскольку все роли там уже исполняются как Codex-native custom agents со
+своей моделью (`ORCHESTRA_CODEX_MODEL`) и reasoning (`ORCHESTRA_CODEX_REASONING`). Полный
+контракт env-фолбэка описан в [`config.example.md`](../config.example.md).
 
 `ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions` полностью отключает permission-
 проверки Claude для root-сессии и её subagent’ов. Используйте его только в
@@ -40,6 +42,39 @@ checker-тредом Codex.
 ```powershell
 $env:ORCHESTRA_CLAUDE_PERMISSION_MODE = 'bypassPermissions'
 ```
+
+## Модели ролей coder и reviewer
+
+Модель каждого тира исполнителя и пер-таск ревьюера задаётся отдельной переменной — для
+Claude-ролей и для Codex-адаптеров независимо; приоритет разрешения — тот же
+`config.md → окружение → дефолт`, что и выше. Тиринг эти переменные не меняют: роль
+выбирается как раньше (`REVIEWER_TIERING`, `Рекомендуемый исполнитель`, `CODEX_CODER`/
+`CODEX_REVIEWER`), переменная задаёт только модель уже выбранной роли. `planner`,
+`merger`, `full_reviewer`, кураторы и `executor` ими не затрагиваются.
+
+| Переменная | Значения / default | Роль |
+|---|---|---|
+| `CLAUDE_CODER_FAST_MODEL` | `haiku` \| `sonnet` \| `opus` \| `fable`; default `sonnet` | Claude `coder_fast` |
+| `CLAUDE_CODER_MODEL` | те же; default `sonnet` | Claude `coder` |
+| `CLAUDE_CODER_DEEP_MODEL` | те же; default `opus` | Claude `coder_deep` |
+| `CLAUDE_REVIEWER_STD_MODEL` | те же; default `sonnet` | Claude `reviewer_std` |
+| `CLAUDE_REVIEWER_MODEL` | те же; default `opus` | Claude `reviewer` |
+| `CODEX_CODER_MODEL` | model id; default — `CODEX_MODEL`, затем модель Codex CLI | `coder_codex` на уровнях `coder_fast`/`coder` и в Режиме 3 (CI-фикс) |
+| `CODEX_CODER_DEEP_MODEL` | model id; default `gpt-5.6-sol` | `coder_codex` на уровне `coder_deep` |
+| `CODEX_REVIEWER_MODEL` | model id; default — `CODEX_MODEL`, затем модель Codex CLI | `reviewer_codex` на уровнях `coder_fast`/`coder` |
+| `CODEX_REVIEWER_DEEP_MODEL` | model id; default `gpt-5.6-sol` | `reviewer_codex` на уровне `coder_deep` (`full` и `augment`) |
+
+Незаданная `CLAUDE_*_MODEL` означает «модель из frontmatter роли» — processor просто не
+передаёт переопределение в `Agent(...)`. Значение вне множества `haiku|sonnet|opus|fable`
+в `.work/config.md` останавливает когорту на Фазе 1.1; то же значение в окружении
+считается незаданным. `CODEX_*_MODEL` — свободные строки, офлайн не валидируются:
+несовместимая с тиром аккаунта модель обнаруживается постфактум как `CODEX_FAILED` с
+фолбэком на Claude (диагностика — `codex debug models`).
+
+Deep-уровень Codex исторически пинился на `gpt-5.6-sol`/`xhigh`. Пин остаётся дефолтом
+модели, но `CODEX_CODER_DEEP_MODEL`/`CODEX_REVIEWER_DEEP_MODEL` его переопределяют;
+reasoning deep-уровня остаётся `xhigh` в любом случае, а общий `CODEX_MODEL` в deep-ветку
+по-прежнему не течёт.
 
 ## Настройки Codex-native сессий
 
@@ -109,6 +144,9 @@ multi-agent processor:
 [Environment]::SetEnvironmentVariable('ORCHESTRA_AUTO_APPROVE', 'on', 'User')
 [Environment]::SetEnvironmentVariable('CODEX_CODER', 'all', 'User')
 [Environment]::SetEnvironmentVariable('CODEX_REVIEWER', 'all', 'User')
+[Environment]::SetEnvironmentVariable('CLAUDE_CODER_MODEL', 'opus', 'User')
+[Environment]::SetEnvironmentVariable('CLAUDE_REVIEWER_MODEL', 'opus', 'User')
+[Environment]::SetEnvironmentVariable('CODEX_REVIEWER_MODEL', 'gpt-5.6-terra', 'User')
 ```
 
 После изменения откройте новый терминал и проверьте эффективную конфигурацию:
@@ -132,7 +170,8 @@ $env:ORCHESTRA_PROVIDER = 'codex'
 ## Что не является пользовательской env-настройкой
 
 Остальные ключи `.work/config.md`, включая `MAX_PARALLEL`, `COHORT_SIZE`,
-`COHORT_TOKEN_BUDGET`, `CODEX_CIFIX`, `CODEX_MODEL`, `CODEX_REASONING`,
+`COHORT_TOKEN_BUDGET`, `CODEX_CIFIX`, `CODEX_MODEL` (общий ключ обоих адаптеров — в
+отличие от пер-ролевых `CODEX_*_MODEL` выше), `CODEX_REASONING`,
 `CODEX_SANDBOX`, `CODEX_NETWORK`, `PUSH` и `CI_WATCH`, не имеют env-фолбэка.
 
 `CC_CODEX_EXEC_GRANT`, `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`, `ORCHESTRA_CODEX_ROLE_TOPIC`,
