@@ -72,6 +72,11 @@ processor».** Координацию (`status.md`, статусы находо�
 
 # Резолвинг пути к runtime (до первого вызова)
 
+**Наличие `tools/<script>.ps1` само по себе не доказывает checkout-раскладку.** Checkout
+разрешён только когда корень одновременно содержит `agents/processor.md`,
+`generate-codex-agents.ps1` и `tools/sync-runtime.ps1`; иначе target-local `tools/` может
+подменить Orchestra runtime.
+
 Processor уже определил раскладку и передал `RUNTIME_LAYOUT=checkout|mirror`. Не повторяй
 filesystem-probe: собственная `tools/` целевого проекта не является Orchestra runtime.
 `$JRT` в примерах ниже — **текстовый placeholder, не shell-переменная**. В каждую команду

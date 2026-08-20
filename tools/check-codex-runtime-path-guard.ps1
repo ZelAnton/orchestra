@@ -46,6 +46,8 @@
          plus the normative docs, requires all three Orchestra source-tree markers
          before selecting a target-local tools/ path. A same-named stale/gitignored
          target file must never shadow the cc-sync mirror.
+      7. Processor-owned handoff. Both Codex and JCode adapter pairs consume
+         RUNTIME_LAYOUT=checkout|mirror and explicitly forbid a second filesystem probe.
 
     On any violation prints one line per finding as "<source> - <check> - <detail>"
     and exits 1. A structural problem (a required file or a rule string cannot be
@@ -258,6 +260,8 @@ $handoffDocs = [ordered]@{
     'agents/processor.md'       = $text['agents/processor.md']
     'agents/coder_codex.md'     = $text['agents/coder_codex.md']
     'agents/reviewer_codex.md'  = $text['agents/reviewer_codex.md']
+    'agents/coder_jcode.md'     = (Get-Content -LiteralPath (Join-Path $AgentsDir 'coder_jcode.md') -Raw -Encoding utf8)
+    'agents/reviewer_jcode.md'  = (Get-Content -LiteralPath (Join-Path $AgentsDir 'reviewer_jcode.md') -Raw -Encoding utf8)
     'knowledge.md'              = $text['knowledge.md']
 }
 foreach ($ref in $handoffDocs.Keys) {
@@ -267,7 +271,7 @@ foreach ($ref in $handoffDocs.Keys) {
             -Detail 'does not carry the processor-owned RUNTIME_LAYOUT=checkout|mirror contract'
     }
 }
-foreach ($ref in @('agents/coder_codex.md', 'agents/reviewer_codex.md')) {
+foreach ($ref in @('agents/coder_codex.md', 'agents/reviewer_codex.md', 'agents/coder_jcode.md', 'agents/reviewer_jcode.md')) {
     $body = [string]$handoffDocs[$ref]
     if ($body -match 'определи\s+раскладку.*Glob.*/.*Read') {
         Add-Finding -FileRef $ref -Check 'runtime-layout-self-probe' `
@@ -286,11 +290,11 @@ if ($processorLayoutMentions -lt 5) {
 
 # --- Report -------------------------------------------------------------------
 if ($findings.Count -eq 0) {
-    Write-Host "OK - runtime path contract holds: checkout/mirror allow-rules agree, adapters use literal granted commands, the tilde caveat is consistent, every runner caller requires Orchestra source identity markers, and Codex adapters consume the processor-owned layout without a false-negative self-probe."
+    Write-Host "OK - runtime path contract holds: checkout/mirror allow-rules agree, adapters use literal granted commands, the tilde caveat is consistent, every runner caller requires Orchestra source identity markers, and model adapters consume the processor-owned layout without a false-negative self-probe."
     exit 0
 }
 
-Write-Host "Found $($findings.Count) codex-runtime path contract violation(s):`n"
+Write-Host "Found $($findings.Count) runtime path contract violation(s):`n"
 foreach ($f in $findings) {
     Write-Host $f
 }

@@ -53,6 +53,12 @@ processor передаёт абсолютный `WORK`, явный `VCS=jj|git`,
 
 # Резолвинг пути к runtime (до первого вызова)
 
+**Наличие `tools/<script>.ps1` само по себе не доказывает checkout-раскладку.** Checkout
+разрешён только когда корень одновременно содержит `agents/processor.md`,
+`generate-codex-agents.ps1` и `tools/sync-runtime.ps1`; иначе target-local `tools/` может
+подменить Orchestra runtime. Identity-проверку уже выполнил processor. **Не повторяй
+filesystem-probe** через `Glob`/`Read`.
+
 Как у `coder_jcode`, processor передаёт `RUNTIME_LAYOUT=checkout|mirror`; `$JRT` ниже —
 текстовый placeholder, а не переменная. Подставляй литерал `tools/jcode-runtime.ps1` для
 `checkout` либо `~/.claude/scripts/jcode-runtime.ps1` для `mirror` прямо в команду.
