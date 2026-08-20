@@ -105,7 +105,10 @@ function New-WorkFixture {
 
 function Invoke-Git {
     param([string]$Dir, [string[]]$GitArgs)
-    $null = & git @('-C', $Dir) @GitArgs 2>&1
+    $output = @(& git @('-C', $Dir) @GitArgs 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "git fixture command failed: git -C '$Dir' $($GitArgs -join ' ')`n$($output -join "`n")"
+    }
 }
 
 try {
@@ -217,6 +220,10 @@ try {
     Invoke-Git -Dir $repo -GitArgs @('config', 'user.email', 'test@example.invalid')
     Invoke-Git -Dir $repo -GitArgs @('config', 'user.name', 'Orchestra Test')
     [System.IO.File]::WriteAllText((Join-Path $repo 'a.txt'), "base`n", $Utf8NoBom)
+    # Real consuming repositories ignore Orchestra's local control plane. Pin that
+    # invariant in the fixture instead of accidentally inheriting a developer's global
+    # excludes file; clean CI runners deliberately have no such user-level convention.
+    [System.IO.File]::WriteAllText((Join-Path $repo '.gitignore'), ".work/`n", $Utf8NoBom)
     Invoke-Git -Dir $repo -GitArgs @('add', '-A')
     Invoke-Git -Dir $repo -GitArgs @('commit', '-qm', 'init')
     Invoke-Git -Dir $repo -GitArgs @('worktree', 'add', '-q', $wt, '-b', 'task', 'HEAD')
