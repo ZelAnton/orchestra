@@ -211,6 +211,28 @@ jobs:
           & $p
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
+      - name: Check jcode leaf-engine contract
+        # tests/test-jcode-runtime.ps1: drives tools/policy.ps1 check-engine-routing and
+        # tools/jcode-runtime.ps1. Asserts the three guarantees the jcode adapters rest on
+        # and that nothing else enforces: engine routing fails CLOSED when codex and jcode
+        # claim the same executor tier (and when the deep tier is routed to jcode without an
+        # explicit deep model), the pinned role tool profiles keep the reviewer shell-less
+        # and write-free, and the snapshot/guard-tree pair detects revisions, main-checkout
+        # rewrites (including already-dirty files), sibling-worktree writes, and an
+        # unverifiable baseline. No jcode binary, provider or network is involved.
+        # K-007: tests/test-*.ps1 files are not discovered automatically, so this wiring is
+        # what makes the suite run at all.
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = "./tests/test-jcode-runtime.ps1"
+          if (-not (Test-Path $p)) {
+            Write-Error "MANDATORY test $p is missing on ${{ matrix.os }} - a missing mandatory test entry point is a hard CI failure, not a silent skip."
+            exit 1
+          }
+          & $p
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Check executable policy boundary
         # tests/test-policy.ps1 (T-084): drives tools/policy.ps1 (on tools/policy-schema.ps1)
         # - schema-driven fail-closed config validation, append-only migration, the

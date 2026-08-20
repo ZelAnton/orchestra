@@ -6,7 +6,8 @@ worktrees, review loops, publication, CI, cleanup, and crash recovery. Apply the
 provider contract at higher precedence whenever provider-specific wording conflicts:
 
 1. You are the root processor. Never invoke `claude`, `claude -p`, `coder_codex`,
-   `reviewer_codex`, or `tools/codex-runtime.ps1`. All model work is native Codex work.
+   `reviewer_codex`, `coder_jcode`, `reviewer_jcode`, `tools/codex-runtime.ps1`, or
+   `tools/jcode-runtime.ps1`. All model work is native Codex work.
 2. Dispatch every canonical role through a NEW named Codex custom-agent thread:
    `planner` -> `orchestra_planner`; `executor` -> `orchestra_executor`;
    `coder_fast` -> `orchestra_coder_fast`; `coder` -> `orchestra_coder`;
@@ -18,16 +19,18 @@ provider contract at higher precedence whenever provider-specific wording confli
 3. The canonical `Agent(...)` operation means spawning the mapped custom agent, passing
    the complete task-specific invocation, and waiting/steering/collecting it through Codex
    multi-agent tools. Preserve the same concurrency and round barriers.
-4. Ignore `CODEX_CODER`, `CODEX_REVIEWER`, `CODEX_CIFIX`, Codex adapter preflight,
-   adapter sentinels, and every fallback-to-Claude branch. The provider has already been
+4. Ignore `CODEX_CODER`, `CODEX_REVIEWER`, `CODEX_CIFIX`, `JCODE_CODER`,
+   `JCODE_REVIEWER`, both adapter preflights, adapter sentinels, and every
+   fallback-to-Claude branch. The provider has already been
    selected outside the model by the launcher. Choose the canonical tier, then dispatch
    its `orchestra_*` role. Integration `F-` fixes use a fresh `orchestra_coder` or
    `orchestra_coder_deep` thread exactly as the canonical tier resolver requires.
    The per-role model keys are equally out of scope here: `CLAUDE_*_MODEL` selects a
    Claude model for an `Agent(...)` dispatch that this provider never performs, and
    `CODEX_CODER_MODEL`/`CODEX_CODER_DEEP_MODEL`/`CODEX_REVIEWER_MODEL`/
-   `CODEX_REVIEWER_DEEP_MODEL` configure the `codex exec` adapters, not native custom
-   agents. Model and reasoning effort of every native role come from the runtime
+   `CODEX_REVIEWER_DEEP_MODEL` configure the `codex exec` adapters, while all
+   `JCODE_*` model/provider/command keys configure the jcode adapters; none apply to
+   native custom agents. Model and reasoning effort of every native role come from the runtime
    (`ORCHESTRA_CODEX_MODEL`/`ORCHESTRA_CODEX_REASONING`) and the role TOML; do not read,
    validate or apply those config keys, and never let a missing one stop a cohort.
 5. Maker/checker independence is thread-based in this provider: the reviewing custom
@@ -83,7 +86,10 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 реализацию/`R-`-фиксы уровней `coder_fast`/`coder` при `CODEX_CODER` и точечные CI/
 сборочные фиксы (Режим 3) при `CODEX_CIFIX` (см. «Codex-исполнитель и маршрутизация»,
 «Codex CI-фиксы»); **reviewer_codex** берёт независимое ревью Claude-реализованных задач
-при `CODEX_REVIEWER` (см. «Codex-ревьюер и маршрутизация»).
+при `CODEX_REVIEWER` (см. «Codex-ревьюер и маршрутизация»). Симметричная пара поверх
+jcode CLI — **coder_jcode** при `JCODE_CODER` и **reviewer_jcode** при `JCODE_REVIEWER`
+(см. «jcode-адаптеры и маршрутизация»); движки не могут владеть одним тиром, пересечение
+останавливает когорту.
 
 **Разделение коммиттера:** исполнители **никогда** не коммитят; **ты** коммитишь
 ветки задач (отдельными коммитами на каждый цикл фиксов — не `--amend`), фиксы
@@ -147,38 +153,43 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 ключей — `config.example.md` рядом с этим файлом). Отсутствующий файл или ключ —
 используй значение по умолчанию, указанное здесь же:
 
-**Фолбэк на переменные окружения (`CODEX_CODER`, `CODEX_REVIEWER`, `KB` и девять
-модельных ключей ролей).** Для этих ключей порядок разрешения такой: значение из
+**Фолбэк на переменные окружения (`CODEX_CODER`, `CODEX_REVIEWER`, `JCODE_CODER`,
+`JCODE_REVIEWER`, `KB` и тринадцать модельных ключей ролей).** Для этих ключей порядок разрешения такой: значение из
 `$WORK/config.md` → иначе одноимённая переменная окружения ОС (прочитай через shell:
 `$CODEX_CODER` / `$env:CODEX_CODER`, `$CODEX_REVIEWER` / `$env:CODEX_REVIEWER`, `$KB` /
-`$env:KB`, и так же для модельных ключей `CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
+`$env:KB`, аналогично для `JCODE_CODER`/`JCODE_REVIEWER` и модельных ключей `CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
 `CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL`,
 `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
-`CODEX_REVIEWER_DEEP_MODEL`) → иначе дефолт ключа (`off` для `CODEX_CODER`/
-`CODEX_REVIEWER`, `on` для `KB`, для модельных — см. «Модели ролей coder/reviewer» ниже).
+`CODEX_REVIEWER_DEEP_MODEL`, `JCODE_CODER_MODEL`, `JCODE_CODER_DEEP_MODEL`,
+`JCODE_REVIEWER_MODEL`, `JCODE_REVIEWER_DEEP_MODEL`) → иначе дефолт ключа (`off` для
+всех четырёх routing-ключей, `on` для `KB`, для модельных — см. «Модели ролей coder/reviewer» ниже).
 То есть если файла `config.md` нет или ключ в нём не задан, но переменная окружения
 выставлена в непустое значение — берётся она; ключ в `config.md` всегда переопределяет
-окружение. Значение из окружения валидируй так же, как из файла (`CODEX_CODER`: `off`/`fast`/
-`fast+std`/`all`; `CODEX_REVIEWER`: `off`/`fast`/`fast+std`/`deep`/`all`; `KB`: `on`/`off`;
+окружение. Значение из окружения валидируй так же, как из файла (`CODEX_CODER`/`JCODE_CODER`:
+`off`/`fast`/`fast+std`/`all`; `CODEX_REVIEWER`/`JCODE_REVIEWER`:
+`off`/`fast`/`fast+std`/`deep`/`all`; `KB`: `on`/`off`;
 `CLAUDE_*_MODEL`: `haiku`/`sonnet`/`opus`/`fable`; `CODEX_*_MODEL` — свободные строки);
 нераспознанное или пустое — считай незаданным (тогда дефолт этого ключа). Остальные
 ключи читаются только из `config.md`.
 
-**Допустимые множества значений Codex-ключей (валидация, fail-closed).** Единый источник —
-таблица «Допустимые значения Codex-ключей» в `config.example.md`; здесь она в компактной
+**Допустимые множества значений adapter-ключей (валидация, fail-closed).** Единый источник —
+таблицы допустимых значений в `config.example.md`; здесь они в компактной
 форме для валидации на Фазе 1.1 (`tools/check-codex-config-guard.ps1` машинно стережёт, что
 эта форма, таблица `config.example.md` и движок `cc-doctor` (`tools/doctor-runtime.ps1`) не
 разошлись):
 `CODEX_CODER` ∈ {off, fast, fast+std, all}; `CODEX_REVIEWER` ∈ {off, fast, fast+std, deep, all};
 `CODEX_CIFIX` ∈ {off, on}; `CODEX_REASONING` ∈ {auto, low, medium, high, xhigh}; `CODEX_SANDBOX` ∈
-{read-only, workspace-write}; `CODEX_NETWORK` ∈ {on, off}. Пустой ключ → его default (для
-`CODEX_CODER`/`CODEX_REVIEWER` — после env-фолбэка); непустое значение **вне** множества —
+{read-only, workspace-write}; `CODEX_NETWORK` ∈ {on, off}; `JCODE_CODER` ∈
+{off, fast, fast+std, all}; `JCODE_REVIEWER` ∈ {off, fast, fast+std, deep, all}. Пустой ключ → его default (для
+четырёх routing-ключей — после env-фолбэка); непустое значение **вне** множества —
 ошибка конфигурации, обрабатываемая fail-closed на Фазе 1.1 (см. ниже), а не молчаливо
 заменяемая default. `CODEX_SANDBOX` намеренно исключает `danger-full-access` и любое иное
 значение, расширяющее запись за пределы рабочей копии задачи; `reviewer_codex` при этом
 всегда принудительно read-only. `CODEX_MODEL`, `CODEX_CMD` и четыре модельных ключа
-адаптеров (`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
-`CODEX_REVIEWER_DEEP_MODEL`) — свободные строки, множеством не ограничены.
+Codex-адаптеров (`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
+`CODEX_REVIEWER_DEEP_MODEL`) и шесть строковых ключей jcode (`JCODE_CODER_MODEL`,
+`JCODE_CODER_DEEP_MODEL`, `JCODE_REVIEWER_MODEL`, `JCODE_REVIEWER_DEEP_MODEL`,
+`JCODE_PROVIDER`, `JCODE_CMD`) — свободные строки, множеством не ограничены.
 
 | Ключ | По умолчанию | Где используется |
 |------|--------------|-------------------|
@@ -224,6 +235,63 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 | `CODEX_SANDBOX` | workspace-write | coder_codex — `--sandbox` codex (reviewer_codex — всегда read-only) |
 | `CODEX_NETWORK` | on | Фазы 2.2/2.8 — сетевой гейт маршрутизации в coder_codex для задач с полем `Сеть:` (см. «Codex-исполнитель и маршрутизация»); внутри coder_codex — сеть песочницы codex |
 | `CODEX_CMD` | codex | codex-агенты — бинарь/команда codex |
+| `JCODE_CODER` | off | Фаза 2.2/2.8 — маршрутизация реализации/`R-`-фиксов в coder_jcode: `off`/`fast`/`fast+std`/`all`; `all` включает и `coder_deep` (см. «jcode-адаптеры и маршрутизация») |
+| `JCODE_REVIEWER` | off | Фаза 2 (2.4) — маршрутизация ревью в reviewer_jcode: `off`/`fast`/`fast+std`/`deep`/`all` |
+| `JCODE_CODER_MODEL` | (не задано → дефолт jcode; env-фолбэк) | `coder_jcode` на уровнях `coder_fast`/`coder` |
+| `JCODE_CODER_DEEP_MODEL` | (не задано; env-фолбэк) | `coder_jcode` на уровне `coder_deep`; **обязателен**, если `JCODE_CODER` захватывает deep |
+| `JCODE_REVIEWER_MODEL` | (не задано → дефолт jcode; env-фолбэк) | `reviewer_jcode` на уровнях `coder_fast`/`coder` |
+| `JCODE_REVIEWER_DEEP_MODEL` | (не задано; env-фолбэк) | `reviewer_jcode` на уровне `coder_deep`; **обязателен**, если `JCODE_REVIEWER` захватывает deep |
+| `JCODE_PROVIDER` | (не задано) | jcode-агенты — `-p` для `jcode run`; пусто → провайдер по умолчанию jcode |
+| `JCODE_CMD` | jcode | jcode-агенты — бинарь/команда jcode |
+
+## jcode-адаптеры и маршрутизация
+
+`coder_jcode` и `reviewer_jcode` — вторая пара опциональных адаптеров, симметричная
+codex-паре: то же множество значений, тот же env-фолбэк, тот же чистый откат на
+Claude-исполнителя по сентинелу (`ЭСКАЛАЦИЯ jcode: JCODE_UNAVAILABLE|JCODE_FAILED`).
+Отличия, которые ты обязан учитывать при dispatch:
+
+1. **Гейт маршрутизации (fail-closed), Фаза 1.1.** Прежде чем открыть когорту, выполни
+   `pwsh -File <tools|~/.claude/scripts>/policy.ps1 check-engine-routing --work $WORK`.
+   Ненулевой код — **останов**: codex и jcode заявили один и тот же тир, либо deep
+   уходит в jcode без заданной `JCODE_*_DEEP_MODEL`. Не выбирай движок сам и не вводи
+   приоритет: два движка на один тир — это неоднозначная конфигурация оператора, а не
+   ситуация, которую разрешает оркестратор. Сообщи вывод команды и остановись.
+2. **CI-фиксы и интеграционные `F-` в jcode не уходят никогда.** Аналога `CODEX_CIFIX`
+   нет; Режим 3 и находки `F-` ведёт Claude-исполнитель.
+3. **У jcode нет песочницы.** Передавай `coder_jcode` абсолютный `RepoRoot` (основное
+   рабочее дерево) наравне с `WT` — без него адаптер не сможет снять snapshot и
+   подтвердить изоляцию. Отчёт с `ISOLATION/...` трактуй как нарушение границы:
+   карантинь ветку задачи и эскалируй, не пытаясь продолжить на её правках.
+
+**Резолвер coder (2.2 и каждый вход в 2.8).** Сначала проверь JCode claim, затем Codex;
+`check-engine-routing` гарантирует, что оба не выберутся для одного `L`:
+
+- `JCODE_CODER=fast` захватывает только `coder_fast`;
+- `fast+std` — `coder_fast|coder`; `all` — все три уровня;
+- claim есть → `<исполнитель задачи>=coder_jcode`; claim нет → применяй обычный
+  `CODEX_CODER` resolver, затем Claude `L`.
+
+Любой `ЭСКАЛАЦИЯ jcode: JCODE_UNAVAILABLE|JCODE_FAILED` немедленно переводит тот же
+вызов на Claude-роль уровня `L`; штатная task-эскалация наступает, только если не
+справился и Claude. `JCODE_FAILED` обязан оставить task-worktree чистой; `ISOLATION/*`
+дополнительно означает quarantine/эскалацию без доверия к внешним правкам. Успешный
+закоммиченный диапазон записывай в историю `Реализовано:` как `jcode`.
+
+**Резолвер reviewer (2.4 и повторно после каждого фикса в 2.8).** База остаётся
+`reviewer_std|reviewer` по `L`; `implBy` — последний элемент `Реализовано:`:
+
+- `JCODE_REVIEWER=all` → `reviewer_jcode` mode=`full` для любого L/implBy; каждый pass —
+  новый `jcode run`, не продолжение maker-вызова;
+- при legacy `fast|fast+std|deep` и `implBy==jcode` остаётся базовый Claude-reviewer;
+- иначе `fast` заменяет базу на `reviewer_jcode` для fast, `fast+std` — для fast/std,
+  `deep` делает то же для fast/std и добавляет mode=`augment` перед базовым reviewer на
+  deep; augment не владеет `SUMMARY-R`;
+- full-сентинел → повтори на базовом Claude-reviewer; augment-сентинел → пропусти bonus-pass.
+
+Codex-reviewer legacy-resolver симметрично считает `implBy==codex` self-engine, а `jcode`
+— независимым maker; JCode-reviewer считает наоборот. Поэтому после каждого R-fix
+переизбирай reviewer по последнему автору, не по первичной реализации.
 
 ## Модели ролей coder/reviewer
 
@@ -266,6 +334,13 @@ Codex-маршрутизация) они не трогают, `planner`/`merger`
 Для уровня `coder_deep` deep-ключ переопределяет исторический пин `gpt-5.6-sol`;
 reasoning deep-уровня остаётся `xhigh` в любом случае.
 
+Для jcode processor резолвит четыре `JCODE_*_MODEL` один раз в Фазе 1.1 и передаёт
+выбранному `coder_jcode`/`reviewer_jcode` готовое значение вместе с `JCODE_PROVIDER` и
+`JCODE_CMD`; сами адаптеры `config.md`/env не читают. Не-deep пусто означает дефолт jcode.
+Deep-ключ обязан быть непустым, если соответствующий маршрут захватывает `deep`; это
+механически проверяет `policy.ps1 check-engine-routing`, потому что у `jcode run` нет
+reasoning-effort. Параметр `model` инструмента `Agent(...)` к jcode-адаптерам не применяй.
+
 # Резолвинг раннеров `tools/*.ps1` (чекаут vs зеркало)
 
 **Наличие `tools/<script>.ps1` само по себе не доказывает checkout-раскладку.** Используй
@@ -297,7 +372,7 @@ reasoning deep-уровня остаётся `xhigh` в любом случае.
   зеркальный путь из `$env:USERPROFILE`/`$HOME`.
 
 Результат этого единственного определения сохрани как `RUNTIME_LAYOUT=checkout|mirror`.
-Каждый фактический вызов `coder_codex` или `reviewer_codex` обязан получить это значение в
+Каждый фактический вызов `coder_codex`, `reviewer_codex`, `coder_jcode` или `reviewer_jcode` обязан получить это значение в
 промпте. Адаптер не повторяет filesystem-probe и не может объявить runtime отсутствующим по
 результату собственного `Glob`/`Read`: layout — handoff processor'а, а реальная availability
 проверяется только попыткой запуска выбранной литеральной runtime-команды.
@@ -658,6 +733,7 @@ append-only инварианта `batch.md`. Подробности — «Рол
 - Оркестратор: processor — этап: <…>
 - Батч: <B-id> · активно N / cap <MAX_PARALLEL> · приём: открыт (волна K) | закрыт (<причина>)
 - Codex: CODEX_CODER=<резолвленное значение> · CODEX_REVIEWER=<резолвленное значение> · CODEX_CIFIX=<резолвленное значение> · permission=<ok (сессионный грант) | ok (settings) | не проверялось (все три off)>
+- JCode: JCODE_CODER=<резолвленное значение> · JCODE_REVIEWER=<резолвленное значение> · permission=<ok (сессионный грант) | ok (settings) | не проверялось (оба off)>
 - Codex attempts: <successes> ok, <fallbacks> fallback (<reason>=N, …), <failures> failed
 - Модели: <ключ>=<резолвленное значение>[ (env)] · … (только явно заданные модельные ключи)
 
@@ -672,8 +748,9 @@ append-only инварианта `batch.md`. Подробности — «Рол
 пересборки обзора в Фазе 1.4 (после того как 1.1 резолвнула значения на эту когорту) и
 несёт именно резолвленные значения всех трёх Codex-маршрутов — `CODEX_CODER`,
 `CODEX_REVIEWER` (после фолбэка на env) и `CODEX_CIFIX` (только из `config.md`) — для
-аудируемости шага 1.1 (см. «Конфигурация», «Фаза 1 — открытие когорты»); при повторном
-открытии новой когорты в той же сессии строка перезаписывается свежерезолвленными
+аудируемости шага 1.1 (см. «Конфигурация», «Фаза 1 — открытие когорты»). Рядом обновляй
+строку «JCode» с двумя резолвленными routing-ключами и исходом его отдельного permission-
+гейта. При повторном открытии новой когорты в той же сессии обе строки перезаписываются свежерезолвленными
 значениями. Поле `permission=` фиксирует результат разового на сессию гейта permission на
 `codex exec` (Фаза 1.1): `ok (сессионный грант)` — сессия несёт признак launcher-гранта
 (`CC_CODEX_EXEC_GRANT`), покрывающего команду; `ok (settings)` — allow-правило найдено в
@@ -681,6 +758,7 @@ append-only инварианта `batch.md`. Подробности — «Рол
 `не проверялось (все три off)` — гейт пропущен, т.к. Codex-маршрутизация выключена по всем
 трём ключам. Отсутствия разрешения при включённой маршрутизации в этой строке не бывает: в
 таком случае processor не открывает когорту вовсе (см. «Гейт permission» в Фазе 1.1) и
+для JCode действует тот же принцип с `CC_JCODE_RUNTIME_GRANT`/локальным точным правилом.
 обзор с таблицей не строит.
 Строка `Модели` появляется там же, с Фазы 1.4, и несёт **только** те из девяти модельных
 ключей ролей (`CLAUDE_*_MODEL`, `CODEX_*_MODEL` — см. «Модели ролей coder/reviewer»),
@@ -1139,10 +1217,10 @@ bookmark сверх BASE), **не** на существовании ветки: 
 
 1.1. **Гейт паузы:** если существует `$WORK/PAUSE` (см. «Пауза»), не открывай когорту —
 освободи lock и заверши. Иначе прочитай `config.md`. **Отдельный, не пропускаемый
-под-шаг:** резолвь `CODEX_CODER`, `CODEX_REVIEWER` и `CODEX_CIFIX` по правилам раздела
-«Конфигурация» (для `CODEX_CODER`/`CODEX_REVIEWER` — включая фолбэк на переменную окружения
-shell — `$CODEX_CODER`/`$env:CODEX_CODER`, `$CODEX_REVIEWER`/`$env:CODEX_REVIEWER` — если
-ключ отсутствует в `config.md` или пуст в нём; `CODEX_CIFIX` резолвится **только из
+под-шаг:** резолвь `CODEX_CODER`, `CODEX_REVIEWER`, `JCODE_CODER`, `JCODE_REVIEWER` и
+`CODEX_CIFIX` по правилам раздела «Конфигурация» (для четырёх routing-ключей — включая
+фолбэк на одноимённую переменную окружения shell, если ключ отсутствует в `config.md`
+или пуст в нём; `CODEX_CIFIX` резолвится **только из
 `config.md`**, без env-фолбэка; таблица дефолтов и правила валидации значения — только там,
 здесь не дублируются) как явное действие исполнения, а не подразумеваемое одной лишь фразой
 «прочитай `config.md`». Выполняй этот под-шаг при **каждом** входе в Фазу 1.1 в рамках сессии — не
@@ -1150,12 +1228,12 @@ shell — `$CODEX_CODER`/`$env:CODEX_CODER`, `$CODEX_REVIEWER`/`$env:CODEX_REVIE
 когорты после завершения предыдущей (0.5 → Фаза 1). Резолвленные значения зафиксируй в
 обзоре `status.md` (Фаза 1.4 — см. «Обзор `$WORK/status.md`») для аудируемости: чтобы
 после сессии можно было проверить, что фолбэк на env не был молча пропущен.
-   **Валидация значений Codex-ключей (fail-closed, до захвата задач).** В том же под-шаге,
+   **Валидация значений adapter-ключей (fail-closed, до захвата задач).** В том же под-шаге,
 **до** любого захвата задач (Фаза 2.0/2.1) и до гейта permission ниже, провалидируй значения
-**всех шести** ключей — `CODEX_CODER`, `CODEX_REVIEWER`, `CODEX_CIFIX`, `CODEX_REASONING`,
-`CODEX_SANDBOX`, `CODEX_NETWORK` — по множествам из раздела «Допустимые множества значений
-Codex-ключей» выше (единый источник — `config.example.md`). Для каждого ключа: пустое/
-неустановленное значение (для `CODEX_CODER`/`CODEX_REVIEWER` — уже после env-фолбэка) → его
+**всех восьми** enum-ключей — `CODEX_CODER`, `CODEX_REVIEWER`, `CODEX_CIFIX`, `CODEX_REASONING`,
+`CODEX_SANDBOX`, `CODEX_NETWORK`, `JCODE_CODER`, `JCODE_REVIEWER` — по множествам из раздела «Допустимые множества значений
+adapter-ключей» выше (единый источник — `config.example.md`). Для каждого ключа: пустое/
+неустановленное значение (для четырёх routing-ключей — уже после env-фолбэка) → его
 документированный default, это **не** ошибка; **непустое** значение **вне** его множества →
 это ошибка конфигурации. При **любом** невалидном значении **не открывай когорту**: сними
 lock и заверши работу, сообщив оператору **ключ**, его **фактическое (некорректное)
@@ -1164,9 +1242,13 @@ lock и заверши работу, сообщив оператору **клю�
 охраняет границу записи песочницы (значение вроде `danger-full-access` расширило бы её за
 пределы рабочей копии), а неверный `CODEX_NETWORK`/маршрутный ключ создал бы расхождение
 промпта и фактической песочницы либо тихо отключил бы нужную маршрутизацию. `CODEX_MODEL`,
-`CODEX_CMD` и четыре модельных ключа адаптеров (`CODEX_CODER_MODEL`,
-`CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL`) — свободные
-строки, этой проверке не подлежат. Диагностировать те же нарушения заранее (до запуска
+`CODEX_CMD`, `JCODE_PROVIDER`, `JCODE_CMD` и восемь модельных ключей адаптеров
+(`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
+`CODEX_REVIEWER_DEEP_MODEL` и соответствующие четыре `JCODE_*_MODEL`) — свободные строки,
+этой проверке не подлежат.
+Затем обязательно выполни `pwsh -File <policy runtime> check-engine-routing --work "$WORK"`:
+ненулевой код означает пересечение tier claims Codex/JCode либо deep-маршрут jcode без
+явной deep-модели; когорту не открывай, выведи точную диагностику команды. Диагностировать те же нарушения заранее (до запуска
 processor) можно `launchers/cc-doctor` — он классифицирует их тем же множеством и тем же
 сообщением по существу.
    **Модельные ключи Claude-ролей (в том же под-шаге).** Резолвь пять ключей
@@ -1177,10 +1259,12 @@ processor) можно `launchers/cc-doctor` — он классифицируе�
 из `config.md` — та же fail-closed ошибка конфигурации, что и у Codex-ключей выше (когорту
 не открывай, сообщи ключ, значение и список допустимых); из окружения — считай ключ
 незаданным (роль пойдёт на модели своего frontmatter) и отметь это одной строкой в
-`journal.md`. Там же резолвь — **только для строки обзора**, без валидации (свободные
-строки) — четыре модельных ключа адаптеров `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`,
-`CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL`: применяют их сами адаптеры, ты их
-никуда не передаёшь. Все резолвленные непустые значения зафиксируй в обзоре `status.md`
+`journal.md`. Там же резолвь без enum-валидации (свободные строки) четыре модельных
+ключа Codex-адаптеров `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`,
+`CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL` — они нужны только строке обзора,
+поскольку Codex-адаптеры читают их сами — и четыре `JCODE_*_MODEL`, которые передавай
+jcode-адаптерам готовыми. Также прочитай `JCODE_PROVIDER`/`JCODE_CMD` только из config.
+Все резолвленные непустые значения зафиксируй в обзоре `status.md`
 рядом с Codex-ключами.
    **Гейт permission на `codex exec` (разовый на сессию, отдельный ритм от резолва
 выше).** Гейт **активен**, если резолвленное значение хотя бы одного из `CODEX_CODER`,
@@ -1262,6 +1346,20 @@ Codex-маршрутизации (все три ключа `off` → пропу�
 пер-задачные сентинелы `coder_codex`/`reviewer_codex` — `CODEX_UNAVAILABLE`/`CODEX_FAILED`
 остаются штатной тихой эскалацией для прочих причин отказа (нет бинаря/авторизации/сбой
 codex). Результат гейта отрази в строке «Codex:» обзора `status.md`. **Фаза 1 запускается только когда
+
+   **Гейт permission на jcode runtime (разовый на сессию).** Если оба резолвленных
+`JCODE_CODER`/`JCODE_REVIEWER` равны `off`, пропусти. Иначе требуй либо точный launcher-
+marker `CC_JCODE_RUNTIME_GRANT=jcode-runtime`, либо элемент `permissions.allow` в тех же
+трёх settings-файлах, содержащий фактическую литеральную форму runtime:
+`pwsh -File tools/jcode-runtime.ps1` для checkout или
+`pwsh -File ~/.claude/scripts/jcode-runtime.ps1` для mirror. Launcher'ы предвыдают обе
+формы только на текущую сессию; `cc-config` намеренно **не** добавляет их в центральный
+постоянный allow-list из трёх Codex-правил. Нет marker/локального правила → не открывай
+когорту: предложи запустить штатный `cc-processor`/`cc-resume`, вручную добавить точное
+per-project правило либо выключить `JCODE_CODER`/`JCODE_REVIEWER`. Не выставляй marker и
+не правь settings сам. Результат отрази отдельной строкой «JCode:» в `status.md`.
+
+**Фаза 1 запускается только когда
 нет когорты в процессе** (см. 0.5 — критерий: `batch.md` не существует), а не когда «нет активных
 задач»: под роллинг-приёмом когорта может на мгновение остаться без ни одной активной
 задачи между раундами и всё равно оставаться в процессе (приём открыт, ждёт
@@ -1659,9 +1757,11 @@ KB=<on|off>.` Planner уже сам исключает T-ID активных з�
 ~3× выигрыша по времени при нулевой разнице в стоимости): `Use the <исполнитель
  задачи> subagent to implement task <T-ID>. Worktree=<абс $WORK/worktrees/<T-ID>>.
  WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>. CALL_DEADLINE_SEC=<из конфига>.
- CALL_OUTPUT_MAX_BYTES=<из конфига>.` (`<исполнитель задачи>` = уровень `L` или
-`coder_codex` по `CODEX_CODER` — см. «Codex-исполнитель и маршрутизация»; для
-`coder_codex` обязательно добавь `RUNTIME_LAYOUT=<checkout|mirror>`.) Для
+CALL_OUTPUT_MAX_BYTES=<из конфига>.` (`<исполнитель задачи>` = уровень `L` или
+`coder_codex`/`coder_jcode` по непересекающимся routing-ключам — см. разделы маршрутизации;
+для обоих адаптеров обязательно добавь `RUNTIME_LAYOUT=<checkout|mirror>`, а для
+`coder_jcode` также `RepoRoot=<абс основной корень>. JCODE_CODER_MODEL=<резолвленная модель
+этого тира или пусто>. JCODE_PROVIDER=<из config или пусто>. JCODE_CMD=<из config или jcode>`.) Для
 Claude-исполнителя, у которого резолвнут непустой модельный ключ его тира, передай
 `model` инструмента `Agent(...)` — см. «Модели ролей coder/reviewer». Раунд
 блокируется до возврата всех его вызовов (неизбежное свойство одного сообщения
@@ -1675,19 +1775,19 @@ Claude-исполнителя, у которого резолвнут непус
 `null`, если preflight завершился до запуска), не включая stdout/stderr. При resume
 с существующей reservation переиспользуй её, а не создавай новый номер.
 
-2.3. Собери отчёты + пер-таск статусы. **Если исполнителем был `coder_codex` и он
-вернул `ЭСКАЛАЦИЯ codex: …`** — это не провал задачи: перезапусти её на
-Claude-исполнителе уровня `L` (см. «Codex-исполнитель и маршрутизация»), дождись
+2.3. Собери отчёты + пер-таск статусы. **Если исполнителем был `coder_codex`/`coder_jcode`
+и он вернул свой `ЭСКАЛАЦИЯ codex|jcode: …`** — это не провал задачи: перезапусти её на
+Claude-исполнителе уровня `L` (см. разделы маршрутизации), дождись
 отчёта, и дальше веди как обычно. Для каждой **успешной**: сформулируй сообщение
 и сделай **первый коммит ветки** (сначала guard — см. «Guard перед `add -A` в
 worktree задачи») — `git -C <wt> add -A && git -C <wt> commit -m "<msg>"`;
 **гард перехода** (`check-transition --kind task --from working --to in-review`, затем CAS
 поколения — см. «Гард переходов и поколения состояния»), после чего
-`Статус: на ревью`; запиши в `task.md` **`Реализовано: <codex|Claude>`** — это
+`Статус: на ревью`; запиши в `task.md` **`Реализовано: <codex|jcode|Claude>`** — это
 **первый элемент** упорядоченной по коммитам, append-only истории авторов диапазонов:
-кто фактически произвёл первичный закоммиченный код (`codex` — только если исполнителем
-был `coder_codex` и он завершил без сентинела `ЭСКАЛАЦИЯ codex:`; после фолбэка на Claude
-или при снятии codex-маршрутизации сетевым/KB-гейтом — `Claude`). Каждый последующий
+кто фактически произвёл первичный закоммиченный код (`codex`/`jcode` — только если
+соответствующий адаптер завершил без своего сентинела; после любого фолбэка на Claude
+или снятия adapter-маршрутизации до вызова — `Claude`). Каждый последующий
 R-фикс **дописывает** свой автор в этот же список через `, ` (Фаза 2.8), так что
 **последний** элемент истории всегда = автор самого свежего закоммиченного диапазона —
 именно того, что уходит на (повторное) ревью. Историю читает Codex-маршрутизация ревью
@@ -1766,15 +1866,17 @@ environment fingerprint; каждый command-result обязан быть termi
 `REVIEWER_TIERING` не выключен): если `Рекомендуемый исполнитель` в дескрипторе —
 `coder_fast`, база **reviewer_std** (sonnet/high); иначе (`coder`/`coder_deep`) — база
 **reviewer** (opus/high). При `REVIEWER_TIERING: false` база — всегда `reviewer`.
-   Затем применяй **Codex-маршрутизацию ревью** (см. «Codex-ревьюер и маршрутизация»):
+   Затем применяй **Codex/JCode-маршрутизацию ревью** (см. соответствующие разделы):
    значения `fast`/`fast+std` (и fast/std-часть `deep`) при условии межпровайдерной
-   **независимости** — задачу реализовал Claude, а не codex — заменяют базовый ревьюер
-   разрешённых уровней на `reviewer_codex` (режим `full`). `CODEX_REVIEWER=all`
-   **заменяет** базовый ревьюер на `reviewer_codex` (`full`) для всех трёх уровней и
-   при любом `implBy`; maker/checker-независимость в этом явном Codex-only режиме
-   обеспечивает отдельный новый checker-вызов/тред `codex exec`, никогда не сессия
-   `coder_codex`. Для `coder_deep` при legacy-значении `CODEX_REVIEWER=deep` и
-   `implBy==Claude` перед базовым `reviewer` дополнительно прогоняется `reviewer_codex` в режиме `augment`
+   **независимости** — последний диапазон написал не тот же adapter engine — заменяют
+   базовый ревьюер разрешённых уровней на `reviewer_codex` либо `reviewer_jcode` (режим
+   `full`). Значение `all` у выбранного движка
+   **заменяет** базовый ревьюер на соответствующий `reviewer_codex|reviewer_jcode`
+   (`full`) для всех трёх уровней и при любом `implBy`; maker/checker-независимость
+   обеспечивает отдельный новый checker-вызов, никогда не продолжение maker-сессии.
+   Для `coder_deep` при legacy-значении `CODEX_REVIEWER=deep` и `implBy!=codex` либо
+   `JCODE_REVIEWER=deep` и `implBy!=jcode` перед базовым `reviewer` дополнительно
+   прогоняется соответствующий adapter-reviewer в режиме `augment`
    (диверсити-проход, не заменяет Opus-ревью). `<ревьюер задачи>` ниже = разрешённый
    этим шагом ревьюер. Тиринг ключуется на `Рекомендуемый исполнитель`, которого
    Codex-маршрутизация не трогает.
@@ -1785,14 +1887,16 @@ environment fingerprint; каждый command-result обязан быть termi
 (при чистом завершении — в 2.6, при завершении с находками — на входе в 2.8). Пока
 поле пусто, resume (0.3) знает, что первый полный протокол ещё не пройден, и не
 свалится в пустой узкий проход повторного ревью (см. «Дескриптор и его статус»).
-   **Диверсити-проход (только `coder_deep` при `CODEX_REVIEWER=deep` и
-   `implBy==Claude`)**: **до** базового
-   ревьюера прогони `reviewer_codex` в режиме `augment` (последовательно — они делят
-   `review.md`): `Use the reviewer_codex subagent to review task <T-ID>. Ветка
+   **Диверсити-проход (`coder_deep`: `CODEX_REVIEWER=deep` при `implBy!=codex` либо
+   `JCODE_REVIEWER=deep` при `implBy!=jcode`)**: **до** базового ревьюера прогони
+   выбранный adapter-reviewer в режиме `augment` (последовательно — они делят
+   `review.md`): `Use the <reviewer_codex|reviewer_jcode> subagent to review task <T-ID>. Ветка
    task/<T-ID>, база <BASE>. WORK=<абс>. Worktree=<абс $WORK/worktrees/<T-ID>>. VCS=<jj|git>.
    RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=augment.
-   REVIEW_MIN_PASSES=<из конфига>.` (сентинел `ЭСКАЛАЦИЯ codex:
-   …` → просто пропусти диверсити-проход, это не блокер; его находки — бонус). Затем —
+   REVIEW_MIN_PASSES=<из конфига>.` Для `reviewer_jcode` вместо Codex-поля передай
+   `Mode=augment`, `JCODE_REVIEWER_MODEL=<deep-model>`, `JCODE_PROVIDER` и `JCODE_CMD`.
+   Сентинел `ЭСКАЛАЦИЯ codex|jcode: …` → просто пропусти диверсити-проход, это не блокер;
+   его находки — бонус. Затем —
    базовый `reviewer`.
    Непосредственно перед этим вызовом `reviewer_codex` зарезервируй попытку:
 `role=reviewer`, `mode=augment`, следующий номер для `(T-ID,reviewer,augment)`, и
@@ -1806,11 +1910,13 @@ environment fingerprint; каждый command-result обязан быть termi
    REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
    CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.
    VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` — для
-   `reviewer_codex` добавь `Worktree=<абс $WORK/worktrees/<T-ID>>.
-   RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`; для Claude-ревьюера с
+   `reviewer_codex` добавь `RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`;
+   для `reviewer_jcode` добавь `RUNTIME_LAYOUT=<checkout|mirror>.
+   Mode=full. JCODE_REVIEWER_MODEL=<модель тира или пусто>. JCODE_PROVIDER=<...>.
+   JCODE_CMD=<...>.`; для Claude-ревьюера с
    непустым модельным ключом его тира — передай `model` инструмента `Agent(...)`
    (см. «Модели ролей coder/reviewer»), в том числе на повторных вызовах в 2.8.
-   **Сентинел `ЭСКАЛАЦИЯ codex: <…>`** от `reviewer_codex` (режим `full`) → перезапусти
+   **Сентинел `ЭСКАЛАЦИЯ codex|jcode: <…>`** от adapter-reviewer (режим `full`) → перезапусти
    ревью этой задачи на эквивалентном **Claude**-ревьюере (базовый уровень из 2.4:
    `reviewer_std`/`reviewer`) тем же промптом фазы, дальше веди как обычно. (Ветка уже
    закоммичена в Фазе 2 — diff `<BASE>...task/<T-ID>` содержателен.)
@@ -1842,8 +1948,8 @@ task/<T-ID>`; для jj — `commit_id` bookmark'а): это и есть вер�
 2.7. Иначе — если открытых `R-` **нет**, но и свежей `SUMMARY-R` тоже нет (ревьюер
 был прерван до завершения, например по `maxTurns`) → повтори `<ревьюер задачи>` тем же
 вызовом (не отправляй исполнителя чинить несуществующие находки — пустой список
-находок coder'у не давай никогда). Если это был `reviewer_codex` и он вместо неполного
-прогона вернул сентинел `ЭСКАЛАЦИЯ codex: …` — обработай как в 2.5 (фолбэк на базовый
+находок coder'у не давай никогда). Если это был adapter-reviewer и он вместо неполного
+прогона вернул свой sentinel `ЭСКАЛАЦИЯ codex|jcode: …` — обработай как в 2.5 (фолбэк на базовый
 Claude-ревьюер). Каждый фактический повторный вызов `reviewer_codex` здесь сначала
 резервируй, а после возврата заверши как новый `role=reviewer, mode=full` attempt;
 resume незавершённой reservation сохраняет прежний номер/id.
@@ -1887,8 +1993,10 @@ ID открытых `R-` и `SMOKE_CMD` (без него самопроверк�
 <исполнитель задачи> subagent to address review findings R-01, R-03 for task <T-ID>.
 Worktree=<абс>. WORK=<абс>. VCS=<jj|git>. SMOKE_CMD=<если задан>.
 CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.` Для
-`coder_codex` добавь `RUNTIME_LAYOUT=<checkout|mirror>`. (codex-сентинел `ЭСКАЛАЦИЯ codex:
-…` → перезапусти фикс на Claude-исполнителе уровня `L`, см. маршрутизацию.) По
+`coder_codex` добавь `RUNTIME_LAYOUT=<checkout|mirror>`; для `coder_jcode` — тот же
+`RUNTIME_LAYOUT`, `RepoRoot`, `JCODE_CODER_MODEL` выбранного тира, `JCODE_PROVIDER` и `JCODE_CMD`.
+Сентинел выбранного адаптера `ЭСКАЛАЦИЯ codex|jcode: …` → перезапусти фикс на
+Claude-исполнителе уровня `L`, см. маршрутизацию. По
 возврату — guard (см. «Guard перед `add -A` в worktree задачи»; тот же перед каждым
 `add -A` в этом worktree), затем **новый коммит**
 (не amend): `git -C <wt> add -A && git -C <wt> commit -m "<краткое описание
@@ -1899,15 +2007,15 @@ CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфи�
 `Codex exit code`; после возврата заверши/эмитни событие по 2.3 **до** фолбэка или
 коммита. Снятая сетевым/KB-гейтом маршрутизация попыткой не считается.
    Затем **допиши автора этого R-фикса в историю `Реализовано:`** — через `, ` к
-   существующему списку значение `codex` или `Claude` по тому же правилу, что в 2.3
-   (`codex` — только если фикс закоммитил `coder_codex` без сентинела; иначе — включая
-   codex-фолбэк на Claude и codex-маршрутизацию, снятую сетевым/KB-гейтом — `Claude`).
+   существующему списку значение `codex`, `jcode` или `Claude` по тому же правилу, что в
+   2.3 (adapter-id — только если соответствующий адаптер завершил без сентинела; иначе
+   `Claude`).
    Теперь **последний** элемент истории = автор только что закоммиченного диапазона фикса
    (именно его отревьюит повторный проход по диапазону `<Previous>..<вершина>`).
    **Пере-резолви `<ревьюер задачи>` заново** по резолверу 2.4 от этого обновлённого
    последнего элемента — **не переиспользуй** выбор первого цикла: если автор диапазона
    сменился между циклами (например, первичную реализацию сделал Claude → ревьюил
-   `reviewer_codex`, а этот R-фикс успел `coder_codex`), ревьюер **обязан** смениться (тут —
+   adapter-reviewer, а этот R-фикс успел adapter-coder того же движка), ревьюер **обязан** смениться (тут —
    на базовый Claude-ревьюер из 2.4), иначе `reviewer_codex` проверял бы код codex и
    независимость ревью нарушилась бы (self-review bypass). Автор не сменился (штатный
    случай — обе правки одного движка) → резолвер даёт тот же ревьюер, что и раньше. Это
@@ -1928,9 +2036,11 @@ CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфи�
    REVIEW_MIN_PASSES=<из конфига>. REVIEW_STRICT=<true|false>.
    REVIEW_FINAL_CLEAN_PASSES=<2 для strict, иначе 1>.
    CALL_DEADLINE_SEC=<из конфига>. CALL_OUTPUT_MAX_BYTES=<из конфига>.
-   VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` (для `reviewer_codex` добавь `Worktree=<абс>.
-   RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`; его сентинел
-   `ЭСКАЛАЦИЯ codex: …` → перезапусти это
+   VERIFICATION_EVIDENCE=$WORK/tasks/<T-ID>/verification.json.` (для `reviewer_codex`
+   добавь `RUNTIME_LAYOUT=<checkout|mirror>. CODEX_REVIEW_MODE=full.`; для
+   `reviewer_jcode` — `RUNTIME_LAYOUT=<checkout|mirror>. Mode=full.
+   JCODE_REVIEWER_MODEL=<...>. JCODE_PROVIDER=<...>. JCODE_CMD=<...>.`; его сентинел
+   `ЭСКАЛАЦИЯ codex|jcode: …` → перезапусти это
    повторное ревью на базовом Claude-ревьюере из 2.4.) — вернись к шагу 2.6. Максимум
    `REVIEW_LOOP_MAX`
    циклов (по полю `Циклов-ревью`); дальше — **гард перехода**
@@ -3058,8 +3168,9 @@ codex-задача уровня `coder_fast` идёт на `reviewer_std`, ур�
 
 **Требование независимости (ключевое).** Ревьюер не должен продолжать сессию исполнителя.
 Для legacy-значений `fast`/`fast+std`/`deep` действует прежняя усиленная граница по
-provider: `reviewer_codex` применяется только к задачам, реализованным Claude; после
-`coder_codex` ревью остаётся на Claude (`reviewer_std`/`reviewer`). Явное значение
+provider: `reviewer_codex` применяется только когда последний диапазон написан не Codex
+(`implBy=Claude|jcode`); после `coder_codex` ревью остаётся на Claude
+(`reviewer_std`/`reviewer`). Явное значение
 `CODEX_REVIEWER=all` выбирает Codex-only профиль: `reviewer_codex` проверяет все уровни
 даже после `coder_codex`, но каждый его прогон — отдельный новый `codex exec`/checker-тред,
 не resume и не thread исполнителя. Это та же thread-based maker/checker-граница, что у
@@ -3067,8 +3178,8 @@ provider: `reviewer_codex` применяется только к задачам
 
 **Резолвер `<ревьюер задачи>`** (после выбора базового Claude-уровня из 2.4; `L` =
 `Рекомендуемый исполнитель`, `implBy` = **автор последнего закоммиченного диапазона** —
-**последний** элемент упорядоченной истории `Реализовано:` из `task.md`, `Claude` или
-`codex`: первичная реализация записывается в Фазе 2.3, каждый R-фикс дописывается в 2.8).
+**последний** элемент упорядоченной истории `Реализовано:` из `task.md`, `Claude`,
+`codex` или `jcode`: первичная реализация записывается в Фазе 2.3, каждый R-фикс дописывается в 2.8).
 Резолвер применяется **на каждом** входе в ревью — и на первом цикле (2.5), и перед
 каждым повторным проходом после фикса (2.8): при смене автора диапазона между циклами
 ревьюер **переизбирается**, а не переиспользуется из первого цикла (это и закрывает
@@ -3079,11 +3190,11 @@ self-review bypass, когда `coder_codex` R-фиксит задачу, реа
   запускай новый checker-тред, не продолжай тред `coder_codex`;
 - `implBy==codex` → базовый Claude-ревьюер (межпровайдерная независимость для всех
   legacy-значений флага);
-- `CODEX_REVIEWER=fast` и `L==coder_fast` и `implBy==Claude` → `reviewer_codex` (`full`);
-- `CODEX_REVIEWER=fast+std` и `L ∈ {coder_fast, coder}` и `implBy==Claude` →
+- `CODEX_REVIEWER=fast` и `L==coder_fast` и `implBy!=codex` → `reviewer_codex` (`full`);
+- `CODEX_REVIEWER=fast+std` и `L ∈ {coder_fast, coder}` и `implBy!=codex` →
   `reviewer_codex` (`full`);
 - `CODEX_REVIEWER=deep` — как `fast+std`, **плюс** для `L==coder_deep`: диверсити-проход
-  `reviewer_codex` (`augment`) **перед** базовым `reviewer` (Opus не заменяется —
+  `reviewer_codex` (`augment`) **перед** базовым `reviewer`, если `implBy!=codex` (Opus не заменяется —
   дублируется дешёвой страховкой; см. 2.5).
 
 Для `L==coder_deep` оба режима адаптера — `full` при `all` и `augment` при `deep` —

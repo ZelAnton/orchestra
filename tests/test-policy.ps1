@@ -191,7 +191,7 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         $schemaEnum = @($d.enum) | Sort-Object
         Assert-Equal $valEnum[$k] ($schemaEnum -join ',') "schema enum for $k equals validation table"
     }
-    Assert-Equal 48 $schema.config.Count 'schema has 48 config keys'
+    Assert-Equal 56 $schema.config.Count 'schema has 56 config keys'
 
     # Per-tier coder/reviewer models: five enum-validated Claude keys and four free-form
     # Codex adapter keys, all resolving config.md -> OS environment -> default.

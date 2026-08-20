@@ -134,6 +134,8 @@ rem     адаптера заблокированным (исправление 
 rem   Bash(codex exec:*) — сохранён как канонический якорь codex-автономии, который называет
 rem     CC_CODEX_EXEC_GRANT и от которого отталкиваются гейт Фазы 1.1 / cc-doctor / правило
 rem     cc-config в settings; безвреден, когда codex не зовётся голой Bash-командой напрямую.
+rem Ещё два session-only префикса покрывают обе литеральные раскладки jcode-runtime;
+rem cc-config их намеренно не сеет в постоянный центральный список.
 rem Гранты стоят перед флагом permission-mode: --allowedTools вариативен и без следующего
 rem флага-ограничителя поглотил бы промпт. Эффективный режим валидируется выше.
 rem
@@ -148,15 +150,20 @@ rem дублирующего постоянного allow-правила в sett
 rem поиск заново. Внутри setlocal — переменная видна дочернему процессу claude и не утекает
 rem в окружение вызывающей оболочки.
 set "CC_CODEX_EXEC_GRANT=codex exec"
+rem Jcode permissions stay session-scoped: unlike the three canonical Codex rules,
+rem cc-config never persists them into every project. Grant both runtime layouts because
+rem target projects use the cc-sync mirror, and expose a dedicated attestation so an old
+rem launcher carrying only the Codex grants cannot be mistaken for a JCode-capable session.
+set "CC_JCODE_RUNTIME_GRANT=jcode-runtime"
 rem Prefer the standalone processkit-cli (CC_PROCESSKIT_CLI or PATH) for the whole
 rem provider session. processkit-runtime validates probe schema/surfaces, writes durable
 rem JSONL under .work\processes\_processor, and falls back to CC_PROCESSKIT_PYTHON only
 rem when no CLI is selected. Explicitly broken backends fail closed with exit 10.
 if not defined USE_PROCESSKIT_RUNTIME goto :run_uncontained
-pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-start-claude -- claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+pwsh -NoProfile -File "%PROCESSKIT_RUNTIME%" run-root --interactive --work "%PROJECT_ROOT%\.work" --label processor-start-claude -- claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 exit /b %ERRORLEVEL%
 :run_uncontained
-claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+claude --agent processor %MODEL_ARG%%EXTRA_ARGS% --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode %CLAUDE_PERMISSION_MODE% "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 exit /b %ERRORLEVEL%
 
 :run_codex

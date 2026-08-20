@@ -130,7 +130,118 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'CODEX_SANDBOX'           'enum'   'workspace-write' -Enum @('read-only', 'workspace-write') -Sensitivity 'high')
         (New-ConfigKey 'CODEX_NETWORK'           'enum'   'on'     -Enum @('on', 'off')                        -Sensitivity 'high')
         (New-ConfigKey 'CODEX_CMD'               'string' 'codex')
+        # jcode leaf adapters (agents/coder_jcode.md, agents/reviewer_jcode.md). The value
+        # space mirrors CODEX_CODER / CODEX_REVIEWER exactly so one routing rule covers both
+        # engines - see Test-EngineRouting below for the fail-closed overlap check. The deep
+        # model keys default to 'unset' (NOT to a pinned model like CODEX_*_DEEP_MODEL): the
+        # jcode CLI has no --effort/--reasoning flag, so a deep tier routed to jcode can only
+        # express its depth through the model, and Test-EngineRouting refuses to route deep
+        # to jcode until that model is named explicitly.
+        (New-ConfigKey 'JCODE_CODER'             'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'all')          -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'JCODE_REVIEWER'          'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'deep', 'all')  -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'JCODE_CODER_MODEL'         'string' 'unset' -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'JCODE_CODER_DEEP_MODEL'    'string' 'unset' -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'JCODE_REVIEWER_MODEL'      'string' 'unset' -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'JCODE_REVIEWER_DEEP_MODEL' 'string' 'unset' -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'JCODE_PROVIDER'          'string' 'unset')
+        (New-ConfigKey 'JCODE_CMD'               'string' 'jcode')
     )
+}
+
+# ============================================================================
+# Engine routing (fail-closed).
+#
+# Two independent leaf engines can claim the same executor tier: CODEX_CODER and
+# JCODE_CODER both range over {fast, std, deep}, and so do CODEX_REVIEWER /
+# JCODE_REVIEWER. Nothing in the value space prevents an operator from setting both.
+#
+# Orchestra resolves that by REFUSING to run, never by silent precedence. A precedence
+# rule (say "jcode wins") would leave the effective engine invisible: config.md would
+# name two engines and one of them would be quietly ignored, which is exactly the class
+# of drift the other gates here exist to prevent (ORCHESTRA_AUTO_APPROVE fails closed on
+# an unrecognised value rather than defaulting; codex pins approval_policy=never rather
+# than degrading to an unsandboxed run). The overlap is computed PER TIER so the error
+# names the exact tiers in conflict, and the fix is always one keystroke (set one side
+# to `off`, or narrow it).
+#
+# Consequence worth knowing: because every non-off value is a prefix-closed tier set,
+# "codex for fast, jcode for std" is NOT expressible - fast+std necessarily contains
+# fast. In practice one engine owns the coder side and one owns the reviewer side; a
+# mixed split within one side needs a wider value space than this schema has.
+# ============================================================================
+
+# The executor tiers a routing value claims. Prefix-closed by construction.
+function Get-EngineTierClaim {
+    param(
+        [ValidateSet('coder', 'reviewer')][string]$Side,
+        [string]$Value
+    )
+    $v = ([string]$Value).Trim().ToLowerInvariant()
+    if ($v -eq '' -or $v -eq 'off') { return @() }
+    switch ($v) {
+        'fast'     { return @('fast') }
+        'fast+std' { return @('fast', 'std') }
+        'all'      { return @('fast', 'std', 'deep') }
+        'deep'     {
+            # Reviewer `deep` is the legacy cumulative mode: full replacement on fast/std
+            # plus an augment pass on deep. The coder enum has no such value, so reaching
+            # it there means the value was never schema-validated.
+            if ($Side -eq 'reviewer') { return @('fast', 'std', 'deep') }
+            return @()
+        }
+        default    { return @() }
+    }
+}
+
+# One already-resolved key value out of the caller's table; missing/null reads as unset.
+function Get-ResolvedConfigValue {
+    param([hashtable]$Values, [string]$Key)
+    if ($Values.ContainsKey($Key) -and $null -ne $Values[$Key]) { return ([string]$Values[$Key]).Trim() }
+    return ''
+}
+
+# Cross-key validation of the two engines' claims plus the jcode deep-tier model rule.
+# Returns a list of conflict strings; empty means the routing is coherent.
+#   $Values - hashtable of already-resolved (config.md -> env -> default) key values.
+function Test-EngineRouting {
+    param([hashtable]$Values)
+
+    $conflicts = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($side in @('coder', 'reviewer')) {
+        $codexKey = 'CODEX_' + $side.ToUpperInvariant()
+        $jcodeKey = 'JCODE_' + $side.ToUpperInvariant()
+        $codexVal = Get-ResolvedConfigValue -Values $Values -Key $codexKey
+        $jcodeVal = Get-ResolvedConfigValue -Values $Values -Key $jcodeKey
+
+        $codexTiers = @(Get-EngineTierClaim -Side $side -Value $codexVal)
+        $jcodeTiers = @(Get-EngineTierClaim -Side $side -Value $jcodeVal)
+
+        $overlap = @($codexTiers | Where-Object { $jcodeTiers -contains $_ })
+        if ($overlap.Count -gt 0) {
+            $conflicts.Add(
+                "$codexKey='$codexVal' and $jcodeKey='$jcodeVal' both claim tier(s): " +
+                ($overlap -join ', ') +
+                ". Two engines cannot own the same tier - set one of them to 'off' or narrow it."
+            )
+        }
+
+        # jcode has no reasoning-effort flag: a deep tier routed to it can only carry its
+        # depth in the model id, so refuse to route deep until that model is named. Codex
+        # needs no such rule - it pins xhigh and has a documented deep-model default.
+        if ($jcodeTiers -contains 'deep') {
+            $deepModelKey = 'JCODE_' + $side.ToUpperInvariant() + '_DEEP_MODEL'
+            if ((Get-ResolvedConfigValue -Values $Values -Key $deepModelKey) -eq '') {
+                $conflicts.Add(
+                    "$jcodeKey='$jcodeVal' routes the deep tier to jcode but $deepModelKey is unset. " +
+                    'The jcode CLI has no --effort/--reasoning flag, so the deep tier carries its ' +
+                    "depth only in the model id - name it explicitly, or drop the deep tier from $jcodeKey."
+                )
+            }
+        }
+    }
+
+    return , $conflicts.ToArray()
 }
 
 # One policy-section descriptor.

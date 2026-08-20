@@ -44,6 +44,16 @@ a human only needs to seed the queue and periodically check status or escalation
   `review.md`. Both are generated from the single source `agents/reviewer.template.md`
   by `generate-coders.ps1`, the same way the coder variants are.
 - **reviewer_codex** — a read-only Codex adapter for per-task review.
+- **coder_jcode / reviewer_jcode** — the same pair of adapters over the jcode CLI,
+  enabled by `JCODE_CODER` / `JCODE_REVIEWER`. jcode runs unsandboxed, so containment is
+  explicit rather than kernel-enforced: the coder is bracketed by a `snapshot` /
+  `guard-tree` pair that fails the task if the run created a revision or changed the
+  main checkout or a known sibling Orchestra worktree. This is post-hoc detection, not
+  an OS sandbox and not a monitor of arbitrary filesystem paths. The reviewer runs on a
+  shell-less, write-free tool profile (`read,ls,agentgrep`) with its diff materialised
+  for it. Two engines may never
+  claim the same executor tier — `policy.ps1 check-engine-routing` fails the cohort
+  closed rather than picking a winner.
 - **full_reviewer** — reviews the integrated result of the whole cohort in
   `_integration`, logging `F-NN` findings in `.work/review_integration.md`.
 - **merger** — sequentially merges the batch's ready branches into `_integration`,

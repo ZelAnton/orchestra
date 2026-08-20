@@ -232,6 +232,67 @@ function Cmd-ValidateConfig {
 }
 
 # ==========================================================================
+# check-engine-routing  (cross-key, fail-closed)
+#
+# validate-config checks each key in isolation; this checks the ONE relation between
+# keys that can silently change which engine runs the work - the CODEX_* / JCODE_*
+# tier claims. Kept a separate command (not folded into validate-config) because it
+# resolves the OS environment as well as config.md, and the processor calls it as a
+# gate before opening a cohort, not as a lint.
+# ==========================================================================
+
+# The documented resolution order for env-fallback keys: .work/config.md -> OS
+# environment -> default. Keys the schema does not mark envFallback never read the
+# environment. The flag is read from the schema, so this cannot drift from it.
+function Get-EffectiveConfigValue {
+    param([string[]]$Lines, [string]$Key)
+    $desc = Get-SchemaConfigKey $Key
+    if (-not $desc) { return '' }
+    if ($null -ne $Lines) {
+        foreach ($e in (ConvertFrom-ConfigText $Lines)) {
+            if ($e.Kind -eq 'key' -and $e.Key -eq $Key) {
+                $v = ([string]$e.Value).Trim()
+                if ($v -ne '') { return $v }
+                break
+            }
+        }
+    }
+    if ($desc.envFallback) {
+        $ev = [Environment]::GetEnvironmentVariable($Key)
+        if ($ev) { return $ev.Trim() }
+    }
+    return ''
+}
+
+function Cmd-CheckEngineRouting {
+    $file = Resolve-TargetFile 'config.md'
+    $lines = Read-Lines $file
+    $routingKeys = @('CODEX_CODER', 'CODEX_REVIEWER', 'JCODE_CODER', 'JCODE_REVIEWER')
+    $allKeys = $routingKeys + @('JCODE_CODER_DEEP_MODEL', 'JCODE_REVIEWER_DEEP_MODEL')
+
+    $values = @{}
+    foreach ($k in $allKeys) { $values[$k] = Get-EffectiveConfigValue -Lines $lines -Key $k }
+
+    # Assigned directly, NOT wrapped in @(...): Test-EngineRouting returns its array via the
+    # `, $x.ToArray()` idiom used throughout this file, and re-wrapping that would nest the
+    # empty array into a 1-element list (a phantom blank conflict).
+    $conflicts = Test-EngineRouting -Values $values
+    if ($conflicts.Count -eq 0) {
+        $shown = @()
+        foreach ($k in $routingKeys) {
+            $v = [string]$values[$k]
+            if ($v -eq '') { $v = 'off' }
+            $shown += ($k + '=' + $v)
+        }
+        Write-Output ('OK   engine routing coherent (' + ($shown -join ', ') + ')')
+        return
+    }
+    Write-Output "FAIL engine routing is ambiguous - refusing to open a cohort ($($conflicts.Count) conflict(s)):"
+    foreach ($c in $conflicts) { Write-Output "  - $c" }
+    Fail 3 "engine routing conflict ($($conflicts.Count) problem(s))"
+}
+
+# ==========================================================================
 # validate-policy  (structural)
 # ==========================================================================
 function Cmd-ValidatePolicy {
@@ -1166,6 +1227,7 @@ try {
     switch ($Command) {
         'schema'           { Cmd-Schema }
         'validate-config'  { Cmd-ValidateConfig }
+        'check-engine-routing' { Cmd-CheckEngineRouting }
         'validate-policy'  { Cmd-ValidatePolicy }
         'migrate'          { Cmd-Migrate }
         'guard-path'       { Cmd-GuardPath }
@@ -1178,7 +1240,7 @@ try {
         'approval-reject'  { Cmd-ApprovalDecide 'reject' }
         'approval-status'  { Cmd-ApprovalStatus }
         default {
-            Fail 2 "unknown command '$Command'. Valid: schema, validate-config, validate-policy, migrate, guard-path, guard-revision, check-paths, check-publish, check-gate, approval-request, approval-approve, approval-reject, approval-status"
+            Fail 2 "unknown command '$Command'. Valid: schema, validate-config, check-engine-routing, validate-policy, migrate, guard-path, guard-revision, check-paths, check-publish, check-gate, approval-request, approval-approve, approval-reject, approval-status"
         }
     }
 } catch {

@@ -178,6 +178,8 @@ fi
 #   Bash(codex exec:*) - retained as the canonical codex-autonomy anchor that
 #     CC_CODEX_EXEC_GRANT names and that the Phase 1.1 gate / cc-doctor / cc-config settings
 #     rule still key off; harmless when codex is not invoked as a bare Bash command directly.
+# Two additional session-only prefixes cover both literal jcode-runtime layouts; they are
+# intentionally not persisted by cc-config's central three-rule Codex list.
 # The grants sit BEFORE --permission-mode: --allowedTools is variadic and, with no
 # following flag to stop it, would swallow the positional prompt. The effective mode is
 # validated above.
@@ -192,7 +194,8 @@ fi
 # no duplicate persistent allow-rule in the settings files and does not re-run the static
 # search.
 export CC_CODEX_EXEC_GRANT="codex exec"
+export CC_JCODE_RUNTIME_GRANT="jcode-runtime"
 if $USE_PROCESSKIT_RUNTIME; then
-  exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-start-claude -- claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+  exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-start-claude -- claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
 fi
-exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."
+exec claude --agent processor "${MODEL_ARG[@]}" "${EXTRA_ARGS[@]}" --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go."

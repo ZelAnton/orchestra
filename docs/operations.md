@@ -182,12 +182,29 @@ implementer and per-task reviewer tier is operator-owned per provider:
 `CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`, `CLAUDE_CODER_DEEP_MODEL`,
 `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL` (`haiku|sonnet|opus|fable`) and, for
 the Codex adapters, `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
-`CODEX_REVIEWER_DEEP_MODEL` (free-form model ids). Each resolves `.work/config.md` → the
+`CODEX_REVIEWER_DEEP_MODEL` (free-form model ids); the jcode adapters take the matching
+`JCODE_*` set. Each resolves `.work/config.md` → the
 same-named environment variable → its default, so a machine-wide default needs no per-project
 edit. They select the model of an already chosen role only — routing and tiering are
 unchanged — and `cc-doctor` prints the effective values. In the Codex-native root mode they
 do not apply: every role runs as a native custom agent under `ORCHESTRA_CODEX_MODEL`.
 Details: [`environment-variables.md`](environment-variables.md).
+
+**Choosing a leaf engine.** `CODEX_CODER`/`CODEX_REVIEWER` and `JCODE_CODER`/`JCODE_REVIEWER`
+route the same executor tiers, so a tier claimed by both is an ambiguous configuration and
+Orchestra refuses it rather than picking a winner: `pwsh -File tools/policy.ps1
+check-engine-routing --work .work` (run by the processor before it opens a cohort, and shown
+by `cc-doctor`) exits non-zero naming the conflicting tiers. Two further jcode-specific rules
+follow from the CLI itself: routing the deep tier to jcode requires an explicit
+`JCODE_*_DEEP_MODEL`, because `jcode run` has no reasoning-effort flag; and jcode runs
+unsandboxed, so `coder_jcode` is bounded by a post-hoc `guard-tree` check (a run that commits
+or changes the main checkout or a known sibling Orchestra worktree fails the task) rather
+than by kernel-enforced confinement. The guard is not an OS sandbox and cannot observe
+arbitrary filesystem paths.
+The standard `cc-processor`/`cc-resume` launchers grant both checkout and cc-sync-mirror
+JCode runtime prefixes for that session. `cc-config` keeps the persistent canonical list
+at the three Codex rules; an ad-hoc Claude session needs an operator-added exact local
+JCode runtime rule or the adapters fall back without widening their own permissions.
 
 **Claude permission mode.** Claude launchers use `auto` by default. To run the Claude root
 and every subagent it creates with permission checks disabled, an operator may set:
@@ -551,8 +568,8 @@ rolls back. Re-run `cc-sync` from a checkout after editing any agent/launcher.
 likewise thin wrappers over one engine, `tools/doctor-runtime.ps1`; run it from a target
 project's root for a read-only readiness report (it never changes anything — not even a
 stuck `orchestrator.lock` or an orphaned worktree, it only reports on them). It covers
-the Codex preflight (binary/auth and the autonomous-runtime allow-rule), the effective
-`CODEX_*` values and their fail-closed validation, KB status, the Windows sandbox
+the Codex and JCode preflights (binary/auth and autonomous-runtime permission), the effective
+`CODEX_*`/`JCODE_*` values and their fail-closed validation, KB status, the Windows sandbox
 profile (a `N/A` line on POSIX, where the concept does not exist), and the task-queue /
 lock / worktree / main-branch / agent-mirror audit. Because `cc-sync` mirrors the doctor
 engine next to the launchers, `cc-doctor` works the same when run from the `~/.claude`
