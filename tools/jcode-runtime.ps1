@@ -265,6 +265,57 @@ function Get-TreeStatusDigest {
     } finally { $sha.Dispose() }
 }
 
+function Get-ControlPlaneDigest {
+    param([string]$RepoRoot, [string]$Worktree)
+    $controlRoot = Join-Path $RepoRoot '.work'
+    if (-not (Test-Path -LiteralPath $controlRoot -PathType Container)) { return 'ABSENT' }
+
+    # .work is intentionally ignored by consuming repositories, so Git's status/diff
+    # fingerprint above cannot see queue, lease, task-descriptor, or approval writes in
+    # the main checkout. Protect that control plane explicitly. Task worktrees are
+    # excluded here because they are fingerprinted as sibling trees below. The current
+    # jcode artifact directory is also expected to appear/change during a coder run
+    # (snapshot output is written before jcode starts, prompt/output/result files after
+    # it), so exclude only that one task-local directory; other task artifacts remain
+    # protected.
+    $worktreePath = [System.IO.Path]::GetFullPath($Worktree)
+    $worktreePath = $worktreePath.TrimEnd([char[]]@([char]92, [char]47))
+    $taskId = Split-Path -Leaf $worktreePath
+    $taskArtifactRelative = ('tasks/{0}/jcode' -f $taskId)
+    $rows = [System.Collections.Generic.List[string]]::new()
+    try {
+        foreach ($entry in @(Get-ChildItem -LiteralPath $controlRoot -Force -Recurse -ErrorAction Stop)) {
+            $relative = [System.IO.Path]::GetRelativePath($controlRoot, $entry.FullName)
+            $normalizedRelative = $relative.Replace([char]92, [char]47)
+            $first = ($normalizedRelative -split '/')[0]
+            if ($first -eq 'worktrees') { continue }
+            if ($normalizedRelative -eq $taskArtifactRelative -or
+                $normalizedRelative.StartsWith($taskArtifactRelative + '/', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+            if ($entry.PSIsContainer) {
+                $rows.Add("D $normalizedRelative")
+                continue
+            }
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $stream = [System.IO.File]::OpenRead($entry.FullName)
+                try { $hex = [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '') }
+                finally { $stream.Dispose() }
+            } finally { $sha.Dispose() }
+            $rows.Add("F $normalizedRelative $hex")
+        }
+    } catch {
+        return 'UNREADABLE'
+    }
+
+    $rows.Sort()
+    $text = $rows -join "`n"
+    $digest = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($text)
+        return [System.BitConverter]::ToString($digest.ComputeHash($bytes)).Replace('-', '')
+    } finally { $digest.Dispose() }
+}
+
 function Get-SiblingTreeSnapshots {
     param([string]$Worktree, [string]$RepoRoot, [string]$Vcs)
     $root = Join-Path (Join-Path $RepoRoot '.work') 'worktrees'
@@ -293,6 +344,7 @@ function New-TreeSnapshot {
         repoRoot      = $RepoRoot
         repoRootHead  = (Get-TreeHead -Dir $RepoRoot -Vcs $Vcs)
         repoRootDigest = (Get-TreeStatusDigest -Dir $RepoRoot -Vcs $Vcs)
+        repoRootControlDigest = (Get-ControlPlaneDigest -RepoRoot $RepoRoot -Worktree $Worktree)
         siblingTrees  = @(Get-SiblingTreeSnapshots -Worktree $Worktree -RepoRoot $RepoRoot -Vcs $Vcs)
     }
 }
@@ -487,6 +539,9 @@ function Cmd-GuardTree {
     if ([string]$after.repoRootDigest -eq 'UNREADABLE') {
         $violations.Add("could not read the working-copy status of '$repoRoot' after the run - isolation is unverifiable")
     }
+    if ([string]$after.repoRootControlDigest -eq 'UNREADABLE') {
+        $violations.Add("could not read the control plane of '$repoRoot' after the run - isolation is unverifiable")
+    }
 
     # A leaf agent never creates revisions - the processor owns all VCS writes.
     if ([string]$before.worktreeHead -ne '' -and [string]$before.worktreeHead -ne [string]$after.worktreeHead) {
@@ -499,6 +554,9 @@ function Cmd-GuardTree {
     }
     if ([string]$before.repoRootDigest -ne 'UNREADABLE' -and [string]$before.repoRootDigest -ne [string]$after.repoRootDigest) {
         $violations.Add('repository root working-copy status changed: the run modified files outside its worktree')
+    }
+    if ([string]$before.repoRootControlDigest -ne [string]$after.repoRootControlDigest) {
+        $violations.Add('repository root control-plane status changed: the run modified ignored .work files outside its worktree')
     }
 
     # Sibling task/integration worktrees live below .work and are ignored by the main

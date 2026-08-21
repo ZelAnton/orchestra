@@ -274,7 +274,10 @@ Processor и merger формируют описательные англоязы
 - Четыре `JCODE_*_MODEL` резолвит processor (`config.md` → env → unset) и передаёт
   адаптеру вместе с config-only `JCODE_PROVIDER`/`JCODE_CMD`; `JCODE_*_DEEP_MODEL` без
   дефолта и обязателен для deep. `tools/jcode-runtime.ps1` владеет argv/tool-профилями,
-  запуском, failure-классификацией, snapshot/guard и materialized review diff;
+  запуском, failure-классификацией, snapshot/guard и materialized review diff. Guard
+  отдельно fingerprint’ит ignored `.work/` control plane основного checkout, исключая
+  только текущий `tasks/<T-ID>/jcode/` artifact directory и `worktrees/`, которые
+  проверяются отдельными границами;
   `tests/test-jcode-runtime.ps1` герметично проверяет routing, tool allowlists и нарушения
   изоляции без настоящего provider/network.
 - **Единый исполняемый runtime `tools/codex-runtime.ps1` (T-075).** Механическая часть

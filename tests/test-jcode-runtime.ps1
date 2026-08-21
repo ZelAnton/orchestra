@@ -250,6 +250,20 @@ try {
     Assert-Equal 3 $guardEscape.ExitCode 'a write outside the worktree is a hard failure'
     Assert-True ($guardEscape.Text -match 'outside its worktree') 'the escape is named in the violation'
 
+    # .work is ignored by consuming repositories, so a plain Git diff/status digest
+    # cannot see a write to the queue or a task descriptor in the protected main
+    # checkout. The control-plane fingerprint must close that blind spot.
+    $controlSnapFile = Join-Path $gitRoot 'control-before.json'
+    $controlSnap = Invoke-Tool -Tool $JcodeTool -ToolArgs @(
+        'snapshot', '--worktree', $wt, '--repo-root', $repo, '--vcs', 'git', '--out', $controlSnapFile)
+    Assert-Equal 0 $controlSnap.ExitCode 'snapshot fingerprints the ignored main control plane'
+    [System.IO.File]::WriteAllText((Join-Path $repo '.work/Tasks_Queue.md'), "escaped queue write`n", $Utf8NoBom)
+    $guardControl = Invoke-Tool -Tool $JcodeTool -ToolArgs @(
+        'guard-tree', '--worktree', $wt, '--repo-root', $repo, '--vcs', 'git', '--before', $controlSnapFile)
+    Assert-Equal 3 $guardControl.ExitCode 'a write to the ignored main control plane is a hard failure'
+    Assert-True ($guardControl.Text -match 'control-plane') 'the ignored control-plane escape is named in the violation'
+    Remove-Item -LiteralPath (Join-Path $repo '.work/Tasks_Queue.md') -Force
+
     # A path-only status digest would miss this second write because a.txt was already
     # dirty when the snapshot was captured. The guard must fingerprint diff content.
     $dirtySnapFile = Join-Path $gitRoot 'dirty-before.json'
