@@ -162,26 +162,6 @@ REVIEWER_TIERING: true
 # CODEX_SANDBOX: workspace-write
 # CODEX_NETWORK: on            # сеть в песочнице coder_codex: on (по умолч.) | off
 # CODEX_CMD: codex
-#
-# --- jcode-агенты (опционально; требуют установленного jcode + `jcode login`) ---
-# ВАЖНО: jcode и codex не могут владеть одним и тем же тиром. Пересечение —
-#   не «побеждает последний», а отказ: `policy.ps1 check-engine-routing` валит
-#   когорту до старта и называет конфликтующие тиры. Задайте один движок на сторону
-#   (реализация / ревью) или сузьте значение.
-# JCODE_CODER: off             # реализация/R--фиксы: off (по умолч.) | fast | fast+std | all
-# JCODE_REVIEWER: off          # ревью: off (по умолч.) | fast | fast+std | deep | all
-# JCODE_CODER_MODEL: claude-opus-4-6    # модель coder_jcode (fast/std); пусто → дефолт jcode
-# JCODE_CODER_DEEP_MODEL:               # модель coder_jcode для coder_deep — ОБЯЗАТЕЛЬНА,
-                                        #   если JCODE_CODER захватывает deep: у jcode нет
-                                        #   флага reasoning-effort, поэтому глубину несёт
-                                        #   только модель. Не задана → routing-гейт закрыт.
-# JCODE_REVIEWER_MODEL: claude-opus-4-6 # модель reviewer_jcode (fast/std); пусто → дефолт jcode
-# JCODE_REVIEWER_DEEP_MODEL:            # аналогично для deep-ревью
-                                        # ^ у всех четырёх есть фолбэк на одноимённую
-                                        #   переменную окружения ОС
-# JCODE_PROVIDER:              # -p у jcode run (claude | openai | openrouter | ollama | …);
-                               #   пусто → провайдер по умолчанию jcode
-# JCODE_CMD: jcode
 # <<< config.md seed end <<<
 ```
 
@@ -237,14 +217,6 @@ REVIEWER_TIERING: true
 | `CODEX_SANDBOX` | workspace-write |
 | `CODEX_NETWORK` | on |
 | `CODEX_CMD` | codex |
-| `JCODE_CODER` | off (или env-переменная `JCODE_CODER`) |
-| `JCODE_REVIEWER` | off (или env-переменная `JCODE_REVIEWER`) |
-| `JCODE_CODER_MODEL` | не задано (дефолт jcode; или env-переменная `JCODE_CODER_MODEL`) |
-| `JCODE_CODER_DEEP_MODEL` | не задано (обязателен, если `JCODE_CODER` захватывает deep; или env-переменная `JCODE_CODER_DEEP_MODEL`) |
-| `JCODE_REVIEWER_MODEL` | не задано (дефолт jcode; или env-переменная `JCODE_REVIEWER_MODEL`) |
-| `JCODE_REVIEWER_DEEP_MODEL` | не задано (обязателен, если `JCODE_REVIEWER` захватывает deep; или env-переменная `JCODE_REVIEWER_DEEP_MODEL`) |
-| `JCODE_PROVIDER` | не задано (провайдер по умолчанию jcode) |
-| `JCODE_CMD` | jcode |
 
 ## Что означает каждый ключ
 
@@ -782,54 +754,6 @@ codex, экономя квоту Claude для самых сложных зад�
 `~/.codex/auth.json` — оркестр ключей не передаёт); опционально `AGENTS.md` в корне
 репозитория, дублирующий запрет коммитов/мутаций VCS. Проверить готовность —
 `launchers\cc-doctor.cmd`.
-
-### Допустимые значения jcode-ключей
-
-Таблица выше — **только про codex**: её шесть ключей и стережёт
-`tools/check-codex-config-guard.ps1`. У jcode-адаптеров своя пара маршрутных ключей, и
-их множества значений задаёт схема `tools/policy-schema.ps1` (единый источник),
-а проверяет `pwsh -File tools/policy.ps1 validate-config` — отдельной копии в
-`cc-doctor` для них нет и заводить её не нужно.
-
-| Ключ | Допустимые значения | По умолчанию |
-|---|---|---|
-| `JCODE_CODER` | `off` \| `fast` \| `fast+std` \| `all` | `off` |
-| `JCODE_REVIEWER` | `off` \| `fast` \| `fast+std` \| `deep` \| `all` | `off` |
-
-`JCODE_CODER_MODEL`, `JCODE_CODER_DEEP_MODEL`, `JCODE_REVIEWER_MODEL`,
-`JCODE_REVIEWER_DEEP_MODEL`, `JCODE_PROVIDER` и `JCODE_CMD` — свободнозначные строки,
-множеством не ограничены.
-
-Сверх пер-ключевой валидации действует **межключевое** правило, которого у codex нет,
-потому что до появления второго движка его не существовало: `CODEX_*` и `JCODE_*`
-покрывают одни и те же тиры, и заявка двух движков на один тир — неоднозначная
-конфигурация. Orchestra её **не разрешает приоритетом, а отвергает**:
-
-```powershell
-pwsh -File tools/policy.ps1 check-engine-routing --work .work
-```
-
-Ненулевой код и перечень конфликтующих тиров; processor гоняет это на Фазе 1.1 до
-захвата задач, `cc-doctor` показывает тот же вывод. Туда же входит правило deep-тира:
-`JCODE_*_DEEP_MODEL` обязателен, если deep направлен в jcode, — у `jcode run` нет флага
-reasoning-effort, и без явной модели глубина уровня просто исчезла бы.
-
-**Предпосылки jcode:** установленный `jcode` и настроенный provider
-(`jcode auth status`; credential store зависит от provider, API-ключ в переменной
-окружения тоже допустим). Разрешение на запуск
-выдаётся launcher'ами на сессию для **обеих** литеральных раскладок:
-`Bash(pwsh -File tools/jcode-runtime.ps1:*)` и
-`Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)`. `cc-config` намеренно не
-расширяет центральный постоянный allow-list сверх трёх Codex-правил. Для ad-hoc Claude-
-сессии оператор добавляет нужное точное JCode-правило в локальный project settings сам;
-адаптерам запрещено править `.claude/settings*`.
-
-**Чем jcode отличается по изоляции.** У `jcode run` **нет песочницы** и нет гейта
-подтверждений — он правит файлы и выполняет shell-команды автономно. Поэтому:
-`coder_jcode` обязан обрамлять прогон парой `snapshot`/`guard-tree` (обнаружение
-постфактум: создал ревизию или писал вне worktree → задача падает), а `reviewer_jcode`
-работает в профиле без shell и без инструментов записи (`read,ls,agentgrep`), из-за чего
-diff ему материализует адаптер (`prepare-review`) вне рабочей копии.
 
 **Разрешение на запуск codex (предвыданный грант).** В permission-mode `auto` classifier
 Claude Code отклоняет автономный запуск codex как «запуск автономного агента», причём отказ

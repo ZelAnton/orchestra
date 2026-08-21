@@ -22,7 +22,7 @@ read-only источниками фактов: их код, очереди и `.
 ## Назначение и установка
 
 Orchestra — не приложение и не библиотека. Это комплект канонических ролевых промптов,
-Claude Code runtime, полностью Codex-native runtime, адаптеров Codex/JCode CLI и
+Claude Code runtime, полностью Codex-native runtime, адаптера Codex CLI и
 кросс-платформенных launchers для автономной обработки очереди задач.
 Агентские описания лежат в каталоге `agents/` и устанавливаются в
 `%USERPROFILE%\.claude\agents`; launchers устанавливаются в `%USERPROFILE%\.claude\scripts`.
@@ -243,18 +243,6 @@ Processor и merger формируют описательные англоязы
   уровни; для `coder_deep` оба адаптера игнорируют общие `CODEX_MODEL`/`CODEX_REASONING`:
   reasoning всегда `xhigh`, модель — `gpt-5.6-sol`, если не задан соответствующий
   deep-ключ (следующий пункт).
-- `coder_jcode.md` и `reviewer_jcode.md` — опциональная пара поверх `jcode run` только
-  для Claude-root provider. `policy.ps1 check-engine-routing` до открытия когорты
-  fail-closed запрещает Codex/JCode claim одного тира и требует явную JCode deep-модель.
-  Processor выбирает `coder_jcode`/`reviewer_jcode` в Фазах 2.2/2.4/2.8, хранит автора
-  каждого диапазона как `jcode` в `Реализовано:` и при sentinel возвращается на Claude-
-  роль тира. Codex-native overlay игнорирует все adapter routes. JCode не имеет sandbox:
-  coder окружён post-hoc `snapshot`/`guard-tree` для вершины целевого worktree,
-  основного checkout и известных sibling-worktree (это детектор, не OS-sandbox и
-  не монитор произвольных путей), reviewer получает только
-  `read,ls,agentgrep` и подготовленный вне worktree diff. Оба используют переданный
-  `RUNTIME_LAYOUT` и литеральный `tools/jcode-runtime.ps1` либо
-  `~/.claude/scripts/jcode-runtime.ps1`; тильду нельзя переносить через shell-переменную.
 - **Модели ролей coder/reviewer настраиваются оператором (ключи `config.md` с
   env-фолбэком).** Пять `CLAUDE_*_MODEL` (`CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
   `CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL`;
@@ -271,15 +259,6 @@ Processor и merger формируют описательные англоязы
   при пустом ключе) и машинно сверяются в `check-consistency.ps1` (Class 4) с enum'ами и
   дефолтами `tools/policy-schema.ps1`, а фолбэк-модели — ещё и с `model:` во frontmatter
   самих ролей.
-- Четыре `JCODE_*_MODEL` резолвит processor (`config.md` → env → unset) и передаёт
-  адаптеру вместе с config-only `JCODE_PROVIDER`/`JCODE_CMD`; `JCODE_*_DEEP_MODEL` без
-  дефолта и обязателен для deep. `tools/jcode-runtime.ps1` владеет argv/tool-профилями,
-  запуском, failure-классификацией, snapshot/guard и materialized review diff. Guard
-  отдельно fingerprint’ит ignored `.work/` control plane основного checkout, исключая
-  только текущий `tasks/<T-ID>/jcode/` artifact directory и `worktrees/`, которые
-  проверяются отдельными границами;
-  `tests/test-jcode-runtime.ps1` герметично проверяет routing, tool allowlists и нарушения
-  изоляции без настоящего provider/network.
 - **Единый исполняемый runtime `tools/codex-runtime.ps1` (T-075).** Механическая часть
   протокола обоих адаптеров вынесена из Markdown-инструкций в тестируемый кросс-платформенный
   pwsh-скрипт (по образцу `tools/queue-tx.ps1`): **безопасная сборка argv** нормализованной
@@ -732,14 +711,6 @@ Processor и merger формируют описательные англоязы
   отдельного правила не требует — реально исполняемая Bash-команда остаётся той же обёрткой
   независимо от него, её и покрывает runtime-грант. Запасной путь, если версия Claude Code всё равно откажет, —
   PreToolUse-хук, возвращающий `allow` для валидированной формы; сейчас не задействован.
-- **Разрешение JCode остаётся сессионным.** `cc-processor`/`cc-resume` передают обе
-  формы `Bash(pwsh -File tools/jcode-runtime.ps1:*)` и
-  `Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)`, а
-  `CC_JCODE_RUNTIME_GRANT=jcode-runtime` не даёт старому launcher'у с одними Codex-
-  грантами выдать ложный OK. Фаза 1.1/`cc-doctor` принимают этот marker либо точное
-  project-local правило. `cc-config` JCode-правил не сеет: центральный persistent list
-  остаётся ровно из трёх Codex-правил. Ad-hoc-сессии требуют ручного operator grant;
-  adapter никогда не правит settings сам.
 - **Codex-runtime всегда запускается в foreground.** Allow-правило покрывает обычный
   `pwsh -File …/codex-runtime.ps1 run …`, но добавленный агентом shell-суффикс `&` меняет
   модель исполнения: команда переживает permission-time safety check, и Claude Code снова
@@ -1060,7 +1031,7 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
    заведены allow-правила `cc-config` (важно для codex-раннера; см. ниже).
 
 Processor сохраняет результат как `RUNTIME_LAYOUT=checkout|mirror` и передаёт его каждому
-Codex/JCode adapter. Адаптеры не повторяют filesystem-probe: это исключает
+Codex adapter. Адаптеры не повторяют filesystem-probe: это исключает
 ложную локальную диагностику «runtime not found» после того, как processor уже выбрал и
 использовал зеркало. Наличие runtime проверяет фактический foreground-вызов выбранной
 литеральной команды; отсутствующий/невалидный handoff является ошибкой контракта вызова.
@@ -1068,11 +1039,11 @@ Codex/JCode adapter. Адаптеры не повторяют filesystem-probe: 
 **Гранты (аудит T-115, факт, не предположение).** Дополнительных предвыдаваемых Bash-грантов
 под зеркальную форму путей **прочих** раннеров (`state-tx`, `queue-tx`, `outbox`, `policy`,
 `redaction`, `supervisor`, `harness`, …) заводить **не нужно**: classifier auto-режима
-особым образом отклоняет автономные model runtimes (`codex exec` и `jcode run`), а
+особым образом отклоняет автономный model runtime (`codex exec`), а
 локальный `pwsh -File tools/<script>.ps1 …`/`pwsh -File ~/.claude/scripts/<script>.ps1 …`
 для остальных раннеров он пропускает без явного гранта в **обеих** раскладках (это обычная
 локальная запись в `.work/`, не автономный внешний агент). Поэтому точечная предвыдача
-остаётся под `codex-runtime.ps1` и session-only `jcode-runtime.ps1` (обе формы), а
+остаётся под `codex-runtime.ps1`, а
 зеркальная форма прочих раннеров работает и без расширения `--allowedTools`/
 seed-правил. `cc-sync` мирроит их файлы (Этап 1 T-115); классификатор их вызовам не мешает —
 двух частей достаточно, третья (гранты) для не-codex раннеров не требуется.
@@ -1088,9 +1059,6 @@ tools/codex-runtime.ps1 *)` и `Bash(pwsh -File ~/.claude/scripts/codex-runtime.
 согласованы в `cc-config.{sh,cmd}`/`config.example.md`, identity-маркеры checkout защищают
 от target-local затенения, оба адаптера документируют ту же
 литеральную команду, что разрешает правило, без `CODEX_RT=~`, и несут единую тильдо-оговорку).
-`jcode-runtime.ps1` следует тому же literal-path правилу; его роли получают
-`RUNTIME_LAYOUT`, а `check-consistency.ps1` запрещает `JRT=~` и требует обе формы в
-session grants. В persistent `cc-config` эти формы намеренно отсутствуют.
 
 ## Разрешения auto-режима и политика «согласие — заранее»
 
@@ -1107,7 +1075,6 @@ session grants. В persistent `cc-config` эти формы намеренно �
 | Операция | Роль(и) | Категория classifier'а | Риск отказа | Способ предвыдачи согласия / обработка отказа |
 |---|---|---|---|---|
 | `pwsh -File <tools/codex-runtime.ps1 \| ~/.claude/scripts/codex-runtime.ps1> …` (runtime-обёртка codex, T-075; две формы резолвинга пути — T-114) | coder_codex, reviewer_codex | запуск автономного агента | **высокий (подтверждён)** | сессионный грант launcher'ов `--allowedTools "Bash(pwsh -File tools/codex-runtime.ps1:*)"` (checkout-форма; + якорь `Bash(codex exec:*)`) + канонические `Bash(pwsh -File tools/codex-runtime.ps1 *)`, `Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)` и `Bash(codex exec *)` (`cc-config`, покрывает обе формы); нестанд. `CODEX_CMD` — аргумент обёртки, покрыт тем же грантом; отказ → сентинел `CODEX_UNAVAILABLE`, фолбэк на Claude |
-| `pwsh -File <tools/jcode-runtime.ps1 \| ~/.claude/scripts/jcode-runtime.ps1> …` | coder_jcode, reviewer_jcode | запуск автономного агента | высокий | обе формы предвыданы session-only стандартными processor/resume launcher'ами и подтверждены `CC_JCODE_RUNTIME_GRANT`; ad-hoc требует точный project-local operator grant, `cc-config` центральный список не расширяет; отказ → `JCODE_UNAVAILABLE`, фолбэк на Claude |
 | Коммит/мёрдж, **изменяющий `.claude/settings*`** или сам грант | processor, merger | самомодификация конфигурации («Self Modification») | **высокий (подтверждён)** | согласие оператора должно быть **видно в контексте самого финализирующего вызова** (не пересказ через субагента — см. политику ниже); правку settings делает только оператор/`cc-config`; отказ → чистая остановка + эскалация оператору, без обхода |
 | `git push` / `git push -u` / `jj git push` | processor | сеть/публикация | низкий (в `auto` обычно проходит) | не в центральном списке; отказ → штатная эскалация «требуется ручное вмешательство», уже запушенное не откатывается; при необходимости — пер-репо локальный грант через `cc-config` |
 | `gh run list/watch`, `gh pr close`, `gh issue`, `gh api` | processor, github_sync | сеть/публикация | низкий–средний | не в центральном списке; отказ/недоступность → штатная эскалация роли (processor: «CI не проверен, подтвердите вручную»; github_sync: пометка `заблокировано`); пер-репо локальный грант |
@@ -1121,7 +1088,7 @@ session grants. В persistent `cc-config` эти формы намеренно �
 codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -File
 ~/.claude/scripts/codex-runtime.ps1 *)` — обе формы фактической команды, T-075/T-114 — и
 якорь `Bash(codex exec *)`) **не заводятся**: расширять список, который `cc-config` сеет во
-**все** репозитории, включая JCode runtime и широкие права (`git push`, `gh`, `rm`, `SMOKE_CMD`), значило бы
+**все** репозитории, включая широкие права (`git push`, `gh`, `rm`, `SMOKE_CMD`), значило бы
 неявно раздуть полномочия агентов во всех проектах. Остаточный риск (конкретная операция
 отклонена в конкретном репозитории) закрывают два механизма без второго источника истины:
 (1) универсальная политика эскалации ниже; (2) пер-репозиторный локальный грант оператора
@@ -1130,8 +1097,8 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 раннеры (`state-tx`, `queue-tx`, `outbox`, `policy`, `redaction`, `supervisor`, `harness`, …)
 исполняются как локальный `pwsh -File …` — classifier пропускает их без гранта в **обеих**
 раскладках (checkout `tools/<script>.ps1` и mirror `~/.claude/scripts/<script>.ps1`); особый
-грант нужен только model-раннерам: Codex покрыт тремя persistent правилами выше, JCode —
-двумя session-only launcher grants (см. «Резолвинг раннеров `tools/*.ps1`»).
+грант нужен только Codex model-runner'у; прочие раннеры работают без расширения
+`--allowedTools` (см. «Резолвинг раннеров `tools/*.ps1`»).
 
 **Политика «согласие — заранее» (единая для всех автономных Bash-операций всех ролей).**
 - Режим `ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions` — явный

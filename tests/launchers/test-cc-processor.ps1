@@ -22,7 +22,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
-            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', 'Bash(pwsh -File tools/jcode-runtime.ps1:*)', 'Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -47,7 +47,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $args = Get-CapturedArgs $captureFile
         Assert-True ($args.Count -ge 9) '[--model value] enough tokens captured'
-        Assert-ArrayEqual @('--agent', 'processor', '--model', 'opus-9000', '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', 'Bash(pwsh -File tools/jcode-runtime.ps1:*)', 'Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)', '--permission-mode', $expectedMode) $args[0..10] '[--model value] --model must precede --permission-mode with its value forwarded'
+        Assert-ArrayEqual @('--agent', 'processor', '--model', 'opus-9000', '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', '--permission-mode', $expectedMode) $args[0..8] '[--model value] --model must precede --permission-mode with its value forwarded'
     }
     finally {
         Remove-Sandbox $paths
@@ -68,7 +68,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
-            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', 'Bash(pwsh -File tools/jcode-runtime.ps1:*)', 'Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -95,7 +95,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
             '--agent', 'processor',
             '--model', 'foo',
             '--verbose', '--extra-flag',
-            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', 'Bash(pwsh -File tools/jcode-runtime.ps1:*)', 'Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -139,7 +139,7 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
 
         $expected = @(
             '--agent', 'processor',
-            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)', 'Bash(pwsh -File tools/jcode-runtime.ps1:*)', 'Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)',
+            '--allowedTools', 'Bash(codex exec:*)', 'Bash(pwsh -File tools/codex-runtime.ps1:*)',
             '--permission-mode', $expectedMode,
             'Start now, following your system prompt: take the orchestrator lock, then process .work/Tasks_Queue.md end to end — capture batches of parallel-safe tasks, plan them, implement in parallel worktrees, review, merge via the merger, and publish (ff-merge + push + CI), looping until no not-started tasks remain. Report progress as you go.'
         )
@@ -220,10 +220,6 @@ Invoke-Test -Name 'cc-processor.cmd' -Body {
         $capturedArgs = Get-CapturedArgs $captureFile
         Assert-True ($capturedArgs -contains 'Bash(codex exec:*)') '[session grant] --allowedTools "Bash(codex exec:*)" must still be forwarded'
         Assert-True ($capturedArgs -contains 'Bash(pwsh -File tools/codex-runtime.ps1:*)') '[session grant] --allowedTools "Bash(pwsh -File tools/codex-runtime.ps1:*)" (the actually-executed runtime wrapper) must be forwarded'
-        # The jcode adapters go through their own wrapper and need their own grant; without
-        # it the auto-mode classifier refuses coder_jcode/reviewer_jcode mid-run.
-        Assert-True ($capturedArgs -contains 'Bash(pwsh -File tools/jcode-runtime.ps1:*)') '[session grant] --allowedTools "Bash(pwsh -File tools/jcode-runtime.ps1:*)" (the jcode runtime wrapper) must be forwarded'
-        Assert-True ($capturedArgs -contains 'Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)') '[session grant] mirror-form jcode runtime wrapper must be forwarded'
     }
     finally {
         Remove-Sandbox $paths

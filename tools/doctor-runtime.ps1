@@ -204,10 +204,7 @@ $script:EnvFallbackKeys = @(
     'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL',
     'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL',
     'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL',
-    'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL',
-    'JCODE_CODER', 'JCODE_REVIEWER',
-    'JCODE_CODER_MODEL', 'JCODE_CODER_DEEP_MODEL',
-    'JCODE_REVIEWER_MODEL', 'JCODE_REVIEWER_DEEP_MODEL'
+    'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL'
 )
 
 function Get-EffCodex {
@@ -406,109 +403,6 @@ foreach ($k in 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'C
 }
 
 # =============================================================================
-# 2a. jcode leaf adapters
-# =============================================================================
-
-Write-Host ''
-Write-Host '== Effective JCODE_* (.work/config.md; keys marked (env) fall back to the OS environment; blank = default) =='
-foreach ($k in 'JCODE_CODER', 'JCODE_REVIEWER', 'JCODE_CODER_MODEL', 'JCODE_CODER_DEEP_MODEL', 'JCODE_REVIEWER_MODEL', 'JCODE_REVIEWER_DEEP_MODEL', 'JCODE_PROVIDER', 'JCODE_CMD') {
-    $val = Get-Cfg $k
-    $src = ''
-    if (-not $val -and $script:EnvFallbackKeys -contains $k) {
-        $ev = Get-EnvTrimmed $k
-        if ($ev) { $val = $ev; $src = ' (env)' }
-    }
-    if (-not $val) { $val = '(default)' }
-    Write-Host ('  ' + $k.PadRight(25) + ' = ' + $val + $src)
-}
-
-$jcodeCmd = Get-Cfg 'JCODE_CMD'
-if (-not $jcodeCmd) { $jcodeCmd = 'jcode' }
-$jcEff = Get-EffCodex 'JCODE_CODER'
-$jrEff = Get-EffCodex 'JCODE_REVIEWER'
-$jcodeRoutingOn = (($jcEff -and $jcEff -ne 'off') -or ($jrEff -and $jrEff -ne 'off'))
-
-Write-Host ''
-Write-Host '== jcode preflight =='
-$jbin = Get-Command $jcodeCmd -ErrorAction SilentlyContinue
-if ($jbin) {
-    Write-Host ('jcode binary : ' + $jbin.Source)
-    $jAuthAvailable = $false
-    try {
-        $jAuthRaw = & $jbin.Source @('--quiet', '--no-update', '--no-selfdev', 'auth', 'status', '--json') 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            $jAuthJson = (@($jAuthRaw) -join "`n") | ConvertFrom-Json
-            $jAuthAvailable = [bool]$jAuthJson.any_available
-        }
-    } catch { $jAuthAvailable = $false }
-    if ($jAuthAvailable) {
-        Write-Host 'auth         : at least one provider available (jcode auth status)'
-    } else {
-        Write-Host 'auth         : no available provider reported (a configured local/no-key provider may still work)'
-    }
-} elseif ($jcodeRoutingOn) {
-    Write-Host ('jcode binary : NOT FOUND (' + $jcodeCmd + ') -> coder_jcode/reviewer_jcode escalate to Claude')
-    Write-Host 'auth         : not checked (binary missing)'
-} else {
-    Write-Host ('jcode binary : not found (' + $jcodeCmd + '), but not required right now - JCODE_CODER and JCODE_REVIEWER are both off')
-    Write-Host 'auth         : not checked (binary missing)'
-}
-# Unlike codex, jcode has NO sandbox: the adapters' containment is the snapshot/guard-tree
-# pair (coder) and the shell-less tool profile (reviewer). Say so here rather than letting
-# the codex sandbox report above imply the same protection covers both engines.
-if ($jcodeRoutingOn) {
-    Write-Host 'isolation    : jcode runs UNSANDBOXED - coder_jcode is contained by post-hoc guard-tree detection, reviewer_jcode by a shell-less tool profile'
-}
-
-# Permission surface, same shape as the codex block above: the adapters reach jcode only
-# through `pwsh -File <tools|~/.claude/scripts>/jcode-runtime.ps1`, so those two literal
-# prefixes are what an allow-rule must cover. There is no bare-command anchor - jcode is
-# never invoked as a plain Bash command.
-#
-# Session grant: cc-processor/cc-resume pass BOTH literal runtime layouts and export a
-# dedicated marker. Reusing CC_CODEX_EXEC_GRANT would let an older launcher carrying only
-# Codex rules produce a false JCode OK.
-$jGrant = [Environment]::GetEnvironmentVariable('CC_JCODE_RUNTIME_GRANT')
-$jSessionGrant = ($jGrant -eq 'jcode-runtime')
-$jcodeRuntimeRules = @('pwsh -File tools/jcode-runtime.ps1', 'pwsh -File ~/.claude/scripts/jcode-runtime.ps1')
-$jPermRule = $false
-foreach ($sf in $settingsFiles) {
-    if (-not (Test-Path -LiteralPath $sf -PathType Leaf)) { continue }
-    try { $jj = Get-Content -LiteralPath $sf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $jj = $null }
-    if ($jj -and $jj.permissions -and $jj.permissions.allow) {
-        foreach ($e in $jj.permissions.allow) {
-            if ($e -isnot [string]) { continue }
-            foreach ($rr in $jcodeRuntimeRules) { if ($e.Contains($rr)) { $jPermRule = $true } }
-        }
-    }
-}
-if (-not $jcodeRoutingOn) {
-    Write-Host 'permission   : not required right now - JCODE_CODER and JCODE_REVIEWER are both off'
-} elseif ($jSessionGrant) {
-    Write-Host 'permission   : session grant present (launcher granted the jcode runtime alongside the codex rules) - no persistent settings allow-rule required for this session'
-} elseif ($jPermRule) {
-    Write-Host ('permission   : allow-rule for the jcode runtime (' + ($jcodeRuntimeRules -join ' or ') + ') present in Claude Code settings (permissions.allow)')
-} else {
-    Write-Host 'WARN permission: NOT found -> JCODE_CODER/JCODE_REVIEWER routing is on, so the auto-mode classifier blocks the autonomous jcode runtime without it; run through cc-processor/cc-resume (session-grants both runtime layouts) or add the exact needed rule by hand to this project permissions.allow. cc-config intentionally keeps the persistent central allow-list to the three Codex rules; coder_jcode/reviewer_jcode never widen settings themselves.'
-}
-
-# Cross-key routing gate. Delegated to policy.ps1 (single source: Test-EngineRouting in
-# tools/policy-schema.ps1) instead of a local copy, so cc-doctor and the processor's
-# pre-cohort gate can never disagree about what counts as a conflict.
-Write-Host ''
-Write-Host '== Engine routing (codex vs jcode) =='
-$policyRuntime = Join-Path $PSScriptRoot 'policy.ps1'
-if (-not (Test-Path -LiteralPath $policyRuntime -PathType Leaf)) {
-    Write-Host 'FAIL engine routing: policy.ps1 is missing from the Orchestra runtime mirror; run cc-sync'
-} else {
-    $routingArgs = @('-NoProfile')
-    if ($script:OnWindows) { $routingArgs += @('-ExecutionPolicy', 'Bypass') }
-    $routingArgs += @('-File', $policyRuntime, 'check-engine-routing', '--work', (Join-Path $ProjectRoot '.work'))
-    $routingOut = & pwsh @routingArgs 2>&1
-    foreach ($line in @($routingOut)) { Write-Host ('  ' + [string]$line) }
-}
-
-# =============================================================================
 # 2b. Effective Claude role models
 # =============================================================================
 #
@@ -703,7 +597,7 @@ if (Test-Path -LiteralPath $qf) {
     Write-Host 'OK   .work/Tasks_Queue.md not found (nothing to validate)'
 }
 
-$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'COHORT_TOKEN_BUDGET', 'COHORT_TOKEN_BUDGET_STRICT', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD', 'REVIEWER_TIERING', 'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL', 'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD', 'JCODE_CODER', 'JCODE_REVIEWER', 'JCODE_CODER_MODEL', 'JCODE_CODER_DEEP_MODEL', 'JCODE_REVIEWER_MODEL', 'JCODE_REVIEWER_DEEP_MODEL', 'JCODE_PROVIDER', 'JCODE_CMD')
+$known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'COHORT_TOKEN_BUDGET', 'COHORT_TOKEN_BUDGET_STRICT', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD', 'REVIEWER_TIERING', 'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL', 'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
 if (Test-Path -LiteralPath $script:ConfigFile) {
     $hasSmoke = $false
     $verificationMode = 'auto'

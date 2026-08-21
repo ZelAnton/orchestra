@@ -253,15 +253,8 @@ $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'DIFF_TOO_LARGE', 'EMPTY_DIFF', 'ENV_LIMIT', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0',
         'LOOP_ORCHESTRA_ROADMAP', 'NEED_IMAGE_VIEW', 'NEED_NET', 'NET_GIT', 'NET_NET', 'OBSERVABILITY_PLATFORM_PLAN',
         'ORCHESTRA_AUTO_APPROVE', 'ORCHESTRA_CLAUDE_PERMISSION_MODE', 'ORCHESTRA_PROCESSKIT_ROOT_RUN_ID', 'REVIEW_FINAL_CLEAN_PASSES', 'REVIEW_STRICT', 'RUNTIME_LAYOUT',
-        'CC_JCODE_RUNTIME_GRANT',
         'OTHER_FAILURE', 'PROMPT_RESUME', 'SEC_E_NO_CREDENTIALS', 'SKIP_GIT', 'SMOKE_FAILED', 'JJ_DRIFT',
-        'THREAD_ID', 'UPPER_SNAKE_CASE', 'VERIFICATION_EVIDENCE',
-        # jcode adapter counterparts of the codex sentinels/locals above: JCODE_UNAVAILABLE /
-        # JCODE_FAILED are the two escalation sentinels coder_jcode/reviewer_jcode return,
-        # JCODE_RT is their local shell variable holding the resolved runtime path (mirrors
-        # CODEX_RT), and NO_FINDINGS is the literal reviewer_jcode makes jcode emit when a
-        # read-only review pass finds nothing - none of them are .work/config.md keys.
-        'JCODE_FAILED', 'JCODE_RT', 'JCODE_UNAVAILABLE', 'NO_FINDINGS'
+        'THREAD_ID', 'UPPER_SNAKE_CASE', 'VERIFICATION_EVIDENCE'
     ), [StringComparer]::Ordinal)
 
 $keyPattern = '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'
@@ -408,10 +401,7 @@ Get-ChildItem -Path $RepoRoot -Recurse -File | ForEach-Object {
 # broker) rather than Orchestra's own runtime state.
 $knownNonArtifact = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'INDEX.md', 'learnings.md', 'codex_out.md', 'codex_review_out.md', 'Tasks_Queue_Format.md',
-        'index.lock', 'Cargo.lock', 'uv.lock', 'packages.lock',
-        # Same nature as codex_out.md / codex_review_out.md above: per-invocation jcode
-        # scratch output captured by the adapters, not durable coordination state.
-        'jcode_out.md', 'jcode_review_out.md'
+        'index.lock', 'Cargo.lock', 'uv.lock', 'packages.lock'
     ), [StringComparer]::Ordinal)
 
 $filenamePattern = '(?<![.\w])[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*\.(?:md|lock)\b'
@@ -742,7 +732,7 @@ foreach ($ck in $valEnum.Keys) {
 
 $vcsContractFiles = @(
     'processor.md', 'coder.template.md', 'reviewer.template.md', 'coder_codex.md',
-    'reviewer_codex.md', 'coder_jcode.md', 'reviewer_jcode.md', 'merger.md', 'full_reviewer.md'
+    'reviewer_codex.md', 'merger.md', 'full_reviewer.md'
 )
 foreach ($name in $vcsContractFiles) {
     $path = Join-Path $AgentsDir $name
@@ -764,11 +754,11 @@ foreach ($marker in @('Проверка сборки: SMOKE_CMD', 'Провер�
     }
 }
 
-# Both adapter families drive their CLI through a pwsh runtime wrapper behind a
+# Both Codex adapters drive their CLI through a pwsh runtime wrapper behind a
 # pre-granted allow-rule, so both carry the same foreground-only contract: Bash
 # auto-backgrounding appends `&`, which stops matching the grant and gets the call
 # refused mid-run.
-foreach ($name in @('coder_codex.md', 'reviewer_codex.md', 'coder_jcode.md', 'reviewer_jcode.md')) {
+foreach ($name in @('coder_codex.md', 'reviewer_codex.md')) {
     $text = Get-Content -LiteralPath (Join-Path $AgentsDir $name) -Raw -Encoding utf8
     if ($text.IndexOf('Foreground-инвариант', [System.StringComparison]::Ordinal) -lt 0 -or
         $text.IndexOf('--timeout-sec 1800', [System.StringComparison]::Ordinal) -lt 0) {
@@ -777,76 +767,19 @@ foreach ($name in @('coder_codex.md', 'reviewer_codex.md', 'coder_jcode.md', 're
     }
 }
 
-# The jcode adapters have no sandbox to fall back on: coder_jcode's ONLY containment is
-# the snapshot/guard-tree pair, and reviewer_jcode's is the shell-less tool profile. If
-# either contract silently drops out of a role file, the adapter would still run - just
-# unbounded - so pin both here.
-$coderJcodeText = Get-Content -LiteralPath (Join-Path $AgentsDir 'coder_jcode.md') -Raw -Encoding utf8
-foreach ($marker in @('snapshot', 'guard-tree')) {
-    if ($coderJcodeText.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
-        Add-Finding -FileRef 'agents/coder_jcode.md' -Check 'jcode-isolation' `
-            -Detail "missing the '$marker' isolation step; jcode has no sandbox, so this pair is the only containment"
-    }
-}
-$reviewerJcodeText = Get-Content -LiteralPath (Join-Path $AgentsDir 'reviewer_jcode.md') -Raw -Encoding utf8
-if ($reviewerJcodeText.IndexOf('prepare-review', [System.StringComparison]::Ordinal) -lt 0) {
-    Add-Finding -FileRef 'agents/reviewer_jcode.md' -Check 'jcode-isolation' `
-        -Detail 'missing the prepare-review step; the read-only reviewer profile has no shell to produce a diff with'
-}
-
 # A role declaration without Phase-2 dispatch is dead configuration. Pin the concrete
 # handoffs and persisted author marker, and protect the mirror literal against the same
 # tilde-through-variable regression previously fixed for codex-runtime.
 foreach ($marker in @(
-        '<исполнитель задачи>=coder_jcode',
-        'Реализовано: <codex|jcode|Claude>',
-        'reviewer_codex|reviewer_jcode',
-        'check-engine-routing',
-        'CC_JCODE_RUNTIME_GRANT=jcode-runtime'
+        '`coder_codex` по маршрутизации',
+        'Реализовано: <codex|Claude>',
+        'на `reviewer_codex` (режим `full`)'
     )) {
     if ($processorText.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
-        Add-Finding -FileRef 'agents/processor.md' -Check 'jcode-dispatch' `
-            -Detail "missing concrete JCode routing marker '$marker'"
+        Add-Finding -FileRef 'agents/processor.md' -Check 'codex-dispatch' `
+            -Detail "missing concrete Codex routing marker '$marker'"
     }
 }
-foreach ($pair in @(
-        @{ Name = 'coder_jcode.md'; Text = $coderJcodeText },
-        @{ Name = 'reviewer_jcode.md'; Text = $reviewerJcodeText }
-    )) {
-    foreach ($marker in @('RUNTIME_LAYOUT=checkout|mirror', '~/.claude/scripts/jcode-runtime.ps1')) {
-        if ($pair.Text.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-Finding -FileRef ("agents/" + $pair.Name) -Check 'jcode-runtime-layout' `
-                -Detail "missing literal runtime-layout contract '$marker'"
-        }
-    }
-    if ($pair.Text -match '(?m)^\s*(?:export\s+)?JRT=~') {
-        Add-Finding -FileRef ("agents/" + $pair.Name) -Check 'jcode-runtime-layout' `
-            -Detail 'mirror runtime is assigned through JRT=~; shell will not expand the tilde from a variable'
-    }
-}
-
-$ccConfigText = (Get-Content -LiteralPath (Join-Path $RepoRoot 'launchers/cc-config.cmd') -Raw -Encoding utf8) +
-    (Get-Content -LiteralPath (Join-Path $RepoRoot 'launchers/cc-config.sh') -Raw -Encoding utf8)
-if ($ccConfigText.IndexOf('Bash(pwsh -File tools/jcode-runtime.ps1 *)', [System.StringComparison]::Ordinal) -ge 0 -or
-    $ccConfigText.IndexOf('Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1 *)', [System.StringComparison]::Ordinal) -ge 0) {
-    Add-Finding -FileRef 'launchers/cc-config.{cmd,sh}' -Check 'central-allowlist' `
-        -Detail 'JCode grants must stay session-scoped; cc-config central persistent list contains only the three Codex rules'
-}
-
-foreach ($name in @('cc-processor.cmd', 'cc-resume.cmd', 'cc-processor.sh', 'cc-resume.sh')) {
-    $text = Get-Content -LiteralPath (Join-Path $RepoRoot "launchers/$name") -Raw -Encoding utf8
-    foreach ($marker in @(
-            'Bash(pwsh -File tools/jcode-runtime.ps1:*)',
-            'Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)',
-            'CC_JCODE_RUNTIME_GRANT'
-        )) {
-        if ($text.IndexOf($marker, [System.StringComparison]::Ordinal) -lt 0) {
-            Add-Finding -FileRef "launchers/$name" -Check 'jcode-session-grant' `
-                -Detail "missing session-only JCode permission marker '$marker'"
-        }
-    }
-}
-
 foreach ($name in @('cc-processor.cmd', 'cc-resume.cmd', 'cc-processor.sh', 'cc-resume.sh')) {
     $text = Get-Content -LiteralPath (Join-Path $RepoRoot "launchers/$name") -Raw -Encoding utf8
     foreach ($key in @('BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS')) {

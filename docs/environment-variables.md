@@ -13,11 +13,9 @@ env-фолбэк, по-прежнему задаются в `.work/config.md`.
 | `ORCHESTRA_AUTO_APPROVE` | `on` / `off`; default `off` | Автоматически подтверждает внутренние gates `human-review`, `force-lock` и `policy-bypass`. Это не разрешения Claude/Codex. Любое другое значение вызывает fail-closed. |
 | `CODEX_CODER` | `off`, `fast`, `fast+std`, `all`; default `off` | В Claude-root режиме направляет реализацию соответствующих уровней в Codex; `all` включает `coder_deep`. |
 | `CODEX_REVIEWER` | `off`, `fast`, `fast+std`, `deep`, `all`; default `off` | В Claude-root режиме направляет ревью соответствующих уровней в Codex; `deep` добавляет augment, `all` полностью заменяет ревью всех уровней. |
-| `JCODE_CODER` | `off`, `fast`, `fast+std`, `all`; default `off` | В Claude-root режиме направляет реализацию соответствующих уровней в jcode; `all` включает `coder_deep`. Пересечение тиров с `CODEX_CODER` — fail-closed (см. ниже). |
-| `JCODE_REVIEWER` | `off`, `fast`, `fast+std`, `deep`, `all`; default `off` | В Claude-root режиме направляет ревью соответствующих уровней в jcode; `deep` добавляет augment, `all` полностью заменяет ревью всех уровней. |
 | `KB` | `on` / `off`; default `on` | Включает или отключает чтение и обновление `.work/knowledge/`. |
 
-Для `CODEX_CODER`, `CODEX_REVIEWER`, `JCODE_CODER`, `JCODE_REVIEWER`, `KB` и тринадцати
+Для `CODEX_CODER`, `CODEX_REVIEWER`, `KB` и девяти
 модельных переменных ролей (см. «Модели ролей coder и reviewer» ниже) действует
 следующий приоритет:
 
@@ -66,10 +64,6 @@ Claude-ролей и для Codex-адаптеров независимо; пр�
 | `CODEX_CODER_DEEP_MODEL` | model id; default `gpt-5.6-sol` | `coder_codex` на уровне `coder_deep` |
 | `CODEX_REVIEWER_MODEL` | model id; default — `CODEX_MODEL`, затем модель Codex CLI | `reviewer_codex` на уровнях `coder_fast`/`coder` |
 | `CODEX_REVIEWER_DEEP_MODEL` | model id; default `gpt-5.6-sol` | `reviewer_codex` на уровне `coder_deep` (`full` и `augment`) |
-| `JCODE_CODER_MODEL` | model id; default — модель по умолчанию jcode | `coder_jcode` на уровнях `coder_fast`/`coder` |
-| `JCODE_CODER_DEEP_MODEL` | model id; **без default** | `coder_jcode` на уровне `coder_deep` — обязателен, если `JCODE_CODER` захватывает deep |
-| `JCODE_REVIEWER_MODEL` | model id; default — модель по умолчанию jcode | `reviewer_jcode` на уровнях `coder_fast`/`coder` |
-| `JCODE_REVIEWER_DEEP_MODEL` | model id; **без default** | `reviewer_jcode` на уровне `coder_deep` (`full` и `augment`) — обязателен, если `JCODE_REVIEWER` захватывает deep |
 
 Незаданная `CLAUDE_*_MODEL` означает «модель из frontmatter роли» — processor просто не
 передаёт переопределение в `Agent(...)`. Значение вне множества `haiku|sonnet|opus|fable`
@@ -82,34 +76,6 @@ Deep-уровень Codex исторически пинился на `gpt-5.6-so
 модели, но `CODEX_CODER_DEEP_MODEL`/`CODEX_REVIEWER_DEEP_MODEL` его переопределяют;
 reasoning deep-уровня остаётся `xhigh` в любом случае, а общий `CODEX_MODEL` в deep-ветку
 по-прежнему не течёт.
-
-У `JCODE_*_DEEP_MODEL` дефолта нет намеренно. У `jcode run` **нет** флага
-reasoning-effort (`--effort` есть только у swarm-spawn), поэтому глубину deep-тира несёт
-исключительно модель — и подставить за оператора осмысленный дефолт нечем: он зависит от
-выбранного провайдера. Ключ не задан, а deep в jcode направлен → когорта не открывается
-(см. «Маршрутизация движков» ниже).
-
-## Маршрутизация движков (fail-closed)
-
-`CODEX_CODER`/`CODEX_REVIEWER` и `JCODE_CODER`/`JCODE_REVIEWER` независимы, и оба
-диапазона покрывают одни и те же тиры `{fast, std, deep}`. Если два движка заявляют один
-тир, Orchestra **не выбирает победителя, а отказывается стартовать**: приоритет сделал бы
-эффективный движок невидимым — в конфиге названы два, а работает молча один. Проверку
-выполняет
-
-```powershell
-pwsh -File tools/policy.ps1 check-engine-routing --work .work
-```
-
-Она возвращает код 3 и называет конкретные конфликтующие тиры; processor гоняет её на
-Фазе 1.1 до открытия когорты, а `cc-doctor` показывает тот же вывод в секции
-`Engine routing`. Чинится одним значением: `off` на одной из сторон либо сужение
-диапазона.
-
-Следствие, о котором стоит знать: раз любое непустое значение — префикс-замкнутое
-множество тиров, комбинация «codex на fast, jcode на std» **невыразима** (`fast+std`
-обязательно включает `fast`). На практике один движок владеет стороной реализации,
-другой — стороной ревью.
 
 ## Настройки Codex-native сессий
 
@@ -207,10 +173,10 @@ $env:ORCHESTRA_PROVIDER = 'codex'
 Остальные ключи `.work/config.md`, включая `MAX_PARALLEL`, `COHORT_SIZE`,
 `COHORT_TOKEN_BUDGET`, `CODEX_CIFIX`, `CODEX_MODEL` (общий ключ обоих адаптеров — в
 отличие от пер-ролевых `CODEX_*_MODEL` выше), `CODEX_REASONING`,
-`CODEX_SANDBOX`, `CODEX_NETWORK`, `JCODE_PROVIDER`, `JCODE_CMD`, `PUSH` и `CI_WATCH`, не
+`CODEX_SANDBOX`, `CODEX_NETWORK`, `PUSH` и `CI_WATCH`, не
 имеют env-фолбэка.
 
-`CC_CODEX_EXEC_GRANT`, `CC_JCODE_RUNTIME_GRANT`, `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`, `ORCHESTRA_CODEX_ROLE_TOPIC`,
+`CC_CODEX_EXEC_GRANT`, `ORCHESTRA_PROCESSKIT_ROOT_RUN_ID`, `ORCHESTRA_CODEX_ROLE_TOPIC`,
 `ORCHESTRA_BROKER_*`, `RUNTIME_LAYOUT`,
 `MSBUILDDISABLENODEREUSE` и `DOTNET_CLI_USE_MSBUILD_SERVER` выставляются runtime или
 launchers внутренне. Переменные `*_FAULT` и внутренние `*_DEBUG` предназначены для

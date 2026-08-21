@@ -28,9 +28,6 @@
 #     not pass through the Bash permission gate (review finding R-01).
 #   Bash(codex exec:*) - the canonical codex-autonomy anchor CC_CODEX_EXEC_GRANT names and
 #     that the Phase 1.1 gate / cc-doctor / cc-config settings rule key off.
-# Two additional session-only prefixes cover both literal jcode-runtime layouts; cc-config
-# does not persist them. They sit BEFORE --permission-mode (the variadic flag must not swallow the following
-# tokens). The effective mode is validated below; --continue is unchanged.
 # CC_CODEX_EXEC_GRANT="codex exec": the same single launcher->processor contract as in
 # cc-processor.sh - an explicit signal of the already-issued session grant that the Phase
 # 1.1 gate and cc-doctor read; its value stays the canonical "codex exec" prefix they
@@ -62,7 +59,6 @@ if [ "$PROVIDER" = "claude" ]; then
 fi
 
 export CC_CODEX_EXEC_GRANT="codex exec"
-export CC_JCODE_RUNTIME_GRANT="jcode-runtime"
 export MSBUILDDISABLENODEREUSE=1
 export DOTNET_CLI_USE_MSBUILD_SERVER=0
 # Keep long codex-runtime calls in the foreground so the existing allow-rule applies.
@@ -133,13 +129,13 @@ fi
 LEASE=".work/orchestrator.lock/lease.json"
 if [ -f "$LEASE" ] && grep -Eq '"role"[[:space:]]*:[[:space:]]*"processor"' "$LEASE"; then
   if $USE_PROCESSKIT_RUNTIME; then
-    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-resume-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
   fi
-  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
+  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" --continue "Continue processing .work/Tasks_Queue.md from where you left off, per your system prompt's Фаза 0 recovery logic."
 else
   echo "No addressed processor lease (.work/orchestrator.lock/lease.json role=processor) for this project - performing a cold recovery instead of resuming an arbitrary last session."
   if $USE_PROCESSKIT_RUNTIME; then
-    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+    exec pwsh -NoProfile -File "$PROCESSKIT_RUNTIME" run-root --interactive --work "$PWD/.work" --label processor-recover-claude -- claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
   fi
-  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" "Bash(pwsh -File tools/jcode-runtime.ps1:*)" "Bash(pwsh -File ~/.claude/scripts/jcode-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
+  exec claude --agent processor --allowedTools "Bash(codex exec:*)" "Bash(pwsh -File tools/codex-runtime.ps1:*)" --permission-mode "$CLAUDE_PERMISSION_MODE" "Cold start: no addressed processor session to continue. Follow your system prompt's Фаза 0 recovery logic from scratch (reconcile any interrupted state without --continue), then process .work/Tasks_Queue.md end to end."
 fi

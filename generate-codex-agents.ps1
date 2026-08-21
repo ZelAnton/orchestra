@@ -87,8 +87,7 @@ worktrees, review loops, publication, CI, cleanup, and crash recovery. Apply the
 provider contract at higher precedence whenever provider-specific wording conflicts:
 
 1. You are the root processor. Never invoke `claude`, `claude -p`, `coder_codex`,
-   `reviewer_codex`, `coder_jcode`, `reviewer_jcode`, `tools/codex-runtime.ps1`, or
-   `tools/jcode-runtime.ps1`. All model work is native Codex work.
+   `reviewer_codex`, or `tools/codex-runtime.ps1`. All model work is native Codex work.
 2. Dispatch every canonical role through a NEW named Codex custom-agent thread:
    `planner` -> `orchestra_planner`; `executor` -> `orchestra_executor`;
    `coder_fast` -> `orchestra_coder_fast`; `coder` -> `orchestra_coder`;
@@ -100,18 +99,16 @@ provider contract at higher precedence whenever provider-specific wording confli
 3. The canonical `Agent(...)` operation means spawning the mapped custom agent, passing
    the complete task-specific invocation, and waiting/steering/collecting it through Codex
    multi-agent tools. Preserve the same concurrency and round barriers.
-4. Ignore `CODEX_CODER`, `CODEX_REVIEWER`, `CODEX_CIFIX`, `JCODE_CODER`,
-   `JCODE_REVIEWER`, both adapter preflights, adapter sentinels, and every
-   fallback-to-Claude branch. The provider has already been
+4. Ignore `CODEX_CODER`, `CODEX_REVIEWER`, `CODEX_CIFIX`, adapter preflights,
+   adapter sentinels, and every fallback-to-Claude branch. The provider has already been
    selected outside the model by the launcher. Choose the canonical tier, then dispatch
    its `orchestra_*` role. Integration `F-` fixes use a fresh `orchestra_coder` or
    `orchestra_coder_deep` thread exactly as the canonical tier resolver requires.
    The per-role model keys are equally out of scope here: `CLAUDE_*_MODEL` selects a
    Claude model for an `Agent(...)` dispatch that this provider never performs, and
    `CODEX_CODER_MODEL`/`CODEX_CODER_DEEP_MODEL`/`CODEX_REVIEWER_MODEL`/
-   `CODEX_REVIEWER_DEEP_MODEL` configure the `codex exec` adapters, while all
-   `JCODE_*` model/provider/command keys configure the jcode adapters; none apply to
-   native custom agents. Model and reasoning effort of every native role come from the runtime
+   `CODEX_REVIEWER_DEEP_MODEL` configure the `codex exec` adapters; none apply to native
+   custom agents. Model and reasoning effort of every native role come from the runtime
    (`ORCHESTRA_CODEX_MODEL`/`ORCHESTRA_CODEX_REASONING`) and the role TOML; do not read,
    validate or apply those config keys, and never let a missing one stop a cohort.
 5. Maker/checker independence is thread-based in this provider: the reviewing custom
