@@ -98,11 +98,9 @@ It mirrors:
   where `claude --agent <name>` loads them from;
 - the launchers into your Claude scripts directory (`%USERPROFILE%\.claude\scripts`
   or `~/.claude/scripts`, which should be on `PATH`) — `launchers\*.cmd` on Windows,
-  `launchers/*.sh` on macOS/Linux — plus `config.example.md` and
-  `constraints.example.md` alongside them so `cc-config` can find its templates,
-  and `docs/inbox_contract.md` as `~/.claude/specs/Inbox_Contract.md`,
-  from the mirror, and `tools/doctor-runtime.ps1` (the shared engine the thin
-  `cc-doctor` wrappers delegate to) so `cc-doctor` runs the same from the mirror.
+  `launchers/*.sh` on macOS/Linux. Common `config.example.md`,
+  `constraints.example.md`, `docs/inbox_contract.md`, and orchestration runtimes are
+  installed under `~/.orchestra` (`%USERPROFILE%\.orchestra` on Windows).
 
 Both launchers are thin wrappers around one cross-platform engine,
 `tools/sync-runtime.ps1` (run under PowerShell 7 — `pwsh` — on both Windows and
@@ -117,7 +115,8 @@ on `PATH`; install it from <https://aka.ms/powershell> if it is missing.)
 Mirroring is transactional: files are published through a staging area with a
 journal-backed rollback, so an interruption mid-publish is rolled back to the exact
 prior state rather than leaving a half-applied mirror. The runtime keeps a manifest
-(`~/.claude/.orchestra-sync-manifest.json`) of the files it manages; on a later sync it
+(`~/.claude/.orchestra-sync-manifest.json` and
+`~/.orchestra/.orchestra-shared-sync-manifest.json`) of the files it manages; on a later sync it
 prunes only entries it previously wrote that are no longer sourced (a renamed/deleted
 agent or launcher). Files it never wrote — other agents you added to the mirror by hand
 — are never touched. The same command generates namespaced Codex custom agents under

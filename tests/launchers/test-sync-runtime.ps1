@@ -9,8 +9,8 @@
   path: the pass/fail result is the cross-platform equivalence proof for sync.
 
   Covered:
-    - a clean mirror publishes agents, launchers, config templates and the WHOLE
-      tools/*.ps1 runner folder (except cc-sync's own engine) + a manifest (T-115);
+    - a clean mirror publishes provider files under the Claude root and common
+      configuration/runtime files under a separate shared root;
     - stale pruning removes only files recorded in the manifest (a removed agent AND a
       removed runner), never foreign files;
     - a mid-publish failure rolls the mirror back to its exact prior state (no partial
@@ -67,8 +67,8 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'launchers\cc-sync.cmd') "@echo off`r`n"
     Write-File (Join-Path $repo 'launchers\cc-doctor.cmd') "@echo off`r`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.sh') "#!/usr/bin/env bash`n"
-    # tools/*.ps1: sync mirrors the WHOLE folder into scripts/ (task T-115), except its own
-    # sync-runtime.ps1 engine, so EVERY runner resolves from a mirror-only project. The
+    # tools/*.ps1: common runners mirror into the shared home; provider runtimes remain
+    # beside provider launchers. The
     # launcher engines the thin cc-doctor wrappers / codex adapters delegate to
     # (doctor-runtime.ps1, codex-runtime.ps1 - T-114) plus the transactional/orchestration
     # runners the agents call directly (state-tx.ps1, queue-tx.ps1, ...) must all travel with
@@ -88,8 +88,10 @@ function New-SyntheticRepo {
 
 function Invoke-Sync {
     param([string]$Repo, [string]$Dest, [string]$Glob = '*.cmd')
+    $shared = Join-Path $Dest '.orchestra'
     $rtArgs = @('-NoProfile', '-File', $script:Runtime,
         '-RepoRoot', $Repo, '-DestinationRoot', $Dest,
+        '-SharedDestinationRoot', $shared,
         '-LauncherGlob', $Glob, '-SkipRegen', '-SkipValidate', '-Quiet')
     $outFile = [System.IO.Path]::GetTempFileName()
     $errFile = [System.IO.Path]::GetTempFileName()
@@ -119,6 +121,7 @@ function Assert-FileText {
 # =============================================================================
 $repo = New-SyntheticRepo
 $dest = New-Root
+$sharedDest = Join-Path $dest '.orchestra'
 $r = Invoke-Sync -Repo $repo -Dest $dest
 Assert-True ($r.ExitCode -eq 0) "clean sync exits 0 (got $($r.ExitCode); err=$($r.Err.Trim()))"
 Assert-FileText (Join-Path $dest 'agents\coder.md') "coder-v1`n" 'clean: coder.md mirrored'
@@ -127,40 +130,45 @@ Assert-True (-not (Test-Path (Join-Path $dest 'agents\coder.template.md'))) 'cle
 Assert-True (-not (Test-Path (Join-Path $dest 'agents\reviewer.template.md'))) 'clean: reviewer.template.md excluded'
 Assert-FileText (Join-Path $dest 'scripts\cc-sync.cmd') "@echo off`r`n" 'clean: cc-sync.cmd mirrored byte-for-byte with CRLF'
 Assert-True (-not (Test-Path (Join-Path $dest 'scripts\cc-sync.sh'))) 'clean: .sh not mirrored when glob is *.cmd'
-Assert-FileText (Join-Path $dest 'scripts\config.example.md') "config-v1`n" 'clean: config.example.md mirrored'
-Assert-FileText (Join-Path $dest 'scripts\constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored'
-Assert-FileText (Join-Path $dest 'specs\Inbox_Contract.md') "inbox-contract-v1`n" 'clean: inbox contract mirrored to the shared specs directory'
+Assert-FileText (Join-Path $sharedDest 'config.example.md') "config-v1`n" 'clean: config.example.md mirrored to shared home'
+Assert-FileText (Join-Path $sharedDest 'constraints.example.md') "constraints-v1`n" 'clean: constraints.example.md mirrored to shared home'
+Assert-FileText (Join-Path $sharedDest 'specs\Inbox_Contract.md') "inbox-contract-v1`n" 'clean: inbox contract mirrored to shared specs directory'
 Assert-FileText (Join-Path $dest 'scripts\codex-processor.md') "codex-processor-v1`n" 'clean: Codex root processor prompt mirrored beside runtimes'
-Assert-FileText (Join-Path $dest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored next to the launchers (so cc-doctor runs from the mirror)'
+Assert-FileText (Join-Path $sharedDest 'scripts\doctor-runtime.ps1') "doctor-rt-v1`n" 'clean: doctor-runtime.ps1 mirrored to shared home'
 Assert-FileText (Join-Path $dest 'scripts\codex-runtime.ps1') "codex-rt-v1`n" 'clean: codex-runtime.ps1 mirrored next to the launchers (so coder_codex/reviewer_codex resolve it from the mirror - T-114)'
 Assert-FileText (Join-Path $dest 'scripts\codex-role-runtime.ps1') "codex-role-rt-v1`n" 'clean: direct-role Codex TUI runtime mirrored next to provider-aware launchers'
 # T-115: the WHOLE tools/*.ps1 folder is mirrored, not a curated allowlist, so the
 # transactional/orchestration runners the agents call directly travel with the mirror too.
-Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'clean: state-tx.ps1 mirrored (whole tools/ folder - T-115)'
-Assert-FileText (Join-Path $dest 'scripts\queue-tx.ps1') "queue-tx-v1`n" 'clean: queue-tx.ps1 mirrored (whole tools/ folder - T-115)'
-Assert-FileText (Join-Path $dest 'scripts\verification.ps1') "verification-v1`n" 'clean: verification.ps1 mirrored for SHA-bound pre-push gates (T-270)'
-# ...but cc-sync's own engine is the sole exclusion (dead weight in a mirror).
-Assert-True (-not (Test-Path (Join-Path $dest 'scripts\sync-runtime.ps1'))) 'clean: sync-runtime.ps1 NOT mirrored (cc-sync engine is the sole tools/*.ps1 exclusion)'
+Assert-FileText (Join-Path $sharedDest 'scripts\state-tx.ps1') "state-tx-v1`n" 'clean: state-tx.ps1 mirrored to shared home'
+Assert-FileText (Join-Path $sharedDest 'scripts\queue-tx.ps1') "queue-tx-v1`n" 'clean: queue-tx.ps1 mirrored to shared home'
+Assert-FileText (Join-Path $sharedDest 'scripts\verification.ps1') "verification-v1`n" 'clean: verification.ps1 mirrored to shared home'
+Assert-True (-not (Test-Path (Join-Path $sharedDest 'scripts\sync-runtime.ps1'))) 'clean: sync-runtime.ps1 remains checkout-only'
 $codexDest = Join-Path $dest '.codex'
 Assert-FileText (Join-Path $codexDest 'agents\orchestra_coder.toml') "name = 'orchestra_coder'`n" 'clean: generated Codex coder role installed under isolated CODEX_HOME'
 Assert-FileText (Join-Path $codexDest 'agents\orchestra_reviewer.toml') "name = 'orchestra_reviewer'`n" 'clean: generated Codex reviewer role installed under isolated CODEX_HOME'
 $codexManifest = Join-Path $codexDest '.orchestra-agent-sync-manifest.json'
 Assert-True (Test-Path -LiteralPath $codexManifest) 'clean: Codex role manifest written'
 $manifestPath = Join-Path $dest '.orchestra-sync-manifest.json'
+$sharedManifestPath = Join-Path $sharedDest '.orchestra-shared-sync-manifest.json'
 Assert-True (Test-Path -LiteralPath $manifestPath) 'clean: manifest written'
 if (Test-Path -LiteralPath $manifestPath) {
     $mf = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
     Assert-True (@($mf.managed) -contains 'agents/coder.md') 'clean: manifest lists agents/coder.md'
-    Assert-True (@($mf.managed) -contains 'scripts/config.example.md') 'clean: manifest lists scripts/config.example.md'
-    Assert-True (@($mf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: manifest lists scripts/doctor-runtime.ps1'
+    Assert-True (-not (@($mf.managed) -contains 'scripts/config.example.md')) 'clean: provider manifest excludes shared config'
+    Assert-True (-not (@($mf.managed) -contains 'scripts/doctor-runtime.ps1')) 'clean: provider manifest excludes shared runtime'
     Assert-True (@($mf.managed) -contains 'scripts/codex-runtime.ps1') 'clean: manifest lists scripts/codex-runtime.ps1'
     Assert-True (@($mf.managed) -contains 'scripts/codex-role-runtime.ps1') 'clean: manifest lists scripts/codex-role-runtime.ps1'
-    Assert-True (@($mf.managed) -contains 'scripts/state-tx.ps1') 'clean: manifest lists scripts/state-tx.ps1 (T-115)'
-    Assert-True (@($mf.managed) -contains 'scripts/verification.ps1') 'clean: manifest lists scripts/verification.ps1 (T-270)'
     Assert-True (@($mf.managed) -contains 'scripts/codex-processor.md') 'clean: manifest lists Codex processor prompt'
-    Assert-True (@($mf.managed) -contains 'specs/Inbox_Contract.md') 'clean: manifest lists shared inbox contract'
+    Assert-True (-not (@($mf.managed) -contains 'specs/Inbox_Contract.md')) 'clean: provider manifest excludes shared inbox contract'
     Assert-True (-not (@($mf.managed) -contains 'scripts/sync-runtime.ps1')) 'clean: manifest excludes cc-sync own engine'
     Assert-True (-not (@($mf.managed) -contains 'agents/coder.template.md')) 'clean: manifest excludes template'
+}
+if (Test-Path -LiteralPath $sharedManifestPath) {
+    $smf = [System.IO.File]::ReadAllText($sharedManifestPath) | ConvertFrom-Json
+    Assert-True (@($smf.managed) -contains 'config.example.md') 'clean: shared manifest lists config.example.md'
+    Assert-True (@($smf.managed) -contains 'scripts/doctor-runtime.ps1') 'clean: shared manifest lists doctor-runtime.ps1'
+    Assert-True (@($smf.managed) -contains 'scripts/state-tx.ps1') 'clean: shared manifest lists state-tx.ps1'
+    Assert-True (@($smf.managed) -contains 'specs/Inbox_Contract.md') 'clean: shared manifest lists inbox contract'
 }
 
 # =============================================================================
@@ -177,8 +185,8 @@ Remove-Item -LiteralPath (Join-Path $repo 'codex\agents\orchestra_reviewer.toml'
 $r2 = Invoke-Sync -Repo $repo -Dest $dest
 Assert-True ($r2.ExitCode -eq 0) "prune sync exits 0 (got $($r2.ExitCode); err=$($r2.Err.Trim()))"
 Assert-True (-not (Test-Path (Join-Path $dest 'agents\reviewer.md'))) 'prune: removed source agent pruned from mirror'
-Assert-True (-not (Test-Path (Join-Path $dest 'scripts\queue-tx.ps1'))) 'prune: removed source runner pruned from mirror (T-115)'
-Assert-FileText (Join-Path $dest 'scripts\state-tx.ps1') "state-tx-v1`n" 'prune: still-sourced runner kept'
+Assert-True (-not (Test-Path (Join-Path $sharedDest 'scripts\queue-tx.ps1'))) 'prune: removed source runner pruned from shared home'
+Assert-FileText (Join-Path $sharedDest 'scripts\state-tx.ps1') "state-tx-v1`n" 'prune: still-sourced runner kept in shared home'
 Assert-FileText (Join-Path $dest 'agents\custom_local.md') "mine`n" 'prune: foreign file untouched'
 Assert-FileText (Join-Path $dest 'agents\coder.md') "coder-v1`n" 'prune: still-sourced agent kept'
 Assert-True (-not (Test-Path (Join-Path $codexDest 'agents\orchestra_reviewer.toml'))) 'prune: removed generated Codex role pruned from its own manifest'
@@ -218,9 +226,9 @@ $manifestR = Join-Path $destR '.orchestra-sync-manifest.json'
 $manifestBefore = [System.IO.File]::ReadAllText($manifestR)
 # Change a source agent so a successful re-sync WOULD overwrite its mirrored copy...
 Write-File (Join-Path $repoR 'agents\coder.md') "coder-CHANGED`n"
-# ...then poison the LAST destination (constraints.example.md) with a NON-empty
-# directory, which the runtime must refuse and roll back.
-$poison = Join-Path $destR 'scripts\constraints.example.md'
+# ...then poison a provider destination with a NON-empty directory, which that
+# transaction must refuse and roll back before the shared transaction starts.
+$poison = Join-Path $destR 'agents\processor.md'
 Remove-Item -LiteralPath $poison -Force
 New-Item -ItemType Directory -Force -Path $poison | Out-Null
 Write-File (Join-Path $poison 'do-not-delete.txt') "real data`n"
@@ -289,7 +297,7 @@ Assert-True ($r7.ExitCode -eq 0) "path guard: unsafe recovery entry is ignored w
 Assert-FileText $outside "must-survive`n" 'path guard: journal traversal cannot remove outside file'
 
 # =============================================================================
-# 7) Get-ManagedPairs/Get-CodexManagedPairs never join a literal backslash into
+# 7) Get-ProviderManagedPairs/Get-SharedManagedPairs/Get-CodexManagedPairs never join a literal backslash into
 #    a Join-Path string argument (regression: `Join-Path $Repo 'codex\processor.md'`
 #    is only a valid separator on Windows; under pwsh on POSIX - this file is
 #    tagged ci:posix and run-all.ps1 runs it there too in CI - the backslash is
@@ -303,13 +311,13 @@ Assert-FileText $outside "must-survive`n" 'path guard: journal traversal cannot 
 #     deterministic on ANY host OS since it never depends on which directory
 #     separator the test process itself happens to run under.
 $runtimeText = Get-Content -LiteralPath $script:Runtime -Raw
-$mppMatch = [regex]::Match($runtimeText, '(?s)function Get-ManagedPairs\b.*?\n\}\r?\n')
+$mppMatch = [regex]::Match($runtimeText, '(?s)function Get-ProviderManagedPairs\b.*?\n\}\r?\n')
 $cmppMatch = [regex]::Match($runtimeText, '(?s)function Get-CodexManagedPairs\b.*?\n\}\r?\n')
-Assert-True $mppMatch.Success 'posix-path: Get-ManagedPairs function body located for inspection'
+Assert-True $mppMatch.Success 'posix-path: Get-ProviderManagedPairs function body located for inspection'
 Assert-True $cmppMatch.Success 'posix-path: Get-CodexManagedPairs function body located for inspection'
 $literalBackslashInJoin = "(?m)Join-Path\s+[^\r\n]*'[^']*\\[^']*'"
 if ($mppMatch.Success) {
-    Assert-True (-not [regex]::IsMatch($mppMatch.Value, $literalBackslashInJoin)) 'posix-path: Get-ManagedPairs builds no Join-Path with a literal backslash inside a string argument (codex\processor.md regression)'
+    Assert-True (-not [regex]::IsMatch($mppMatch.Value, $literalBackslashInJoin)) 'posix-path: Get-ProviderManagedPairs builds no Join-Path with a literal backslash inside a string argument (codex\processor.md regression)'
 }
 if ($cmppMatch.Success) {
     Assert-True (-not [regex]::IsMatch($cmppMatch.Value, $literalBackslashInJoin)) 'posix-path: Get-CodexManagedPairs builds no Join-Path with a literal backslash inside a string argument (codex\agents regression)'
@@ -317,12 +325,12 @@ if ($cmppMatch.Success) {
 
 # 7b) Dynamic check: dot-source ONLY the real function definitions (everything
 #     before the "# Main" execution block, which calls exit and would otherwise
-#     terminate this test process) and drive Get-ManagedPairs/Get-CodexManagedPairs
+#     terminate this test process) and drive Get-ProviderManagedPairs/Get-CodexManagedPairs
 #     directly against a synthetic $Repo, verifying - via a DirectorySeparatorChar-
 #     agnostic Split-Path decomposition, not a literal-backslash string scan - that
 #     the Codex prompt/agent pairs resolve to the correct leaf/parent names.
 #     NOTE (R-01, verified empirically against a real pwsh 7.4.6 on Linux): this
-#     dynamic check alone does NOT distinguish old vs. new Get-ManagedPairs /
+#     dynamic check alone does NOT distinguish old vs. new Get-ProviderManagedPairs /
 #     Get-CodexManagedPairs behavior on POSIX, because pwsh's Join-Path cmdlet
 #     normalizes an embedded literal backslash in a ChildPath string argument to
 #     '/' on that platform - so the pre-fix `Join-Path $Repo 'codex\processor.md'`
@@ -349,9 +357,9 @@ try {
         try {
             . $tmpFuncScript
             $destP = Join-Path $repoP 'dest-unused'
-            $pairs = Get-ManagedPairs -Repo $repoP -Dest $destP -Glob '*.cmd'
+            $pairs = Get-ProviderManagedPairs -Repo $repoP -Dest $destP -Glob '*.cmd'
             $codexPromptPair = @($pairs | Where-Object { $_.Kind -eq 'codex_prompt' })
-            Assert-True ($codexPromptPair.Count -eq 1) 'posix-path: Get-ManagedPairs finds exactly one codex_prompt pair'
+            Assert-True ($codexPromptPair.Count -eq 1) 'posix-path: Get-ProviderManagedPairs finds exactly one codex_prompt pair'
             if ($codexPromptPair.Count -eq 1) {
                 $src = $codexPromptPair[0].Source
                 Assert-True ((Split-Path -Leaf $src) -eq 'processor.md') "posix-path: codex prompt Source leaf is processor.md (got $src)"

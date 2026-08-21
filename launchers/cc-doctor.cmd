@@ -12,10 +12,12 @@ rem separate hand-mirrored POSIX shell program) is what makes Windows and POSIX 
 rem identical diagnostics, and removes the cmd.exe UTF-8/codepage fragility the old
 rem inline version had to work around.
 setlocal
+if not defined ORCHESTRA_HOME set "ORCHESTRA_HOME=%USERPROFILE%\.orchestra"
 rem Prefer the checkout layout (launchers\..\tools\doctor-runtime.ps1); fall back to the
 rem mirror layout (the runtime mirrored next to this launcher in %USERPROFILE%\.claude\
 rem scripts by cc-sync) so cc-doctor keeps working when run from the mirror.
 set "CC_DOCTOR_RT=%~dp0..\tools\doctor-runtime.ps1"
+if not exist "%CC_DOCTOR_RT%" set "CC_DOCTOR_RT=%ORCHESTRA_HOME%\scripts\doctor-runtime.ps1"
 if not exist "%CC_DOCTOR_RT%" set "CC_DOCTOR_RT=%~dp0doctor-runtime.ps1"
 if not exist "%CC_DOCTOR_RT%" (
   echo cc-doctor: doctor-runtime.ps1 not found next to the launcher or under ..\tools; reinstall the mirror with cc-sync from a repo checkout. 1>&2

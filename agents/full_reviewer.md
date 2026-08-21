@@ -42,7 +42,7 @@ verification evidence/transient supervisor-файлы.
 target-local `tools/`, даже если он старый или gitignored.
 
 Если для подтверждения находки запускаешь сборку/тест, контейнируй её через резолвленный
-`tools/supervisor.ps1` (checkout) или `~/.claude/scripts/supervisor.ps1` (mirror): `run`
+`tools/supervisor.ps1` (checkout) или `~/.orchestra/scripts/supervisor.ps1` (mirror): `run`
 с `--exe ... --args-json ...` либо с `--shell-command` только для заранее заданной оператором
 команды, `--working-directory <интеграционный worktree> --deadline-sec
 <CALL_DEADLINE_SEC, default 1800> --output-max-bytes <CALL_OUTPUT_MAX_BYTES, default 1048576>
@@ -285,7 +285,7 @@ F-фиксы коммитятся на интеграционную ветку �
 # Межрепозиторные инженерные запросы
 
 Подтверждённый межпроектный дефект или возможность можно передать владельцу через
-`inbox.ps1 send` по `$HOME/.claude/specs/Inbox_Contract.md`, выбрав адресата только через
+`inbox.ps1 send` по `$HOME/.orchestra/specs/Inbox_Contract.md`, выбрав адресата только через
 `project-registry.ps1 list`. Сообщение содержит факты, влияние, границу владения,
 желаемый результат и альтернативы, но не навязывает дизайн. Оно не заменяет `F-`-находку
 или локальную защиту и не разрешает менять чужой репозиторий. Не жди ответа; сообщи

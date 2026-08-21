@@ -197,7 +197,24 @@ function Resolve-OrchestraProcessKitBackend {
     $cliName = if ($cliExplicit) { $configuredCli.Trim() } else { 'processkit-cli' }
 
     if (-not $cliDisabled) {
-        $cli = Get-ProcessKitApplication $cliName
+        $cli = $null
+        if ($cliExplicit) {
+            $cli = Get-ProcessKitApplication $cliName
+        } else {
+            # The shared binary is installed beside the common runtime, before PATH
+            # discovery. This makes the already-installed .orchestra/processkit-cli.exe
+            # deterministic and prevents an unrelated developer installation from taking
+            # precedence over the Orchestra contract.
+            foreach ($candidate in @(
+                (Join-Path (Get-OrchestraHome) 'processkit-cli.exe'),
+                (Join-Path (Get-OrchestraHome) 'processkit-cli'),
+                'processkit-cli'
+            )) {
+                if ([System.IO.Path]::IsPathRooted($candidate) -and -not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+                $cli = Get-ProcessKitApplication $candidate
+                if ($null -ne $cli -and $cli.Source) { break }
+            }
+        }
         if ($null -ne $cli -and $cli.Source) {
             $contract = Test-ProcessKitCliContract -FilePath ([string]$cli.Source)
             return [pscustomobject]@{

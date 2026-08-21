@@ -152,7 +152,7 @@ processor). **Используй переданные `WORK` и `VCS`. Если 
 никогда не исполняй оттуда одноимённый runtime Orchestra.
 (здесь — `tools/redaction.ps1`) резолвится по единому правилу: в **чекауте** orchestra —
 буквально этот относительный путь; в целевом проекте **без трёх identity-маркеров** (зеркало
-`cc-sync`) тот же раннер лежит в `~/.claude/scripts/<script>.ps1` — подставь эту форму,
+`cc-sync`) тот же раннер лежит в `~/.orchestra/scripts/<script>.ps1` — подставь эту форму,
 **тильду оставь литеральной** (её раскрывает shell). Запускай раннер как `pwsh -File …` (PowerShell 7), **не** через
 `powershell.exe`/Windows PowerShell 5.1 (её дефолтная политика Restricted валит скрипт с
 «running scripts is disabled») и **не** пересобирая зеркальный путь через
@@ -164,7 +164,7 @@ processor). **Используй переданные `WORK` и `VCS`. Если 
 # Изоляция сборок и диагностика процессов
 
 Любую сборку/тест/`SMOKE_CMD` запускай не голой Bash-командой, а через резолвленный выше
-`tools/supervisor.ps1` (в зеркале — `~/.claude/scripts/supervisor.ps1`). Для произвольной,
+`tools/supervisor.ps1` (в зеркале — `~/.orchestra/scripts/supervisor.ps1`). Для произвольной,
 заранее заданной оператором строки `SMOKE_CMD` используй `run --shell-command <строка>`;
 для известного argv предпочтительнее `run --exe <program> --args-json <JSON-массив>`.
 Эффективные `CALL_DEADLINE_SEC` и `CALL_OUTPUT_MAX_BYTES` бери из промпта processor;
@@ -189,12 +189,12 @@ reuse-воркеры MSBuild/компилятора не переживают с
 **Резолвинг контракта очереди (без обхода диска).** Ссылки `docs/queue_contract.md`/
 `Tasks_Queue_Format.md` (в т.ч. форма «см. …, §N», как §18 выше) — **не** команда искать файл на
 диске: читай их по точному пути `$ROOT/docs/queue_contract.md` (полная спецификация —
-`$HOME/.claude/specs/Tasks_Queue_Format.md`, в PowerShell
-`$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
+`$HOME/.orchestra/specs/Tasks_Queue_Format.md`, в PowerShell
+`$env:USERPROFILE\.orchestra\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
 `find / -maxdepth N` — как и любой другой неограниченный от корня обход: `-maxdepth N` от `/` на
 Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
 может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
-ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+ограниченный `$ROOT/docs`/`$HOME/.orchestra/specs`.
 
 # Риск задачи (`Риск:`)
 
@@ -346,7 +346,7 @@ processor закоммитит точечно (не `git add -A`), поэтом�
 
 Если в ходе реализации ты **подтвердил** дефект, повторяющееся трение или недостающую
 возможность в другом зарегистрированном проекте, можешь отправить его владельцу запрос
-через `inbox.ps1 send`. Прочитай `$HOME/.claude/specs/Inbox_Contract.md`; адресата выбирай
+через `inbox.ps1 send`. Прочитай `$HOME/.orchestra/specs/Inbox_Contract.md`; адресата выбирай
 только через `project-registry.ps1 list`, тело передавай через `--body-file`. Укажи
 проверенные факты, влияние, границу владения, желаемый результат и альтернативы; не
 навязывай реализацию. Запрос не заменяет локальный фикс/фолбэк и не разрешает менять

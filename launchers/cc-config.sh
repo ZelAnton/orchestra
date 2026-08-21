@@ -29,15 +29,16 @@
 #     write it.
 
 # Directory of this script (works whether run from a repo checkout or the ~/.claude/scripts
-# mirror).
+# provider mirror). Shared templates are installed under ~/.orchestra.
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+export ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
 
 mkdir -p ".work"
 
 # Look for a template next to launchers/ first (repo checkout layout: this file lives in
-# launchers/, the *.example.md one level up at the repo root), then alongside this script
-# (mirror layout in ~/.claude/scripts, where cc-sync.sh mirrors the templates flat next to
-# the *.sh files). On success prints the resolved path and returns 0. On failure prints
+# launchers/, the *.example.md one level up at the repo root), then in ~/.orchestra
+# (the shared mirror), then alongside this script for legacy/provider mirrors. On success
+# prints the resolved path and returns 0. On failure prints
 # nothing and returns a code the caller maps to a distinct cause (task T-056): 1 = a
 # directory of that name shadows the template (the ~/.claude/scripts mirror is corrupted),
 # 2 = the template is genuinely absent. `[ -f ]` already skips a directory, but without
@@ -46,6 +47,9 @@ mkdir -p ".work"
 find_template() {
   if [ -f "$SCRIPT_DIR/../$1" ]; then
     printf '%s\n' "$SCRIPT_DIR/../$1"
+    return 0
+  elif [ -f "$ORCHESTRA_HOME/$1" ]; then
+    printf '%s\n' "$ORCHESTRA_HOME/$1"
     return 0
   elif [ -f "$SCRIPT_DIR/$1" ]; then
     printf '%s\n' "$SCRIPT_DIR/$1"
@@ -203,6 +207,9 @@ fi
 # Registration is a required cc-config outcome: a missing/broken runtime fails the
 # launcher instead of leaving the project silently undiscoverable by other repositories.
 PROJECT_REGISTRY="$SCRIPT_DIR/../tools/project-registry.ps1"
+if [ ! -f "$PROJECT_REGISTRY" ]; then
+  PROJECT_REGISTRY="$ORCHESTRA_HOME/scripts/project-registry.ps1"
+fi
 if [ ! -f "$PROJECT_REGISTRY" ]; then
   PROJECT_REGISTRY="$SCRIPT_DIR/project-registry.ps1"
 fi

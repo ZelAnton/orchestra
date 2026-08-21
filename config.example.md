@@ -608,7 +608,7 @@ commit/merge/publication) и `check-publish` (allowed branch/remote + push/merge
 allow-список `cc-doctor` и валидация processor'а — **машинно-сверяемые копии** этой схемы
 (`tools/check-consistency.ps1`, Class 4/5), а не независимые источники: расхождение валит
 smoke-гейт. `cc-doctor` держит свою копию хардкодом намеренно — он работает и вне репозитория
-(mirror в `~/.claude/scripts`, где `tools/` недоступен), — но разойтись со схемой не может.
+(shared runtime в `~/.orchestra/scripts`, где `tools/` недоступен), — но разойтись со схемой не может.
 
 ## База знаний проекта (KB)
 
@@ -711,8 +711,8 @@ codex, экономя квоту Claude для самых сложных зад�
 маршрутизацией — Фаза 1.1; адаптеры `coder_codex`/`reviewer_codex` при формировании
 `--sandbox`) валидируют значения по **этой одной таблице** — она единый источник истины.
 `cc-doctor` и processor держат её копию (mirror-совместимость — движок `cc-doctor`
-работает и вне репозитория, будучи зеркалирован рядом с launcher'ами в
-`~/.claude/scripts`), а `tools/check-codex-config-guard.ps1` **машинно стережёт**, что
+работает и вне репозитория, будучи установленным в
+`~/.orchestra/scripts`), а `tools/check-codex-config-guard.ps1` **машинно стережёт**, что
 копии не разошлись между собой (defaults, множества значений, ветвление `processor.md` и
 единый движок `cc-doctor` `tools/doctor-runtime.ps1`).
 

@@ -16,10 +16,12 @@
 set -u
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+export ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
 # Prefer the checkout layout (launchers/../tools/doctor-runtime.ps1); fall back to the
 # mirror layout (the runtime mirrored next to this launcher in ~/.claude/scripts by
 # cc-sync) so cc-doctor keeps working when run from the mirror.
 RT="$SCRIPT_DIR/../tools/doctor-runtime.ps1"
+[ -f "$RT" ] || RT="$ORCHESTRA_HOME/scripts/doctor-runtime.ps1"
 [ -f "$RT" ] || RT="$SCRIPT_DIR/doctor-runtime.ps1"
 if [ ! -f "$RT" ]; then
   echo "cc-doctor: doctor-runtime.ps1 not found next to the launcher or under ../tools; reinstall the mirror with cc-sync from a repo checkout." >&2

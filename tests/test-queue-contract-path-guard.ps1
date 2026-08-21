@@ -42,7 +42,7 @@ function New-Fixture {
     } else {
         '$ROOT/docs/roadmap_contract.md $ROOT/.work/roadmap.md'
     }
-    $queuePaths = '$ROOT/docs/queue_contract.md $HOME/.claude/specs/Tasks_Queue_Format.md'
+    $queuePaths = '$ROOT/docs/queue_contract.md $HOME/.orchestra/specs/Tasks_Queue_Format.md'
 
     # One role cites both families so the validator's per-family fail-closed scope check
     # remains active in every fixture.

@@ -67,7 +67,11 @@ export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
 export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
 
 SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd)"
+export ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
 PROCESSKIT_RUNTIME="$SCRIPT_DIR/../tools/processkit-runtime.ps1"
+if [ ! -f "$PROCESSKIT_RUNTIME" ]; then
+  PROCESSKIT_RUNTIME="$ORCHESTRA_HOME/scripts/processkit-runtime.ps1"
+fi
 if [ ! -f "$PROCESSKIT_RUNTIME" ]; then
   PROCESSKIT_RUNTIME="$SCRIPT_DIR/processkit-runtime.ps1"
 fi

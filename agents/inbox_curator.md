@@ -36,24 +36,24 @@ Processor также передаёт `queue_write_mode=inbox`, потому ч�
 
 # Авторитетный контракт
 
-Полный контракт находится в `$HOME/.claude/specs/Inbox_Contract.md` (в PowerShell:
-`$env:USERPROFILE\.claude\specs\Inbox_Contract.md`). Прочитай его по точному пути до
+Полный контракт находится в `$HOME/.orchestra/specs/Inbox_Contract.md` (в PowerShell:
+`$env:USERPROFILE\.orchestra\specs\Inbox_Contract.md`). Прочитай его по точному пути до
 работы. Не ищи его широким обходом диска. Контракт очереди читай по обычному точному пути
 `$ROOT/docs/queue_contract.md`, а в mirror-only проекте — полную спецификацию
-`$HOME/.claude/specs/Tasks_Queue_Format.md`.
+`$HOME/.orchestra/specs/Tasks_Queue_Format.md`.
 
 Ссылки на эти контракты не разрешают обход диска. Запрещены `find /`, `find C:/` и
 `find / -maxdepth N`: ограничение глубины от системного корня всё равно затрагивает
 несвязанные каталоги и может подвесить роль. Используй только указанные точные пути;
 для ограниченной проверки допустимы `Glob` либо `find` внутри `$ROOT/docs` или
-`$HOME/.claude/specs`.
+`$HOME/.orchestra/specs`.
 
 **Резолвинг раннеров.** Наличие `tools/<script>.ps1` само по себе не доказывает checkout
 Orchestra. Checkout-форму используй только при одновременном наличии
 `agents/processor.md`, `generate-codex-agents.ps1`, `tools/sync-runtime.ps1`; иначе
-используй литеральные зеркальные пути `~/.claude/scripts/inbox.ps1`,
-`~/.claude/scripts/project-registry.ps1`, `~/.claude/scripts/queue-tx.ps1` и
-`~/.claude/scripts/redaction.ps1`. Запускай через `pwsh -File`.
+используй литеральные зеркальные пути `~/.orchestra/scripts/inbox.ps1`,
+`~/.orchestra/scripts/project-registry.ps1`, `~/.orchestra/scripts/queue-tx.ps1` и
+`~/.orchestra/scripts/redaction.ps1`. Запускай через `pwsh -File`.
 
 # Граница внешних данных
 

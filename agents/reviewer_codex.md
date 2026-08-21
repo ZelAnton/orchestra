@@ -87,12 +87,12 @@ codex), тогда как прочие локальные `pwsh -File …`-ра�
 **Резолвинг контракта очереди (без обхода диска).** Ссылки `docs/queue_contract.md`/
 `Tasks_Queue_Format.md` (в т.ч. форма «см. …, §N») — **не** команда искать файл на диске: читай
 их по точному пути `$ROOT/docs/queue_contract.md` (полная спецификация —
-`$HOME/.claude/specs/Tasks_Queue_Format.md`, в PowerShell
-`$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
+`$HOME/.orchestra/specs/Tasks_Queue_Format.md`, в PowerShell
+`$env:USERPROFILE\.orchestra\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
 `find / -maxdepth N` — как и любой другой неограниченный от корня обход: `-maxdepth N` от `/` на
 Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
 может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
-ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+ограниченный `$ROOT/docs`/`$HOME/.orchestra/specs`.
 
 Реально исполняемая Bash-строка адаптера — это не голая `codex exec`, а runtime-обёртка
 `pwsh -File <runtime> …` (см. «Вызов codex (read-only) и прогоны»), где `<runtime>` — путь к
@@ -620,7 +620,7 @@ CODEX_FAILED` **не меняется** (processor распознаёт эска
 # Межрепозиторные инженерные запросы
 
 Подтверждённую внешнюю проблему можно передать зарегистрированному проекту через
-`inbox.ps1 send` по `$HOME/.claude/specs/Inbox_Contract.md`, выбрав адресата через
+`inbox.ps1 send` по `$HOME/.orchestra/specs/Inbox_Contract.md`, выбрав адресата через
 `project-registry.ps1 list`. Сообщение не заменяет `R-`-находку, sentinel или локальную
 проверку, не разрешает менять чужой репозиторий и не задерживает возврат processor.
 Передай факты, влияние, желаемый результат и альтернативы; укажи `msg-id`.

@@ -128,12 +128,33 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
+# Provider runtimes remain in the Claude/Codex mirror, while their shared libraries live
+# in .orchestra/scripts. Keep checkout execution working and resolve the installed shared
+# copy when this file is launched from the provider mirror.
+function Resolve-SharedRuntimePath {
+    param([Parameter(Mandatory)][string]$Name)
+    $candidates = @(
+        (Join-Path $PSScriptRoot $Name),
+        (Join-Path (Join-Path (Get-OrchestraHomeForProviderRuntime) 'scripts') $Name)
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    }
+    throw "shared Orchestra runtime dependency not found: $Name"
+}
+
+function Get-OrchestraHomeForProviderRuntime {
+    $configured = [Environment]::GetEnvironmentVariable('ORCHESTRA_HOME')
+    if (-not [string]::IsNullOrWhiteSpace($configured)) { return [System.IO.Path]::GetFullPath($configured.Trim()) }
+    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($profile)) { $profile = [string]$HOME }
+    if ([string]::IsNullOrWhiteSpace($profile)) { throw 'cannot determine the user profile for Orchestra home' }
+    return [System.IO.Path]::GetFullPath((Join-Path $profile '.orchestra'))
+}
+
 # Shared whole-process-tree kill primitive (Stop-ProcessTree). Dot-sourced (never a
-# local copy) so this runtime and tools/supervisor.ps1 use ONE hardened implementation
-# (T-256). Loaded up here, before the CLI-dispatch guard, so it is also present when a
-# caller dot-sources this file (e.g. tools/codex-preflight.ps1, which itself drives
-# Invoke-Captured). proc-tree.ps1 is a pure library with no top-level side effects.
-. (Join-Path $PSScriptRoot 'proc-tree.ps1')
+# local copy) so this runtime and tools/supervisor.ps1 use ONE hardened implementation.
+. (Resolve-SharedRuntimePath 'proc-tree.ps1')
 
 # Shared Win32 quoting primitive (ConvertTo-Win32Arg / ConvertTo-Win32CommandLine) comes from
 # tools/common.ps1 (T-240), shared with tools/supervisor.ps1 instead of a per-file copy. Loaded
@@ -141,7 +162,7 @@ $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 # Fail/Opt/Require-Opt/Read-TextOrEmpty (defined below, so they override common's throw-model
 # copies): it reports failures by writing stderr and calling `exit`, not via a coded-error
 # catch dispatcher, so it deliberately does NOT adopt common's Fail.
-. (Join-Path $PSScriptRoot 'common.ps1')
+. (Resolve-SharedRuntimePath 'common.ps1')
 
 # --------------------------------------------------------------------------
 # Argument parsing:  <command> [--key value | --flag] ...

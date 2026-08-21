@@ -37,10 +37,11 @@ function New-Sandbox {
         Root    = $root
         Project = Join-Path $root 'project'
         Scripts = Join-Path $root 'scripts'
+        Orchestra = Join-Path $root '.orchestra'
         Bin     = Join-Path $root 'bin'
     }
     New-Item -ItemType Directory -Force -Path $paths.Project | Out-Null
-    New-Item -ItemType Directory -Force -Path $paths.Scripts | Out-Null
+    New-Item -ItemType Directory -Force -Path $paths.Scripts, $paths.Orchestra, (Join-Path $paths.Orchestra 'scripts') | Out-Null
     New-Item -ItemType Directory -Force -Path $paths.Bin | Out-Null
     return $paths
 }
@@ -155,17 +156,16 @@ function Install-Launcher {
                 -Destination (Join-Path $agentsDir "$roleName.md") -Force
         }
 
-        # cc-processor/cc-resume resolve the ProcessKit adapter from either the checkout
-        # tools/ directory or the flat cc-sync mirror. Launcher fixtures model the latter,
-        # so install that runtime dependency beside the launcher as cc-sync does.
+        # cc-processor/cc-resume resolve the common ProcessKit adapter from the shared home
+        # or the checkout. Launcher fixtures model the installed shared layout.
         if ($n -in @('cc-processor.cmd', 'cc-resume.cmd')) {
             Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tools/processkit-runtime.ps1') `
-                -Destination (Join-Path $Paths.Scripts 'processkit-runtime.ps1') -Force
+                -Destination (Join-Path $Paths.Orchestra 'scripts/processkit-runtime.ps1') -Force
         }
         if ($n -eq 'cc-config.cmd') {
             foreach ($runtime in @('common.ps1', 'project-registry-lib.ps1', 'project-registry.ps1')) {
                 Copy-Item -LiteralPath (Join-Path $script:RepoRoot ('tools/' + $runtime)) `
-                    -Destination (Join-Path $Paths.Scripts $runtime) -Force
+                    -Destination (Join-Path $Paths.Orchestra ('scripts/' + $runtime)) -Force
             }
         }
 
@@ -182,7 +182,8 @@ function Install-Launcher {
 
 function Install-ConfigExample {
     param([Parameter(Mandatory)] $Paths)
-    Copy-Item -LiteralPath $script:ConfigExamplePath -Destination (Join-Path $Paths.Scripts 'config.example.md') -Force
+    Copy-Item -LiteralPath $script:ConfigExamplePath -Destination (Join-Path $Paths.Orchestra 'config.example.md') -Force
+    Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'constraints.example.md') -Destination (Join-Path $Paths.Orchestra 'constraints.example.md') -Force
 }
 
 # Shared PowerShell helper dropped into the sandbox bin\ dir. It writes each
@@ -286,7 +287,7 @@ exit 0
 
 function Install-FakeStateTx {
     param([Parameter(Mandatory)] $Paths)
-    Set-Content -LiteralPath (Join-Path $Paths.Scripts 'state-tx.ps1') -Value $script:FakeStateTxScript -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $Paths.Orchestra 'scripts/state-tx.ps1') -Value $script:FakeStateTxScript -Encoding utf8
 }
 
 function Install-FakeProcessKitRuntime {
@@ -297,7 +298,7 @@ if ($env:FAKE_PROCESSKIT_RUNTIME_ARGS) {
 }
 $code = if ($env:FAKE_PROCESSKIT_RUNTIME_EXIT) { [int]$env:FAKE_PROCESSKIT_RUNTIME_EXIT } else { 0 }
 exit $code
-'@ | Set-Content -LiteralPath (Join-Path $Paths.Scripts 'processkit-runtime.ps1') -Encoding utf8
+'@ | Set-Content -LiteralPath (Join-Path $Paths.Orchestra 'scripts/processkit-runtime.ps1') -Encoding utf8
 }
 
 function Get-CapturedArgs {
@@ -343,6 +344,7 @@ function Invoke-Launcher {
         CC_PROCESSKIT_PYTHON = ''
         ORCHESTRA_PROVIDER = ''
         ORCHESTRA_CLAUDE_PERMISSION_MODE = ''
+        ORCHESTRA_HOME = $Paths.Orchestra
     }
     if ($Name -eq 'cc-config.cmd') {
         # cc-config now writes a user-global registry. Keep every launcher fixture fully

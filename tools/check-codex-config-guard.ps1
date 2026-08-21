@@ -13,7 +13,7 @@
     defaults is the "Допустимые значения Codex-ключей" table in config.example.md.
 
     Because cc-doctor must keep working when its engine (tools/doctor-runtime.ps1) is
-    mirrored standalone into ~/.claude/scripts, it does not read config.example.md at
+    installed standalone into ~/.orchestra/scripts, it does not read config.example.md at
     runtime - it, like processor.md's Phase 1.1 branching, carries its own copy of the
     allowed sets ($codexAllowed). Since task T-090 the two former cc-doctor.cmd/.sh
     copies are unified into that one runtime, so there is a single downstream copy to

@@ -29,7 +29,9 @@ rem боремся: не передавайте в EXTRA_ARGS произволь
 
 setlocal
 set "LAUNCHER_DIR=%~dp0"
+if not defined ORCHESTRA_HOME set "ORCHESTRA_HOME=%USERPROFILE%\.orchestra"
 set "PROCESSKIT_RUNTIME=%~dp0..\tools\processkit-runtime.ps1"
+if not exist "%PROCESSKIT_RUNTIME%" set "PROCESSKIT_RUNTIME=%ORCHESTRA_HOME%\scripts\processkit-runtime.ps1"
 if not exist "%PROCESSKIT_RUNTIME%" set "PROCESSKIT_RUNTIME=%~dp0processkit-runtime.ps1"
 rem Do not use %%CD%% for the target root: a real environment variable named CD
 rem shadows cmd.exe's dynamic current-directory value (GitHub Windows runners set one).
@@ -190,6 +192,7 @@ rem then the flat cc-sync mirror next to this launcher). Fall back to a raw `rd 
 rem pwsh (PowerShell 7) is unavailable in PATH or the runner cannot be resolved.
 :force_unlock
 set "STATE_TX=%LAUNCHER_DIR%..\tools\state-tx.ps1"
+if not exist "%STATE_TX%" set "STATE_TX=%ORCHESTRA_HOME%\scripts\state-tx.ps1"
 if exist "%STATE_TX%" goto :force_unlock_run
 set "STATE_TX=%LAUNCHER_DIR%state-tx.ps1"
 if exist "%STATE_TX%" goto :force_unlock_run

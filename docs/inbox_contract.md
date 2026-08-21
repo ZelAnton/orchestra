@@ -66,7 +66,7 @@ Runner resolution is fail-closed. Use `<root>/tools/<name>.ps1` only when that r
 Orchestra source checkout, proven by all three identity markers
 `agents/processor.md`, `generate-codex-agents.ps1`, and `tools/sync-runtime.ps1`.
 Every normal target repository uses the literal installed runners
-`~/.claude/scripts/project-registry.ps1` and `~/.claude/scripts/inbox.ps1`; the mere
+`~/.orchestra/scripts/project-registry.ps1` and `~/.orchestra/scripts/inbox.ps1`; the mere
 presence of its own `tools/` directory is not evidence that those files belong to
 Orchestra. Never scan the disk looking for a runner.
 

@@ -48,8 +48,8 @@ lease уже проверенным родителем; сам им не упр�
 `tools/project-registry.ps1` и `tools/state-tx.ps1` допустимы только при трёх
 identity-маркерах Orchestra
 (`agents/processor.md`, `generate-codex-agents.ps1`, `tools/sync-runtime.ps1`); в обычном
-проекте используй соответствующие `~/.claude/scripts/project-registry.ps1` и
-`~/.claude/scripts/state-tx.ps1`.
+проекте используй соответствующие `~/.orchestra/scripts/project-registry.ps1` и
+`~/.orchestra/scripts/state-tx.ps1`.
 
 # Что считать связью
 

@@ -25,7 +25,8 @@ Orchestra — не приложение и не библиотека. Это к�
 Claude Code runtime, полностью Codex-native runtime, адаптера Codex CLI и
 кросс-платформенных launchers для автономной обработки очереди задач.
 Агентские описания лежат в каталоге `agents/` и устанавливаются в
-`%USERPROFILE%\.claude\agents`; launchers устанавливаются в `%USERPROFILE%\.claude\scripts`.
+`%USERPROFILE%\.claude\agents`; provider launchers устанавливаются в `%USERPROFILE%\.claude\scripts`,
+а общий runtime, конфигурация и спецификации — в `%USERPROFILE%\.orchestra`.
 После изменения ролей или launcher выполните `launchers\cc-sync.cmd` (или `cc-sync.sh`),
 иначе Claude продолжит использовать старую копию. Установленный в PATH `cc-sync` тоже
 работает, если текущий каталог — checkout Orchestra: launcher узнаёт его по трём identity-
@@ -215,7 +216,7 @@ Processor и merger формируют описательные англоязы
   Claude проверяет»; явное `CODEX_REVIEWER=all` использует ту же thread-based границу,
   что native provider: новый checker-вызов Codex без resume maker-треда.
 - `cc-sync` после обычной генерации запускает Codex-генератор, зеркалирует root prompt рядом
-  с runtime в `~/.claude/scripts/codex-processor.md` и управляемо устанавливает только
+  с provider runtime в `~/.claude/scripts/codex-processor.md` и управляемо устанавливает только
   `orchestra_*.toml` в `$CODEX_HOME/agents` с отдельным manifest. Чужие custom agents не
   удаляются. Пути из обоих manifest/journal считаются недоверенными: stale-pruning и crash
   recovery принимают только canonical descendants соответствующего destination root;
@@ -290,12 +291,11 @@ Processor и merger формируют описательные англоязы
   `git status`/`git diff` чисты, но `jj diff` содержит изменения, и требуют
   `clean=false`. **Зеркалирование в другие проекты (T-114 → обобщено T-115).**
   `tools/sync-runtime.ps1` изначально (T-114) мирроил в `<dest>/scripts` только
-  `codex-runtime.ps1` тем же способом, что и `doctor-runtime.ps1`; **с T-115 он зеркалирует
-  ВСЮ папку `tools/*.ps1`** (кроме своего `sync-runtime.ps1` — единственное исключение),
-  поэтому `cc-sync` кладёт в целевой проект копию **каждого** раннера
-  (`~/.claude/scripts/codex-runtime.ps1`, `state-tx.ps1`, `queue-tx.ps1`, `outbox.ps1`,
-  `policy.ps1`, `redaction.ps1`, `notify.ps1`, … — новый раннер подхватывается автоматически, без точечного
-  добавления в список); адаптеры и агенты резолвят путь к раннеру по обеим
+  provider runtime; теперь он разделяет provider mirror и общий home: `codex-runtime.ps1`
+  остаётся в `~/.claude/scripts`, а общие раннеры (`state-tx.ps1`, `queue-tx.ps1`, `outbox.ps1`,
+  `policy.ps1`, `redaction.ps1`, `notify.ps1`, …) устанавливаются в
+  `~/.orchestra/scripts`. Конфигурация и спецификации также устанавливаются в `~/.orchestra`;
+  адаптеры и агенты резолвят путь к раннеру по обеим
   раскладкам (чекаут/зеркало — см. «Резолвинг раннеров `tools/*.ps1`» ниже, «Разрешение на
   запуск codex — предвыдаётся, а не выпрашивается по ходу» и `agents/coder_codex.md`,
   «Резолвинг пути к runtime»), иначе вне чекаута orchestra голый относительный путь
@@ -805,7 +805,7 @@ original/sender/key. Повтор после потери stdout не дубли
 заголовка. Агрегирующие `list`/`reconcile`/`actionable` пропускают одну невалидную запись,
 сохраняя валидную проекцию и возвращая diagnostics `errors`; адресные `show`/`mark`/`reply`
 по-прежнему строго отвергают такую запись. Нормативный контракт — `docs/inbox_contract.md`; `cc-sync` публикует его как
-`~/.claude/specs/Inbox_Contract.md`.
+`~/.orchestra/specs/Inbox_Contract.md`.
 
 `project-registry.ps1 unregister --project <id-or-name>` удаляет только registry entry;
 при live inbound dependency оно fail-closed, а явный `--detach-dependents` атомарно убирает
@@ -836,15 +836,15 @@ Processor механически проверяет `actionable` и вызыва
 
 ## Резолвинг контрактов очереди/roadmap и ограничение поиска
 
-Голые ссылки `docs/queue_contract.md` и `~/.claude/specs/Tasks_Queue_Format.md` в
+Голые ссылки `docs/queue_contract.md` и `~/.orchestra/specs/Tasks_Queue_Format.md` в
 агентских инструкциях **не являются заданием искать файл на диске**. Если роль действительно
 должна прочитать контракт, она строит точный путь без обхода файловой системы:
 
 1. Возьми уже определённый стандартным VCS-паттерном корень текущего репозитория `ROOT` и
    открой абсолютный путь `$ROOT/docs/queue_contract.md`. Не трактуй эту ссылку как путь
    относительно произвольного текущего каталога worktree.
-2. Полная спецификация формата лежит ровно в `$HOME/.claude/specs/Tasks_Queue_Format.md`
-   (PowerShell: `$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Раскрой `HOME` /
+2. Полная спецификация формата лежит ровно в `$HOME/.orchestra/specs/Tasks_Queue_Format.md`
+   (PowerShell: `$env:USERPROFILE\.orchestra\specs\Tasks_Queue_Format.md`). Раскрой `HOME` /
    `USERPROFILE` в путь и открой его напрямую.
 3. Для roadmap используй только `$ROOT/docs/roadmap_contract.md`; проектный runtime-артефакт
    открывай только по `$ROOT/.work/roadmap.md`. Голые `docs/roadmap_contract.md` и
@@ -857,7 +857,7 @@ Processor механически проверяет `actionable` и вызыва
 Files/Windows/Users и т.п. — много подпапок), поэтому ограничивать нужно **поддеревом**, а не
 глубиной. Для точного известного пути используй `Read`; для проверки используй доступный всем
 ролям `Glob` либо `find`, ограниченный малым известным поддеревом (`$ROOT/docs` или
-`$HOME/.claude/specs`).
+`$HOME/.orchestra/specs`).
 
 ### Классификация 71 ссылок в `agents/*.md` (T-118 → пересмотрено T-122)
 
@@ -1014,11 +1014,11 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
    `tools/<script>.ps1` — не переписывай его в абсолютный: эта литеральная форма совпадает с
    давно предвыданным Bash-грантом launcher'ов и seed-правилами `cc-config`.
 2. **Зеркало `cc-sync`** (любой целевой проект, не прошедший identity-проверку checkout,
-   использует orchestra через `~/.claude`) — его собственная/старая/gitignored папка `tools/`,
+   использует provider mirror через `~/.claude`, а общий runtime через `~/.orchestra`) — его собственная/старая/gitignored папка `tools/`,
    если существует, **никогда не является источником runtime Orchestra** и не исполняется;
-   `tools/sync-runtime.ps1` зеркалирует **всю** папку `tools/*.ps1` (кроме себя) в
-   `<dest>/scripts` (по умолчанию `~/.claude/scripts`, T-115), так что раннер лежит в
-   `~/.claude/scripts/<script>.ps1`. Держи **тильду литеральной прямо в тексте команды** (не
+   `tools/sync-runtime.ps1` зеркалирует provider runtimes в `<dest>/scripts`, а общие
+   `tools/*.ps1` — в `<shared>/scripts` (по умолчанию `~/.orchestra/scripts`), так что общий раннер лежит в
+   `~/.orchestra/scripts/<script>.ps1`. Держи **тильду литеральной прямо в тексте команды** (не
    подставляй заранее раскрытый `$HOME` и **не** проводи путь через shell-переменную):
    **тильда раскрывается shell только как литерал в начале слова текста команды, не через
    переменную или подстановку** — `~`, пришедший из `$VAR` или иной подстановки, остаётся
@@ -1040,7 +1040,7 @@ Codex adapter. Адаптеры не повторяют filesystem-probe: это
 под зеркальную форму путей **прочих** раннеров (`state-tx`, `queue-tx`, `outbox`, `policy`,
 `redaction`, `supervisor`, `harness`, …) заводить **не нужно**: classifier auto-режима
 особым образом отклоняет автономный model runtime (`codex exec`), а
-локальный `pwsh -File tools/<script>.ps1 …`/`pwsh -File ~/.claude/scripts/<script>.ps1 …`
+локальный `pwsh -File tools/<script>.ps1 …`/`pwsh -File ~/.orchestra/scripts/<script>.ps1 …`
 для остальных раннеров он пропускает без явного гранта в **обеих** раскладках (это обычная
 локальная запись в `.work/`, не автономный внешний агент). Поэтому точечная предвыдача
 остаётся под `codex-runtime.ps1`, а
@@ -1096,7 +1096,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 Обобщение зеркалирования всего `tools/*.ps1` (T-115) новых грантов **не добавляет**: прочие
 раннеры (`state-tx`, `queue-tx`, `outbox`, `policy`, `redaction`, `supervisor`, `harness`, …)
 исполняются как локальный `pwsh -File …` — classifier пропускает их без гранта в **обеих**
-раскладках (checkout `tools/<script>.ps1` и mirror `~/.claude/scripts/<script>.ps1`); особый
+раскладках (checkout `tools/<script>.ps1` и mirror `~/.orchestra/scripts/<script>.ps1`); особый
 грант нужен только Codex model-runner'у; прочие раннеры работают без расширения
 `--allowedTools` (см. «Резолвинг раннеров `tools/*.ps1`»).
 
@@ -1132,7 +1132,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 | Путь | Владелец / назначение |
 |---|---|
 | `~/.orchestra/projects.json` | пользовательский глобальный реестр адресуемых проектов (`orchestra/project-registry@1`); меняется только `project-registry.ps1 register`, который явно запускает оператор через `cc-config`; агенты читают его для маршрутизации |
-| `~/.claude/specs/Inbox_Contract.md` | установленная `cc-sync` копия нормативного `docs/inbox_contract.md`, которую читают роли в target-проектах (`Inbox_Contract.md`) |
+| `~/.orchestra/specs/Inbox_Contract.md` | установленная `cc-sync` копия нормативного `docs/inbox_contract.md`, которую читают роли в target-проектах (`Inbox_Contract.md`) |
 | `.inbox/messages/<msg-id>.json` | долговечное межрепозиторное сообщение (`orchestra/inbox-message@1`) со статусами оценки/ответа, task links и remarks; мутируется только `tools/inbox.ps1`, единственное разрешённое исключение cross-project записи |
 | `.inbox/releases/<rel-id>.json` | канонический аудит release fan-out (`orchestra/release-notification@1`): immutable version/notes/products, замороженные target ids и crash-recoverable delivery ids; пишет только `tools/inbox.ps1 release` |
 | `.inbox/inbox.lock` | краткоживущий атомарный лок создания/перехода message records; держит только `tools/inbox.ps1` |
@@ -1237,7 +1237,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
   `ttl_seconds`/`pid`/`pid_started`, поэтому битые scalar-поля всегда дают структурный код 18.
 - **`cc-doctor` диагностирует современную аренду через `state-tx status --json`.**
   `tools/doctor-runtime.ps1` резолвит `state-tx.ps1` в обеих поддерживаемых раскладках
-  (`tools/state-tx.ps1` в чекауте и `~/.claude/scripts/state-tx.ps1` в зеркале `cc-sync`) и
+  (`tools/state-tx.ps1` в чекауте и `~/.orchestra/scripts/state-tx.ps1` в зеркале `cc-sync`) и
   показывает owner/role/возраст heartbeat/liveness структурного `lease.json`. Только
   degraded mkdir-lock без `lease.json` проходит через прежнюю эвристику `info` с
   `started=`/`host=`; её совместимый вывод не менять.

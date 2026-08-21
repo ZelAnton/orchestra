@@ -24,8 +24,8 @@ separate registry; agents must never set it.
 Useful diagnostics:
 
 ```powershell
-pwsh -File "$HOME/.claude/scripts/project-registry.ps1" list --json
-pwsh -File "$HOME/.claude/scripts/inbox.ps1" list --root "$PWD" --json
+pwsh -File "$HOME/.orchestra/scripts/project-registry.ps1" list --json
+pwsh -File "$HOME/.orchestra/scripts/inbox.ps1" list --root "$PWD" --json
 cc-inbox
 ```
 
@@ -533,13 +533,14 @@ verified.
 
 **`cc-sync` — installing/refreshing the mirror (transactional).** `cc-sync.cmd`/
 `cc-sync.sh` are thin wrappers over one engine, `tools/sync-runtime.ps1`, which mirrors
-this repo's agent `*.md`, the launchers, `config.example.md` / `constraints.example.md`,
-and the `cc-doctor` engine (`tools/doctor-runtime.ps1`) into your Claude environment
-(`~/.claude`, `%USERPROFILE%\.claude` on Windows). Mirroring is **transactional**: every
+this repo's agent `*.md`, the launchers, and provider runtimes into your Claude environment,
+and common configuration, specifications, and orchestration runtimes into `~/.orchestra`.
+Mirroring is **transactional**: every
 file is published through a staging area with a journal-backed rollback, so an
 interruption mid-publish (or a hard crash, recovered on the next run) is rolled back to
 the exact prior state — you never get a half-applied mirror. The engine keeps a
-**manifest** (`~/.claude/.orchestra-sync-manifest.json`) of the files it manages; on a
+**manifests** (`~/.claude/.orchestra-sync-manifest.json` and
+`~/.orchestra/.orchestra-shared-sync-manifest.json`) of the files it manages; on a
 later sync it prunes only entries it previously wrote that are no longer sourced (a
 renamed/deleted agent or launcher), and **never touches files it did not write** (agents
 you added to the mirror by hand are safe). A destination that has been corrupted into an
@@ -554,9 +555,9 @@ stuck `orchestrator.lock` or an orphaned worktree, it only reports on them). It 
 the Codex preflight (binary/auth and autonomous-runtime permission), the effective
 `CODEX_*` values and their fail-closed validation, KB status, the Windows sandbox
 profile (a `N/A` line on POSIX, where the concept does not exist), and the task-queue /
-lock / worktree / main-branch / agent-mirror audit. Because `cc-sync` mirrors the doctor
-engine next to the launchers, `cc-doctor` works the same when run from the `~/.claude`
-mirror as from a checkout. Its `OK`/`WARN`/`FAIL`/`N/A` lines are advisory text — it
+lock / worktree / main-branch / agent-mirror audit. Because `cc-sync` installs the doctor
+engine in `~/.orchestra/scripts`, `cc-doctor` works the same from a provider mirror as
+from a checkout. Its `OK`/`WARN`/`FAIL`/`N/A` lines are advisory text — it
 always exits 0.
 
 **CI (what runs automatically, on which OS).** `.github/workflows/ci.yml` runs on every

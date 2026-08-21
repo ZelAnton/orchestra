@@ -111,17 +111,17 @@ Treat the key as one contract propagated through this chain:
    user-facing command. Preserve the launcher naming, `.cmd` CRLF policy, and validation
    commands in [Coding Style & Naming Conventions](../AGENTS.md#coding-style--naming-conventions)
    and [Build, Test, and Development Commands](../AGENTS.md#build-test-and-development-commands).
-3. Rely on `Get-ManagedPairs` in
-   [`tools/sync-runtime.ps1`](../tools/sync-runtime.ps1) to mirror every `tools/*.ps1` file
-   to `<destination>/scripts`. Do not add a per-runner copy list. `sync-runtime.ps1` itself
-   is the sole runner exclusion because a mirror has no checkout source to synchronize.
+3. Rely on the provider/shared pair discovery functions in
+   [`tools/sync-runtime.ps1`](../tools/sync-runtime.ps1) to mirror provider files to the
+   Claude/Codex homes and common `tools/*.ps1` files to `<shared>/scripts`. Keep the
+   provider/shared classification explicit; `sync-runtime.ps1` itself remains checkout-only.
 4. Make each agent caller implement the
    [checkout-versus-mirror resolution rule](../knowledge.md#резолвинг-раннеров-toolsps1-чекаут-vs-зеркало):
    resolve once per run. The existence of `tools/<name>.ps1` alone does not prove the checkout
    layout: require all three Orchestra source markers (`agents/processor.md`,
    `generate-codex-agents.ps1`, `tools/sync-runtime.ps1`). Only then use literal
    `tools/<name>.ps1`; otherwise invoke
-   literal `~/.claude/scripts/<name>.ps1` directly in the command. Do not pass the tilde
+   literal `~/.orchestra/scripts/<name>.ps1` directly in the command. Do not pass the tilde
    form through a variable or rebuild it from `$HOME`. Never execute a same-named runner from
    a target project's own, stale, or gitignored `tools/` directory.
 5. Audit permissions against

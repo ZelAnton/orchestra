@@ -37,7 +37,7 @@
     Queue paths:
 
       - `$ROOT/docs/queue_contract.md`            (exact queue-contract path -> resolving)
-      - `$HOME/.claude/specs/Tasks_Queue_Format.md` (exact spec path        -> resolving)
+      - `$HOME/.orchestra/specs/Tasks_Queue_Format.md` (exact spec path        -> resolving)
 
     Roadmap paths:
 
@@ -109,7 +109,7 @@ $RoadmapMentionTokens = @('roadmap_contract.md', '.work/roadmap.md')
 # full-sentence match) so prose may be reworded while the substance stays enforced.
 $QueueRequiredTokens = [ordered]@{
     'resolve-queue-path' = '$ROOT/docs/queue_contract.md'
-    'resolve-spec-path'  = '$HOME/.claude/specs/Tasks_Queue_Format.md'
+    'resolve-spec-path'  = '$HOME/.orchestra/specs/Tasks_Queue_Format.md'
 }
 $RoadmapRequiredTokens = [ordered]@{
     'resolve-roadmap-contract-path' = '$ROOT/docs/roadmap_contract.md'

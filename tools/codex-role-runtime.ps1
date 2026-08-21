@@ -52,7 +52,7 @@ function Resolve-RolePrompt {
     }
 
     # Checkout: <repo>/tools -> <repo>/agents.
-    # cc-sync mirror: ~/.claude/scripts -> ~/.claude/agents.
+    # cc-sync provider mirror: ~/.claude/scripts -> ~/.claude/agents.
     $agentsRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'agents'
     $candidate = Join-Path $agentsRoot ($RoleName + '.md')
     if (Test-Path -LiteralPath $candidate -PathType Leaf) {

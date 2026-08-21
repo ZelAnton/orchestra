@@ -59,6 +59,29 @@ $script:ErrPrefix = 'ERR'
 $script:FaultEnv  = 'ORCHESTRA_COMMON_FAULT'
 $script:LockName  = 'resource'
 
+# Shared installed state lives outside the Claude/Codex provider homes. Operators may
+# override the location for a portable installation or tests; the default is the user's
+# .orchestra directory on both Windows and POSIX.
+function Get-OrchestraHome {
+    $configured = [Environment]::GetEnvironmentVariable('ORCHESTRA_HOME')
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        return [System.IO.Path]::GetFullPath($configured.Trim())
+    }
+    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($profile)) { $profile = [string]$HOME }
+    if ([string]::IsNullOrWhiteSpace($profile)) { throw 'cannot determine the user profile for Orchestra home' }
+    return [System.IO.Path]::GetFullPath((Join-Path $profile '.orchestra'))
+}
+
+function Resolve-OrchestraSharedScript {
+    param([Parameter(Mandatory)][string]$Name)
+    $local = Join-Path $PSScriptRoot $Name
+    if (Test-Path -LiteralPath $local -PathType Leaf) { return $local }
+    $shared = Join-Path (Join-Path (Get-OrchestraHome) 'scripts') $Name
+    if (Test-Path -LiteralPath $shared -PathType Leaf) { return $shared }
+    throw "shared Orchestra script not found: $Name"
+}
+
 # --------------------------------------------------------------------------
 # .work/config.md line parsing.
 #

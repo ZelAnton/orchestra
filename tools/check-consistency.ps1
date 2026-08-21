@@ -441,7 +441,7 @@ foreach ($name in $artifactLocations.Keys) {
 # keys). That list is meant to track the defaults table in config.example.md
 # exactly (task T-043) — this check catches drift between the two without
 # requiring cc-doctor to parse config.example.md at runtime (its engine must keep
-# working when mirrored standalone into ~/.claude/scripts, see the comments in
+# working when installed standalone into ~/.orchestra/scripts, see the comments in
 # tools/doctor-runtime.ps1). The same class also guards the engine's other local copies of
 # the same schema — $script:EnvFallbackKeys, $claudeModelAllowed and
 # $claudeModelFrontmatter — against tools/policy-schema.ps1.
@@ -481,7 +481,7 @@ foreach ($key in $defaultKeys) {
 # cc-doctor's remaining local copies of the schema must not drift from it either. Three
 # are guarded below, in this order (tools/policy-schema.ps1 is the single source of all
 # three; the copies exist only so the engine keeps working when mirrored standalone into
-# ~/.claude/scripts):
+# ~/.orchestra/scripts):
 #   $script:EnvFallbackKeys - the keys that also resolve from the OS environment, vs the
 #                             schema's envFallback flags.
 #   $claudeModelAllowed     - allowed value set per key, vs the schema enums.
@@ -659,7 +659,7 @@ if ($null -eq $doctorFrontmatterModels) {
 # turn checked equal to the cc-doctor allowlist (Class 4), a schema change not mirrored
 # into config.example.md - and thence cc-doctor - fails here. cc-doctor's engine
 # (tools/doctor-runtime.ps1) keeps its own hardcoded copy (it must run when mirrored
-# standalone into ~/.claude/scripts) yet cannot drift from this schema.
+# standalone into ~/.orchestra/scripts) yet cannot drift from this schema.
 
 $SchemaFile = Join-Path $PSScriptRoot 'policy-schema.ps1'
 if (-not (Test-Path -LiteralPath $SchemaFile)) {

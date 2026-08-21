@@ -23,6 +23,7 @@
 MODEL_ARG=()
 EXTRA_ARGS=()
 PROVIDER="${ORCHESTRA_PROVIDER:-claude}"
+export ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
 
 # Agent builds are isolated runs: do not leave reusable .NET build workers behind.
 export MSBUILDDISABLENODEREUSE=1
@@ -34,14 +35,15 @@ export DOTNET_CLI_USE_MSBUILD_SERVER=0
 export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
 export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
 
-# Resolve tools/state-tx.ps1 by the checkout-vs-mirror rule (same shape as cc-doctor.sh): prefer
-# the checkout copy (launchers/../tools/state-tx.ps1); otherwise the flat cc-sync mirror copy next
-# to this launcher in ~/.claude/scripts. Echoes the resolved path, or nothing if neither exists.
+# Resolve common state-tx/processkit runtimes from the shared home first, then checkout and
+# the legacy flat mirror. Echoes the resolved path, or nothing if neither exists.
 resolve_state_tx() {
   local script_dir
   script_dir="$(CDPATH='' cd -- "${0%/*}" && pwd)"
   if [ -f "$script_dir/../tools/state-tx.ps1" ]; then
     printf '%s\n' "$script_dir/../tools/state-tx.ps1"
+  elif [ -f "$ORCHESTRA_HOME/scripts/state-tx.ps1" ]; then
+    printf '%s\n' "$ORCHESTRA_HOME/scripts/state-tx.ps1"
   elif [ -f "$script_dir/state-tx.ps1" ]; then
     printf '%s\n' "$script_dir/state-tx.ps1"
   fi
@@ -52,6 +54,8 @@ resolve_processkit_runtime() {
   script_dir="$(CDPATH='' cd -- "${0%/*}" && pwd)"
   if [ -f "$script_dir/../tools/processkit-runtime.ps1" ]; then
     printf '%s\n' "$script_dir/../tools/processkit-runtime.ps1"
+  elif [ -f "$ORCHESTRA_HOME/scripts/processkit-runtime.ps1" ]; then
+    printf '%s\n' "$ORCHESTRA_HOME/scripts/processkit-runtime.ps1"
   elif [ -f "$script_dir/processkit-runtime.ps1" ]; then
     printf '%s\n' "$script_dir/processkit-runtime.ps1"
   fi

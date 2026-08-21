@@ -95,7 +95,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 Если ты или субагент подтвердили, что повторяющееся трение, дефект либо недостающая
 возможность принадлежит другому зарегистрированному проекту, разрешено отправить ему
 структурированный запрос через `inbox.ps1 send`. Сначала прочитай точный контракт
-`$HOME/.claude/specs/Inbox_Contract.md`, выбери адресата через
+`$HOME/.orchestra/specs/Inbox_Contract.md`, выбери адресата через
 `project-registry.ps1 list`, подготовь тело в отдельном UTF-8 файле и передай его через
 `--body-file`. Не ищи соседние репозитории по диску и не меняй в них ничего, кроме
 сообщения, атомарно созданного инструментом в `.inbox`. Запрос обязан содержать
@@ -272,7 +272,7 @@ reasoning deep-уровня остаётся `xhigh` в любом случае.
 относительную checkout-форму только если `$ROOT` — именно исходный checkout Orchestra, что
 одновременно подтверждают маркеры `$ROOT/agents/processor.md`,
 `$ROOT/generate-codex-agents.ps1` и `$ROOT/tools/sync-runtime.ps1`. Во всех остальных
-целевых проектах выбирай зеркало `~/.claude/scripts/<script>.ps1`, даже если в проекте есть
+целевых проектах выбирай зеркало `~/.orchestra/scripts/<script>.ps1`, даже если в проекте есть
 собственная, старая или gitignored папка `tools/` с одноимёнными файлами: такие файлы не
 являются runtime Orchestra и их нельзя исполнять. Это предотвращает затенение свежего
 `cc-sync`-зеркала устаревшей локальной копией.
@@ -289,7 +289,7 @@ reasoning deep-уровня остаётся `xhigh` в любом случае.
   совпадает с предвыданным Bash-грантом launcher'ов/`cc-config`, **не** переписывай её в
   абсолютный путь);
 - **зеркало `cc-sync`** (любой целевой проект без полного набора identity-маркеров, независимо
-  от наличия своей `tools/`) — тот же раннер лежит в `~/.claude/scripts/<script>.ps1`
+  от наличия своей `tools/`) — тот же раннер лежит в `~/.orchestra/scripts/<script>.ps1`
   (`cc-sync` зеркалирует **всю** папку `tools/`, T-115); используй **буквально** этот путь с
   тильдой (её раскрывает сама shell — заранее не разворачивай). Запускай раннер как
   `pwsh -File …` (PowerShell 7), **не** `powershell.exe`/Windows PowerShell 5.1 (её Restricted-
@@ -311,12 +311,12 @@ reasoning deep-уровня остаётся `xhigh` в любом случае.
 **Резолвинг контракта очереди (без обхода диска).** Ссылки `docs/queue_contract.md`/
 `Tasks_Queue_Format.md` (в т.ч. форма «см. …, §N») — **не** команда искать файл на диске: читай
 их по точному пути `$ROOT/docs/queue_contract.md` (полная спецификация —
-`$HOME/.claude/specs/Tasks_Queue_Format.md`, в PowerShell
-`$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
+`$HOME/.orchestra/specs/Tasks_Queue_Format.md`, в PowerShell
+`$env:USERPROFILE\.orchestra\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
 `find / -maxdepth N` — как и любой другой неограниченный от корня обход: `-maxdepth N` от `/` на
 Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
 может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
-ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+ограниченный `$ROOT/docs`/`$HOME/.orchestra/specs`.
 
 ## Операторские уведомления (`NOTIFY_CMD`)
 
@@ -2968,7 +2968,7 @@ T-069). Сверка T-065 выше его систематически недо
   **или** `CODEX_CIFIX` ≠ `off`). Сессия ни разу не роутит в codex → preflight не
   запускается (нулевая цена; поведение не меняется).
 - **Что.** `pwsh -File tools/codex-preflight.ps1` (резолвинг пути раннера — то же двойное
-  правило checkout `tools/<name>.ps1` vs зеркало `~/.claude/scripts/<name>.ps1`, что у
+  правило checkout `tools/<name>.ps1` vs зеркало `~/.orchestra/scripts/<name>.ps1`, что у
   `codex-runtime.ps1`; см. «Резолвинг раннеров `tools/*.ps1`»). Это ~1 c локальный проб
   **без** модельного вызова, сети и токенов: запускает `codex sandbox -c
   sandbox_mode=workspace-write -- <noop>` (та же restricted-token-песочница, что у

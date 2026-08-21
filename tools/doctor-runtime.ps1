@@ -66,7 +66,7 @@
                        defaults table.
   All of them are kept hardcoded here (not read from config.example.md at runtime) because
   cc-doctor must keep working when this runtime is mirrored standalone into
-  ~/.claude/scripts by cc-sync, where a reliable checkout of tools/ + config.example.md
+  ~/.orchestra by cc-sync, where a reliable checkout of tools/ + config.example.md
   is not guaranteed to be present.
 #>
 
@@ -79,11 +79,10 @@ param(
 
     # The Orchestra repository root above launchers/ (used only by the agent-mirror
     # freshness check). Defaults to the parent of tools/ (where this script lives),
-    # which is correct both in a checkout (repo root) and in the ~/.claude/scripts
-    # mirror (~/.claude, whose agents/ is the mirror itself).
+    # which is correct both in a checkout (repo root) and in the installed shared home.
     [string]$RepoRoot,
 
-    # The user home whose ~/.claude and ~/.codex are inspected. Defaults to the real
+    # The user home whose ~/.claude, ~/.orchestra and ~/.codex are inspected. Defaults to the real
     # home; overridable so tests never read the machine's real Codex/Claude settings.
     [string]$HomeDir
 )
@@ -93,7 +92,7 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 
 # Shared `.work/config.md` value/comment extraction. common.ps1 is ASCII-only and is
-# installed beside this runtime by sync-runtime in the mirror layout.
+# installed under the shared Orchestra home by sync-runtime.
 . (Join-Path $PSScriptRoot 'common.ps1')
 
 # --- OS detection correct on both Windows PowerShell 5.1 and pwsh 7 ----------------
@@ -144,20 +143,20 @@ if (Test-OrchestraSourceCheckout $ProjectRoot) {
     })
     if ($shadowed.Count -gt 0) {
         Write-Host ('WARN target-local tools/ contains Orchestra-named runner(s) that are ignored because this is not the Orchestra source checkout: ' + ($shadowed -join ', '))
-        Write-Host '  agents must use ~/.claude/scripts/<script>.ps1; run cc-sync from the Orchestra checkout to refresh that mirror'
+        Write-Host '  agents must use ~/.orchestra/scripts/<script>.ps1; run cc-sync from the Orchestra checkout to refresh that mirror'
     } else {
-        Write-Host 'OK   target is not the Orchestra source checkout; use the cc-sync mirror ~/.claude/scripts/<script>.ps1'
+        Write-Host 'OK   target is not the Orchestra source checkout; use the cc-sync mirror ~/.orchestra/scripts/<script>.ps1'
     }
 }
 
 # state-tx.ps1 is shipped in both runtime layouts: tools/ in an Orchestra checkout,
-# or ~/.claude/scripts beside this doctor after cc-sync. Resolve those canonical
+# or ~/.orchestra/scripts in the shared runtime after cc-sync. Resolve those canonical
 # locations explicitly; do not assume the target project itself contains Orchestra.
 function Resolve-StateTxPath {
     $checkout = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/state-tx.ps1'
     if (Test-Path -LiteralPath $checkout -PathType Leaf) { return $checkout }
 
-    $mirror = Join-Path (Join-Path $HomeDir '.claude/scripts') 'state-tx.ps1'
+    $mirror = Join-Path (Join-Path $HomeDir '.orchestra/scripts') 'state-tx.ps1'
     if (Test-Path -LiteralPath $mirror -PathType Leaf) { return $mirror }
 
     return $null
@@ -248,7 +247,10 @@ switch -CaseSensitive ($claudePermissionMode) {
 Write-Host ''
 
 Write-Host '== Codex-native processor provider =='
-$nativeRuntime = Join-Path $PSScriptRoot 'codex-processor-runtime.ps1'
+$nativeRuntime = Join-Path (Join-Path $HomeDir '.claude/scripts') 'codex-processor-runtime.ps1'
+if (-not (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
+    $nativeRuntime = Join-Path $PSScriptRoot 'codex-processor-runtime.ps1'
+}
 if ($provider -ne 'codex') {
     Write-Host 'OK   Codex-native processor package check deferred (ORCHESTRA_PROVIDER is not codex)'
 } elseif (-not (Test-Path -LiteralPath $nativeRuntime -PathType Leaf)) {
@@ -297,7 +299,10 @@ if (Test-Path -LiteralPath $authFile -PathType Leaf) {
 
 Write-Host ''
 Write-Host '== Process containment =='
-$processkitRuntime = Join-Path $PSScriptRoot 'processkit-runtime.ps1'
+$processkitRuntime = Join-Path (Join-Path $HomeDir '.orchestra/scripts') 'processkit-runtime.ps1'
+if (-not (Test-Path -LiteralPath $processkitRuntime -PathType Leaf)) {
+    $processkitRuntime = Join-Path $PSScriptRoot 'processkit-runtime.ps1'
+}
 if (-not (Test-Path -LiteralPath $processkitRuntime -PathType Leaf)) {
     Write-Host 'FAIL root containment: processkit-runtime.ps1 is missing from the Orchestra runtime mirror; run cc-sync'
 } else {

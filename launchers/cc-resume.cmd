@@ -2,7 +2,9 @@
 chcp 65001 >nul
 setlocal
 set "LAUNCHER_DIR=%~dp0"
+if not defined ORCHESTRA_HOME set "ORCHESTRA_HOME=%USERPROFILE%\.orchestra"
 set "PROCESSKIT_RUNTIME=%~dp0..\tools\processkit-runtime.ps1"
+if not exist "%PROCESSKIT_RUNTIME%" set "PROCESSKIT_RUNTIME=%ORCHESTRA_HOME%\scripts\processkit-runtime.ps1"
 if not exist "%PROCESSKIT_RUNTIME%" set "PROCESSKIT_RUNTIME=%~dp0processkit-runtime.ps1"
 rem Do not use %%CD%% for the target root: a real environment variable named CD
 rem shadows cmd.exe's dynamic current-directory value (GitHub Windows runners set one).

@@ -116,7 +116,7 @@ processor передаёт абсолютный `WORK` и `батч=<B-id>` в �
 или gitignored.
 (здесь — `tools/queue-tx.ps1`, резолвер готовности) резолвится по единому правилу: в
 **чекауте** orchestra — буквально этот относительный путь; в целевом проекте **без трёх
-identity-маркеров** (зеркало `cc-sync`) тот же раннер лежит в `~/.claude/scripts/<script>.ps1` — подставь
+identity-маркеров** (зеркало `cc-sync`) тот же раннер лежит в `~/.orchestra/scripts/<script>.ps1` — подставь
 эту форму, **тильду оставь литеральной** (её раскрывает shell). Запускай раннер как `pwsh -File …` (PowerShell 7), **не** через
 `powershell.exe`/Windows PowerShell 5.1 (её дефолтная политика Restricted валит скрипт с
 «running scripts is disabled») и **не** пересобирая зеркальный путь через
@@ -128,12 +128,12 @@ exec`). Единый источник правила — `knowledge.md` / `docs/
 **Резолвинг контракта очереди (без обхода диска).** Ссылки `docs/queue_contract.md`/
 `Tasks_Queue_Format.md` (в т.ч. форма «см. …, §N») — **не** команда искать файл на диске: читай
 их по точному пути `$ROOT/docs/queue_contract.md` (полная спецификация —
-`$HOME/.claude/specs/Tasks_Queue_Format.md`, в PowerShell
-`$env:USERPROFILE\.claude\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
+`$HOME/.orchestra/specs/Tasks_Queue_Format.md`, в PowerShell
+`$env:USERPROFILE\.orchestra\specs\Tasks_Queue_Format.md`). Запрещены `find /`, `find C:/` и
 `find / -maxdepth N` — как и любой другой неограниченный от корня обход: `-maxdepth N` от `/` на
 Windows остаётся широким (Program Files/Windows/Users и т.п. — много подпапок на малой глубине) и
 может подвесить роль. Для точного пути используй `Read`; для проверки — `Glob` либо `find`,
-ограниченный `$ROOT/docs`/`$HOME/.claude/specs`.
+ограниченный `$ROOT/docs`/`$HOME/.orchestra/specs`.
 
 # Конфликт-домен
 
@@ -487,7 +487,7 @@ VCS в переданном committed `BASE`; live worktree не являетс�
 
 Если планирование подтвердило внешний пробел контракта/инструмента, можно отправить
 владельцу зарегистрированного проекта запрос через `inbox.ps1 send` по
-`$HOME/.claude/specs/Inbox_Contract.md`, выбрав адресата через
+`$HOME/.orchestra/specs/Inbox_Contract.md`, выбрав адресата через
 `project-registry.ps1 list`. Это не заменяет самодостаточный локальный план и не даёт
 права править чужой репозиторий. Описывай проверенные факты, влияние, желаемый результат
 и альтернативы, не навязанный дизайн; не жди ответа и верни `msg-id` processor.

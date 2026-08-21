@@ -141,7 +141,7 @@ Write-File (Join-Path $runtimeIdentity.Proj 'tools/policy.ps1') '# stale target-
 Write-File (Join-Path $runtimeIdentity.Proj 'tools/notify.ps1') '# stale target-local copy'
 $runtimeIdentityResult = Invoke-Doctor -Case $runtimeIdentity
 Assert-Contains $runtimeIdentityResult.Out 'WARN target-local tools/ contains Orchestra-named runner(s) that are ignored because this is not the Orchestra source checkout: policy.ps1, notify.ps1' 'runtime identity: stale target-local runners are diagnosed as ignored'
-Assert-Contains $runtimeIdentityResult.Out 'agents must use ~/.claude/scripts/<script>.ps1' 'runtime identity: diagnostic points agents at the cc-sync mirror'
+Assert-Contains $runtimeIdentityResult.Out 'agents must use ~/.orchestra/scripts/<script>.ps1' 'runtime identity: diagnostic points agents at the shared Orchestra runtime'
 Remove-Case $runtimeIdentity
 
 # =============================================================================
@@ -507,8 +507,9 @@ Assert-Contains $r.Out '/900s (live)' 'lock lease checkout: TTL threshold report
 Assert-Contains $r.Out 's (live)' 'lock lease checkout: live status reported'
 Assert-NotContains $r.Out 'WARN orchestrator.lock' 'lock lease checkout: healthy lease does not WARN'
 
-$mirrorDir = Join-Path $c.Home '.claude/scripts'
-New-Item -ItemType Directory -Force -Path $mirrorDir | Out-Null
+$mirrorDir = Join-Path $c.Home '.orchestra/scripts'
+$providerDir = Join-Path $c.Home '.claude/scripts'
+New-Item -ItemType Directory -Force -Path $mirrorDir, $providerDir | Out-Null
 Copy-Item -LiteralPath $script:Runtime -Destination (Join-Path $mirrorDir 'doctor-runtime.ps1')
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'state-tx.ps1') -Destination (Join-Path $mirrorDir 'state-tx.ps1')
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $script:Runtime) 'common.ps1') -Destination (Join-Path $mirrorDir 'common.ps1')

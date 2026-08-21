@@ -35,7 +35,7 @@
     table is in turn checked to equal the cc-doctor allowlist (Class 4), a change here that
     is not mirrored into config.example.md - and thence cc-doctor - fails the smoke gate. So
     cc-doctor's engine (tools/doctor-runtime.ps1) keeps its own hardcoded copy (it must run
-    when mirrored standalone into ~/.claude/scripts) yet cannot drift from this schema.
+    when mirrored standalone into ~/.orchestra/scripts) yet cannot drift from this schema.
 
     Runs under PowerShell 7 (pwsh). Get-RealFsPath uses .NET 6+ ResolveLinkTarget for
     symlink/junction resolution; under Windows PowerShell 5.1 that call is unavailable and

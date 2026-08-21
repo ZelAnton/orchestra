@@ -36,6 +36,7 @@ rem script (mirror layout in %USERPROFILE%\.claude\scripts, where cc-sync.cmd mi
 rem templates flat next to the *.cmd files).
 if not exist ".work" mkdir ".work"
 setlocal
+if not defined ORCHESTRA_HOME set "ORCHESTRA_HOME=%USERPROFILE%\.orchestra"
 rem Prefer pwsh (defaults to UTF-8) but fall back to Windows PowerShell 5.1, which needs an
 rem explicit UTF-8 encoding on both read and write: without it, a BOM-less UTF-8 template
 rem with Cyrillic comments gets misread as ANSI and re-encoded as mojibake (same class of
@@ -63,6 +64,7 @@ endlocal & exit /b %CC_CONFIG_RC%
 
 :seed_config
 set "CC_CONFIG_TEMPLATE=%~dp0..\config.example.md"
+if not exist "%CC_CONFIG_TEMPLATE%" set "CC_CONFIG_TEMPLATE=%ORCHESTRA_HOME%\config.example.md"
 if not exist "%CC_CONFIG_TEMPLATE%" set "CC_CONFIG_TEMPLATE=%~dp0config.example.md"
 rem Distinguish three causes so the diagnostic is never misleading (task T-056):
 rem  (a) the template is truly absent;
@@ -99,6 +101,7 @@ goto :eof
 
 :seed_constraints
 set "CC_CONSTRAINTS_TEMPLATE=%~dp0..\constraints.example.md"
+if not exist "%CC_CONSTRAINTS_TEMPLATE%" set "CC_CONSTRAINTS_TEMPLATE=%ORCHESTRA_HOME%\constraints.example.md"
 if not exist "%CC_CONSTRAINTS_TEMPLATE%" set "CC_CONSTRAINTS_TEMPLATE=%~dp0constraints.example.md"
 rem Same three-cause distinction as :seed_config (task T-056): (a) template absent;
 rem (b) template PATH is a directory, not a file; (c) template is a real file - defer to
@@ -164,6 +167,7 @@ rem the flat cc-sync mirror. Registration is a required cc-config outcome: unlik
 rem older best-effort template diagnostics, a missing/broken registry runtime returns a
 rem non-zero exit so the operator cannot believe the project is addressable when it is not.
 set "CC_PROJECT_REGISTRY=%~dp0..\tools\project-registry.ps1"
+if not exist "%CC_PROJECT_REGISTRY%" set "CC_PROJECT_REGISTRY=%ORCHESTRA_HOME%\scripts\project-registry.ps1"
 if not exist "%CC_PROJECT_REGISTRY%" set "CC_PROJECT_REGISTRY=%~dp0project-registry.ps1"
 if not exist "%CC_PROJECT_REGISTRY%" (
   echo Failed to register project ^(project-registry.ps1 not found next to the launcher or in the cc-sync mirror - run cc-sync^).

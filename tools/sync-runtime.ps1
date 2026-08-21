@@ -10,22 +10,16 @@
        unless -SkipRegen. A regeneration failure aborts before any mirroring.
     2. Validates agent .md invariants (validate-agents.ps1), unless -SkipValidate.
        A violation is reported but is non-fatal (matches the pre-T-090 behaviour).
-    3. Mirrors its OWN managed files into the Claude environment
-       ($DestinationRoot, default ~/.claude) TRANSACTIONALLY:
+    3. Mirrors provider-specific files into the Claude environment
+       ($DestinationRoot, default ~/.claude) and common runtime files into the
+       shared Orchestra home ($SharedDestinationRoot, default ~/.orchestra),
+       each TRANSACTIONALLY:
          - agents/*.md  (minus the two generator templates) -> <dest>/agents
          - launchers    (*.cmd on Windows, *.sh on POSIX)    -> <dest>/scripts
-         - docs/inbox_contract.md                            -> <dest>/specs/Inbox_Contract.md
-         - config.example.md, constraints.example.md         -> <dest>/scripts
-         - tools/*.ps1  (EVERY runner except cc-sync's own   -> <dest>/scripts
-           sync-runtime.ps1) so any runtime a launcher or an agent drives by a
-           bare tools/<name>.ps1 path - the launcher engines doctor-runtime.ps1 /
-           codex-runtime.ps1 AND the transactional/orchestration runners the
-           agents call directly (state-tx, queue-tx, outbox, policy, redaction,
-           supervisor, harness, ...), including their co-located shared dependencies
-           such as common.ps1, resolves from a mirror-only target project
-           at ~/.claude/scripts/<name>.ps1 too (task T-115; generalizes the
-           two-file T-114 allowlist to the whole tools/ folder, so a new runner is
-           picked up automatically)
+         - Codex-specific runtimes and prompt                    -> <dest>/scripts
+         - config.example.md, constraints.example.md             -> <shared>/
+         - docs/inbox_contract.md                                 -> <shared>/specs
+         - common orchestration tools                             -> <shared>/scripts
        Publication goes through a staging area and a persisted journal, so an
        error mid-publish (or a hard crash, recovered on the next run) is rolled
        back to the exact prior state - never a partially applied mirror.
@@ -53,6 +47,11 @@ param(
     # Target Claude environment root. Defaults to ~/.claude. Overridable so tests
     # never touch the real mirror.
     [string]$DestinationRoot,
+
+    # Shared Orchestra runtime/configuration root. Defaults to ~/.orchestra. When
+    # DestinationRoot is explicitly overridden by a fixture and this value is omitted,
+    # a sibling test-local <DestinationRoot>/.orchestra is used.
+    [string]$SharedDestinationRoot,
 
     # Target Codex environment root for generated custom agents. Defaults to
     # $CODEX_HOME or ~/.codex in a normal run. When DestinationRoot is explicitly
@@ -349,14 +348,23 @@ function Remove-Stale {
 
 $script:ExcludedAgents = @('coder.template.md', 'reviewer.template.md')
 
-# cc-sync's OWN engine is the one tools/*.ps1 that is deliberately never mirrored: run
+# cc-sync's OWN engine is deliberately never mirrored: run
 # from a mirror it has nothing to sync FROM (a reported no-op), and cc-sync.cmd/.sh only
 # ever resolve it from ../tools, never from the mirror - so a mirrored copy would be dead
-# weight. Every OTHER runner in tools/ IS mirrored (see Get-ManagedPairs).
-$script:ExcludedRuntimes = @('sync-runtime.ps1')
+# weight. Provider and shared runners are mirrored by their respective pair functions.
+$script:ProviderRuntimes = @(
+    'codex-preflight.ps1', 'codex-processor-runtime.ps1', 'codex-role-runtime.ps1', 'codex-runtime.ps1'
+)
+$script:SharedRuntimes = @(
+    'common.ps1', 'doctor-runtime.ps1', 'events-common.ps1', 'harness.ps1', 'inbox.ps1',
+    'linearize.ps1', 'metrics.ps1', 'notify.ps1', 'outbox.ps1', 'policy-schema.ps1',
+    'policy.ps1', 'proc-tree.ps1', 'processkit-runtime.ps1', 'project-registry-lib.ps1',
+    'project-registry.ps1', 'queue-tx.ps1', 'redaction.ps1', 'state-tx.ps1', 'supervisor.ps1',
+    'verification.ps1'
+)
 
-function Get-ManagedPairs {
-    # Returns @{ Source; Dest; Kind } for every file this tool mirrors.
+function Get-ProviderManagedPairs {
+    # Returns provider-specific @{ Source; Dest; Kind } entries.
     param([string]$Repo, [string]$Dest, [string]$Glob)
     $pairs = [System.Collections.Generic.List[object]]::new()
 
@@ -377,22 +385,6 @@ function Get-ManagedPairs {
         }
     }
 
-    foreach ($tpl in @('config.example.md', 'constraints.example.md')) {
-        $src = Join-Path $Repo $tpl
-        if (Test-Path -LiteralPath $src -PathType Leaf) {
-            $pairs.Add([ordered]@{ Source = $src; Dest = (Join-Path $scriptsDst $tpl); Kind = 'template' })
-        }
-    }
-
-    $inboxContract = Join-Path (Join-Path $Repo 'docs') 'inbox_contract.md'
-    if (Test-Path -LiteralPath $inboxContract -PathType Leaf) {
-        $pairs.Add([ordered]@{
-            Source = $inboxContract
-            Dest = Join-Path (Join-Path $Dest 'specs') 'Inbox_Contract.md'
-            Kind = 'spec'
-        })
-    }
-
     # The root Codex processor prompt is consumed by codex-processor-runtime.ps1.
     # It travels beside the launcher runtimes so the mirror-only layout needs no
     # Orchestra checkout at execution time.
@@ -401,34 +393,81 @@ function Get-ManagedPairs {
         $pairs.Add([ordered]@{ Source = $codexPrompt; Dest = (Join-Path $scriptsDst 'codex-processor.md'); Kind = 'codex_prompt' })
     }
 
-    # Tools runtimes and their shared dot-source dependencies: mirror the ENTIRE tools/*.ps1
-    # set next to the launchers (task T-115),
-    # not a curated allowlist, so EVERY runner an agent or launcher drives by a bare
-    # tools/<name>.ps1 path resolves from a mirror-only target project (no orchestra checkout)
-    # at ~/.claude/scripts/<name>.ps1 - and a NEW runner added to tools/ is picked up
-    # automatically, with no per-tool edit here (the T-114-style one-off is gone).
-    #   - The launcher engines the thin cc-* wrappers delegate to: doctor-runtime.ps1
-    #     (cc-doctor - runs from the mirror against a target project) and, historically the
-    #     first mirrored member, codex-runtime.ps1 (coder_codex/reviewer_codex drive codex
-    #     through it - task T-114).
-    #   - The transactional/orchestration runners processor and the other agents call
-    #     directly (state-tx, queue-tx, outbox, policy, policy-schema, redaction, supervisor,
-    #     harness, check-codex-config-guard, ...): these were the ones that used to resolve
-    #     ONLY from a checkout; they now travel with the mirror too, so the agents' dual-layout
-    #     path resolution (checkout tools/<name>.ps1 vs mirror ~/.claude/scripts/<name>.ps1;
-    #     see the tools/*.ps1 runner-resolution rule in knowledge.md / docs/queue_contract.md)
-    #     finds a real copy in either layout.
-    # Mirrored regardless of the launcher glob (both OSes need the same single pwsh engines).
-    # cc-sync's own runtime is the sole exclusion (see $script:ExcludedRuntimes).
+    # Only provider-specific runtimes remain beside Claude launchers. Common tools are
+    # installed under the shared root by Get-SharedManagedPairs.
     $toolsSrc = Join-Path $Repo 'tools'
     if (Test-Path -LiteralPath $toolsSrc) {
         foreach ($f in (Get-ChildItem -LiteralPath $toolsSrc -File -Filter '*.ps1' -ErrorAction SilentlyContinue | Sort-Object Name)) {
-            if ($script:ExcludedRuntimes -contains $f.Name) { continue }
+            if ($script:ProviderRuntimes -notcontains $f.Name) { continue }
             $pairs.Add([ordered]@{ Source = $f.FullName; Dest = (Join-Path $scriptsDst $f.Name); Kind = 'runtime' })
         }
     }
 
     return $pairs
+}
+
+function Get-SharedManagedPairs {
+    # Returns common configuration/spec/runtime @{ Source; Dest; Kind } entries.
+    param([string]$Repo, [string]$Dest)
+    $pairs = [System.Collections.Generic.List[object]]::new()
+    foreach ($tpl in @('config.example.md', 'constraints.example.md')) {
+        $src = Join-Path $Repo $tpl
+        if (Test-Path -LiteralPath $src -PathType Leaf) {
+            $pairs.Add([ordered]@{ Source = $src; Dest = (Join-Path $Dest $tpl); Kind = 'template' })
+        }
+    }
+    $inboxContract = Join-Path (Join-Path $Repo 'docs') 'inbox_contract.md'
+    if (Test-Path -LiteralPath $inboxContract -PathType Leaf) {
+        $pairs.Add([ordered]@{ Source = $inboxContract; Dest = (Join-Path (Join-Path $Dest 'specs') 'Inbox_Contract.md'); Kind = 'spec' })
+    }
+    $toolsSrc = Join-Path $Repo 'tools'
+    $scriptsDst = Join-Path $Dest 'scripts'
+    if (Test-Path -LiteralPath $toolsSrc) {
+        foreach ($name in $script:SharedRuntimes) {
+            $src = Join-Path $toolsSrc $name
+            if (Test-Path -LiteralPath $src -PathType Leaf) {
+                $pairs.Add([ordered]@{ Source = $src; Dest = (Join-Path $scriptsDst $name); Kind = 'runtime' })
+            }
+        }
+    }
+    return $pairs
+}
+
+function Invoke-TransactionalMirror {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$ManifestName,
+        [Parameter(Mandatory)][object[]]$Pairs,
+        [Parameter(Mandatory)][string]$FailureLabel
+    )
+    New-Item -ItemType Directory -Force -Path $Root | Out-Null
+    Invoke-JournalRecovery -Root $Root
+    $manifestPath = Join-Path $Root $ManifestName
+    $previous = Read-Manifest -ManifestPath $manifestPath -Root $Root
+    $managed = [System.Collections.Generic.HashSet[string]]::new($script:PathComparer)
+    foreach ($p in $Pairs) { [void]$managed.Add([System.IO.Path]::GetFullPath($p.Dest)) }
+    $tx = New-TxContext -Root $Root
+    New-Item -ItemType Directory -Force -Path $tx.Stage | Out-Null
+    New-Item -ItemType Directory -Force -Path $tx.Backup | Out-Null
+    $counts = @{}
+    $removed = 0
+    try {
+        foreach ($p in $Pairs) {
+            Publish-One -Tx $tx -Source $p.Source -Dest $p.Dest
+            if (-not $counts.ContainsKey($p.Kind)) { $counts[$p.Kind] = 0 }
+            $counts[$p.Kind]++
+        }
+        foreach ($old in $previous) {
+            if (-not $managed.Contains($old)) { Remove-Stale -Tx $tx -Dest $old; $removed++ }
+        }
+        Write-Manifest -ManifestPath $manifestPath -Root $Root -AbsoluteDests @($managed)
+    } catch {
+        Invoke-Rollback -Tx $tx
+        Remove-Item -LiteralPath $tx.Dir -Recurse -Force -ErrorAction SilentlyContinue
+        Stop-Sync 1 "$FailureLabel failed and was rolled back to its previous state - $($_.Exception.Message)"
+    }
+    Remove-Item -LiteralPath $tx.Dir -Recurse -Force -ErrorAction SilentlyContinue
+    return [pscustomobject]@{ Counts = $counts; Removed = $removed }
 }
 
 function Get-CodexManagedPairs {
@@ -512,7 +551,7 @@ if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 try { $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path } catch { Stop-Sync 2 "repository root '$RepoRoot' does not exist." }
 
 # Checkout vs mirror: the generator and templates only exist in an actual checkout.
-# Run from the launchers-only ~/.claude/scripts mirror there is nothing to sync FROM,
+# Run from an installed provider mirror there is nothing to sync FROM,
 # so this is a deliberate, reported no-op (never a false "Synced").
 $isCheckout = (Test-Path -LiteralPath (Join-Path $RepoRoot 'generate-coders.ps1')) -or (Test-Path -LiteralPath (Join-Path $RepoRoot 'agents/coder.template.md'))
 if (-not $isCheckout) {
@@ -522,6 +561,15 @@ if (-not $isCheckout) {
 
 $destinationWasExplicit = -not [string]::IsNullOrWhiteSpace($DestinationRoot)
 if (-not $DestinationRoot) { $DestinationRoot = Join-Path $HOME '.claude' }
+if (-not $SharedDestinationRoot) {
+    if ($destinationWasExplicit) {
+        $SharedDestinationRoot = Join-Path $DestinationRoot '.orchestra'
+    } elseif ($env:ORCHESTRA_HOME) {
+        $SharedDestinationRoot = $env:ORCHESTRA_HOME
+    } else {
+        $SharedDestinationRoot = Join-Path $HOME '.orchestra'
+    }
+}
 if (-not $CodexDestinationRoot) {
     if ($destinationWasExplicit) {
         $CodexDestinationRoot = Join-Path $DestinationRoot '.codex'
@@ -536,97 +584,44 @@ if (-not $LauncherGlob) { $LauncherGlob = if ($script:OnWindows) { '*.cmd' } els
 if (-not $SkipRegen)    { Invoke-Regen    -Repo $RepoRoot }
 if (-not $SkipValidate) { Invoke-Validate -Repo $RepoRoot }
 
-New-Item -ItemType Directory -Force -Path $DestinationRoot | Out-Null
-
-# Recover any partial state left by a crashed previous run, THEN start fresh.
-Invoke-JournalRecovery -Root $DestinationRoot
-
-$manifestPath = Join-Path $DestinationRoot '.orchestra-sync-manifest.json'
-$previous = Read-Manifest -ManifestPath $manifestPath -Root $DestinationRoot
-
-$pairs = Get-ManagedPairs -Repo $RepoRoot -Dest $DestinationRoot -Glob $LauncherGlob
+$providerPairs = Get-ProviderManagedPairs -Repo $RepoRoot -Dest $DestinationRoot -Glob $LauncherGlob
+$sharedPairs = Get-SharedManagedPairs -Repo $RepoRoot -Dest $SharedDestinationRoot
 try {
-    Assert-WindowsLauncherBytes -Pairs $pairs
+    Assert-WindowsLauncherBytes -Pairs (@($providerPairs) + @($sharedPairs))
 } catch {
     Stop-Sync 1 $_.Exception.Message
 }
-$newManaged = [System.Collections.Generic.HashSet[string]]::new($script:PathComparer)
-foreach ($p in $pairs) { [void]$newManaged.Add([System.IO.Path]::GetFullPath($p.Dest)) }
 
-$tx = New-TxContext -Root $DestinationRoot
-New-Item -ItemType Directory -Force -Path $tx.Stage | Out-Null
-New-Item -ItemType Directory -Force -Path $tx.Backup | Out-Null
-
-$counts = @{ agent = 0; launcher = 0; template = 0; spec = 0; runtime = 0; codex_prompt = 0 }
-$removed = 0
-try {
-    foreach ($p in $pairs) {
-        Publish-One -Tx $tx -Source $p.Source -Dest $p.Dest
-        $counts[$p.Kind]++
-    }
-    # Stale-entry pruning: only destinations THIS TOOL recorded in the previous
-    # manifest that are no longer sourced. Foreign files (never in the manifest)
-    # are untouched.
-    foreach ($old in $previous) {
-        if (-not $newManaged.Contains($old)) {
-            Remove-Stale -Tx $tx -Dest $old
-            $removed++
-        }
-    }
-    Write-Manifest -ManifestPath $manifestPath -Root $DestinationRoot -AbsoluteDests @($newManaged)
-} catch {
-    Invoke-Rollback -Tx $tx
-    Remove-Item -LiteralPath $tx.Dir -Recurse -Force -ErrorAction SilentlyContinue
-    Stop-Sync 1 "mirror failed and was rolled back to its previous state - $($_.Exception.Message)"
-}
-
-# Success: drop the transaction workspace (journal + staging + backups).
-Remove-Item -LiteralPath $tx.Dir -Recurse -Force -ErrorAction SilentlyContinue
+$providerResult = Invoke-TransactionalMirror -Root $DestinationRoot `
+    -ManifestName '.orchestra-sync-manifest.json' -Pairs $providerPairs -FailureLabel 'Claude provider mirror'
+$sharedResult = Invoke-TransactionalMirror -Root $SharedDestinationRoot `
+    -ManifestName '.orchestra-shared-sync-manifest.json' -Pairs $sharedPairs -FailureLabel 'shared Orchestra mirror'
 
 # Publish the namespaced Codex custom-agent package under its own transactional
 # manifest. The Claude mirror and Codex home are different roots, so each has an
 # independent crash-recoverable transaction and stale-file allowlist. Foreign Codex
 # agents are never touched.
-New-Item -ItemType Directory -Force -Path $CodexDestinationRoot | Out-Null
-Invoke-JournalRecovery -Root $CodexDestinationRoot
-$codexManifestPath = Join-Path $CodexDestinationRoot '.orchestra-agent-sync-manifest.json'
-$codexPrevious = Read-Manifest -ManifestPath $codexManifestPath -Root $CodexDestinationRoot
 $codexPairs = Get-CodexManagedPairs -Repo $RepoRoot -Dest $CodexDestinationRoot
-$codexManaged = [System.Collections.Generic.HashSet[string]]::new($script:PathComparer)
-foreach ($p in $codexPairs) { [void]$codexManaged.Add([System.IO.Path]::GetFullPath($p.Dest)) }
-$codexTx = New-TxContext -Root $CodexDestinationRoot
-New-Item -ItemType Directory -Force -Path $codexTx.Stage | Out-Null
-New-Item -ItemType Directory -Force -Path $codexTx.Backup | Out-Null
-$codexRemoved = 0
-try {
-    foreach ($p in $codexPairs) { Publish-One -Tx $codexTx -Source $p.Source -Dest $p.Dest }
-    foreach ($old in $codexPrevious) {
-        if (-not $codexManaged.Contains($old)) {
-            Remove-Stale -Tx $codexTx -Dest $old
-            $codexRemoved++
-        }
-    }
-    Write-Manifest -ManifestPath $codexManifestPath -Root $CodexDestinationRoot -AbsoluteDests @($codexManaged)
-} catch {
-    Invoke-Rollback -Tx $codexTx
-    Remove-Item -LiteralPath $codexTx.Dir -Recurse -Force -ErrorAction SilentlyContinue
-    Stop-Sync 1 "Codex role mirror failed and was rolled back - $($_.Exception.Message)"
-}
-Remove-Item -LiteralPath $codexTx.Dir -Recurse -Force -ErrorAction SilentlyContinue
+$codexResult = Invoke-TransactionalMirror -Root $CodexDestinationRoot `
+    -ManifestName '.orchestra-agent-sync-manifest.json' -Pairs $codexPairs -FailureLabel 'Codex role mirror'
 
 $agentsDst = Join-Path $DestinationRoot 'agents'
 $scriptsDst = Join-Path $DestinationRoot 'scripts'
-Write-SyncInfo ("Synced {0} agent definition(s) -> {1}" -f $counts['agent'], $agentsDst)
-Write-SyncInfo ("Synced {0} launcher script(s) -> {1}" -f $counts['launcher'], $scriptsDst)
-Write-SyncInfo ("Synced {0} config template(s) -> {1}" -f $counts['template'], $scriptsDst)
-Write-SyncInfo ("Synced {0} shared specification(s) -> {1}" -f $counts['spec'], (Join-Path $DestinationRoot 'specs'))
-Write-SyncInfo ("Synced {0} launcher runtime(s) -> {1}" -f $counts['runtime'], $scriptsDst)
-Write-SyncInfo ("Synced {0} Codex processor prompt(s) -> {1}" -f $counts['codex_prompt'], $scriptsDst)
+Write-SyncInfo ("Synced {0} provider agent definition(s) -> {1}" -f $providerResult.Counts['agent'], $agentsDst)
+Write-SyncInfo ("Synced {0} launcher script(s) -> {1}" -f $providerResult.Counts['launcher'], $scriptsDst)
+Write-SyncInfo ("Synced {0} provider runtime(s) -> {1}" -f $providerResult.Counts['runtime'], $scriptsDst)
+Write-SyncInfo ("Synced {0} Codex processor prompt(s) -> {1}" -f $providerResult.Counts['codex_prompt'], $scriptsDst)
+Write-SyncInfo ("Synced {0} shared config template(s) -> {1}" -f $sharedResult.Counts['template'], $SharedDestinationRoot)
+Write-SyncInfo ("Synced {0} shared specification(s) -> {1}" -f $sharedResult.Counts['spec'], (Join-Path $SharedDestinationRoot 'specs'))
+Write-SyncInfo ("Synced {0} shared runtime(s) -> {1}" -f $sharedResult.Counts['runtime'], (Join-Path $SharedDestinationRoot 'scripts'))
 Write-SyncInfo ("Synced {0} Codex custom agent(s) -> {1}" -f $codexPairs.Count, (Join-Path $CodexDestinationRoot 'agents'))
-if ($removed -gt 0) {
-    Write-SyncInfo ("Removed {0} stale previously-managed mirror entry(ies)." -f $removed)
+if ($providerResult.Removed -gt 0) {
+    Write-SyncInfo ("Removed {0} stale previously-managed provider entry(ies)." -f $providerResult.Removed)
 }
-if ($codexRemoved -gt 0) {
-    Write-SyncInfo ("Removed {0} stale previously-managed Codex agent entry(ies)." -f $codexRemoved)
+if ($sharedResult.Removed -gt 0) {
+    Write-SyncInfo ("Removed {0} stale previously-managed shared entry(ies)." -f $sharedResult.Removed)
+}
+if ($codexResult.Removed -gt 0) {
+    Write-SyncInfo ("Removed {0} stale previously-managed Codex agent entry(ies)." -f $codexResult.Removed)
 }
 exit 0
