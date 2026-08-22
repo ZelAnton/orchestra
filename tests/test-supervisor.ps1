@@ -67,6 +67,22 @@ function Read-File { param([string]$Path) if (Test-Path -LiteralPath $Path) { re
 function Write-File { param([string]$Path, [string]$Text) [System.IO.File]::WriteAllText($Path, $Text, $script:Utf8) }
 function ArgsJson { param([string[]]$A) return (, $A | ConvertTo-Json -Compress) }
 
+function New-TestConfigHome {
+    param([hashtable]$Overrides = @{})
+    $configHome = New-TempDir
+    $cli = 'off'
+    $python = ''
+    if ($Overrides.ContainsKey('CC_PROCESSKIT_CLI')) { $cli = [string]$Overrides['CC_PROCESSKIT_CLI'] }
+    if ($Overrides.ContainsKey('CC_PROCESSKIT_PYTHON')) { $python = [string]$Overrides['CC_PROCESSKIT_PYTHON'] }
+    $content = @(
+        '# test root configuration'
+        "CC_PROCESSKIT_CLI: $cli"
+        "CC_PROCESSKIT_PYTHON: $python"
+    ) -join "`n"
+    Write-File (Join-Path $configHome 'root-config.md') $content
+    return $configHome
+}
+
 # Runs supervisor.ps1 as a child pwsh process; returns @{ ExitCode; Out; Err }.
 function Invoke-Spv {
     param(
@@ -82,12 +98,11 @@ function Invoke-Spv {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
-    # Keep host-installed ProcessKit binaries from changing baseline scenarios. Tests
-    # opt into a CLI explicitly when they exercise the standalone backend.
-    $psi.Environment['CC_PROCESSKIT_CLI'] = 'off'
-    $psi.Environment['CC_PROCESSKIT_PYTHON'] = ''
+    $psi.Environment['ORCHESTRA_HOME'] = New-TestConfigHome -Overrides $EnvironmentOverrides
     foreach ($name in $EnvironmentOverrides.Keys) {
-        $psi.Environment[[string]$name] = [string]$EnvironmentOverrides[$name]
+        if ($name -notin @('CC_PROCESSKIT_CLI', 'CC_PROCESSKIT_PYTHON')) {
+            $psi.Environment[[string]$name] = [string]$EnvironmentOverrides[$name]
+        }
     }
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ToolPath) + $ToolArgs)) { $psi.ArgumentList.Add($a) }
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -106,8 +121,7 @@ function Start-Spv {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
-    $psi.Environment['CC_PROCESSKIT_CLI'] = 'off'
-    $psi.Environment['CC_PROCESSKIT_PYTHON'] = ''
+    $psi.Environment['ORCHESTRA_HOME'] = New-TestConfigHome
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
     }
@@ -234,7 +248,7 @@ function Resolve-ProcessKitFixture {
         '--working-directory', $d, '--stdout-file', $out, '--json'
     )
     Assert-Exit $r 0 'shell-command succeeds'
-    Assert-Equal '1|0' (Read-File $out) 'shell-command inherits disabled MSBuild reuse/server policy'
+    Assert-Equal '1|0' (Read-File $out).TrimEnd("`r", "`n") 'shell-command inherits disabled MSBuild reuse/server policy'
 }.Invoke()
 
 # =============================================================================
