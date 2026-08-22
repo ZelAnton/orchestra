@@ -41,13 +41,7 @@ $opts = $parsed.Opts
 
 function Get-ConfigValue {
     param([string]$Work, [string]$Key)
-    $file = Join-Path $Work 'config.md'
-    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return '' }
-    foreach ($line in (Get-Content -LiteralPath $file -Encoding UTF8)) {
-        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
-        if ($null -ne $entry -and [string]::Equals($entry.Key, $Key, [System.StringComparison]::Ordinal)) { return $entry.Value }
-    }
-    return ''
+    return Get-OrchestraConfigValue -Work $Work -Key $Key -Default ''
 }
 
 function ConvertTo-PosixShellLiteral {

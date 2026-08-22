@@ -181,10 +181,17 @@ function Read-Config {
     param([string]$Work)
     $values = @{}
     $path = Join-Path $Work 'config.md'
-    if (-not (Test-Path -LiteralPath $path)) { return $values }
-    foreach ($raw in (Get-Content -LiteralPath $path -Encoding utf8)) {
-        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$raw)
-        if ($null -ne $entry) { $values[$entry.Key] = $entry.Value }
+    if (Test-Path -LiteralPath $path) {
+        foreach ($raw in (Get-Content -LiteralPath $path -Encoding utf8)) {
+            $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$raw)
+            if ($null -ne $entry -and -not [string]::IsNullOrWhiteSpace($entry.Value)) { $values[$entry.Key] = $entry.Value }
+        }
+    }
+    foreach ($key in @('VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'SMOKE_CMD')) {
+        if (-not $values.ContainsKey($key)) {
+            $value = Get-OrchestraConfigValue -Work $Work -Key $key -Default ''
+            if (-not [string]::IsNullOrWhiteSpace($value)) { $values[$key] = $value }
+        }
     }
     return $values
 }

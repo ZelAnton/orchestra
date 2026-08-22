@@ -6,6 +6,7 @@ rem subroutine name as the first argument:
 rem
 rem   call "%~dp0cc-common.cmd" run <agent> "<prompt>"
 rem   call "%~dp0cc-common.cmd" resolve_permission_mode
+rem   call "%~dp0cc-common.cmd" resolve_provider
 rem   call "%~dp0cc-common.cmd" sanitize
 rem
 rem "goto :%1" below jumps straight to the matching label; an unset/unknown
@@ -34,11 +35,13 @@ exit /b %errorlevel%
 rem Operator-owned opt-in for Claude launchers. Keep the committed agent
 rem frontmatter on auto: a bypassPermissions parent takes precedence for every
 rem spawned subagent, so changing installed role definitions is unnecessary. Delayed
-rem expansion is intentional: the environment value is untrusted command text until it
+rem expansion is intentional: the root-config value is untrusted command text until it
 rem has matched one of the two literals, so percent-expanding it would let a quote plus
 rem cmd metacharacters execute before the fail-closed branch.
 setlocal EnableExtensions EnableDelayedExpansion
-set "CANDIDATE_CLAUDE_PERMISSION_MODE=!ORCHESTRA_CLAUDE_PERMISSION_MODE!"
+call :config_get ORCHESTRA_CLAUDE_PERMISSION_MODE
+if errorlevel 1 exit /b %ERRORLEVEL%
+set "CANDIDATE_CLAUDE_PERMISSION_MODE=!CC_CONFIG_VALUE!"
 if not defined CANDIDATE_CLAUDE_PERMISSION_MODE set "CANDIDATE_CLAUDE_PERMISSION_MODE=auto"
 if "!CANDIDATE_CLAUDE_PERMISSION_MODE!"=="auto" goto :permission_mode_auto
 if "!CANDIDATE_CLAUDE_PERMISSION_MODE!"=="bypassPermissions" goto :permission_mode_bypass
@@ -51,6 +54,67 @@ exit /b 2
 endlocal
 set "CLAUDE_PERMISSION_MODE=auto"
 exit /b 0
+
+:resolve_provider
+setlocal EnableExtensions EnableDelayedExpansion
+call :config_get ORCHESTRA_PROVIDER
+if errorlevel 1 exit /b %ERRORLEVEL%
+set "CANDIDATE_PROVIDER=!CC_CONFIG_VALUE!"
+if not defined CANDIDATE_PROVIDER set "CANDIDATE_PROVIDER=claude"
+if /I "!CANDIDATE_PROVIDER!"=="claude" (
+  endlocal
+  set "PROVIDER=claude"
+  exit /b 0
+)
+if /I "!CANDIDATE_PROVIDER!"=="codex" (
+  endlocal
+  set "PROVIDER=codex"
+  exit /b 0
+)
+endlocal
+echo Invalid ORCHESTRA_PROVIDER. Allowed: claude, codex. 1>&2
+set "PROVIDER="
+exit /b 2
+
+:config_get
+set "CC_CONFIG_VALUE="
+if not defined ORCHESTRA_HOME set "ORCHESTRA_HOME=%USERPROFILE%\.orchestra"
+set "CC_CONFIG_RUNTIME=%~dp0..\tools\config-runtime.ps1"
+if not exist "%CC_CONFIG_RUNTIME%" set "CC_CONFIG_RUNTIME=%ORCHESTRA_HOME%\scripts\config-runtime.ps1"
+if not exist "%CC_CONFIG_RUNTIME%" (
+  echo Orchestra config runtime is missing: %CC_CONFIG_RUNTIME% 1>&2
+  exit /b 12
+)
+set "CC_CONFIG_PS=pwsh"
+where pwsh >nul 2>nul
+if errorlevel 1 set "CC_CONFIG_PS=powershell"
+call :make_config_capture_dir
+if errorlevel 1 exit /b %ERRORLEVEL%
+set "CC_CONFIG_CAPTURE=%CC_CONFIG_CAPTURE_DIR%\value.tmp"
+%CC_CONFIG_PS% -NoProfile -File "%CC_CONFIG_RUNTIME%" get --work "%CD%\.work" --key %1 > "%CC_CONFIG_CAPTURE%"
+set "CC_CONFIG_RC=%ERRORLEVEL%"
+if exist "%CC_CONFIG_CAPTURE%" (
+  for /f "usebackq delims=" %%V in ("%CC_CONFIG_CAPTURE%") do set "CC_CONFIG_VALUE=%%V"
+  del /q "%CC_CONFIG_CAPTURE%" >nul 2>nul
+)
+rmdir "%CC_CONFIG_CAPTURE_DIR%" >nul 2>nul
+if not "%CC_CONFIG_RC%"=="0" exit /b %CC_CONFIG_RC%
+exit /b 0
+
+:make_config_capture_dir
+setlocal EnableExtensions EnableDelayedExpansion
+set /a CC_CONFIG_CAPTURE_ATTEMPTS=0
+:config_capture_retry
+set /a CC_CONFIG_CAPTURE_ATTEMPTS+=1
+set "CC_CONFIG_CAPTURE_CANDIDATE=%TEMP%\orchestra-config-!RANDOM!-!RANDOM!"
+mkdir "!CC_CONFIG_CAPTURE_CANDIDATE!" >nul 2>nul
+if not errorlevel 1 (
+  for %%D in ("!CC_CONFIG_CAPTURE_CANDIDATE!") do endlocal & set "CC_CONFIG_CAPTURE_DIR=%%~D" & exit /b 0
+)
+if !CC_CONFIG_CAPTURE_ATTEMPTS! LSS 32 goto :config_capture_retry
+endlocal
+echo Failed to allocate an isolated Orchestra config capture directory. 1>&2
+exit /b 12
 
 :permission_mode_bypass
 endlocal

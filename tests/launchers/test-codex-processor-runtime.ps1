@@ -43,9 +43,18 @@ exit $code
 }
 function Invoke-Runtime {
     param($Fixture, [string]$Action, [hashtable]$Environment = @{}, [string[]]$Additional = @())
+    $configHome = Join-Path $Fixture.Base '.orchestra'
+    New-Item -ItemType Directory -Force -Path $configHome | Out-Null
+    $configLines = @(('CODEX_HOME: ' + $Fixture.CodexHome))
+    $configKeys = @('ORCHESTRA_CODEX_MODEL', 'ORCHESTRA_CODEX_REASONING', 'ORCHESTRA_CODEX_SANDBOX', 'ORCHESTRA_CODEX_MAX_THREADS', 'CODEX_HOME')
+    foreach ($key in $Environment.Keys) {
+        if ($configKeys -contains $key -and -not [string]::IsNullOrWhiteSpace([string]$Environment[$key])) {
+            $configLines += ('{0}: {1}' -f $key, $Environment[$key])
+        }
+    }
+    [System.IO.File]::WriteAllText((Join-Path $configHome 'root-config.md'), (($configLines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
     $old = @{}
     $vars = @{
-        CODEX_HOME = $Fixture.CodexHome
         FAKE_ARGS_FILE = $Fixture.Args
         FAKE_PROMPT_FILE = $Fixture.InitialPrompt
         FAKE_THREAD_ID = '11111111-2222-3333-4444-555555555555'
@@ -54,9 +63,14 @@ function Invoke-Runtime {
         ORCHESTRA_CODEX_SANDBOX = ''
         ORCHESTRA_CODEX_REASONING = ''
         ORCHESTRA_CODEX_MAX_THREADS = ''
+        ORCHESTRA_HOME = $configHome
     }
     foreach ($key in $Environment.Keys) { $vars[$key] = $Environment[$key] }
-    foreach ($key in $vars.Keys) { $old[$key] = [Environment]::GetEnvironmentVariable($key); [Environment]::SetEnvironmentVariable($key, [string]$vars[$key]) }
+    foreach ($key in $vars.Keys) {
+        $old[$key] = [Environment]::GetEnvironmentVariable($key)
+        if ($key -eq 'CODEX_HOME' -or $configKeys -contains $key) { [Environment]::SetEnvironmentVariable($key, '') }
+        else { [Environment]::SetEnvironmentVariable($key, [string]$vars[$key]) }
+    }
     try {
         $all = @('-NoProfile','-File',$runtime,$Action,'-Root',$Fixture.Project,'-PromptPath',$Fixture.Prompt,'-CodexCmd',$Fixture.Fake) + $Additional
         $outFile = Join-Path $Fixture.Base ('out-' + [Guid]::NewGuid().ToString('N') + '.txt')

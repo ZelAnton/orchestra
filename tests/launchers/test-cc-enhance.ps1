@@ -49,4 +49,22 @@ Invoke-Test -Name 'cc-enhance.cmd' -Body {
     finally {
         Remove-Sandbox $paths
     }
+
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-enhance.cmd'
+        Install-FakeClaude -Paths $paths
+        Remove-Item -LiteralPath (Join-Path $paths.Orchestra 'scripts/config-runtime.ps1') -Force
+        $captureFile = Join-Path $paths.Root 'claude-args.txt'
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-enhance.cmd' -EnvVars @{
+            FAKE_ARGS_FILE = $captureFile
+            FAKE_EXIT_CODE = '0'
+        }
+        Assert-Equal 12 $result.ExitCode 'provider resolver must propagate a config runtime failure'
+        Assert-True (@(Get-CapturedArgs $captureFile).Count -eq 0) 'provider resolver failure must not start Claude'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
 }

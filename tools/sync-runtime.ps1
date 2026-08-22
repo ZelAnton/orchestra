@@ -356,7 +356,7 @@ $script:ProviderRuntimes = @(
     'codex-preflight.ps1', 'codex-processor-runtime.ps1', 'codex-role-runtime.ps1', 'codex-runtime.ps1'
 )
 $script:SharedRuntimes = @(
-    'common.ps1', 'doctor-runtime.ps1', 'events-common.ps1', 'harness.ps1', 'inbox.ps1',
+    'common.ps1', 'config-runtime.ps1', 'doctor-runtime.ps1', 'events-common.ps1', 'harness.ps1', 'inbox.ps1',
     'linearize.ps1', 'metrics.ps1', 'notify.ps1', 'outbox.ps1', 'policy-schema.ps1',
     'policy.ps1', 'proc-tree.ps1', 'processkit-runtime.ps1', 'project-registry-lib.ps1',
     'project-registry.ps1', 'queue-tx.ps1', 'redaction.ps1', 'state-tx.ps1', 'supervisor.ps1',
@@ -410,7 +410,7 @@ function Get-SharedManagedPairs {
     # Returns common configuration/spec/runtime @{ Source; Dest; Kind } entries.
     param([string]$Repo, [string]$Dest)
     $pairs = [System.Collections.Generic.List[object]]::new()
-    foreach ($tpl in @('config.example.md', 'constraints.example.md')) {
+    foreach ($tpl in @('config.example.md', 'root-config.example.md', 'constraints.example.md')) {
         $src = Join-Path $Repo $tpl
         if (Test-Path -LiteralPath $src -PathType Leaf) {
             $pairs.Add([ordered]@{ Source = $src; Dest = (Join-Path $Dest $tpl); Kind = 'template' })
@@ -550,6 +550,21 @@ function Invoke-Validate {
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 try { $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path } catch { Stop-Sync 2 "repository root '$RepoRoot' does not exist." }
 
+# The shared resolver is optional for the synthetic sync fixtures, but is loaded
+# for a real checkout so CODEX_HOME comes from root-config.md rather than the OS.
+$commonPath = Join-Path $RepoRoot 'tools/common.ps1'
+if (Test-Path -LiteralPath $commonPath -PathType Leaf) { . $commonPath }
+
+function Expand-ConfiguredPath {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $Value }
+    if ($Value -eq '~') { return $HOME }
+    if ($Value.StartsWith('~/' ) -or $Value.StartsWith('~\')) {
+        return Join-Path $HOME $Value.Substring(2)
+    }
+    return $Value
+}
+
 # Checkout vs mirror: the generator and templates only exist in an actual checkout.
 # Run from an installed provider mirror there is nothing to sync FROM,
 # so this is a deliberate, reported no-op (never a false "Synced").
@@ -573,10 +588,12 @@ if (-not $SharedDestinationRoot) {
 if (-not $CodexDestinationRoot) {
     if ($destinationWasExplicit) {
         $CodexDestinationRoot = Join-Path $DestinationRoot '.codex'
-    } elseif ($env:CODEX_HOME) {
-        $CodexDestinationRoot = $env:CODEX_HOME
     } else {
-        $CodexDestinationRoot = Join-Path $HOME '.codex'
+        $configuredCodexHome = ''
+        if (Get-Command Get-OrchestraConfigValue -ErrorAction SilentlyContinue) {
+            $configuredCodexHome = Get-OrchestraConfigValue -Work (Join-Path $RepoRoot '.work') -Key 'CODEX_HOME' -Default ''
+        }
+        $CodexDestinationRoot = if ($configuredCodexHome) { Expand-ConfiguredPath $configuredCodexHome } else { Join-Path $HOME '.codex' }
     }
 }
 if (-not $LauncherGlob) { $LauncherGlob = if ($script:OnWindows) { '*.cmd' } else { '*.sh' } }

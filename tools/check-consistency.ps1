@@ -257,6 +257,15 @@ $nonKeyTokens = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
         'THREAD_ID', 'UPPER_SNAKE_CASE', 'VERIFICATION_EVIDENCE'
     ), [StringComparer]::Ordinal)
 
+# These are global root-config.md settings, not entries in the consuming project's
+# config.example.md defaults table. Their schema/documentation is checked separately
+# through tools/policy-schema.ps1 and root-config.example.md.
+$rootConfigKeys = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
+    'CODEX_HOME', 'CC_PROCESSKIT_CLI', 'CC_PROCESSKIT_PYTHON', 'ORCHESTRA_REGISTRY_PATH',
+    'BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS', 'ORCHESTRA_CODEX_MODEL',
+    'ORCHESTRA_CODEX_REASONING', 'ORCHESTRA_CODEX_SANDBOX', 'ORCHESTRA_CODEX_MAX_THREADS'
+), [StringComparer]::Ordinal)
+
 $keyPattern = '\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b'
 $usedKeyLocations = [ordered]@{}   # key -> List[string] of "file:line"
 
@@ -271,7 +280,7 @@ foreach ($file in $agentFiles) {
     for ($i = 0; $i -lt $lines.Count; $i++) {
         foreach ($m in [regex]::Matches($lines[$i], $keyPattern)) {
             $tok = $m.Value
-            if ($nonKeyTokens.Contains($tok)) { continue }
+            if ($nonKeyTokens.Contains($tok) -or $rootConfigKeys.Contains($tok)) { continue }
             if (-not $usedKeyLocations.Contains($tok)) { $usedKeyLocations[$tok] = [System.Collections.Generic.List[string]]::new() }
             $usedKeyLocations[$tok].Add("$($file.Name):$($i + 1)")
         }
@@ -443,7 +452,7 @@ foreach ($name in $artifactLocations.Keys) {
 # requiring cc-doctor to parse config.example.md at runtime (its engine must keep
 # working when installed standalone into ~/.orchestra/scripts, see the comments in
 # tools/doctor-runtime.ps1). The same class also guards the engine's other local copies of
-# the same schema — $script:EnvFallbackKeys, $claudeModelAllowed and
+# the same schema — root-config descriptors, $claudeModelAllowed and
 # $claudeModelFrontmatter — against tools/policy-schema.ps1.
 
 $DoctorRuntimeFile = Join-Path $RepoRoot 'tools/doctor-runtime.ps1'
@@ -482,8 +491,8 @@ foreach ($key in $defaultKeys) {
 # are guarded below, in this order (tools/policy-schema.ps1 is the single source of all
 # three; the copies exist only so the engine keeps working when mirrored standalone into
 # ~/.orchestra/scripts):
-#   $script:EnvFallbackKeys - the keys that also resolve from the OS environment, vs the
-#                             schema's envFallback flags.
+#   root-config.md - the global configuration source; schema envFallback flags must all
+#                    remain false.
 #   $claudeModelAllowed     - allowed value set per key, vs the schema enums.
 #   $claudeModelFrontmatter - the model each role falls back to when its key is unset, vs
 #                             the schema default AND vs the `model:` frontmatter of the
@@ -529,33 +538,71 @@ foreach ($desc in $schemaForModels.config) {
     if ([string]$desc.name -match $roleModelKeyPattern) { $schemaRoleModels[[string]$desc.name] = $desc }
 }
 
-# The third doctor copy: the keys that also resolve from the OS environment. cc-doctor
-# labels exactly these "(env)" and falls back to the environment for them, so a schema key
-# marked envFallback that never reaches this list would be honoured by the runtime but
-# reported as unset by the doctor.
-$envFallbackMatch = [regex]::Match($rtContent, '\$script:EnvFallbackKeys\s*=\s*@\((?<body>[^)]*)\)')
-if (-not $envFallbackMatch.Success) {
-    Add-Finding -FileRef $srcName -Check 'cc-doctor-env-fallback' `
-        -Detail 'could not find the $script:EnvFallbackKeys list - format may have changed'
+foreach ($desc in @($schemaForModels.config) + @($schemaForModels.root)) {
+    if ([bool]$desc.envFallback) {
+        Add-Finding -FileRef 'tools/policy-schema.ps1' -Check 'config-root-only' `
+            -Detail "'$($desc.name)' is still marked as an OS environment fallback; settings must come from config.md/root-config.md"
+    }
+}
+
+$commonRuntimePath = Join-Path $RepoRoot 'tools/common.ps1'
+$commonRuntimeContent = if (Test-Path -LiteralPath $commonRuntimePath -PathType Leaf) {
+    Get-Content -LiteralPath $commonRuntimePath -Raw -Encoding utf8
+} else { '' }
+$rootOnlyMatch = [regex]::Match($commonRuntimeContent, '\$script:OrchestraRootOnlyKeys\s*=\s*@\((?<body>[^)]*)\)')
+if (-not $rootOnlyMatch.Success) {
+    Add-Finding -FileRef 'tools/common.ps1' -Check 'root-only-key-set' -Detail 'could not find $script:OrchestraRootOnlyKeys'
 } else {
-    $doctorEnvKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($m in [regex]::Matches($envFallbackMatch.Groups['body'].Value, "'([A-Za-z0-9_]+)'")) {
-        [void]$doctorEnvKeys.Add($m.Groups[1].Value)
+    $runtimeRootOnlyKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($match in [regex]::Matches($rootOnlyMatch.Groups['body'].Value, "'([A-Z][A-Z0-9_]+)'")) {
+        [void]$runtimeRootOnlyKeys.Add($match.Groups[1].Value)
     }
-    $schemaEnvKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($desc in $schemaForModels.config) {
-        if ($desc.envFallback) { [void]$schemaEnvKeys.Add([string]$desc.name) }
-    }
-    foreach ($key in $schemaEnvKeys) {
-        if (-not $doctorEnvKeys.Contains($key)) {
-            Add-Finding -FileRef $srcName -Check 'cc-doctor-env-fallback' `
-                -Detail "'$key' resolves from the OS environment per tools/policy-schema.ps1 but is missing from `$script:EnvFallbackKeys"
+    $schemaRootOnlyKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($desc in $schemaForModels.root) { [void]$schemaRootOnlyKeys.Add([string]$desc.name) }
+    foreach ($name in $schemaRootOnlyKeys) {
+        if (-not $runtimeRootOnlyKeys.Contains($name)) {
+            Add-Finding -FileRef 'tools/common.ps1' -Check 'root-only-key-set' -Detail "schema root key '$name' is project-overridable because the runtime list omits it"
         }
     }
-    foreach ($key in $doctorEnvKeys) {
-        if (-not $schemaEnvKeys.Contains($key)) {
-            Add-Finding -FileRef $srcName -Check 'cc-doctor-env-fallback' `
-                -Detail "'$key' is in `$script:EnvFallbackKeys but tools/policy-schema.ps1 does not mark it envFallback"
+    foreach ($name in $runtimeRootOnlyKeys) {
+        if (-not $schemaRootOnlyKeys.Contains($name)) {
+            Add-Finding -FileRef 'tools/common.ps1' -Check 'root-only-key-set' -Detail "runtime root-only key '$name' is absent from the root schema"
+        }
+    }
+}
+
+$rootTemplatePath = Join-Path $RepoRoot 'root-config.example.md'
+if (-not (Test-Path -LiteralPath $rootTemplatePath -PathType Leaf)) {
+    Add-Finding -FileRef 'root-config.example.md' -Check 'root-config-template' -Detail 'global configuration template is missing'
+} else {
+    $rootTemplateLines = @(Get-Content -LiteralPath $rootTemplatePath -Encoding utf8)
+    $documentedRootKeys = [ordered]@{}
+    for ($lineIndex = 0; $lineIndex -lt $rootTemplateLines.Count; $lineIndex++) {
+        $match = [regex]::Match([string]$rootTemplateLines[$lineIndex], '^#\s+([A-Z][A-Z0-9_]+):\s*(.*?)\s*$')
+        if (-not $match.Success) { continue }
+        $name = $match.Groups[1].Value
+        if ($documentedRootKeys.Contains($name)) {
+            Add-Finding -FileRef 'root-config.example.md' -Check 'root-config-template' -Detail "'$name' is documented more than once"
+            continue
+        }
+        $documentedRootKeys[$name] = $match.Groups[2].Value
+        if ($lineIndex + 1 -ge $rootTemplateLines.Count -or [string]$rootTemplateLines[$lineIndex + 1] -notmatch '^#\s{3}\S') {
+            Add-Finding -FileRef 'root-config.example.md' -Check 'root-config-template' -Detail "'$name' has no explanatory comment after its example value"
+        }
+    }
+    $schemaConfigByName = [ordered]@{}
+    foreach ($desc in @($schemaForModels.root) + @($schemaForModels.config)) { $schemaConfigByName[[string]$desc.name] = $desc }
+    foreach ($name in $schemaConfigByName.Keys) {
+        if (-not $documentedRootKeys.Contains($name)) {
+            Add-Finding -FileRef 'root-config.example.md' -Check 'root-config-template' -Detail "schema key '$name' is not documented"
+        } elseif ([string]$documentedRootKeys[$name] -cne [string]$schemaConfigByName[$name].default) {
+            Add-Finding -FileRef 'root-config.example.md' -Check 'root-config-template' `
+                -Detail "'$name' example default '$($documentedRootKeys[$name])' differs from schema '$($schemaConfigByName[$name].default)'"
+        }
+    }
+    foreach ($name in $documentedRootKeys.Keys) {
+        if (-not $schemaConfigByName.Contains($name)) {
+            Add-Finding -FileRef 'root-config.example.md' -Check 'root-config-template' -Detail "documented key '$name' is absent from the schema"
         }
     }
 }

@@ -9,8 +9,8 @@
     transport fallback when no standalone CLI is available, but it does not issue
     the launcher attestation required for a processor lease.
 
-    Environment contract:
-      CC_PROCESSKIT_CLI     unset = auto-discover processkit-cli on PATH
+    Configuration contract (`~/.orchestra/root-config.md`):
+      CC_PROCESSKIT_CLI     unset = auto-discover processkit-cli in ~/.orchestra or PATH
                             off   = disable standalone CLI discovery
                             other = required executable path/name (fail closed)
       CC_PROCESSKIT_PYTHON  optional legacy Python executable with importable processkit
@@ -35,7 +35,7 @@ $script:ProcessKitRequiredSurfaces = @(
     'cancel', 'cancel:--run-id', 'kill', 'kill:--run-id',
     'list', 'list:--json', 'prune', 'prune:--json'
 )
-if (-not (Get-Command ConvertTo-Win32CommandLine -CommandType Function -ErrorAction SilentlyContinue)) {
+if (-not (Get-Command Get-OrchestraConfigValue -CommandType Function -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot 'common.ps1')
 }
 
@@ -45,25 +45,10 @@ function Get-ProcessKitApplication {
     return @(Get-Command $Name.Trim() -CommandType Application -ErrorAction SilentlyContinue) | Select-Object -First 1
 }
 
-function Get-OrchestraProcessKitEnvironmentVariable {
-    param([Parameter(Mandatory)][string]$Name)
-
-    # A launcher started from an already-open terminal inherits that terminal's stale
-    # environment block. Read an explicitly present process value first (including
-    # `off`), then refresh from the Windows User/Machine scopes so an operator's
-    # SetEnvironmentVariable(..., 'User') takes effect without reopening the shell.
-    $processVariables = [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process)
-    if ($processVariables.Contains($Name)) { return [string]$processVariables[$Name] }
-
-    $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
-        [System.Runtime.InteropServices.OSPlatform]::Windows)
-    if ($onWindows) {
-        foreach ($target in @([EnvironmentVariableTarget]::User, [EnvironmentVariableTarget]::Machine)) {
-            $value = [string][Environment]::GetEnvironmentVariable($Name, $target)
-            if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
-        }
-    }
-    return ''
+function Get-OrchestraProcessKitConfigValue {
+    param([Parameter(Mandatory)][string]$Name, [string]$Work = '')
+    $configWork = if ([string]::IsNullOrWhiteSpace($Work)) { Join-Path (Get-Location).Path '.work' } else { $Work }
+    return Get-OrchestraConfigValue -Work $configWork -Key $Name -Default ''
 }
 
 function Set-ProcessKitArgumentList {
@@ -174,7 +159,8 @@ function Test-ProcessKitPython {
 }
 
 function Resolve-OrchestraProcessKitPythonBackend {
-    $configuredPython = Get-OrchestraProcessKitEnvironmentVariable 'CC_PROCESSKIT_PYTHON'
+    param([string]$Work = '')
+    $configuredPython = Get-OrchestraProcessKitConfigValue -Name 'CC_PROCESSKIT_PYTHON' -Work $Work
     if ([string]::IsNullOrWhiteSpace($configuredPython)) { return $null }
     $python = Get-ProcessKitApplication $configuredPython.Trim()
     if ($null -eq $python -or -not $python.Source) {
@@ -191,7 +177,8 @@ function Resolve-OrchestraProcessKitPythonBackend {
 }
 
 function Resolve-OrchestraProcessKitBackend {
-    $configuredCli = Get-OrchestraProcessKitEnvironmentVariable 'CC_PROCESSKIT_CLI'
+    param([string]$Work = '')
+    $configuredCli = Get-OrchestraProcessKitConfigValue -Name 'CC_PROCESSKIT_CLI' -Work $Work
     $cliDisabled = $configuredCli.Trim().Equals('off', [System.StringComparison]::OrdinalIgnoreCase)
     $cliExplicit = -not [string]::IsNullOrWhiteSpace($configuredCli) -and -not $cliDisabled
     $cliName = if ($cliExplicit) { $configuredCli.Trim() } else { 'processkit-cli' }
@@ -230,7 +217,7 @@ function Resolve-OrchestraProcessKitBackend {
         if ($cliExplicit) { throw "CC_PROCESSKIT_CLI executable not found: $configuredCli" }
     }
 
-    $pythonBackend = Resolve-OrchestraProcessKitPythonBackend
+    $pythonBackend = Resolve-OrchestraProcessKitPythonBackend -Work $Work
     if ($null -ne $pythonBackend) { return $pythonBackend }
 
     return [pscustomobject]@{ Kind = 'none'; Path = ''; Version = ''; SchemaVersion = 0; Surfaces = @(); SupportsInheritedStdio = $false; Explicit = $false }

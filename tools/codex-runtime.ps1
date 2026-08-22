@@ -587,7 +587,18 @@ function Get-CodexChildEnvironment {
         (Join-Path $root 'pycache')
     )
     foreach ($dir in $dirs) { [void](New-Item -ItemType Directory -Force -Path $dir) }
+    $codexHome = Get-OrchestraConfigValue -Work (Join-Path $Worktree '.work') -Key 'CODEX_HOME' -Default ''
+    $profileHome = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if ([string]::IsNullOrWhiteSpace($profileHome)) { $profileHome = [string]$HOME }
+    if ([string]::IsNullOrWhiteSpace($codexHome)) {
+        $codexHome = Join-Path $profileHome '.codex'
+    } elseif ($codexHome -eq '~') {
+        $codexHome = $profileHome
+    } elseif ($codexHome.StartsWith('~/') -or $codexHome.StartsWith('~\')) {
+        $codexHome = Join-Path $profileHome $codexHome.Substring(2)
+    }
     return @{
+        CODEX_HOME          = [System.IO.Path]::GetFullPath($codexHome)
         TEMP                = (Join-Path $root 'tmp')
         TMP                 = (Join-Path $root 'tmp')
         UV_CACHE_DIR        = (Join-Path $root 'uv')

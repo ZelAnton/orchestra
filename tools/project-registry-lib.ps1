@@ -23,14 +23,16 @@ function Get-OrchestraRegistryPath {
     if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
         return [System.IO.Path]::GetFullPath($ExplicitPath)
     }
-    $fromEnv = [string][Environment]::GetEnvironmentVariable('ORCHESTRA_REGISTRY_PATH')
-    if (-not [string]::IsNullOrWhiteSpace($fromEnv)) {
-        return [System.IO.Path]::GetFullPath($fromEnv)
+    $fromConfig = Get-OrchestraConfigValue -Work (Join-Path (Get-Location).Path '.work') -Key 'ORCHESTRA_REGISTRY_PATH' -Default ''
+    if (-not [string]::IsNullOrWhiteSpace($fromConfig)) {
+        $candidate = $fromConfig.Trim()
+        if ($candidate -eq '~' -or $candidate.StartsWith('~' + [System.IO.Path]::DirectorySeparatorChar) -or $candidate.StartsWith('~/' )) {
+            $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+            $candidate = if ($candidate -eq '~') { $profile } else { Join-Path $profile $candidate.Substring(2) }
+        }
+        return [System.IO.Path]::GetFullPath($candidate)
     }
-    $profileHome = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    if ([string]::IsNullOrWhiteSpace($profileHome)) { $profileHome = [string]$HOME }
-    if ([string]::IsNullOrWhiteSpace($profileHome)) { Fail 2 'cannot determine the user profile for the Orchestra project registry' }
-    return (Join-Path (Join-Path $profileHome '.orchestra') 'projects.json')
+    return (Join-Path (Get-OrchestraHome) 'projects.json')
 }
 
 function Resolve-OrchestraProjectRoot {

@@ -151,15 +151,15 @@ macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
    - `cc-processor codex` — fully Codex-native root processor in the familiar interactive
      Codex terminal UI, plus Codex custom-agent roles, with no Claude process or fallback.
 
-The provider can instead be selected for every project in a new terminal:
+The provider can instead be selected for every project in the shared root config:
 
-```powershell
-[Environment]::SetEnvironmentVariable('ORCHESTRA_PROVIDER', 'codex', 'User')
+```text
+ORCHESTRA_PROVIDER: codex
 ```
 
 Allowed values are `claude` and `codex`; an explicit provider argument to
 `cc-processor`, `cc-resume`, `cc-thinker`, `cc-audit`, or `cc-enhance` wins over the
-environment. `cc-resume codex` resumes the exact Codex processor thread recorded in
+root-config value. `cc-resume codex` resumes the exact Codex processor thread recorded in
 `.work/codex_processor_session.json`. If no valid addressed thread exists but durable
 in-flight `.work/` state remains, it automatically opens a new Codex thread in provider-
 handoff recovery mode; with no such state it performs the normal Phase-0 cold recovery.
@@ -181,22 +181,22 @@ overrides are `ORCHESTRA_CODEX_MODEL`, `ORCHESTRA_CODEX_REASONING`,
 `ORCHESTRA_CODEX_SANDBOX`, and `ORCHESTRA_CODEX_MAX_THREADS`.
 
 In the Claude-root (hybrid) mode, the model of each implementer and per-task reviewer tier
-is operator-configurable, per provider, through `.work/config.md` keys that also fall back
-to same-named system environment variables (`config.md` → environment → default). The
+is operator-configurable, per provider, through `.work/config.md` keys with the shared
+root-config fallback (`config.md` → `~/.orchestra/root-config.md` → default). The
 Codex-native root above is unaffected: there every role runs under `ORCHESTRA_CODEX_MODEL`.
 
 ```powershell
 # Claude roles: haiku | sonnet | opus | fable
-[Environment]::SetEnvironmentVariable('CLAUDE_CODER_FAST_MODEL', 'haiku', 'User')
-[Environment]::SetEnvironmentVariable('CLAUDE_CODER_MODEL', 'sonnet', 'User')
-[Environment]::SetEnvironmentVariable('CLAUDE_CODER_DEEP_MODEL', 'opus', 'User')
-[Environment]::SetEnvironmentVariable('CLAUDE_REVIEWER_STD_MODEL', 'sonnet', 'User')
-[Environment]::SetEnvironmentVariable('CLAUDE_REVIEWER_MODEL', 'opus', 'User')
+CLAUDE_CODER_FAST_MODEL: haiku
+CLAUDE_CODER_MODEL: sonnet
+CLAUDE_CODER_DEEP_MODEL: opus
+CLAUDE_REVIEWER_STD_MODEL: sonnet
+CLAUDE_REVIEWER_MODEL: opus
 # Codex adapters: any model id the account's tier serves
-[Environment]::SetEnvironmentVariable('CODEX_CODER_MODEL', 'gpt-5.6-terra', 'User')
-[Environment]::SetEnvironmentVariable('CODEX_CODER_DEEP_MODEL', 'gpt-5.6-sol', 'User')
-[Environment]::SetEnvironmentVariable('CODEX_REVIEWER_MODEL', 'gpt-5.6-terra', 'User')
-[Environment]::SetEnvironmentVariable('CODEX_REVIEWER_DEEP_MODEL', 'gpt-5.6-sol', 'User')
+CODEX_CODER_MODEL: gpt-5.6-terra
+CODEX_CODER_DEEP_MODEL: gpt-5.6-sol
+CODEX_REVIEWER_MODEL: gpt-5.6-terra
+CODEX_REVIEWER_DEEP_MODEL: gpt-5.6-sol
 ```
 
 Unset keys keep today's behaviour: the Claude roles run on the model in their own
@@ -209,8 +209,8 @@ Claude launchers default to the guarded `auto` permission mode. An operator can 
 isolated machine or container into permission bypass for the Claude root and every spawned
 subagent:
 
-```powershell
-[Environment]::SetEnvironmentVariable('ORCHESTRA_CLAUDE_PERMISSION_MODE', 'bypassPermissions', 'User')
+```text
+ORCHESTRA_CLAUDE_PERMISSION_MODE: bypassPermissions
 ```
 
 Open a new terminal, run `cc-sync`, and verify the warning with `cc-doctor`. Set the value
@@ -222,22 +222,22 @@ Claude process cannot damage the host.
 For a fully unattended machine, the operator can pre-grant all fresh Orchestra human
 approval gates once, for every target project:
 
-```powershell
-[Environment]::SetEnvironmentVariable('ORCHESTRA_AUTO_APPROVE', 'on', 'User')
+```text
+ORCHESTRA_AUTO_APPROVE: on
 ```
 
 Open a new terminal, run `cc-sync`, then verify with `cc-doctor`. This is separate from
 Claude/Codex sandbox permissions: `policy.ps1` still creates the normal one-time approval
 artifact, binds it to the current diff and policy, and records
-`decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; it simply does not park the processor.
-Use `off` (or remove the variable) to restore interactive approvals.
+`decided_by=root-config:ORCHESTRA_AUTO_APPROVE`; it simply does not park the processor.
+Use `off` (or remove the key) to restore interactive approvals.
 
 Install the standalone `processkit-cli` on `PATH` to provide the required kernel-backed
 containment for the whole processor session. To pin an exact binary (also useful until a
-new terminal sees an updated system `PATH`), set a user/system environment variable:
+new terminal sees an updated system `PATH`), set `CC_PROCESSKIT_CLI` in the root config:
 
 ```powershell
-setx CC_PROCESSKIT_CLI "C:\Tools\processkit-cli.exe"
+CC_PROCESSKIT_CLI: C:\Tools\processkit-cli.exe
 ```
 
 An explicit user/machine `CC_PROCESSKIT_CLI` is re-read by the runtime and works even from an

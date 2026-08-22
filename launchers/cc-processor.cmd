@@ -7,7 +7,7 @@ rem Необязательные флаги (в любом порядке, пе�
 rem   claude|codex       явный provider (также: --provider <claude|codex>).
 rem                      Если не задан, читается системная ORCHESTRA_PROVIDER;
 rem                      default = claude.
-rem   ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions задаёт
+rem   ORCHESTRA_CLAUDE_PERMISSION_MODE: auto|bypassPermissions в root-config задаёт
 rem                      permission mode для Claude-root; default = auto.
 rem   --force-lock       операторский force-takeover аренды: удалить каталог аренды
 rem                      .work\orchestrator.lock (вместе с lease.json) перед стартом —
@@ -39,8 +39,8 @@ for %%I in (.) do set "PROJECT_ROOT=%%~fI"
 set MODEL_ARG=
 set MODEL_VALUE=
 set EXTRA_ARGS=
-set "PROVIDER=%ORCHESTRA_PROVIDER%"
-if not defined PROVIDER set "PROVIDER=claude"
+call "%LAUNCHER_DIR%cc-common.cmd" resolve_provider
+if errorlevel 1 exit /b %ERRORLEVEL%
 rem An agent run is an isolated build environment: persistent MSBuild nodes/servers only
 rem leak resources into later tasks. Force the child session (and every subagent/tool it
 rem spawns) to use short-lived build workers. These values stay inside setlocal.
@@ -49,9 +49,13 @@ set "DOTNET_CLI_USE_MSBUILD_SERVER=0"
 rem Codex xhigh reviews routinely outlive Claude Code's short Bash default. If Claude
 rem auto-backgrounds the runtime command it appends `&`, which intentionally bypasses the
 rem pre-granted foreground allow-rule and causes an approval prompt. Keep the wrapper in
-rem foreground; explicit user/system values win over these session-scoped defaults.
-if not defined BASH_DEFAULT_TIMEOUT_MS set "BASH_DEFAULT_TIMEOUT_MS=1900000"
-if not defined BASH_MAX_TIMEOUT_MS set "BASH_MAX_TIMEOUT_MS=1900000"
+rem foreground; root-config values win over these session-scoped defaults.
+call "%LAUNCHER_DIR%cc-common.cmd" config_get BASH_DEFAULT_TIMEOUT_MS
+if errorlevel 1 exit /b %ERRORLEVEL%
+if defined CC_CONFIG_VALUE (set "BASH_DEFAULT_TIMEOUT_MS=%CC_CONFIG_VALUE%") else set "BASH_DEFAULT_TIMEOUT_MS=1900000"
+call "%LAUNCHER_DIR%cc-common.cmd" config_get BASH_MAX_TIMEOUT_MS
+if errorlevel 1 exit /b %ERRORLEVEL%
+if defined CC_CONFIG_VALUE (set "BASH_MAX_TIMEOUT_MS=%CC_CONFIG_VALUE%") else set "BASH_MAX_TIMEOUT_MS=1900000"
 
 :parse
 if "%~1"=="" goto :run
@@ -101,11 +105,17 @@ goto :parse
 :run
 set "USE_PROCESSKIT_RUNTIME="
 if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
-if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_PYTHON (
+call "%LAUNCHER_DIR%cc-common.cmd" config_get CC_PROCESSKIT_PYTHON
+if errorlevel 1 exit /b %ERRORLEVEL%
+set "PROCESSKIT_PYTHON_CONFIG=%CC_CONFIG_VALUE%"
+call "%LAUNCHER_DIR%cc-common.cmd" config_get CC_PROCESSKIT_CLI
+if errorlevel 1 exit /b %ERRORLEVEL%
+set "PROCESSKIT_CLI_CONFIG=%CC_CONFIG_VALUE%"
+if not defined USE_PROCESSKIT_RUNTIME if defined PROCESSKIT_PYTHON_CONFIG (
   echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
   exit /b 12
 )
-if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" (
+if not defined USE_PROCESSKIT_RUNTIME if defined PROCESSKIT_CLI_CONFIG if /I not "%PROCESSKIT_CLI_CONFIG%"=="off" (
   echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
   exit /b 12
 )

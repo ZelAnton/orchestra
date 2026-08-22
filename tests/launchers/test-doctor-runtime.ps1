@@ -13,9 +13,9 @@
   Ports the behaviour coverage of the former test-cc-doctor.ps1 (which drove the inline
   .cmd program the runtime replaced) directly against the engine: exec-permission
   classification (routing off / routing on with no grant / settings allow-rule / session
-  grant / deny-only / CI-fix-only / custom CODEX_CMD), effective CODEX_* + env fallback,
-  fail-closed Codex key value validation, KB status (default, env fallback, config
-  precedence over env), the queue/config audit, structured/legacy lock diagnostics in
+  grant / deny-only / CI-fix-only / custom CODEX_CMD), effective CODEX_* + root-config,
+  fail-closed Codex key value validation, KB status (default, root-config, project
+  precedence over root), the queue/config audit, structured/legacy lock diagnostics in
   both checkout and mirror layouts, and the
   Windows sandbox profile block (OS-conditionally: the real classification on Windows, the
   N/A line on POSIX). The codex "binary present/version" line is not asserted (it depends
@@ -78,12 +78,12 @@ function Invoke-Doctor {
         [string]$Runtime = $script:Runtime,
         [string]$PowerShellHost = $script:Pwsh.Source
     )
-    # Env vars the runtime consults from the process environment (CODEX_CODER/
-    # CODEX_REVIEWER and the nine per-role model keys via env fallback, CC_CODEX_EXEC_GRANT
-    # session grant). Set them on the parent so the spawned child inherits them, then
+    # Configuration values supplied by a case are written to its root-config.md. Only
+    # process protocol values such as CC_CODEX_EXEC_GRANT remain environment signals.
     # restore. Unset ambient routing by default so a machine with real CODEX_* set cannot
     # make these scenarios flaky.
     $defaults = @{
+        ORCHESTRA_HOME = (Join-Path $Case.Home '.orchestra')
         CODEX_CODER = ''; CODEX_REVIEWER = ''; CC_CODEX_EXEC_GRANT = ''; KB = ''
         CLAUDE_CODER_FAST_MODEL = ''; CLAUDE_CODER_MODEL = ''; CLAUDE_CODER_DEEP_MODEL = ''
         CLAUDE_REVIEWER_STD_MODEL = ''; CLAUDE_REVIEWER_MODEL = ''
@@ -96,12 +96,35 @@ function Invoke-Doctor {
         ORCHESTRA_CODEX_SANDBOX = ''; ORCHESTRA_CODEX_MAX_THREADS = ''
         CODEX_HOME = (Join-Path $Case.Home '.codex')
     }
-    foreach ($k in $Env.Keys) { $defaults[$k] = $Env[$k] }
+    $configKeys = @('CODEX_CODER', 'CODEX_REVIEWER', 'KB',
+        'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL',
+        'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL',
+        'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL',
+        'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_CMD', 'CODEX_MODEL', 'CODEX_REASONING',
+        'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CIFIX', 'ORCHESTRA_AUTO_APPROVE',
+        'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'SMOKE_CMD',
+        'ORCHESTRA_PROVIDER', 'ORCHESTRA_CLAUDE_PERMISSION_MODE', 'ORCHESTRA_CODEX_MODEL',
+        'ORCHESTRA_CODEX_REASONING', 'ORCHESTRA_CODEX_SANDBOX', 'ORCHESTRA_CODEX_MAX_THREADS',
+        'CC_PROCESSKIT_CLI', 'CC_PROCESSKIT_PYTHON', 'CODEX_HOME')
+    $rootEntries = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $Env.Keys) {
+        if ($configKeys -contains $k -and -not [string]::IsNullOrWhiteSpace([string]$Env[$k])) {
+            [void]$rootEntries.Add("$k`: $($Env[$k])")
+        }
+    }
+    if (-not ($Env.ContainsKey('CODEX_HOME'))) { [void]$rootEntries.Add(('CODEX_HOME: ' + (Join-Path $Case.Home '.codex'))) }
+    if (-not ($Env.ContainsKey('CC_PROCESSKIT_CLI'))) { [void]$rootEntries.Add('CC_PROCESSKIT_CLI: off') }
+    if ($rootEntries.Count -gt 0) { Write-File (Join-Path $Case.Home '.orchestra/root-config.md') (($rootEntries -join "`n") + "`n") }
 
+    $processEnv = @{}
+    foreach ($k in $defaults.Keys) { $processEnv[$k] = $defaults[$k] }
+    foreach ($k in $Env.Keys) {
+        if (-not ($configKeys -contains $k)) { $processEnv[$k] = $Env[$k] }
+    }
     $saved = @{}
-    foreach ($k in $defaults.Keys) {
+    foreach ($k in $processEnv.Keys) {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
-        Set-Item -Path "env:$k" -Value $defaults[$k]
+        Set-Item -Path "env:$k" -Value $processEnv[$k]
     }
     try {
         $rtArgs = @('-NoProfile', '-File', $Runtime,
@@ -160,15 +183,15 @@ Remove-Case $c
 # =============================================================================
 $c = New-Case
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'on' }
-Assert-Contains $r.Out 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment)' 'auto-approve on: doctor reports effective machine-wide pre-consent'
+Assert-Contains $r.Out 'OK   ORCHESTRA_AUTO_APPROVE = on (root-config)' 'auto-approve on: doctor reports effective root-config pre-consent'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_AUTO_APPROVE = 'maybe' }
 Assert-Contains $r.Out "FAIL ORCHESTRA_AUTO_APPROVE: invalid value 'maybe'" 'auto-approve invalid: doctor reports fail-closed value'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_CLAUDE_PERMISSION_MODE = 'bypassPermissions' }
 Assert-Contains $r.Out 'WARN ORCHESTRA_CLAUDE_PERMISSION_MODE = bypassPermissions' 'Claude bypass: doctor reports disabled permission checks'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_CLAUDE_PERMISSION_MODE = 'unsafe' }
 Assert-Contains $r.Out "FAIL ORCHESTRA_CLAUDE_PERMISSION_MODE: invalid value 'unsafe'" 'Claude mode invalid: doctor reports fail-closed value'
-$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_CLAUDE_PERMISSION_MODE = ' bypassPermissions' }
-Assert-Contains $r.Out "FAIL ORCHESTRA_CLAUDE_PERMISSION_MODE: invalid value ' bypassPermissions'" 'Claude mode whitespace: doctor matches strict launcher validation'
+$r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_CLAUDE_PERMISSION_MODE = '" bypassPermissions"' }
+Assert-Contains $r.Out 'FAIL ORCHESTRA_CLAUDE_PERMISSION_MODE: invalid value' 'Claude mode quoted value: doctor fails closed on unsupported syntax'
 $r = Invoke-Doctor -Case $c -Env @{ ORCHESTRA_PROVIDER = 'codex' }
 Assert-Contains $r.Out 'OK   ORCHESTRA_PROVIDER = codex (Claude-free native Codex root processor)' 'provider codex: doctor reports full native provider'
 Assert-Contains $r.Out 'FAIL Codex-native processor preflight exited' 'provider codex: incomplete native package fails preflight visibly'
@@ -241,18 +264,18 @@ Assert-NotContains $r.Out 'WARN exec permission' 'mirror-form allow-rule: no WAR
 Remove-Case $c
 
 # =============================================================================
-# 4) effective CODEX_*: env fallback accepts all and labels it "(env)"
+# 4) effective CODEX_*: root-config values are accepted and have no env label
 # =============================================================================
 # Key/value alignment is padded, so match the pair rather than a fixed column width.
 $c = New-Case
 $r = Invoke-Doctor -Case $c -Env @{ CODEX_CODER = 'all'; CODEX_REVIEWER = 'all' }
-Assert-True ([regex]::IsMatch($r.Out, 'CODEX_CODER\s+=\s+all \(env\)')) 'env fallback: CODEX_CODER all read from env and labelled'
-Assert-True ([regex]::IsMatch($r.Out, 'CODEX_REVIEWER\s+=\s+all \(env\)')) 'env fallback: CODEX_REVIEWER all read from env and labelled'
-Assert-Contains $r.Out 'OK   Codex key values: all set values are within their allowed sets' 'env fallback: all values validate'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_CODER\s+=\s+all')) 'root-config: CODEX_CODER all is read'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_REVIEWER\s+=\s+all')) 'root-config: CODEX_REVIEWER all is read'
+Assert-Contains $r.Out 'OK   Codex key values: all set values are within their allowed sets' 'root-config: all values validate'
 Remove-Case $c
 
 # =============================================================================
-# 4a) per-role model keys: config wins over env, env fallback is labelled "(env)",
+# 4a) per-role model keys: root-config values are accepted without an env label,
 #     an unset Claude key shows the role's frontmatter model, and a bad value FAILs
 # =============================================================================
 $c = New-Case
@@ -261,15 +284,15 @@ Set-Config $c (@(
     'CODEX_REVIEWER_MODEL: gpt-5.6-terra'
 ) -join "`n")
 $r = Invoke-Doctor -Case $c -Env @{
-    CLAUDE_CODER_DEEP_MODEL = 'opus'          # config.md must win over the environment
-    CLAUDE_REVIEWER_MODEL   = 'sonnet'        # env-only -> labelled (env)
-    CODEX_CODER_DEEP_MODEL  = 'gpt-5.6-terra' # env-only -> labelled (env)
+    CLAUDE_CODER_DEEP_MODEL = 'opus'          # project config must win over root-config
+    CLAUDE_REVIEWER_MODEL   = 'sonnet'        # root-only value
+    CODEX_CODER_DEEP_MODEL  = 'gpt-5.6-terra' # root-only value
 }
-Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_CODER_DEEP_MODEL\s+=\s+sonnet(?! \(env\))')) 'role models: config.md value wins over the same-named env var'
-Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_REVIEWER_MODEL\s+=\s+sonnet \(env\)')) 'role models: Claude key read from env and labelled'
+Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_CODER_DEEP_MODEL\s+=\s+sonnet')) 'role models: project value wins over root-config'
+Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_REVIEWER_MODEL\s+=\s+sonnet')) 'role models: Claude key read from root-config'
 Assert-True ([regex]::IsMatch($r.Out, 'CLAUDE_CODER_FAST_MODEL\s+=\s+sonnet \(frontmatter default\)')) 'role models: an unset Claude key shows the frontmatter model'
 Assert-True ([regex]::IsMatch($r.Out, 'CODEX_REVIEWER_MODEL\s+=\s+gpt-5\.6-terra')) 'role models: Codex adapter key printed from config.md'
-Assert-True ([regex]::IsMatch($r.Out, 'CODEX_CODER_DEEP_MODEL\s+=\s+gpt-5\.6-terra \(env\)')) 'role models: Codex deep key read from env and labelled'
+Assert-True ([regex]::IsMatch($r.Out, 'CODEX_CODER_DEEP_MODEL\s+=\s+gpt-5\.6-terra')) 'role models: Codex deep key read from root-config'
 Assert-NotContains $r.Out 'FAIL CLAUDE_' 'role models: valid values produce no FAIL'
 Remove-Case $c
 
@@ -280,11 +303,10 @@ Assert-Contains $r.Out "FAIL CLAUDE_REVIEWER_MODEL: invalid value 'gpt-4o' ->" '
 Assert-Contains $r.Out 'allowed: haiku | sonnet | opus | fable' 'role models: FAIL lists the allowed set'
 Remove-Case $c
 
-# The same bad value from the environment is only ignored (the role keeps its frontmatter
-# model), so the FAIL line must name the source the operator has to fix.
+# The same bad value in root-config is also validated and fails closed.
 $c = New-Case
 $r = Invoke-Doctor -Case $c -Env @{ CLAUDE_REVIEWER_MODEL = 'gpt-4o' }
-Assert-Contains $r.Out "FAIL CLAUDE_REVIEWER_MODEL: invalid value 'gpt-4o' (env) ->" 'role models: out-of-set env value is labelled (env)'
+Assert-Contains $r.Out "FAIL CLAUDE_REVIEWER_MODEL: invalid value 'gpt-4o' ->" 'role models: out-of-set root-config value fails closed'
 Remove-Case $c
 
 # =============================================================================
@@ -397,15 +419,15 @@ Remove-Case $c
 # =============================================================================
 $c = New-Case
 $r = Invoke-Doctor -Case $c
-Assert-Contains $r.Out 'KB = on (default)' 'KB: default is on when unset in both config and env'
+Assert-Contains $r.Out 'KB = on (default)' 'KB: default is on when unset in config and root-config'
 Remove-Case $c
 
 # =============================================================================
-# 12b) KB status: env fallback labelled "(env)" when config.md does not set KB
+# 12b) KB status: root-config value is used when config.md does not set KB
 # =============================================================================
 $c = New-Case
 $r = Invoke-Doctor -Case $c -Env @{ KB = 'off' }
-Assert-Contains $r.Out 'KB = off (env)' 'KB: env fallback read and labelled'
+Assert-Contains $r.Out 'KB = off' 'KB: root-config value is read'
 Remove-Case $c
 
 # =============================================================================
@@ -414,8 +436,8 @@ Remove-Case $c
 $c = New-Case
 Set-Config $c 'KB: off'
 $r = Invoke-Doctor -Case $c -Env @{ KB = 'on' }
-Assert-Contains $r.Out 'KB = off' 'KB: config wins over env'
-Assert-NotContains $r.Out 'KB = off (env)' 'KB: config value is not labelled as env-sourced'
+Assert-Contains $r.Out 'KB = off' 'KB: project config wins over root-config'
+Assert-NotContains $r.Out 'KB = off (root-config)' 'KB: project value is not labelled as root-sourced'
 Remove-Case $c
 
 # =============================================================================
@@ -464,7 +486,8 @@ Remove-Case $c
 
 $c = New-Case
 $r = Invoke-Doctor -Case $c
-Assert-Contains $r.Out 'OK   .work/config.md not found - verification is disabled by default' 'config: missing config.md defaults verification to disabled, not blocked'
+Assert-Contains $r.Out 'OK   .work/config.md not found (project defaults/root fallbacks apply)' 'config: missing config.md keeps root fallbacks active'
+Assert-Contains $r.Out 'OK   verification profile is disabled by default' 'config: missing project and root verification settings default to disabled, not blocked'
 Remove-Case $c
 
 $c = New-Case
@@ -478,6 +501,23 @@ Set-Config $c 'VERIFICATION_MODE: auto'
 $r = Invoke-Doctor -Case $c
 Assert-Contains $r.Out 'verification profile is missing' 'config: explicit VERIFICATION_MODE=auto with no commands is still the dangerous missing-profile case'
 Assert-Contains $r.Out 'executable changes will be blocked before push' 'config: explicit auto missing-profile explains publication impact'
+Remove-Case $c
+
+$c = New-Case
+$r = Invoke-Doctor -Case $c -Env @{ VERIFICATION_COMMANDS = '["git status --short", "git diff --check"]' }
+Assert-Contains $r.Out 'OK   .work/config.md not found (project defaults/root fallbacks apply)' 'root verification: missing project config still allows root fallbacks'
+Assert-Contains $r.Out 'OK   verification profile is configured: 2 command(s)' 'root verification: commands are resolved from root-config.md'
+Remove-Case $c
+
+$c = New-Case
+Set-Config $c 'MAX_PARALLEL: 3'
+$r = Invoke-Doctor -Case $c -Env @{ SMOKE_CMD = 'make root-check' }
+Assert-Contains $r.Out 'OK   verification profile uses backward-compatible SMOKE_CMD fallback (1 command)' 'root verification: SMOKE_CMD falls back through root-config.md when project config omits it'
+Remove-Case $c
+
+$c = New-Case
+$r = Invoke-Doctor -Case $c -Env @{ VERIFICATION_MODE = 'required' }
+Assert-Contains $r.Out 'FAIL verification profile is required but neither VERIFICATION_COMMANDS nor SMOKE_CMD is configured' 'root verification: required mode without commands fails closed'
 Remove-Case $c
 
 # =============================================================================

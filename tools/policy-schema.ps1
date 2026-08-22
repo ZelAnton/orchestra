@@ -12,7 +12,7 @@
     the policy was never an executable boundary. This file is that one place:
 
       * Get-OrchestraSchema returns a single versioned object describing every config key
-        (type, default, enum/range, OS-environment precedence, sensitivity) and every
+        (type, default, enum/range, project/root scope, sensitivity) and every
         policy section (its heading in constraints.example.md and how it is interpreted).
         tools/policy.ps1 (the CLI), tools/check-consistency.ps1 (Class 5, the smoke gate)
         and tests/test-policy.ps1 all consume THIS object, so the docs and validators are
@@ -59,14 +59,14 @@ $script:PolicySchemaVersion = 'orchestra/policy-schema@1'
 #   type        - 'int' | 'bool' | 'enum' | 'string' | 'json-string-array'.
 #   default     - human default string (matches config.example.md's defaults table prose).
 #   enum        - allowed value set for 'enum' (else $null).
-#   min         - inclusive lower bound for 'int' (else $null); ints have no explicit max.
-#   envFallback - $true for the keys that also resolve from the OS environment (CODEX_CODER,
-#                 CODEX_REVIEWER, KB and the per-tier coder/reviewer model keys).
+#   min/max     - inclusive bounds for 'int' (else $null).
+#   envFallback - retained as a compatibility field and always false. Configuration is
+#                 resolved from project config.md and root-config.md, never the OS environment.
 #   sensitivity - 'low' | 'medium' | 'high' (how much a wrong value can widen blast radius).
 function New-ConfigKey {
     param(
         [string]$Name, [string]$Type, [string]$Default,
-        [string[]]$Enum = $null, $Min = $null,
+        [string[]]$Enum = $null, $Min = $null, $Max = $null,
         [bool]$EnvFallback = $false, [string]$Sensitivity = 'low'
     )
     return [ordered]@{
@@ -75,6 +75,7 @@ function New-ConfigKey {
         default     = $Default
         enum        = $Enum
         min         = $Min
+        max         = $Max
         envFallback = $EnvFallback
         sensitivity = $Sensitivity
     }
@@ -110,26 +111,55 @@ function Get-SchemaConfigKeys {
         (New-ConfigKey 'REVIEWER_TIERING'        'bool'   'true')
         (New-ConfigKey 'MAIN_BRANCH'             'string' 'autodetect'                       -Sensitivity 'high')
         (New-ConfigKey 'EVENTS_OUTBOX'           'enum'   'on'     -Enum @('on', 'off'))
-        (New-ConfigKey 'KB'                      'enum'   'on'     -Enum @('on', 'off')                         -EnvFallback $true)
+        (New-ConfigKey 'KB'                      'enum'   'on'     -Enum @('on', 'off'))
         (New-ConfigKey 'KB_TTL'                  'int'    '8'                                -Min 1)
         (New-ConfigKey 'KB_CAP'                  'int'    '12'                               -Min 1)
-        (New-ConfigKey 'CLAUDE_CODER_FAST_MODEL'   'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CLAUDE_CODER_MODEL'        'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CLAUDE_CODER_DEEP_MODEL'   'enum' 'opus'   -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CLAUDE_REVIEWER_STD_MODEL' 'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CLAUDE_REVIEWER_MODEL'     'enum' 'opus'   -Enum @('haiku', 'sonnet', 'opus', 'fable') -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CODEX_CODER'             'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'all')          -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CODEX_REVIEWER'          'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'deep', 'all')  -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_CODER_FAST_MODEL'   'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_CODER_MODEL'        'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_CODER_DEEP_MODEL'   'enum' 'opus'   -Enum @('haiku', 'sonnet', 'opus', 'fable') -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_REVIEWER_STD_MODEL' 'enum' 'sonnet' -Enum @('haiku', 'sonnet', 'opus', 'fable') -Sensitivity 'medium')
+        (New-ConfigKey 'CLAUDE_REVIEWER_MODEL'     'enum' 'opus'   -Enum @('haiku', 'sonnet', 'opus', 'fable') -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_CODER'             'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'all')          -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_REVIEWER'          'enum'   'off'    -Enum @('off', 'fast', 'fast+std', 'deep', 'all')  -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_CIFIX'             'enum'   'off'    -Enum @('off', 'on')                        -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_MODEL'             'string' 'unset')
-        (New-ConfigKey 'CODEX_CODER_MODEL'         'string' 'unset'       -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CODEX_CODER_DEEP_MODEL'    'string' 'gpt-5.6-sol' -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CODEX_REVIEWER_MODEL'      'string' 'unset'       -EnvFallback $true -Sensitivity 'medium')
-        (New-ConfigKey 'CODEX_REVIEWER_DEEP_MODEL' 'string' 'gpt-5.6-sol' -EnvFallback $true -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_CODER_MODEL'         'string' 'unset'       -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_CODER_DEEP_MODEL'    'string' 'gpt-5.6-sol' -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_REVIEWER_MODEL'      'string' 'unset'       -Sensitivity 'medium')
+        (New-ConfigKey 'CODEX_REVIEWER_DEEP_MODEL' 'string' 'gpt-5.6-sol' -Sensitivity 'medium')
         (New-ConfigKey 'CODEX_REASONING'         'enum'   'auto'   -Enum @('auto', 'low', 'medium', 'high', 'xhigh'))
         (New-ConfigKey 'CODEX_SANDBOX'           'enum'   'workspace-write' -Enum @('read-only', 'workspace-write') -Sensitivity 'high')
         (New-ConfigKey 'CODEX_NETWORK'           'enum'   'on'     -Enum @('on', 'off')                        -Sensitivity 'high')
         (New-ConfigKey 'CODEX_CMD'               'string' 'codex')
+    )
+}
+
+function New-RootConfigKey {
+    param(
+        [string]$Name, [string]$Type, [string]$Default,
+        [string[]]$Enum = $null, $Min = $null, $Max = $null, [string]$Sensitivity = 'low'
+    )
+    return [ordered]@{
+        name = $Name; type = $Type; default = $Default; enum = $Enum; min = $Min; max = $Max
+        scope = 'root'; sensitivity = $Sensitivity; envFallback = $false
+    }
+}
+
+function Get-SchemaRootConfigKeys {
+    return @(
+        (New-RootConfigKey 'ORCHESTRA_PROVIDER' 'enum' 'claude' -Enum @('claude', 'codex') -Sensitivity 'high')
+        (New-RootConfigKey 'ORCHESTRA_CLAUDE_PERMISSION_MODE' 'enum' 'auto' -Enum @('auto', 'bypassPermissions') -Sensitivity 'high')
+        (New-RootConfigKey 'ORCHESTRA_AUTO_APPROVE' 'enum' 'off' -Enum @('on', 'off') -Sensitivity 'high')
+        (New-RootConfigKey 'ORCHESTRA_CODEX_MODEL' 'string' 'unset' -Sensitivity 'medium')
+        (New-RootConfigKey 'ORCHESTRA_CODEX_REASONING' 'enum' 'high' -Enum @('low', 'medium', 'high', 'xhigh') -Sensitivity 'medium')
+        (New-RootConfigKey 'ORCHESTRA_CODEX_SANDBOX' 'enum' 'danger-full-access' -Enum @('workspace-write', 'danger-full-access') -Sensitivity 'high')
+        (New-RootConfigKey 'ORCHESTRA_CODEX_MAX_THREADS' 'int' '6' -Min 2 -Max 32 -Sensitivity 'medium')
+        (New-RootConfigKey 'CODEX_HOME' 'string' '~/.codex')
+        (New-RootConfigKey 'CC_PROCESSKIT_CLI' 'string' 'unset' -Sensitivity 'medium')
+        (New-RootConfigKey 'CC_PROCESSKIT_PYTHON' 'string' 'unset' -Sensitivity 'medium')
+        (New-RootConfigKey 'ORCHESTRA_REGISTRY_PATH' 'string' '~/.orchestra/projects.json')
+        (New-RootConfigKey 'BASH_DEFAULT_TIMEOUT_MS' 'int' '1900000' -Min 1)
+        (New-RootConfigKey 'BASH_MAX_TIMEOUT_MS' 'int' '1900000' -Min 1)
     )
 }
 
@@ -159,6 +189,7 @@ function Get-OrchestraSchema {
     return [ordered]@{
         version = $script:PolicySchemaVersion
         config  = @(Get-SchemaConfigKeys)
+        root    = @(Get-SchemaRootConfigKeys)
         policy  = @(Get-SchemaPolicySections)
     }
 }
@@ -166,6 +197,12 @@ function Get-OrchestraSchema {
 function Get-SchemaConfigKey {
     param([string]$Name)
     foreach ($k in (Get-SchemaConfigKeys)) { if ($k.name -eq $Name) { return $k } }
+    return $null
+}
+
+function Get-SchemaRootConfigKey {
+    param([string]$Name)
+    foreach ($k in (Get-SchemaRootConfigKeys)) { if ($k.name -eq $Name) { return $k } }
     return $null
 }
 
@@ -186,6 +223,9 @@ function Test-ConfigValue {
             $n = [int]$v
             if ($null -ne $Descriptor.min -and $n -lt [int]$Descriptor.min) {
                 return [pscustomobject]@{ Ok = $false; Reason = "$n is below the minimum $($Descriptor.min)" }
+            }
+            if ($null -ne $Descriptor.max -and $n -gt [int]$Descriptor.max) {
+                return [pscustomobject]@{ Ok = $false; Reason = "$n is above the maximum $($Descriptor.max)" }
             }
             return [pscustomobject]@{ Ok = $true; Reason = '' }
         }

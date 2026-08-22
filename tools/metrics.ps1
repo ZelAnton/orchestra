@@ -29,13 +29,9 @@ try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } 
 
 function Get-MetricsConfigValue {
     param([string]$Work, [string]$Key)
-    $config = Join-Path $Work 'config.md'
-    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return $null }
-    foreach ($line in (Get-Content -LiteralPath $config -Encoding UTF8)) {
-        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
-        if ($null -ne $entry -and [string]::Equals($entry.Key, $Key, [System.StringComparison]::Ordinal)) { return $entry.Value }
-    }
-    return $null
+    $value = Get-OrchestraConfigValue -Work $Work -Key $Key -Default ''
+    if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+    return $value
 }
 
 function Get-CohortTokenBudget {

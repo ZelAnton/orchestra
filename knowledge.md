@@ -85,9 +85,8 @@ Processor и merger формируют описательные англоязы
 `.work/roadmap.md` (упорядоченные вехи со статусами `запланирована`/`текущая`/`достигнута`,
 проверяемый критерий достижения, связь веха↔`T-ID`), машинно-локального (как `.work/knowledge/`),
 а не сеемого шаблона; на него ссылаются будущие потребители осведомлённости о дорожной карте;
-`docs/environment-variables.md` — операторский справочник по поддерживаемым переменным
-окружения, их значениям, defaults, приоритету относительно `.work/config.md` и границе
-между публичными настройками и внутренними runtime-переменными.
+`docs/environment-variables.md` — операторский справочник по root-config, project config,
+defaults и границе между пользовательскими настройками и внутренними runtime-переменными.
 
 ### Координация и интеграция
 
@@ -188,7 +187,8 @@ Processor и merger формируют описательные англоязы
   поэтому текст не может перевязать runtime-параметр и не наследуется TUI.
   Эти одно-ролевые сессии не пишут processor UUID: продолжение выполняется нативными
   средствами Codex, а `.work/codex_processor_session.json` принадлежит только processor.
-- `ORCHESTRA_PROVIDER=claude|codex` задаёт системный default; литеральный аргумент
+- `ORCHESTRA_PROVIDER: claude|codex` в `~/.orchestra/root-config.md` задаёт системный default;
+  литеральный аргумент
   `codex|claude` у `cc-processor`, `cc-resume`, `cc-thinker`, `cc-audit` и `cc-enhance`
   имеет приоритет. Default остаётся `claude` для обратной совместимости. В Codex-provider
   processor все planner/coder/reviewer/merger/
@@ -198,7 +198,7 @@ Processor и merger формируют описательные англоязы
   operator-owned cold-recovery handoff от уже остановленного Claude через
   `cc-resume codex --from claude` (либо автоматический эквивалент без Codex UUID при durable
   in-flight state).
-- `ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions` — operator-owned режим
+- `ORCHESTRA_CLAUDE_PERMISSION_MODE: auto|bypassPermissions` в root-config — operator-owned режим
   всех Claude-launcher’ов; default `auto`, любое иное значение fail-closed останавливает
   launcher до старта Claude. Режим родителя `bypassPermissions` имеет приоритет
   над frontmatter subagent’а и наследуется всеми создаваемыми ролями, поэтому
@@ -217,7 +217,9 @@ Processor и merger формируют описательные англоязы
   что native provider: новый checker-вызов Codex без resume maker-треда.
 - `cc-sync` после обычной генерации запускает Codex-генератор, зеркалирует root prompt рядом
   с provider runtime в `~/.claude/scripts/codex-processor.md` и управляемо устанавливает только
-  `orchestra_*.toml` в `$CODEX_HOME/agents` с отдельным manifest. Чужие custom agents не
+  `orchestra_*.toml` в `$CODEX_HOME/agents` с отдельным manifest. `CODEX_HOME` резолвится
+  из root-config и передаётся каждому native и leaf Codex child, поэтому sync, роли,
+  сессии и `codex exec` используют один home. Чужие custom agents не
   удаляются. Пути из обоих manifest/journal считаются недоверенными: stale-pruning и crash
   recovery принимают только canonical descendants соответствующего destination root;
   traversal и внешние absolute paths игнорируются. И containment, и manifest sets используют
@@ -245,7 +247,7 @@ Processor и merger формируют описательные англоязы
   reasoning всегда `xhigh`, модель — `gpt-5.6-sol`, если не задан соответствующий
   deep-ключ (следующий пункт).
 - **Модели ролей coder/reviewer настраиваются оператором (ключи `config.md` с
-  env-фолбэком).** Пять `CLAUDE_*_MODEL` (`CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
+  fallback на `~/.orchestra/root-config.md`).** Пять `CLAUDE_*_MODEL` (`CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
   `CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL`;
   `haiku|sonnet|opus|fable`) processor резолвит один раз на Фазе 1.1 и передаёт
   параметром `model` инструмента `Agent(...)` при каждом вызове роли — frontmatter
@@ -382,7 +384,7 @@ Processor и merger формируют описательные англоязы
   guard», что и allowlist ключей в `tools/check-consistency.ps1`, класс 4).
 - **Исполняемая граница policy/config (T-084).** Единый versioned schema source
   `tools/policy-schema.ps1` (`Get-OrchestraSchema`) описывает и `config.md` (типы, defaults,
-  enum/range, env-precedence, чувствительность), и разделы политики `constraints.md`.
+  enum/range, scope precedence, чувствительность), и разделы политики `constraints.md`.
   Каноническое извлечение `KEY: value` и отсечение Markdown inline-комментария живёт отдельно
   в `tools/common.ps1::ConvertFrom-OrchestraConfigLine`: `#` внутри токена сохраняется,
   whitespace-delimited `#` начинает комментарий, а значение с ведущим `[` сохраняется целиком
@@ -390,7 +392,8 @@ Processor и merger формируют описательные англоязы
   `metrics` и зеркалируемый `doctor-runtime` используют этот один примитив и оставляют у себя
   только доменную валидацию/first-vs-last-match политику. CLI `tools/policy.ps1` (companion
   `state-tx.ps1`/`queue-tx.ps1`) исполняет: `validate-config`
-  (fail-closed — неизвестный/дублирующийся/невалидный ключ это ошибка, а не тихий default),
+  (при `--work` проверяет и project config, и effective root-config; неизвестный/
+  дублирующийся/невалидный ключ fail-closed, а не тихий default),
   `validate-policy`, `migrate` (перенос старого `config.md` на схему без потери
   значений/комментариев, append-only), `guard-path` (гард destructive-операций: реальная
   канонизация пути по symlink/junction, корень/объект/leaf, id задачи/батча, VCS-регистрация
@@ -417,13 +420,13 @@ Processor и merger формируют описательные англоязы
   отвечают. Положительный, отрицательные и смешанный (неполный и полный dispatch в одном
   абзаце) фикстурные случаи выполняет `tests/test-consistency.ps1`; дрейф копий класса 4,
   которые схема (а не `config.example.md`) держит единственным источником —
-  `$script:EnvFallbackKeys`, `$claudeModelAllowed`, `$claudeModelFrontmatter`, — ловит
+  root-config descriptors, `$claudeModelAllowed`, `$claudeModelFrontmatter`, — ловит
   `tests/test-consistency-model-keys.ps1`. Тесты policy — `tests/test-policy.ps1`.
-  В полностью автономном режиме operator-owned переменная ОС
-  `ORCHESTRA_AUTO_APPROVE=on` заранее разрешает внутренние human gates во всех проектах:
+  В полностью автономном режиме operator-owned root-config key
+  `ORCHESTRA_AUTO_APPROVE: on` в `~/.orchestra/root-config.md` заранее разрешает внутренние human gates во всех проектах:
   `approval-request` всё равно сохраняет обычный одноразовый артефакт, fingerprint кода,
   snapshot политики и deadline, но сразу записывает `decision=approve` с
-  `decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; `approval-status` также может безопасно
+  `decided_by=root-config:ORCHESTRA_AUTO_APPROVE`; `approval-status` также может безопасно
   потребить существующий свежий pending-запрос при crash recovery. Весь read-check-write
   цикл ручного решения и обеих веток auto-approve сериализуется общим
   `.work/approvals/approvals.lock` через `Acquire-Lock`/`Release-Lock`, поэтому одноразовый
@@ -912,8 +915,10 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
 ### Конфигурация и запуск
 
 - `config.example.md` — каноническое описание `.work/config.md`, всех defaults и
-  Codex/KB-переключателей. `launchers\cc-config.cmd`/`.sh` создаёт локальные `.work/config.md`
-  (блочный seed) и `.work/constraints.md` (полная копия), не перезаписывая существующие,
+  Codex/KB-переключателей; `root-config.example.md` документирует глобальные и те же
+  project-ключи для fallback. `launchers\cc-config.cmd`/`.sh` fail-closed создаёт отсутствующий
+  `~/.orchestra/root-config.md`, затем локальные `.work/config.md` (блочный seed) и
+  `.work/constraints.md` (полная копия), не перезаписывая существующие,
   затем создаёт `.inbox/messages`/`.inbox/releases` и регистрирует проект в
   `~/.orchestra/projects.json`.
 - `constraints.example.md` — шаблон человекочитаемой политики ограничений проекта
@@ -1101,7 +1106,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 `--allowedTools` (см. «Резолвинг раннеров `tools/*.ps1`»).
 
 **Политика «согласие — заранее» (единая для всех автономных Bash-операций всех ролей).**
-- Режим `ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions` — явный
+- Режим `ORCHESTRA_CLAUDE_PERMISSION_MODE: bypassPermissions` — явный
   operator-owned opt-in всей Claude-сессии, а не грант от агента. Он отключает
   permission-проверки и наследуется subagent’ам, но не отменяет `policy.ps1`.
   Ролям запрещено устанавливать переменную или порождать новую bypass-сессию.
@@ -1131,6 +1136,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 
 | Путь | Владелец / назначение |
 |---|---|
+| `~/.orchestra/root-config.md` | единственный пользовательский глобальный конфиг: root-only provider/runtime ключи и fallback для всех project-ключей; OS environment не является источником настроек |
 | `~/.orchestra/projects.json` | пользовательский глобальный реестр адресуемых проектов (`orchestra/project-registry@1`); меняется только `project-registry.ps1 register`, который явно запускает оператор через `cc-config`; агенты читают его для маршрутизации |
 | `~/.orchestra/specs/Inbox_Contract.md` | установленная `cc-sync` копия нормативного `docs/inbox_contract.md`, которую читают роли в target-проектах (`Inbox_Contract.md`) |
 | `.inbox/messages/<msg-id>.json` | долговечное межрепозиторное сообщение (`orchestra/inbox-message@1`) со статусами оценки/ответа, task links и remarks; мутируется только `tools/inbox.ps1`, единственное разрешённое исключение cross-project записи |
@@ -1173,7 +1179,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 | `.work/events.jsonl` | append-only машинный event-outbox; пишет только processor (одна JSON-строка на событие) при `EVENTS_OUTBOX:on` через транзакционный интерфейс `tools/outbox.ps1` (валидация конверта/payload, детерминированный `event_id`-дедуп-ключ, строгие scalar-only `operation.completed` как timing spine архива, отказ с rc=5 для многострочного raw-ввода `--json-line`/`--stdin`, игнорирование whitespace-only строк, ремонт оборванного хвоста, single-writer); основной источник read-only агрегатора/пер-задачной проекции `tools/metrics.ps1`; машинный контракт для будущей платформы наблюдаемости (`docs/queue_contract.md`, §19); не привязан к одной когорте, переживает очистку Фазы 6, никогда не переписывается/не усекается; Markdown-артефакты остаются источником истины для человека |
 | `.work/outbox-tx.lock` | краткоживущий атомарный лок дозаписи event-outbox (отдельный от `orchestrator.lock`/`queue-tx.lock`/`state-tx.lock`); держит `tools/outbox.ps1` на время одной дозаписи; обеспечивает single-writer инвариант `events.jsonl` |
 | `.work/events_cursor.json` | курсор референсного потребителя outbox (`tools/outbox.ps1 read`): монотонный byte-offset — exactly-once граница штатного single-writer потока; `delivered_ids` персистентно хранится как пустой массив (старый исторический набор учитывается один раз при компактизации), дедуп действует только внутри текущего непрочитанного суффикса, поэтому поздний ручной/внешний дубль после сохранённого offset выдаётся повторно как at-least-once аномалия; ведёт потребитель/тесты, не processor |
-| `.work/approvals/<apr-id>.json` | персистентный одноразовый запрос на человеческое подтверждение (T-095): subject (task/batch), причина (human-review/force-lock/policy-bypass), diff-фингерпринт затронутых путей, снапшот применённой политики, срок действия и решение; ведёт `tools/policy.ps1 approval-request`; approve/reject оператора потребляют ID ровно один раз; `approval-status` сверяет свежесть (истекает при смене кода/политики или к дедлайну — fail-closed). Системный operator pre-grant `ORCHESTRA_AUTO_APPROVE=on` автоматически потребляет только свежий pending-запрос с `decided_by=system-env:ORCHESTRA_AUTO_APPROVE`, не отменяя audit/fingerprint/policy checks; `off`/unset сохраняет ручной gate, invalid fail-closed. |
+| `.work/approvals/<apr-id>.json` | персистентный одноразовый запрос на человеческое подтверждение (T-095): subject (task/batch), причина (human-review/force-lock/policy-bypass), diff-фингерпринт затронутых путей, снапшот применённой политики, срок действия и решение; ведёт `tools/policy.ps1 approval-request`; approve/reject оператора потребляют ID ровно один раз; `approval-status` сверяет свежесть (истекает при смене кода/политики или к дедлайну — fail-closed). Системный operator pre-grant `ORCHESTRA_AUTO_APPROVE: on` из `~/.orchestra/root-config.md` автоматически потребляет только свежий pending-запрос с `decided_by=root-config:ORCHESTRA_AUTO_APPROVE`, не отменяя audit/fingerprint/policy checks; `off`/unset сохраняет ручной gate, invalid fail-closed. |
 | `.work/approvals/approvals.lock` | краткоживущий атомарный лок мутаций approval-артефактов: `tools/policy.ps1` держит его на всём read-check-write для ручного approve/reject, auto-approve существующей записи в `approval-request` и crash-recovery auto-approve в `approval-status`; атомарность отдельного JSON по-прежнему обеспечивает `Write-JsonAtomic` |
 | `.work/knowledge/` | runtime-KB целевого проекта при `KB:on` |
 | `.work/roadmap.md` | опциональная дорожная карта подключённого проекта: упорядоченные вехи (название/цель, статус `запланирована`/`текущая`/`достигнута`, проверяемый критерий достижения `Достижение:`) + сводка текущего состояния + машиночитаемая связь веха↔`T-ID` (поле `Задачи:` — какие задачи поставлены под веху; завершены = лежат в `Tasks_Done.md`, как readiness §11–§12); нормативный формат — `docs/roadmap_contract.md`. **Машинно-локальный рантайм-артефакт** (как `.work/knowledge/`), а не сеемый версионируемый шаблон (`config.example.md` этой задачей намеренно не трогается) и **без tx-интерфейса** на первом шаге (редкие, эффективно однопользовательские записи — обоснование в контракте, §11). Пишут человек-оператор/`thinker` (создание/переупорядочивание вех, пометка достигнутой); конвейер (`processor`)/популяторы в текущем шаге не пишут, лишь могут читать. Нет файла — деградация без ошибок (плоский бэклог, как раньше); не путать с `plans/LOOP_ORCHESTRA_ROADMAP.md` (план развития самой Orchestra, версионируемый) |

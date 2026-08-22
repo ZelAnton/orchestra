@@ -75,8 +75,8 @@
                          decision goes stale (exit 11) once the affected code or
                          constraints.md/policy-schema changes, and no answer by the deadline is
                          a fail-closed rejection (exit 11), never a default approval. Exit 12 =
-                         pending (awaiting the operator). With operator-owned OS environment
-                         `ORCHESTRA_AUTO_APPROVE=on`, a fresh request is audit-recorded and
+                         pending (awaiting the operator). With operator-owned
+                         `ORCHESTRA_AUTO_APPROVE: on` in ~/.orchestra/root-config.md, a fresh request is audit-recorded and
                          consumed immediately; unset/`off` keeps manual approval and any other
                          value fails closed.
 
@@ -186,7 +186,7 @@ function Cmd-Schema {
 # validate-config  (fail-closed)
 # ==========================================================================
 function Get-ConfigFindings {
-    param([string[]]$Lines)
+    param([string[]]$Lines, [ValidateSet('project', 'root')][string]$Scope = 'project')
     $findings = [System.Collections.Generic.List[string]]::new()
     $entries = ConvertFrom-ConfigText $Lines
     $seen = @{}
@@ -197,6 +197,7 @@ function Get-ConfigFindings {
         }
         if ($e.Kind -ne 'key') { continue }
         $desc = Get-SchemaConfigKey $e.Key
+        if (-not $desc -and $Scope -eq 'root') { $desc = Get-SchemaRootConfigKey $e.Key }
         if (-not $desc) {
             $findings.Add("line $($e.Line): unknown key '$($e.Key)' (not in the schema; possible typo)")
             continue
@@ -216,19 +217,30 @@ function Get-ConfigFindings {
 
 function Cmd-ValidateConfig {
     $file = Resolve-TargetFile 'config.md'
-    $lines = Read-Lines $file
-    if ($null -eq $lines) {
-        Write-Output "OK   $file not found - defaults apply (nothing to validate)"
-        return
+    $targets = [System.Collections.Generic.List[object]]::new()
+    $explicitRootFile = [System.IO.Path]::GetFileName($file) -ieq 'root-config.md'
+    $targets.Add([pscustomobject]@{ Path = $file; Scope = $(if ($explicitRootFile) { 'root' } else { 'project' }) })
+    if (-not $opts.ContainsKey('file')) {
+        $targets.Add([pscustomobject]@{ Path = (Get-OrchestraRootConfigPath); Scope = 'root' })
     }
-    $findings = Get-ConfigFindings $lines
-    if ($findings.Count -eq 0) {
-        Write-Output "OK   ${file}: all set keys are known and within their type/enum/range"
-        return
+
+    $problems = 0
+    foreach ($target in $targets) {
+        $lines = Read-Lines $target.Path
+        if ($null -eq $lines) {
+            Write-Output "OK   $($target.Path) not found - defaults apply (nothing to validate)"
+            continue
+        }
+        $findings = Get-ConfigFindings $lines -Scope $target.Scope
+        if ($findings.Count -eq 0) {
+            Write-Output "OK   $($target.Path): all set keys are known and within their type/enum/range"
+            continue
+        }
+        $problems += $findings.Count
+        Write-Output "FAIL $($target.Path): $($findings.Count) config problem(s) (no silent default is substituted):"
+        foreach ($f in $findings) { Write-Output "  - $f" }
     }
-    Write-Output "FAIL ${file}: $($findings.Count) config problem(s) (no silent default is substituted):"
-    foreach ($f in $findings) { Write-Output "  - $f" }
-    Fail 3 "config validation failed ($($findings.Count) problem(s))"
+    if ($problems -gt 0) { Fail 3 "config validation failed ($problems problem(s))" }
 }
 
 # ==========================================================================
@@ -662,10 +674,9 @@ function Get-PublishTargets {
 # check-gate  (publish CI gate: fail-closed, SHA-bound, whole-set)
 # ==========================================================================
 
-# Read an int config value from .work/config.md (or --config), falling back to the schema
-# default when the key is unset/absent/invalid. Deadline/backoff are OPERATIONAL tuning, so
-# they live in config.md (like CALL_DEADLINE_SEC), while WHICH checks are required is a
-# security decision that lives in constraints.md.
+# Read an int config value from project config.md, then root-config.md, falling back to the
+# schema default when the key is unset/absent/invalid. --config remains an explicit local
+# file override for callers that use a non-standard work layout.
 function Get-ConfigInt {
     param([string]$Name, [int]$SchemaDefault)
     $file = ''
@@ -676,6 +687,9 @@ function Get-ConfigInt {
             if ($e.Kind -eq 'key' -and $e.Key -eq $Name -and $e.Value -match '^-?\d+$') { return [int]$e.Value }
         }
     }
+    $work = if ($opts.ContainsKey('work')) { [string]$opts['work'] } elseif ($file) { Split-Path -Parent $file } else { '' }
+    $rootValue = Get-OrchestraConfigValue -Work $work -Key $Name -Default ''
+    if ($rootValue -match '^-?\d+$') { return [int]$rootValue }
     return $SchemaDefault
 }
 
@@ -903,13 +917,13 @@ function Get-ApprovalNow {
 # tools/common.ps1's millisecond Format-Utc. Defined after the common dot-source so this wins.
 function Format-Utc { param([datetime]$T) return $T.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
 
-# Machine-wide, operator-owned pre-consent for unattended Orchestra installations.
-# This is deliberately an OS environment variable rather than a project config key: an
-# agent cannot create it for itself, while one operator setting applies consistently to
-# every checkout processed on the machine. We still persist and consume the ordinary
-# one-time approval record so the audit trail and freshness checks are not bypassed.
+# Root-wide, operator-owned pre-consent for unattended Orchestra installations. It is
+# deliberately root-only, so a project agent cannot create consent for itself. We still
+# persist and consume the ordinary one-time approval record so the audit trail and freshness
+# checks are not bypassed.
 function Get-SystemAutoApprove {
-    $raw = [Environment]::GetEnvironmentVariable('ORCHESTRA_AUTO_APPROVE')
+    $work = if ($opts.ContainsKey('work')) { [string]$opts['work'] } else { '' }
+    $raw = Get-OrchestraConfigValue -Work $work -Key 'ORCHESTRA_AUTO_APPROVE' -Default 'off'
     if ([string]::IsNullOrWhiteSpace($raw) -or $raw.Trim().ToLowerInvariant() -eq 'off') { return $false }
     if ($raw.Trim().ToLowerInvariant() -eq 'on') { return $true }
     Fail 2 "ORCHESTRA_AUTO_APPROVE must be 'on' or 'off' (got '$raw'); refusing an ambiguous approval policy"
@@ -918,9 +932,9 @@ function Get-SystemAutoApprove {
 function Set-SystemAutoApproval {
     param($Record, [datetime]$Now)
     $Record.decision = 'approve'
-    $Record.decided_by = 'system-env:ORCHESTRA_AUTO_APPROVE'
+    $Record.decided_by = 'root-config:ORCHESTRA_AUTO_APPROVE'
     $Record.decided_at = (Format-Utc $Now)
-    $Record.note = 'pre-granted by operator through the machine/user environment'
+    $Record.note = 'pre-granted by operator through ~/.orchestra/root-config.md'
 }
 
 function Cmd-ApprovalRequest {

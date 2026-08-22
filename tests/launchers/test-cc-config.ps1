@@ -54,6 +54,49 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Remove-Sandbox $paths
     }
 
+    # --- Root config: a missing file is seeded from the shared template. ---
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' -SkipRootConfigFixture
+        Assert-Equal 0 $result.ExitCode '[root config: fresh] exit code'
+        $rootConfigPath = Join-Path $paths.Orchestra 'root-config.md'
+        Assert-FileExists $rootConfigPath '[root config: fresh] root-config.md must be created'
+        Assert-Contains (Get-Content -LiteralPath $rootConfigPath -Raw) '# ORCHESTRA_PROVIDER: claude' '[root config: fresh] global template content is copied'
+        Assert-Contains $result.Output 'Created' '[root config: fresh] creation is reported'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Root config: malformed target and missing template fail the launcher. ---
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+        New-Item -ItemType Directory -Force -Path (Join-Path $paths.Orchestra 'root-config.md') | Out-Null
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' -SkipRootConfigFixture
+        Assert-Equal 2 $result.ExitCode '[root config: directory target] exit code'
+        Assert-Contains $result.Output 'path is a directory' '[root config: directory target] precise failure is reported'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' -SkipRootConfigFixture
+        Assert-Equal 2 $result.ExitCode '[root config: missing template] exit code'
+        Assert-Contains $result.Output 'root-config.example.md not found' '[root config: missing template] precise failure is reported'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
     # --- Scenario 2: .work/config.md already exists -> must not be touched ---
     $paths = New-Sandbox
     try {

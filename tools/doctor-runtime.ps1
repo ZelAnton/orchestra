@@ -23,15 +23,14 @@
                                 `pwsh -File ~/.claude/scripts/codex-runtime.ps1` (cc-sync
                                 mirror) - (session grant OR permissions.allow), gated on
                                 whether Codex routing is on.
-    3. Effective CODEX_*      - the resolved CODEX_* values (.work/config.md, with the
-                                documented config-then-env fallback for CODEX_CODER/
-                                CODEX_REVIEWER and the four adapter model keys), followed
-                                by the per-tier Claude role models (CLAUDE_*_MODEL, same
-                                fallback; blank = the role's frontmatter model).
+    3. Effective CODEX_*      - the resolved CODEX_* values (.work/config.md, then the
+                                shared ~/.orchestra/root-config.md, then defaults), followed
+                                by the per-tier Claude role models (CLAUDE_*_MODEL; blank =
+                                the role's frontmatter model).
     4. Codex key validation   - fail-closed classification of the six value-constrained
                                 Codex keys against their allowed sets ($codexAllowed).
-    5. KB status              - the resolved KB mode (.work/config.md, with the same
-                                documented config-then-env fallback, default `on`) and
+    5. KB status              - the resolved KB mode (.work/config.md, then root-config,
+                                default `on`) and
                                 per-shard entry counts.
     6. Windows sandbox        - Windows-only: the [windows] sandbox profile + approval
                                 policy from ~/.codex/config.toml vs this process's
@@ -117,6 +116,12 @@ $script:EmDash     = [char]0x2014
 
 $script:WorkDir    = Join-Path $ProjectRoot '.work'
 $script:ConfigFile = Join-Path $script:WorkDir 'config.md'
+$script:OrchestraHome = if (-not [string]::IsNullOrWhiteSpace([string]$env:ORCHESTRA_HOME)) {
+    [System.IO.Path]::GetFullPath($env:ORCHESTRA_HOME.Trim())
+} else {
+    Join-Path $HomeDir '.orchestra'
+}
+$script:RootConfigFile = Join-Path $script:OrchestraHome 'root-config.md'
 
 # A target project's tools/ directory is not an Orchestra checkout identity. Old cc-config
 # versions could leave gitignored copies there, and project-native tools may use the same generic
@@ -156,7 +161,7 @@ function Resolve-StateTxPath {
     $checkout = Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/state-tx.ps1'
     if (Test-Path -LiteralPath $checkout -PathType Leaf) { return $checkout }
 
-    $mirror = Join-Path (Join-Path $HomeDir '.orchestra/scripts') 'state-tx.ps1'
+    $mirror = Join-Path $script:OrchestraHome 'scripts/state-tx.ps1'
     if (Test-Path -LiteralPath $mirror -PathType Leaf) { return $mirror }
 
     return $null
@@ -179,39 +184,14 @@ function Get-ConfigLines {
 }
 
 function Get-Cfg {
-    # First active matching key wins. Value/comment semantics come from common.ps1.
+    # Project config overrides root-config; root-only keys are always read from root-config.
     param([string]$Key)
-    foreach ($line in (Get-ConfigLines)) {
-        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
-        if ($null -ne $entry -and [string]::Equals($entry.Key, $Key, [System.StringComparison]::Ordinal)) { return $entry.Value }
-    }
-    return ''
+    return Get-OrchestraConfigValue -Work $script:WorkDir -Key $Key -Default '' -OrchestraHome $script:OrchestraHome
 }
-
-function Get-EnvTrimmed {
-    param([string]$Key)
-    $v = [Environment]::GetEnvironmentVariable($Key)
-    if ($v) { return $v.Trim() }
-    return ''
-}
-
-# The config keys that also resolve from the OS environment when config.md leaves them
-# empty (documented contract: config.md -> env -> default). Kept as one list so the
-# effective-value printout, the value validation and Get-EffCodex cannot disagree.
-$script:EnvFallbackKeys = @(
-    'CODEX_CODER', 'CODEX_REVIEWER', 'KB',
-    'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL',
-    'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL',
-    'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL',
-    'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL'
-)
 
 function Get-EffCodex {
-    # Effective value of an env-fallback key: config.md wins, else the same-named env var.
     param([string]$Key)
-    $v = Get-Cfg $Key
-    if (-not $v -and $script:EnvFallbackKeys -contains $Key) { $v = Get-EnvTrimmed $Key }
-    return $v
+    return Get-Cfg $Key
 }
 
 # =============================================================================
@@ -219,21 +199,21 @@ function Get-EffCodex {
 # =============================================================================
 
 Write-Host '== System autonomy =='
-$provider = (Get-EnvTrimmed 'ORCHESTRA_PROVIDER').ToLowerInvariant()
+$provider = (Get-Cfg 'ORCHESTRA_PROVIDER').ToLowerInvariant()
 if (-not $provider) { $provider = 'claude' }
 switch ($provider) {
     'claude' { Write-Host 'OK   ORCHESTRA_PROVIDER = claude (legacy Claude root processor)' }
     'codex'  { Write-Host 'OK   ORCHESTRA_PROVIDER = codex (Claude-free native Codex root processor)' }
     default  { Write-Host ("FAIL ORCHESTRA_PROVIDER: invalid value '$provider' (allowed: claude | codex)") }
 }
-$autoApprove = (Get-EnvTrimmed 'ORCHESTRA_AUTO_APPROVE').ToLowerInvariant()
+$autoApprove = (Get-Cfg 'ORCHESTRA_AUTO_APPROVE').ToLowerInvariant()
 switch ($autoApprove) {
     ''      { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = (default off) - human approval gates remain interactive' }
     'off'   { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = off - human approval gates remain interactive' }
-    'on'    { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = on (system environment) - fresh approval requests are audit-recorded and auto-approved' }
+    'on'    { Write-Host 'OK   ORCHESTRA_AUTO_APPROVE = on (root-config) - fresh approval requests are audit-recorded and auto-approved' }
     default { Write-Host ("FAIL ORCHESTRA_AUTO_APPROVE: invalid value '$autoApprove' (allowed: on | off); policy.ps1 fails closed") }
 }
-$claudePermissionMode = [Environment]::GetEnvironmentVariable('ORCHESTRA_CLAUDE_PERMISSION_MODE')
+$claudePermissionMode = Get-Cfg 'ORCHESTRA_CLAUDE_PERMISSION_MODE'
 if ([string]::IsNullOrEmpty($claudePermissionMode)) { $claudePermissionMode = 'auto' }
 switch -CaseSensitive ($claudePermissionMode) {
     'auto' { Write-Host 'OK   ORCHESTRA_CLAUDE_PERMISSION_MODE = auto (default; classifier remains active)' }
@@ -265,10 +245,10 @@ if ($provider -ne 'codex') {
         Write-Host ('FAIL Codex-native processor preflight exited ' + $nativeRc + '; run cc-sync and codex login, then retry')
     }
 }
-$nativeModel = Get-EnvTrimmed 'ORCHESTRA_CODEX_MODEL'
-$nativeReasoning = Get-EnvTrimmed 'ORCHESTRA_CODEX_REASONING'
-$nativeSandbox = Get-EnvTrimmed 'ORCHESTRA_CODEX_SANDBOX'
-$nativeThreads = Get-EnvTrimmed 'ORCHESTRA_CODEX_MAX_THREADS'
+$nativeModel = Get-Cfg 'ORCHESTRA_CODEX_MODEL'
+$nativeReasoning = Get-Cfg 'ORCHESTRA_CODEX_REASONING'
+$nativeSandbox = Get-Cfg 'ORCHESTRA_CODEX_SANDBOX'
+$nativeThreads = Get-Cfg 'ORCHESTRA_CODEX_MAX_THREADS'
 Write-Host ('  ORCHESTRA_CODEX_MODEL       = ' + $(if ($nativeModel) { $nativeModel } else { '(Codex default)' }))
 Write-Host ('  ORCHESTRA_CODEX_REASONING   = ' + $(if ($nativeReasoning) { $nativeReasoning } else { 'high (default)' }))
 Write-Host ('  ORCHESTRA_CODEX_SANDBOX     = ' + $(if ($nativeSandbox) { $nativeSandbox } else { 'danger-full-access (default)' }))
@@ -299,7 +279,7 @@ if (Test-Path -LiteralPath $authFile -PathType Leaf) {
 
 Write-Host ''
 Write-Host '== Process containment =='
-$processkitRuntime = Join-Path (Join-Path $HomeDir '.orchestra/scripts') 'processkit-runtime.ps1'
+$processkitRuntime = Join-Path $script:OrchestraHome 'scripts/processkit-runtime.ps1'
 if (-not (Test-Path -LiteralPath $processkitRuntime -PathType Leaf)) {
     $processkitRuntime = Join-Path $PSScriptRoot 'processkit-runtime.ps1'
 }
@@ -346,8 +326,8 @@ Write-Host 'OK   build workers: processor launchers export MSBUILDDISABLENODEREU
 $cmdPrefix    = $codexCmd + ' exec'
 $runtimeRules = @('pwsh -File tools/codex-runtime.ps1', 'pwsh -File ~/.claude/scripts/codex-runtime.ps1')
 
-# Routing is on if ANY of CODEX_CODER / CODEX_REVIEWER (config-or-env) or CODEX_CIFIX
-# (config only) is something other than off - the union of the three Codex routes.
+# Routing is on if ANY of CODEX_CODER / CODEX_REVIEWER / CODEX_CIFIX is something other
+# than off - the union of the three Codex routes.
 $ccEff = Get-EffCodex 'CODEX_CODER'
 $crEff = Get-EffCodex 'CODEX_REVIEWER'
 $cfEff = Get-Cfg 'CODEX_CIFIX'
@@ -395,14 +375,10 @@ if (-not $codexRoutingOn) {
 # =============================================================================
 
 Write-Host ''
-Write-Host '== Effective CODEX_* (.work/config.md; keys marked (env) fall back to the OS environment; blank = default) =='
+Write-Host '== Effective CODEX_* (project config.md -> root-config.md; blank = default) =='
 foreach ($k in 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD') {
     $val = Get-Cfg $k
     $src = ''
-    if (-not $val -and $script:EnvFallbackKeys -contains $k) {
-        $ev = Get-EnvTrimmed $k
-        if ($ev) { $val = $ev; $src = ' (env)' }
-    }
     if (-not $val) { $val = '(default)' }
     Write-Host ('  ' + $k.PadRight(25) + ' = ' + $val + $src)
 }
@@ -432,30 +408,23 @@ $claudeModelFrontmatter = [ordered]@{
     'CLAUDE_REVIEWER_MODEL'     = 'opus'
 }
 Write-Host ''
-Write-Host '== Effective Claude role models (.work/config.md, then the OS environment; blank = model from the agent frontmatter) =='
+Write-Host '== Effective Claude role models (project config.md -> root-config.md; blank = model from the agent frontmatter) =='
 $claudeModelInvalid = $false
 foreach ($k in $claudeModelAllowed.Keys) {
     $val = Get-Cfg $k
-    $src = ''
-    if (-not $val -and $script:EnvFallbackKeys -contains $k) {
-        $ev = Get-EnvTrimmed $k
-        if ($ev) { $val = $ev; $src = ' (env)' }
-    }
     if (-not $val) {
         Write-Host ('  ' + $k.PadRight(25) + ' = ' + $claudeModelFrontmatter[$k] + ' (frontmatter default)')
         continue
     }
     if ($claudeModelAllowed[$k] -notcontains $val) {
-        # Name the source: a bad value in config.md blocks the cohort, the same value in
-        # the environment is only ignored - the operator must be able to tell which.
         $claudeModelInvalid = $true
-        Write-Host ('FAIL ' + $k + ': invalid value ' + [char]39 + $val + [char]39 + $src + ' -> allowed: ' + ($claudeModelAllowed[$k] -join ' | '))
+        Write-Host ('FAIL ' + $k + ': invalid value ' + [char]39 + $val + [char]39 + ' -> allowed: ' + ($claudeModelAllowed[$k] -join ' | '))
         continue
     }
     Write-Host ('  ' + $k.PadRight(25) + ' = ' + $val + $src)
 }
 if ($claudeModelInvalid) {
-    Write-Host '  -> fix .work/config.md (or the env var): a value set in config.md blocks the cohort at Phase 1.1; a bad env value is ignored and the role falls back to its frontmatter model'
+    Write-Host '  -> fix .work/config.md or root-config.md: an invalid configured value blocks the cohort at Phase 1.1'
 }
 
 # =============================================================================
@@ -481,9 +450,6 @@ Write-Host '== Codex key value validation =='
 $codexInvalid = $false
 foreach ($k in $codexAllowed.Keys) {
     $v = Get-Cfg $k
-    if (-not $v -and $script:EnvFallbackKeys -contains $k) {
-        $v = Get-EnvTrimmed $k
-    }
     if (-not $v) { continue }
     if ($codexAllowed[$k] -notcontains $v) {
         $codexInvalid = $true
@@ -493,7 +459,7 @@ foreach ($k in $codexAllowed.Keys) {
 if (-not $codexInvalid) {
     Write-Host 'OK   Codex key values: all set values are within their allowed sets'
 } else {
-    Write-Host '  -> fix .work/config.md (or the env var) so the cohort is not blocked at Phase 1.1; no silent default is substituted for an invalid value'
+    Write-Host '  -> fix .work/config.md or root-config.md so the cohort is not blocked at Phase 1.1; no silent default is substituted for an invalid value'
 }
 
 # =============================================================================
@@ -504,11 +470,7 @@ Write-Host ''
 Write-Host ('== ' + $script:KbTitle + ' (KB; .work/knowledge) ==')
 $kb = Get-Cfg 'KB'
 $kbSrc = ''
-if (-not $kb) {
-    $ev = Get-EnvTrimmed 'KB'
-    if ($ev) { $kb = $ev; $kbSrc = ' (env)' }
-}
-if (-not $kb) { $kb = 'on (default)' } else { $kb = $kb + $kbSrc }
+if (-not $kb) { $kb = 'on (default)' }
 Write-Host ('  KB = ' + $kb)
 $kbDir = Join-Path $script:WorkDir 'knowledge'
 if (Test-Path -LiteralPath $kbDir) {
@@ -604,51 +566,51 @@ if (Test-Path -LiteralPath $qf) {
 
 $known = @('MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX', 'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS', 'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC', 'COHORT_TOKEN_BUDGET', 'COHORT_TOKEN_BUDGET_STRICT', 'SMOKE_CMD', 'VERIFICATION_MODE', 'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC', 'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC', 'NOTIFY_CMD', 'REVIEWER_TIERING', 'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL', 'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP', 'CODEX_CODER', 'CODEX_REVIEWER', 'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL', 'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX', 'CODEX_NETWORK', 'CODEX_CMD')
 if (Test-Path -LiteralPath $script:ConfigFile) {
-    $hasSmoke = $false
-    $verificationMode = 'auto'
-    $verificationModeExplicit = $false
-    $verificationCommands = $null
-    $verificationCommandsValid = $true
     $unknown = New-Object System.Collections.ArrayList
     foreach ($line in (Get-ConfigLines)) {
         $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
         if ($null -eq $entry) { continue }
         $k = $entry.Key
-        $v = $entry.Value
         if ($known -notcontains $k) { [void]$unknown.Add($k) }
-        if ($k -eq 'SMOKE_CMD' -and $v) { $hasSmoke = $true }
-        if ($k -eq 'VERIFICATION_MODE' -and $v) { $verificationMode = $v; $verificationModeExplicit = $true }
-        if ($k -eq 'VERIFICATION_COMMANDS' -and $v) {
-            try {
-                $decoded = $v | ConvertFrom-Json
-                if ($decoded -isnot [array]) { $decoded = @($decoded) }
-                $verificationCommands = @($decoded)
-                if ($verificationCommands.Count -eq 0 -or @($verificationCommands | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) { $verificationCommandsValid = $false }
-            } catch { $verificationCommandsValid = $false }
-        }
     }
     if ($unknown.Count -eq 0) {
         Write-Host 'OK   .work/config.md: no unknown/mistyped keys'
     } else {
         Write-Host ('FAIL .work/config.md: unknown/possibly mistyped key(s): ' + ($unknown -join ', '))
     }
-    if ($verificationMode -eq 'disabled') {
-        Write-Host 'OK   verification profile is explicitly disabled by operator (VERIFICATION_MODE=disabled)'
-    } elseif (-not $verificationCommandsValid) {
-        Write-Host 'FAIL VERIFICATION_COMMANDS must be a non-empty JSON array of non-empty command strings'
-    } elseif ($null -ne $verificationCommands -and $verificationCommands.Count -gt 0) {
-        Write-Host ("OK   verification profile is configured: {0} command(s)" -f $verificationCommands.Count)
-    } elseif ($hasSmoke) {
-        Write-Host 'OK   verification profile uses backward-compatible SMOKE_CMD fallback (1 command)'
-    } elseif ($verificationMode -eq 'required') {
-        Write-Host 'FAIL verification profile is required but neither VERIFICATION_COMMANDS nor SMOKE_CMD is configured'
-    } elseif ($verificationModeExplicit) {
-        Write-Host 'WARN verification profile is missing - executable changes will be blocked before push (VERIFICATION_MODE=auto with no commands configured); configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or drop VERIFICATION_MODE to use the disabled-by-default behavior'
-    } else {
-        Write-Host 'OK   verification profile is disabled by default (VERIFICATION_MODE not set - defaults to disabled); configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or set VERIFICATION_MODE: auto|required to enable pre-publish checks'
-    }
 } else {
-    Write-Host 'OK   .work/config.md not found - verification is disabled by default (VERIFICATION_MODE not set - defaults to disabled); configure VERIFICATION_COMMANDS, SMOKE_CMD, or VERIFICATION_MODE: auto|required to enable pre-publish checks'
+    Write-Host 'OK   .work/config.md not found (project defaults/root fallbacks apply)'
+}
+
+$hasSmoke = -not [string]::IsNullOrWhiteSpace((Get-Cfg 'SMOKE_CMD'))
+$verificationModeValue = Get-Cfg 'VERIFICATION_MODE'
+$verificationModeExplicit = -not [string]::IsNullOrWhiteSpace($verificationModeValue)
+$verificationMode = if ($verificationModeExplicit) { $verificationModeValue } else { 'auto' }
+$verificationCommandsRaw = Get-Cfg 'VERIFICATION_COMMANDS'
+$verificationCommands = $null
+$verificationCommandsValid = $true
+if (-not [string]::IsNullOrWhiteSpace($verificationCommandsRaw)) {
+    try {
+        $decoded = $verificationCommandsRaw | ConvertFrom-Json
+        if ($decoded -isnot [array]) { $decoded = @($decoded) }
+        $verificationCommands = @($decoded)
+        if ($verificationCommands.Count -eq 0 -or @($verificationCommands | Where-Object { $_ -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0) { $verificationCommandsValid = $false }
+    } catch { $verificationCommandsValid = $false }
+}
+if ($verificationMode -eq 'disabled') {
+    Write-Host 'OK   verification profile is explicitly disabled by operator (VERIFICATION_MODE=disabled)'
+} elseif (-not $verificationCommandsValid) {
+    Write-Host 'FAIL VERIFICATION_COMMANDS must be a non-empty JSON array of non-empty command strings'
+} elseif ($null -ne $verificationCommands -and $verificationCommands.Count -gt 0) {
+    Write-Host ("OK   verification profile is configured: {0} command(s)" -f $verificationCommands.Count)
+} elseif ($hasSmoke) {
+    Write-Host 'OK   verification profile uses backward-compatible SMOKE_CMD fallback (1 command)'
+} elseif ($verificationMode -eq 'required') {
+    Write-Host 'FAIL verification profile is required but neither VERIFICATION_COMMANDS nor SMOKE_CMD is configured'
+} elseif ($verificationModeExplicit) {
+    Write-Host 'WARN verification profile is missing - executable changes will be blocked before push (VERIFICATION_MODE=auto with no commands configured); configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or drop VERIFICATION_MODE to use the disabled-by-default behavior'
+} else {
+    Write-Host 'OK   verification profile is disabled by default (VERIFICATION_MODE not set - defaults to disabled); configure VERIFICATION_COMMANDS, keep SMOKE_CMD as fallback, or set VERIFICATION_MODE: auto|required to enable pre-publish checks'
 }
 
 # =============================================================================

@@ -10,13 +10,19 @@ REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
 RUN_DIR="$(mktemp -d)"
 MOCK_DIR="$(mktemp -d)"
 MISSING_PATH="$(mktemp -d)"
+PW_ONLY_DIR="$(mktemp -d)"
 ARGS_FILE="$MOCK_DIR/claude-args"
 RC_FILE="$MOCK_DIR/claude-rc"
 PWSH_ARGS_FILE="$MOCK_DIR/pwsh-args"
 FAILURES=0
+ROOT_CONFIG_DIR="$RUN_DIR/.orchestra"
+ROOT_CONFIG_FILE="$ROOT_CONFIG_DIR/root-config.md"
+ORIGINAL_PATH="$PATH"
+AWK_PATH="$(command -v awk 2>/dev/null || true)"
+mkdir -p "$ROOT_CONFIG_DIR"
 
 cleanup() {
-    rm -rf "$RUN_DIR" "$MOCK_DIR" "$MISSING_PATH"
+    rm -rf "$RUN_DIR" "$MOCK_DIR" "$MISSING_PATH" "$PW_ONLY_DIR"
 }
 trap cleanup EXIT
 
@@ -33,13 +39,35 @@ exit 0
 EOF
 cat > "$MOCK_DIR/pwsh" <<'EOF'
 #!/bin/sh
-printf '%s\n' "$@" > "$PWSH_ARGS_FILE"
+case " $* " in
+    *config-runtime.ps1* )
+        if [ -n "${PWSH_CONFIG_EXIT_CODE:-}" ]; then exit "$PWSH_CONFIG_EXIT_CODE"; fi
+        key=''
+        previous=''
+        for arg in "$@"; do
+            if [ "$previous" = '--key' ]; then key="$arg"; fi
+            previous="$arg"
+        done
+        if [ -f "${ORCHESTRA_HOME:-$HOME/.orchestra}/root-config.md" ]; then
+            awk -F: -v wanted="$key" '$1 ~ "^[[:space:]]*" wanted "[[:space:]]*$" { sub(/^[[:space:]]*/, "", $2); sub(/[[:space:]]+#.*$/, "", $2); sub(/[[:space:]]+$/, "", $2); print $2; exit }' "${ORCHESTRA_HOME:-$HOME/.orchestra}/root-config.md"
+        fi
+        exit 0
+        ;;
+esac
+if [ -n "${PWSH_ARGS_FILE:-}" ]; then printf '%s\n' "$@" > "$PWSH_ARGS_FILE"; fi
 if [ -n "${ORCHESTRA_CODEX_ROLE_TOPIC:-}" ]; then
-    printf 'TOPIC=%s\n' "$ORCHESTRA_CODEX_ROLE_TOPIC" >> "$PWSH_ARGS_FILE"
+    if [ -n "${PWSH_ARGS_FILE:-}" ]; then printf 'TOPIC=%s\n' "$ORCHESTRA_CODEX_ROLE_TOPIC" >> "$PWSH_ARGS_FILE"; fi
 fi
 exit 0
 EOF
 chmod +x "$MOCK_DIR/claude" "$MOCK_DIR/codex" "$MOCK_DIR/pwsh"
+if [ -n "$AWK_PATH" ]; then
+    printf '#!/bin/sh\nexec %s "$@"\n' "$AWK_PATH" > "$MOCK_DIR/awk"
+    chmod +x "$MOCK_DIR/awk"
+fi
+cp "$MOCK_DIR/pwsh" "$PW_ONLY_DIR/pwsh"
+if [ -x "$MOCK_DIR/awk" ]; then cp "$MOCK_DIR/awk" "$PW_ONLY_DIR/awk"; fi
+chmod +x "$PW_ONLY_DIR/pwsh"
 
 pass() {
     printf 'Testing %s: [PASS]\n' "$1"
@@ -66,6 +94,14 @@ contains_argument_pair() {
     return 1
 }
 
+clear_root_config() {
+    rm -f "$ROOT_CONFIG_FILE"
+}
+
+set_root_config() {
+    printf '%s\n' "$1" > "$ROOT_CONFIG_FILE"
+}
+
 run_with_mock_claude() {
     local launcher="$1"
     local agent="$2"
@@ -75,12 +111,13 @@ run_with_mock_claude() {
     local launcher_path="$REPO_ROOT/launchers/$launcher"
     local rc
 
+    clear_root_config
     : > "$ARGS_FILE"
     : > "$RC_FILE"
     (
         cd "$RUN_DIR" || exit 99
-        PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
-            CLAUDE_EXIT_CODE=0 ORCHESTRA_CLAUDE_PERMISSION_MODE= \
+        PATH="$MOCK_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
+            CLAUDE_EXIT_CODE=0 ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions \
             "$BASH" "$launcher_path" "$@"
     )
     rc=$?
@@ -113,7 +150,8 @@ run_without_claude() {
     local rc
 
     set +e
-    output=$(cd "$RUN_DIR" && PATH="$MISSING_PATH" ORCHESTRA_CLAUDE_PERMISSION_MODE= \
+    clear_root_config
+    output=$(cd "$RUN_DIR" && PATH="$MISSING_PATH:$PW_ONLY_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" ORCHESTRA_CLAUDE_PERMISSION_MODE= \
         "$BASH" "$launcher_path" 2>&1)
     rc=$?
     set -e
@@ -137,12 +175,13 @@ run_with_bypass_permissions() {
     local launcher_path="$REPO_ROOT/launchers/$launcher"
     local rc
 
+    set_root_config 'ORCHESTRA_CLAUDE_PERMISSION_MODE: bypassPermissions'
     : > "$ARGS_FILE"
     : > "$RC_FILE"
     (
         cd "$RUN_DIR" || exit 99
-        PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
-            CLAUDE_EXIT_CODE=0 ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions \
+        PATH="$MOCK_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
+            CLAUDE_EXIT_CODE=0 ORCHESTRA_CLAUDE_PERMISSION_MODE=unsafe \
             "$BASH" "$launcher_path"
     )
     rc=$?
@@ -161,16 +200,70 @@ run_with_invalid_permission_mode() {
     local output
     local rc
 
+    set_root_config 'ORCHESTRA_CLAUDE_PERMISSION_MODE: unsafe'
     : > "$ARGS_FILE"
     set +e
-    output=$(cd "$RUN_DIR" && PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" \
-        CLAUDE_RC_FILE="$RC_FILE" ORCHESTRA_CLAUDE_PERMISSION_MODE=unsafe \
+    output=$(cd "$RUN_DIR" && PATH="$MOCK_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" \
+        CLAUDE_RC_FILE="$RC_FILE" ORCHESTRA_CLAUDE_PERMISSION_MODE=bypassPermissions \
         "$BASH" "$launcher_path" 2>&1)
     rc=$?
     set -e
     if [ "$rc" -ne 2 ] || [ -s "$ARGS_FILE" ] || \
         ! printf '%s\n' "$output" | grep -Fq 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE'; then
         fail "$name" "invalid mode did not fail closed before Claude start (rc=$rc; output=$output)"
+        return
+    fi
+    pass "$name"
+}
+
+run_with_config_runtime_failure() {
+    local name="cc-enhance.sh (config runtime failure is fail-closed)"
+    local launcher_path="$REPO_ROOT/launchers/cc-enhance.sh"
+    local output
+    local rc
+
+    clear_root_config
+    : > "$ARGS_FILE"
+    set +e
+    output=$(cd "$RUN_DIR" && PATH="$MOCK_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" \
+        CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" PWSH_CONFIG_EXIT_CODE=12 \
+        "$BASH" "$launcher_path" 2>&1)
+    rc=$?
+    set -e
+    if [ "$rc" -ne 12 ]; then
+        fail "$name" "expected exit 12, got $rc: $output"
+        return
+    fi
+    if [ -s "$ARGS_FILE" ]; then
+        fail "$name" "Claude started after config resolution failed"
+        return
+    fi
+    pass "$name"
+}
+
+run_with_shared_processkit_cli() {
+    local name="cc-processor.sh (shared Orchestra ProcessKit CLI discovery)"
+    local launcher_path="$REPO_ROOT/launchers/cc-processor.sh"
+    local shared_cli="$ROOT_CONFIG_DIR/processkit-cli"
+    local rc
+
+    clear_root_config
+    printf '#!/bin/sh\nexit 0\n' > "$shared_cli"
+    chmod +x "$shared_cli"
+    : > "$PWSH_ARGS_FILE"
+    (
+        cd "$RUN_DIR" || exit 99
+        PATH="$MOCK_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" \
+            "$BASH" "$launcher_path"
+    )
+    rc=$?
+    rm -f "$shared_cli"
+    if [ "$rc" -ne 0 ]; then
+        fail "$name" "launcher exited $rc"
+        return
+    fi
+    if ! grep -Eq 'processkit-runtime\.ps1$' "$PWSH_ARGS_FILE" || ! grep -Fxq 'run-root' "$PWSH_ARGS_FILE"; then
+        fail "$name" "shared ProcessKit CLI did not activate the ProcessKit root runtime"
         return
     fi
     pass "$name"
@@ -195,10 +288,11 @@ run_with_mock_codex_processor() {
     local launcher_path="$REPO_ROOT/launchers/$launcher"
     local rc
 
+    clear_root_config
     : > "$PWSH_ARGS_FILE"
     (
         cd "$RUN_DIR" || exit 99
-        PATH="$MOCK_DIR" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" ORCHESTRA_PROVIDER=claude \
+        PATH="$MOCK_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" ORCHESTRA_PROVIDER=claude \
             "$BASH" "$launcher_path" codex "$@"
     )
     rc=$?
@@ -234,10 +328,11 @@ run_with_mock_codex_role() {
     local launcher_path="$REPO_ROOT/launchers/$launcher"
     local rc
 
+    clear_root_config
     : > "$PWSH_ARGS_FILE"
     (
         cd "$RUN_DIR" || exit 99
-        PATH="$MOCK_DIR:/usr/bin:/bin" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" \
+        PATH="$MOCK_DIR:/usr/bin:/bin" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" \
             ORCHESTRA_PROVIDER=claude "$BASH" "$launcher_path" codex "opening topic"
     )
     rc=$?
@@ -416,6 +511,8 @@ test_launcher cc-queue.sh queue_builder
 test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
 run_with_mock_codex_processor cc-processor.sh start
+run_with_config_runtime_failure
+run_with_shared_processkit_cli
 run_with_mock_codex_processor cc-resume.sh resume
 run_with_mock_codex_processor cc-resume.sh handoff --from claude
 run_with_mock_codex_role cc-thinker.sh thinker

@@ -59,12 +59,19 @@ function New-Sandbox {
     return $root
 }
 function Write-Utf8 { param([string]$Path, [string]$Text) [System.IO.File]::WriteAllText($Path, $Text, $script:Utf8) }
+function New-TestOrchestraHome {
+    param([string]$AutoApprove)
+    $testHome = New-TempDir
+    if ($AutoApprove) { Write-Utf8 (Join-Path $testHome 'root-config.md') ("ORCHESTRA_AUTO_APPROVE: $AutoApprove`n") }
+    return $testHome
+}
 
 # Runs policy.ps1 as a child pwsh process; returns @{ ExitCode; Out; Err }.
 function Invoke-Policy {
     param(
         [string[]]$ToolArgs,
-        [ValidateSet('', 'off', 'on', 'invalid')][string]$AutoApprove = ''
+        [ValidateSet('', 'off', 'on', 'invalid')][string]$AutoApprove = '',
+        [string]$OrchestraHome = ''
     )
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:PsExe
@@ -74,9 +81,7 @@ function Invoke-Policy {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
-    # Never inherit the operator machine's autonomy setting into baseline fail-closed
-    # scenarios; dedicated tests opt in explicitly below.
-    $psi.Environment['ORCHESTRA_AUTO_APPROVE'] = $AutoApprove
+    $psi.Environment['ORCHESTRA_HOME'] = if ($OrchestraHome) { $OrchestraHome } else { New-TestOrchestraHome $AutoApprove }
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
     }
@@ -104,7 +109,7 @@ function Start-PolicyAsync {
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = $script:Utf8
     $psi.StandardErrorEncoding = $script:Utf8
-    $psi.Environment['ORCHESTRA_AUTO_APPROVE'] = $AutoApprove
+    $psi.Environment['ORCHESTRA_HOME'] = New-TestOrchestraHome $AutoApprove
     $psi.Environment['POLICY_TEST_APPROVAL_LOCK_WAIT_SIGNAL'] = $LockWaitSignal
     foreach ($a in (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $script:Tool) + $ToolArgs)) {
         $psi.ArgumentList.Add($a)
@@ -194,7 +199,7 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Equal 48 $schema.config.Count 'schema has 48 config keys'
 
     # Per-tier coder/reviewer models: five enum-validated Claude keys and four free-form
-    # Codex adapter keys, all resolving config.md -> OS environment -> default.
+    # Codex adapter keys, all resolving config.md -> root-config -> default.
     $roleModelKeys = [ordered]@{
         'CLAUDE_CODER_FAST_MODEL'   = @{ Type = 'enum';   Default = 'sonnet' }
         'CLAUDE_CODER_MODEL'        = @{ Type = 'enum';   Default = 'sonnet' }
@@ -212,7 +217,7 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
         if (-not $d) { continue }
         Assert-Equal $roleModelKeys[$k].Type $d.type "$k has the expected type"
         Assert-Equal $roleModelKeys[$k].Default $d.default "$k has the documented default"
-        Assert-True ([bool]$d.envFallback) "$k resolves from the OS environment too"
+        Assert-True (-not [bool]$d.envFallback) "$k does not resolve from system environment settings"
         if ($roleModelKeys[$k].Type -eq 'enum') {
             Assert-Equal 'fable,haiku,opus,sonnet' ((@($d.enum) | Sort-Object) -join ',') "$k allows exactly the Claude model aliases"
         }
@@ -311,6 +316,25 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Write-Utf8 $cfg "CLAUDE_CODER_MODEL:`n"
     $r = Invoke-Policy @('validate-config', '--file', $cfg)
     Assert-Exit $r 0 'validate-config treats an empty role model key as unset (frontmatter default)'
+
+    $rootCfg = Join-Path $sb 'root-config.md'
+    Write-Utf8 $rootCfg "ORCHESTRA_PROVIDER: codex`nMAX_PARALLEL: 9`nORCHESTRA_CODEX_MAX_THREADS: 32`n"
+    $r = Invoke-Policy @('validate-config', '--file', $rootCfg)
+    Assert-Exit $r 0 'validate-config accepts root-only and project keys in root-config.md'
+
+    Write-Utf8 $rootCfg "ORCHESTRA_PROVIDER: broken`nMAX_PARALLEL: zero`nORCHESTRA_CODEX_MAX_THREADS: 33`nUNKNOWN_ROOT_KEY: x`n"
+    $r = Invoke-Policy @('validate-config', '--file', $rootCfg)
+    Assert-Exit $r 3 'validate-config rejects invalid and unknown root-config values'
+    Assert-OutMatch $r "unknown key 'UNKNOWN_ROOT_KEY'" 'validate-config reports unknown root-config keys'
+    Assert-OutMatch $r 'above the maximum 32' 'validate-config enforces the native Codex thread maximum'
+
+    Write-Utf8 $cfg "MAX_PARALLEL: 5`n"
+    $testHome = Join-Path $sb 'validation-home'
+    New-Item -ItemType Directory -Force -Path $testHome | Out-Null
+    Write-Utf8 (Join-Path $testHome 'root-config.md') "MAX_PARALLEL: invalid`n"
+    $r = Invoke-Policy @('validate-config', '--work', (Split-Path -Parent $cfg)) -OrchestraHome $testHome
+    Assert-Exit $r 3 'validate-config --work validates the effective root-config.md too'
+    Assert-OutMatch $r 'MAX_PARALLEL' 'validate-config --work reports the invalid root fallback'
 }.Invoke()
 
 # =============================================================================
@@ -1102,7 +1126,7 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     $j = $r.Out.Trim() | ConvertFrom-Json
     Assert-Equal 'created-auto-approved' $j.state 'auto-approve: request reports immediate system decision'
     Assert-Equal 'approve' $j.decision 'auto-approve: decision is approve'
-    Assert-Equal 'system-env:ORCHESTRA_AUTO_APPROVE' $j.decided_by 'auto-approve: audit identity names the operator pre-grant'
+    Assert-Equal 'root-config:ORCHESTRA_AUTO_APPROVE' $j.decided_by 'auto-approve: audit identity names the root-config pre-grant'
     Assert-True (Test-Path -LiteralPath (Join-Path $work "approvals/$($j.id).json")) 'auto-approve: audit artifact remains persisted'
 
     $r = Invoke-Policy @('approval-status', '--work', $work, '--id', $j.id, '--root', $sb, '--paths-from', $changed, '--now', '2026-01-01T00:01:00Z', '--json') -AutoApprove on
@@ -1117,7 +1141,7 @@ function Assert-OutMatch { param($R, [string]$Pattern, [string]$Msg) $t = "$($R.
     Assert-Exit $r 0 'auto-approve: status-only recovery consumes a live pending request'
     $status = $r.Out.Trim() | ConvertFrom-Json
     Assert-Equal 'approved' $status.verdict 'auto-approve: recovered pending verdict approved'
-    Assert-Equal 'system-env:ORCHESTRA_AUTO_APPROVE' $status.decided_by 'auto-approve: recovered request preserves system audit identity'
+    Assert-Equal 'root-config:ORCHESTRA_AUTO_APPROVE' $status.decided_by 'auto-approve: recovered request preserves root-config audit identity'
 
     # Invalid values are not interpreted truthily and cannot silently widen policy.
     $r = Invoke-Policy @('approval-request', '--work', $work, '--task', 'T-203', '--reason', 'human-review', '--fingerprint', 'aa', '--policy-hash', 'bb', '--json') -AutoApprove invalid

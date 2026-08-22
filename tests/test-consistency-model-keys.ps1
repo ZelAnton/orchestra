@@ -1,22 +1,21 @@
 # ci:posix
 <#
 .SYNOPSIS
-    Fixture for the Class 4 role-model and env-fallback checks of
+    Fixture for the Class 4 role-model consistency checks of
     tools/check-consistency.ps1.
 
 .DESCRIPTION
     Three parts of the config contract exist twice on purpose: the schema source
     tools/policy-schema.ps1 owns them, and tools/doctor-runtime.ps1 carries local copies
     ($claudeModelAllowed - allowed models per tier, $claudeModelFrontmatter - the model a
-    role falls back to when its key is unset, $script:EnvFallbackKeys - the keys that also
-    resolve from the OS environment) so cc-doctor keeps working when its engine is
+    role falls back to when its key is unset) so cc-doctor keeps working when its engine is
     mirrored standalone into ~/.claude/scripts. Class 4 machine-guarantees they cannot
     drift.
 
     This test copies the repository into a disposable root, runs the real validator once
     unmodified (must stay clean), then drifts ONLY a doctor copy - per scenario: one
-    allowed value dropped plus one key removed, one fallback model changed, one
-    env-fallback key removed - and runs the same entry point again. Every drift must be
+    allowed value dropped plus one key removed, one fallback model changed - and runs the
+    same entry point again. Every drift must be
     reported with a non-zero exit code, naming both ends of the contract. Driving the
     production entry point (not a test-only mode) also proves the checks are wired into
     the main flow. No repository file is modified.
@@ -134,24 +133,6 @@ try {
     Assert-Equal 1 @($found2 | Where-Object { $_ -match "agents/coder\.md runs on 'sonnet'" }).Count `
         "the role frontmatter is named; findings=$($found2 -join ' // ')"
 
-    # The third doctor copy: the keys cc-doctor resolves from the OS environment. Dropping
-    # one must be reported against the schema's envFallback flags.
-    $root3 = New-RepoFixture
-    $doctor3Path = Join-Path $root3 $DoctorRelPath
-    $doctor3 = [System.IO.File]::ReadAllText($doctor3Path)
-    $envOriginal = "'CODEX_CODER', 'CODEX_REVIEWER', 'KB',"
-    $envDrifted = "'CODEX_CODER', 'CODEX_REVIEWER',"
-    if (-not $doctor3.Contains($envOriginal)) {
-        throw "Fixture anchor not found in $DoctorRelPath : $envOriginal"
-    }
-    [System.IO.File]::WriteAllText($doctor3Path, $doctor3.Replace($envOriginal, $envDrifted), $Utf8NoBom)
-
-    $drifted3 = Invoke-Checker -Root $root3
-    $found3 = @($drifted3.Lines | Where-Object { $_ -match ' - cc-doctor-env-fallback - ' })
-    Assert-Equal 1 $drifted3.ExitCode 'a drifted cc-doctor env-fallback list fails the validator'
-    Assert-Equal 1 $found3.Count "one finding per dropped env-fallback key; findings=$($found3 -join ' // ')"
-    Assert-Equal 1 @($found3 | Where-Object { $_ -match "'KB' resolves from the OS environment" }).Count `
-        "the dropped key is named; findings=$($found3 -join ' // ')"
 }
 finally {
     foreach ($dir in $TempRoots) {
@@ -167,5 +148,5 @@ if ($Failures.Count -gt 0) {
     exit 1
 }
 
-Write-Host 'OK - consistency Class 4 reports every drift between the cc-doctor role-model/env-fallback copies, tools/policy-schema.ps1 and the role frontmatter.'
+Write-Host 'OK - consistency Class 4 reports every drift between the cc-doctor role-model copies, tools/policy-schema.ps1 and the role frontmatter.'
 exit 0

@@ -147,23 +147,13 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 ключей — `config.example.md` рядом с этим файлом). Отсутствующий файл или ключ —
 используй значение по умолчанию, указанное здесь же:
 
-**Фолбэк на переменные окружения (`CODEX_CODER`, `CODEX_REVIEWER`, `KB` и девять
-модельных ключей ролей).** Для этих ключей порядок разрешения такой: значение из
-`$WORK/config.md` → иначе одноимённая переменная окружения ОС (прочитай через shell:
-`$CODEX_CODER` / `$env:CODEX_CODER`, `$CODEX_REVIEWER` / `$env:CODEX_REVIEWER`, `$KB` /
-`$env:KB`, аналогично для модельных ключей `CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`,
-`CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL`,
-`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
-`CODEX_REVIEWER_DEEP_MODEL`) → иначе дефолт ключа (`off` для двух routing-ключей,
-`on` для `KB`, для модельных — см. «Модели ролей coder/reviewer» ниже).
-То есть если файла `config.md` нет или ключ в нём не задан, но переменная окружения
-выставлена в непустое значение — берётся она; ключ в `config.md` всегда переопределяет
-окружение. Значение из окружения валидируй так же, как из файла (`CODEX_CODER`:
-`off`/`fast`/`fast+std`/`all`; `CODEX_REVIEWER`:
-`off`/`fast`/`fast+std`/`deep`/`all`; `KB`: `on`/`off`;
-`CLAUDE_*_MODEL`: `haiku`/`sonnet`/`opus`/`fable`; `CODEX_*_MODEL` — свободные строки);
-нераспознанное или пустое — считай незаданным (тогда дефолт этого ключа). Остальные
-ключи читаются только из `config.md`.
+**Резолвинг конфигурации.** Сначала читай `$WORK/config.md`, затем
+`$HOME/.orchestra/root-config.md`, затем применяй документированный default. Это
+относится ко всем ключам из таблицы, включая `CODEX_CODER`, `CODEX_REVIEWER`, `KB` и
+модельные ключи ролей. Root-only ключи provider/runtime (`ORCHESTRA_*`,
+`CODEX_HOME`, `CC_PROCESSKIT_*`, registry и launcher timeouts) читаются только из
+`root-config.md`. OS environment не является источником настроек; внутренние
+process-scoped env-сигналы runtime не являются конфигурацией.
 
 **Допустимые множества значений adapter-ключей (валидация, fail-closed).** Единый источник —
 таблицы допустимых значений в `config.example.md`; здесь они в компактной
@@ -173,7 +163,7 @@ jj — в т.ч. colocated-репозиториев — jj workspace; см. «О
 `CODEX_CODER` ∈ {off, fast, fast+std, all}; `CODEX_REVIEWER` ∈ {off, fast, fast+std, deep, all};
 `CODEX_CIFIX` ∈ {off, on}; `CODEX_REASONING` ∈ {auto, low, medium, high, xhigh}; `CODEX_SANDBOX` ∈
 {read-only, workspace-write}; `CODEX_NETWORK` ∈ {on, off}. Пустой ключ → его default (для
-двух routing-ключей — после env-фолбэка); непустое значение **вне** множества —
+двух routing-ключей — после project/root-resolve); непустое значение **вне** множества —
 ошибка конфигурации, обрабатываемая fail-closed на Фазе 1.1 (см. ниже), а не молчаливо
 заменяемая default. `CODEX_SANDBOX` намеренно исключает `danger-full-access` и любое иное
 значение, расширяющее запись за пределы рабочей копии задачи; `reviewer_codex` при этом
@@ -204,23 +194,23 @@ Codex-адаптеров (`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_
 | `APPROVAL_DEADLINE_SEC` | 86400 | Фаза 5.3/5.4 — срок действия запроса на human approval (нет ответа = отказ, fail-closed) |
 | `NOTIFY_CMD` | (не задано) | Одноразовый best-effort operator notification для `task.escalated`, свежего `approval.pending` и красного required CI; команда operator-owned, перед ней текст redacted |
 | `REVIEWER_TIERING` | true | Фаза 2 (2.4) — выбор reviewer vs reviewer_std |
-| `CLAUDE_CODER_FAST_MODEL` | sonnet (env-фолбэк) | модель `coder_fast` при dispatch — см. «Модели ролей coder/reviewer» |
-| `CLAUDE_CODER_MODEL` | sonnet (env-фолбэк) | модель `coder` при dispatch — см. «Модели ролей coder/reviewer» |
-| `CLAUDE_CODER_DEEP_MODEL` | opus (env-фолбэк) | модель `coder_deep` при dispatch — см. «Модели ролей coder/reviewer» |
-| `CLAUDE_REVIEWER_STD_MODEL` | sonnet (env-фолбэк) | модель `reviewer_std` при dispatch — см. «Модели ролей coder/reviewer» |
-| `CLAUDE_REVIEWER_MODEL` | opus (env-фолбэк) | модель `reviewer` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_CODER_FAST_MODEL` | sonnet | модель `coder_fast` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_CODER_MODEL` | sonnet | модель `coder` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_CODER_DEEP_MODEL` | opus | модель `coder_deep` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_REVIEWER_STD_MODEL` | sonnet | модель `reviewer_std` при dispatch — см. «Модели ролей coder/reviewer» |
+| `CLAUDE_REVIEWER_MODEL` | opus | модель `reviewer` при dispatch — см. «Модели ролей coder/reviewer» |
 | `EVENTS_OUTBOX` | on | Событийный outbox `.work/events.jsonl`: `on`/`off`. `on` (по умолчанию) — дописывать машинные события на границах фаз/раундов, при захвате/смене статуса задачи, карантине/эскалации, слиянии и публикации; `off` — не писать (Markdown-артефакты остаются как есть). См. «Событийный outbox (`.work/events.jsonl`)» |
-| `KB` | on | База знаний (`.work/knowledge/`): `off`/`on` (с фолбэком на `$env:KB` — см. выше). `on` включает чтение KB (planner/coder/reviewer) и Фазу 5.5 (knowledge_curator); `off` отключает — см. «База знаний (KB)» |
+| `KB` | on | База знаний (`.work/knowledge/`): `off`/`on` (project config → root-config). `on` включает чтение KB (planner/coder/reviewer) и Фазу 5.5 (knowledge_curator); `off` отключает — см. «База знаний (KB)» |
 | `KB_TTL` | 8 | knowledge_curator — истечение неподтверждённых одиночных записей (батчей) |
 | `KB_CAP` | 12 | knowledge_curator — максимум записей на область |
 | `CODEX_CODER` | off | Фаза 2.2/2.8 — маршрутизация реализации/`R-`-фиксов в coder_codex: `off`/`fast`/`fast+std`/`all`; `all` включает и `coder_deep` |
 | `CODEX_REVIEWER` | off | Фаза 2 (2.4) — маршрутизация ревью в reviewer_codex: `off`/`fast`/`fast+std`/`deep`/`all`; `deep` добавляет augment к Claude-reviewer, `all` заменяет ревью всех уровней (см. «Codex-ревьюер и маршрутизация») |
 | `CODEX_CIFIX` | off | Фазы 4.3/5.4 — точечные CI/сборочные фиксы (Режим 3) через coder_codex: `off`/`on` |
 | `CODEX_MODEL` | (не задано) | codex-агенты — `-m` для codex; пусто → дефолт codex |
-| `CODEX_CODER_MODEL` | (не задано → `CODEX_MODEL`; env-фолбэк) | `coder_codex` на уровнях `coder_fast`/`coder` и в Режиме 3 |
-| `CODEX_CODER_DEEP_MODEL` | gpt-5.6-sol (env-фолбэк) | `coder_codex` на уровне `coder_deep`; `CODEX_MODEL` в эту ветку не течёт |
-| `CODEX_REVIEWER_MODEL` | (не задано → `CODEX_MODEL`; env-фолбэк) | `reviewer_codex` на уровнях `coder_fast`/`coder` |
-| `CODEX_REVIEWER_DEEP_MODEL` | gpt-5.6-sol (env-фолбэк) | `reviewer_codex` на уровне `coder_deep` (`full` и `augment`) |
+| `CODEX_CODER_MODEL` | (не задано → `CODEX_MODEL`) | `coder_codex` на уровнях `coder_fast`/`coder` и в Режиме 3 |
+| `CODEX_CODER_DEEP_MODEL` | gpt-5.6-sol | `coder_codex` на уровне `coder_deep`; `CODEX_MODEL` в эту ветку не течёт |
+| `CODEX_REVIEWER_MODEL` | (не задано → `CODEX_MODEL`) | `reviewer_codex` на уровнях `coder_fast`/`coder` |
+| `CODEX_REVIEWER_DEEP_MODEL` | gpt-5.6-sol | `reviewer_codex` на уровне `coder_deep` (`full` и `augment`) |
 | `CODEX_REASONING` | auto | codex-агенты — `model_reasoning_effort` (coder auto→high; reviewer auto→xhigh) |
 | `CODEX_SANDBOX` | workspace-write | coder_codex — `--sandbox` codex (reviewer_codex — всегда read-only) |
 | `CODEX_NETWORK` | on | Фазы 2.2/2.8 — сетевой гейт маршрутизации в coder_codex для задач с полем `Сеть:` (см. «Codex-исполнитель и маршрутизация»); внутри coder_codex — сеть песочницы codex |
@@ -228,8 +218,7 @@ Codex-адаптеров (`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_
 ## Модели ролей coder/reviewer
 
 Оператор задаёт модель каждого тира исполнителя и пер-таск ревьюера ключами
-`config.md` с фолбэком на одноимённые переменные окружения ОС (порядок разрешения —
-«Фолбэк на переменные окружения» выше). Ключи меняют **только модель уже выбранной
+`config.md` с fallback на `root-config.md`. Ключи меняют **только модель уже выбранной
 роли**: выбор роли (тиринг `REVIEWER_TIERING`, поле `Рекомендуемый исполнитель`,
 Codex-маршрутизация) они не трогают, `planner`/`merger`/`full_reviewer`/кураторов/
 `executor` не затрагивают.
@@ -259,7 +248,7 @@ Codex-маршрутизация) они не трогают, `planner`/`merger`
 Модели Codex-адаптеров задаются отдельными ключами `CODEX_CODER_MODEL`/
 `CODEX_CODER_DEEP_MODEL` (для `coder_codex`) и `CODEX_REVIEWER_MODEL`/
 `CODEX_REVIEWER_DEEP_MODEL` (для `reviewer_codex`); их читают сами адаптеры из
-`config.md`/окружения — ты их в промпт не пересылаешь и в `-m` не подставляешь.
+`config.md`/`root-config.md` — ты их в промпт не пересылаешь и в `-m` не подставляешь.
 К самим адаптерам `coder_codex`/`reviewer_codex` параметр `model` тоже не применяй:
 `CLAUDE_*_MODEL` задают модель тирной Claude-роли, а не модель адаптера (когда задача
 ушла в codex, тирный ключ не используется вовсе).
@@ -659,7 +648,7 @@ append-only инварианта `batch.md`. Подробности — «Рол
 - Батч: <B-id> · активно N / cap <MAX_PARALLEL> · приём: открыт (волна K) | закрыт (<причина>)
 - Codex: CODEX_CODER=<резолвленное значение> · CODEX_REVIEWER=<резолвленное значение> · CODEX_CIFIX=<резолвленное значение> · permission=<ok (сессионный грант) | ok (settings) | не проверялось (все три off)>
 - Codex attempts: <successes> ok, <fallbacks> fallback (<reason>=N, …), <failures> failed
-- Модели: <ключ>=<резолвленное значение>[ (env)] · … (только явно заданные модельные ключи)
+- Модели: <ключ>=<резолвленное значение>[ (root-config)] · … (только явно заданные модельные ключи)
 
 | Задача | Название | Агент | Этап | Ветка | Worktree |
 |--------|----------|-------|------|-------|----------|
@@ -671,7 +660,7 @@ append-only инварианта `batch.md`. Подробности — «Рол
 только «Оркестратор: processor — этап: …». Строка «Codex» появляется начиная с
 пересборки обзора в Фазе 1.4 (после того как 1.1 резолвнула значения на эту когорту) и
 несёт именно резолвленные значения всех трёх Codex-маршрутов — `CODEX_CODER`,
-`CODEX_REVIEWER` (после фолбэка на env) и `CODEX_CIFIX` (только из `config.md`) — для
+`CODEX_REVIEWER` (после project/root-resolve) и `CODEX_CIFIX` — для
 аудируемости шага 1.1 (см. «Конфигурация», «Фаза 1 — открытие когорты»). При повторном
 открытии новой когорты в той же сессии строка «Codex» перезаписывается свежерезолвленными
 значениями. Поле `permission=` фиксирует результат разового на сессию гейта permission на
@@ -684,8 +673,8 @@ append-only инварианта `batch.md`. Подробности — «Рол
 обзор с таблицей не строит.
 Строка `Модели` появляется там же, с Фазы 1.4, и несёт **только** те из девяти модельных
 ключей ролей (`CLAUDE_*_MODEL`, `CODEX_*_MODEL` — см. «Модели ролей coder/reviewer»),
-которые резолвнулись в непустое значение, с пометкой источника `(env)` для взятых из
-окружения. Ни один ключ не задан — строку опусти целиком (это и есть «все роли на своих
+которые резолвнулись в непустое значение, с пометкой источника `(root-config)` для взятых оттуда.
+Ни один ключ не задан — строку опусти целиком (это и есть «все роли на своих
 дефолтных моделях»).
 Строку `Codex attempts` показывай рядом со строкой `Codex` начиная с Фазы 1.4 и
 пересчитывай при каждой штатной пересборке обзора только по **завершённым**
@@ -1141,21 +1130,20 @@ bookmark сверх BASE), **не** на существовании ветки: 
 освободи lock и заверши. Иначе прочитай `config.md`. **Отдельный, не пропускаемый
 под-шаг:** резолвь `CODEX_CODER`, `CODEX_REVIEWER` и
 `CODEX_CIFIX` по правилам раздела «Конфигурация» (для двух routing-ключей — включая
-фолбэк на одноимённую переменную окружения shell, если ключ отсутствует в `config.md`
-или пуст в нём; `CODEX_CIFIX` резолвится **только из
-`config.md`**, без env-фолбэка; таблица дефолтов и правила валидации значения — только там,
+fallback на `root-config.md`, если ключ отсутствует в `config.md`
+или пуст в нём; таблица дефолтов и правила валидации значения — только там,
 здесь не дублируются) как явное действие исполнения, а не подразумеваемое одной лишь фразой
 «прочитай `config.md`». Выполняй этот под-шаг при **каждом** входе в Фазу 1.1 в рамках сессии — не
 только на первом открытии когорты, но и повторно при каждом следующем открытии новой
 когорты после завершения предыдущей (0.5 → Фаза 1). Резолвленные значения зафиксируй в
 обзоре `status.md` (Фаза 1.4 — см. «Обзор `$WORK/status.md`») для аудируемости: чтобы
-после сессии можно было проверить, что фолбэк на env не был молча пропущен.
+после сессии можно было проверить источник project/root значения.
    **Валидация значений adapter-ключей (fail-closed, до захвата задач).** В том же под-шаге,
 **до** любого захвата задач (Фаза 2.0/2.1) и до гейта permission ниже, провалидируй значения
 **всех шести** enum-ключей — `CODEX_CODER`, `CODEX_REVIEWER`, `CODEX_CIFIX`, `CODEX_REASONING`,
 `CODEX_SANDBOX`, `CODEX_NETWORK` — по множествам из раздела «Допустимые множества значений
 adapter-ключей» выше (единый источник — `config.example.md`). Для каждого ключа: пустое/
-неустановленное значение (для четырёх routing-ключей — уже после env-фолбэка) → его
+неустановленное значение (для routing-ключей — уже после project/root-resolve) → его
 документированный default, это **не** ошибка; **непустое** значение **вне** его множества →
 это ошибка конфигурации. При **любом** невалидном значении **не открывай когорту**: сними
 lock и заверши работу, сообщив оператору **ключ**, его **фактическое (некорректное)
@@ -1170,13 +1158,12 @@ lock и заверши работу, сообщив оператору **клю�
 этой проверке не подлежат.
    **Модельные ключи Claude-ролей (в том же под-шаге).** Резолвь пять ключей
 `CLAUDE_CODER_FAST_MODEL`, `CLAUDE_CODER_MODEL`, `CLAUDE_CODER_DEEP_MODEL`,
-`CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL` (`config.md` → одноимённая переменная
-окружения → пусто) и запомни на всю когорту — при dispatch их не перечитывают (см. «Модели
+`CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL` (`config.md` → `root-config.md` →
+пусто) и запомни на всю когорту — при dispatch их не перечитывают (см. «Модели
 ролей coder/reviewer»). Непустое значение **вне** множества `haiku`/`sonnet`/`opus`/`fable`:
 из `config.md` — та же fail-closed ошибка конфигурации, что и у Codex-ключей выше (когорту
-не открывай, сообщи ключ, значение и список допустимых); из окружения — считай ключ
-незаданным (роль пойдёт на модели своего frontmatter) и отметь это одной строкой в
-`journal.md`. Там же резолвь без enum-валидации (свободные строки) четыре модельных
+не открывай, сообщи ключ, значение и список допустимых); из root-config — сообщи
+об ошибке так же. Там же резолвь без enum-валидации (свободные строки) четыре модельных
 ключа Codex-адаптеров `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`,
 `CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL` — они нужны только строке обзора,
 Все резолвленные непустые значения зафиксируй в обзоре `status.md`
@@ -1185,7 +1172,7 @@ lock и заверши работу, сообщив оператору **клю�
 выше).** Гейт **активен**, если резолвленное значение хотя бы одного из `CODEX_CODER`,
 `CODEX_REVIEWER` **или** `CODEX_CIFIX` ≠ `off` (логическое ИЛИ по всем трём
 Codex-маршрутам — реализация/`R-`-фиксы, ревью, точечные CI/сборочные фиксы; `CODEX_CIFIX`
-резолвится только из `config.md`, без env-фолбэка). Все три = `off` → пропусти гейт
+резолвится по project/root-resolve). Все три = `off` → пропусти гейт
 целиком. Иначе — при **первом** открытии когорты в сессии убедись, что автономный
 `codex exec` разрешён; без разрешения классификатор auto-режима Claude Code блокирует
 **каждый** вызов `coder_codex`/`reviewer_codex`, и вся Codex-маршрутизация молча вырождается
@@ -1307,7 +1294,7 @@ drain выполни `inbox.ps1 reconcile --root "$ROOT" --json`, чтобы в�
 **planner** (batch-режим) для **первой волны**, передав
 `capacity=MAX_PARALLEL`, `батч=<B-id>`, `WORK`, `MAX_PARALLEL` (planner использует
 его для минимального горизонта просмотра на будущих доборках — см. planner.md) и
-флаг чтения базы знаний — **резолвленное** значение `KB` (файл → `$env:KB` → дефолт
+флаг чтения базы знаний — **резолвленное** значение `KB` (project config → root-config → default
 `on`, см. «Конфигурация»), не жёстко зашитый дефолт: `Use the planner subagent to
 select and plan up to <capacity> queue tasks. Батч=<B-id>. WORK=<абс>. BASE=<полный id>.
 MAX_PARALLEL=<из конфига>. KB=<on|off>.` При `KB:on` planner читает
@@ -2175,7 +2162,7 @@ exit 8 «BLOCK» = push требует ручного подтверждения
 случаев **не роняет** конвейер.
 
 **Линеаризация истории на публикации (`PUBLISH_LINEAR_HISTORY`, opt-in, по умолчанию
-выключено).** Резолвни `PUBLISH_LINEAR_HISTORY` (файл `config.md`, иначе дефолт `false`).
+выключено).** Резолвни `PUBLISH_LINEAR_HISTORY` (`config.md` → `root-config.md` → `false`).
 **`false`/ключ отсутствует → пропусти этот шаг целиком: поведение существующих проектов не
 меняется** — merger интегрировал через merge-коммиты (`--no-ff` / `jj new "task/<T-ID>" @`),
 per-task откат Фазы 4.3 отработал на этих merge-границах ещё до сюда, ты просто ff-вливаешь
@@ -2230,11 +2217,11 @@ ff) → **не публикуй**: это безопасная остановк�
 обязательного human review»), force-lock, **policy bypass** (публикация, требующая обойти
 denylist/push-block, т.е. случай check-publish «BLOCK» или осознанного исключения denylist) —
 требуют **отдельного операторского решения**, а не автоматического продолжения processor.
-Исключение — системное заранее выданное согласие `ORCHESTRA_AUTO_APPROVE=on`: его задаёт
-оператор вне агентской сессии на уровне User/Machine, поэтому это не саморасширение
-полномочий агентом. В этом режиме всё равно создай/проверь обычный одноразовый запрос ниже:
+Исключение — заранее выданное оператором согласие `ORCHESTRA_AUTO_APPROVE: on` в
+`$HOME/.orchestra/root-config.md`, поэтому это не саморасширение полномочий агентом. В
+этом режиме всё равно создай/проверь обычный одноразовый запрос ниже:
 `policy.ps1` механически запишет `decision=approve` от
-`system-env:ORCHESTRA_AUTO_APPROVE`, сохранит fingerprint/policy audit trail и вернёт
+`root-config:ORCHESTRA_AUTO_APPROVE`, сохранит fingerprint/policy audit trail и вернёт
 успех без остановки processor. Не вызывай `approval-approve` самостоятельно и не подменяй
 эту переменную внутри сессии.
 Оформи его как **персистентный одноразовый запрос**: `pwsh -File tools/policy.ps1
@@ -2453,7 +2440,8 @@ false`/нет remote), — а не сразу после локального ff
 
 **Ожидаемый набор** обязательных CI-проверок берётся из политики
 `.work/constraints.md` (раздел «Обязательные CI-проверки публикации»); тайминги — из
-`.work/config.md` (`PUBLISH_CI_DEADLINE_SEC`, `PUBLISH_CI_BACKOFF_SEC`). **Набор пуст или
+`.work/config.md` → `root-config.md` (`PUBLISH_CI_DEADLINE_SEC`,
+`PUBLISH_CI_BACKOFF_SEC`). **Набор пуст или
 `.work/constraints.md` нет** — обязательного набора нет: ожидание CI деградирует к прежнему
 best-effort поведению по `CI_WATCH` (одиночный `gh run watch`), без жёстких отказов
 (деградация без ошибок). Иначе — цикл гейта:
@@ -2522,7 +2510,7 @@ best-effort поведению по `CI_WATCH` (одиночный `gh run watch
 ## Фаза 5.5 — курирование базы знаний (условно, при `KB:on`)
 
 Выполняется **только если резолвленное значение `KB` (см. «Конфигурация» — файл, иначе
-фолбэк `$env:KB`, иначе дефолт `on`) — `on`**, **после** того как CI устаканился (5.4)
+fallback root-config, иначе дефолт `on`) — `on`**, **после** того как CI устаканился (5.4)
 или сразу при `PUSH:false`/отсутствии CI (после 5.3), и **строго до удалений Фазы 6** —
 источники харвеста (`review.md`, `review_integration.md`, `merge_report.md`,
 `learnings.md`, поля дескрипторов) ещё на месте, а причины падений CI и их фиксы уже
@@ -3167,8 +3155,8 @@ Codex не ведёт **никогда**.
 
 Агенты ведут единую базу знаний проекта в `.work/knowledge/` (шарды
 `architecture/`/`conventions/`/`pitfalls/` + `INDEX.md`), чтобы **меньше исследовать код**
-и **не повторять ошибки**. **По умолчанию `KB: on`** (резолвится с фолбэком на `$env:KB` —
-см. «Конфигурация»); явный `KB: off` в `config.md` **или** `$env:KB=off` полностью
+и **не повторять ошибки**. **По умолчанию `KB: on`** (project config → root-config → default;
+см. «Конфигурация»); явный `KB: off` в `config.md` или root-config полностью
 отключает всё нижеописанное — поведение как без базы знаний вовсе. Каталог
 машинно-локальный (gitignored в `.work/`); инвариант «один писатель» держится на одном
 `orchestrator.lock`.
@@ -3689,7 +3677,7 @@ risk-классификацию и парковку задач до решени
   → ff-вливание локально без push (как `PUSH: false`) + сообщение о задержке. Заданные
   обязательные проверки прогоняй как часть гейта публикации (merger уже гоняет `SMOKE_CMD`;
   дополнительные команды из файла — здесь). Незаданное ничего не меняет — действует поведение
-  по `config.md`.
+  по резолвленному project/root-конфигу.
 
 # Ограничения
 

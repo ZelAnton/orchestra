@@ -60,6 +60,31 @@ find_template() {
   return 2
 }
 
+# --- root-config.md (copy the global template once; never overwrite operator settings) ---
+if [ -e "$ORCHESTRA_HOME/root-config.md" ] && [ ! -f "$ORCHESTRA_HOME/root-config.md" ]; then
+  echo "Failed to use $ORCHESTRA_HOME/root-config.md (path is not a regular file)." >&2
+  exit 2
+elif [ -f "$ORCHESTRA_HOME/root-config.md" ]; then
+  echo "$ORCHESTRA_HOME/root-config.md already exists - leaving it unchanged."
+else
+  TEMPLATE="$(find_template root-config.example.md)"; template_rc=$?
+  if [ "$template_rc" -eq 0 ]; then
+    if ! mkdir -p "$ORCHESTRA_HOME"; then
+      echo "Failed to create $ORCHESTRA_HOME/root-config.md (shared Orchestra directory could not be created)." >&2
+      exit 2
+    fi
+    if cp -f "$TEMPLATE" "$ORCHESTRA_HOME/root-config.md"; then
+      echo "Created $ORCHESTRA_HOME/root-config.md from root-config.example.md - edit it for this machine."
+    else
+      echo "Failed to create $ORCHESTRA_HOME/root-config.md (copy failed)." >&2
+      exit 2
+    fi
+  else
+    echo "Failed to create $ORCHESTRA_HOME/root-config.md (root-config.example.md not found; run cc-sync from the Orchestra checkout)." >&2
+    exit 2
+  fi
+fi
+
 # --- config.md (seed only the marked block) ---
 if [ -f ".work/config.md" ]; then
   echo ".work/config.md already exists - leaving it unchanged."

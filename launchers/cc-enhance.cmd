@@ -3,8 +3,8 @@ rem Run enhancement_scout in the current folder through Claude or the interactiv
 setlocal
 set "LAUNCHER_DIR=%~dp0"
 for %%I in (.) do set "PROJECT_ROOT=%%~fI"
-set "PROVIDER=%ORCHESTRA_PROVIDER%"
-if not defined PROVIDER set "PROVIDER=claude"
+call "%~dp0cc-common.cmd" resolve_provider
+if errorlevel 1 exit /b %ERRORLEVEL%
 if /I "%~1"=="claude" (
   set "PROVIDER=claude"
 )

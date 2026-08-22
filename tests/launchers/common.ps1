@@ -161,6 +161,16 @@ function Install-Launcher {
         if ($n -in @('cc-processor.cmd', 'cc-resume.cmd')) {
             Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'tools/processkit-runtime.ps1') `
                 -Destination (Join-Path $Paths.Orchestra 'scripts/processkit-runtime.ps1') -Force
+            foreach ($runtime in @('common.ps1', 'config-runtime.ps1')) {
+                Copy-Item -LiteralPath (Join-Path $script:RepoRoot ('tools/' + $runtime)) `
+                    -Destination (Join-Path $Paths.Orchestra ('scripts/' + $runtime)) -Force
+            }
+        }
+        if ($n -in @('cc-common.cmd', 'cc-audit.cmd', 'cc-enhance.cmd', 'cc-thinker.cmd', 'cc-processor.cmd', 'cc-resume.cmd')) {
+            foreach ($runtime in @('common.ps1', 'config-runtime.ps1')) {
+                Copy-Item -LiteralPath (Join-Path $script:RepoRoot ('tools/' + $runtime)) `
+                    -Destination (Join-Path $Paths.Orchestra ('scripts/' + $runtime)) -Force
+            }
         }
         if ($n -eq 'cc-config.cmd') {
             foreach ($runtime in @('common.ps1', 'project-registry-lib.ps1', 'project-registry.ps1')) {
@@ -183,6 +193,7 @@ function Install-Launcher {
 function Install-ConfigExample {
     param([Parameter(Mandatory)] $Paths)
     Copy-Item -LiteralPath $script:ConfigExamplePath -Destination (Join-Path $Paths.Orchestra 'config.example.md') -Force
+    Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'root-config.example.md') -Destination (Join-Path $Paths.Orchestra 'root-config.example.md') -Force
     Copy-Item -LiteralPath (Join-Path $script:RepoRoot 'constraints.example.md') -Destination (Join-Path $Paths.Orchestra 'constraints.example.md') -Force
 }
 
@@ -322,6 +333,7 @@ function Invoke-Launcher {
         [Parameter(Mandatory)] [string] $Name,
         [string[]] $LauncherArgs = @(),
         [hashtable] $EnvVars = @{},
+        [switch] $SkipRootConfigFixture,
         # When set, PATH is NOT inherited from the current environment (only
         # $Paths.Bin plus the minimal Windows/PowerShell system directories
         # needed for cmd.exe/powershell.exe themselves to run). Use this for
@@ -339,11 +351,25 @@ function Invoke-Launcher {
     $originalPath = $env:PATH
     $originalLocation = Get-Location
     $setEnvVars = @{}
+    $configKeys = @(
+        'MAX_PARALLEL', 'COHORT_SIZE', 'COHORT_MAX_AGE', 'REVIEW_MIN_PASSES', 'REVIEW_LOOP_MAX',
+        'INTEGRATION_LOOP_MAX', 'CI_FIX_MAX', 'STAGNATION_LIMIT', 'QUARANTINE_MAX_ATTEMPTS',
+        'CALL_DEADLINE_SEC', 'CALL_MAX_ATTEMPTS', 'CALL_OUTPUT_MAX_BYTES', 'COHORT_BUDGET_SEC',
+        'COHORT_TOKEN_BUDGET', 'COHORT_TOKEN_BUDGET_STRICT', 'SMOKE_CMD', 'VERIFICATION_MODE',
+        'VERIFICATION_COMMANDS', 'PUSH', 'CI_WATCH', 'PUBLISH_CI_DEADLINE_SEC',
+        'PUBLISH_CI_BACKOFF_SEC', 'PUBLISH_LINEAR_HISTORY', 'APPROVAL_DEADLINE_SEC',
+        'NOTIFY_CMD', 'REVIEWER_TIERING', 'MAIN_BRANCH', 'EVENTS_OUTBOX', 'KB', 'KB_TTL', 'KB_CAP',
+        'CLAUDE_CODER_FAST_MODEL', 'CLAUDE_CODER_MODEL', 'CLAUDE_CODER_DEEP_MODEL',
+        'CLAUDE_REVIEWER_STD_MODEL', 'CLAUDE_REVIEWER_MODEL', 'CODEX_CODER', 'CODEX_REVIEWER',
+        'CODEX_CIFIX', 'CODEX_MODEL', 'CODEX_CODER_MODEL', 'CODEX_CODER_DEEP_MODEL',
+        'CODEX_REVIEWER_MODEL', 'CODEX_REVIEWER_DEEP_MODEL', 'CODEX_REASONING', 'CODEX_SANDBOX',
+        'CODEX_NETWORK', 'CODEX_CMD', 'ORCHESTRA_PROVIDER', 'ORCHESTRA_CLAUDE_PERMISSION_MODE',
+        'ORCHESTRA_AUTO_APPROVE', 'ORCHESTRA_CODEX_MODEL', 'ORCHESTRA_CODEX_REASONING',
+        'ORCHESTRA_CODEX_SANDBOX', 'ORCHESTRA_CODEX_MAX_THREADS', 'CODEX_HOME', 'CC_PROCESSKIT_CLI',
+        'CC_PROCESSKIT_PYTHON', 'ORCHESTRA_REGISTRY_PATH', 'BASH_DEFAULT_TIMEOUT_MS',
+        'BASH_MAX_TIMEOUT_MS'
+    )
     $effectiveEnvVars = @{
-        CC_PROCESSKIT_CLI = 'off'
-        CC_PROCESSKIT_PYTHON = ''
-        ORCHESTRA_PROVIDER = ''
-        ORCHESTRA_CLAUDE_PERMISSION_MODE = ''
         ORCHESTRA_HOME = $Paths.Orchestra
     }
     if ($Name -eq 'cc-config.cmd') {
@@ -352,6 +378,25 @@ function Invoke-Launcher {
         $effectiveEnvVars['ORCHESTRA_REGISTRY_PATH'] = Join-Path $Paths.Root 'profile/projects.json'
     }
     foreach ($k in $EnvVars.Keys) { $effectiveEnvVars[$k] = $EnvVars[$k] }
+    $rootConfigLines = @(
+        foreach ($k in $EnvVars.Keys) {
+            if ($configKeys -contains $k -and -not [string]::IsNullOrWhiteSpace([string]$EnvVars[$k])) {
+                '{0}: {1}' -f $k, $EnvVars[$k]
+            }
+        }
+    )
+    if (-not $EnvVars.ContainsKey('CODEX_HOME')) { $rootConfigLines += 'CODEX_HOME: ' + (Join-Path $Paths.Orchestra '.codex') }
+    if (-not $EnvVars.ContainsKey('CC_PROCESSKIT_CLI')) { $rootConfigLines += 'CC_PROCESSKIT_CLI: off' }
+    if (-not $EnvVars.ContainsKey('ORCHESTRA_REGISTRY_PATH') -and $effectiveEnvVars.ContainsKey('ORCHESTRA_REGISTRY_PATH')) {
+        $rootConfigLines += 'ORCHESTRA_REGISTRY_PATH: ' + [string]$effectiveEnvVars['ORCHESTRA_REGISTRY_PATH']
+    }
+    $rootConfigPath = Join-Path $Paths.Orchestra 'root-config.md'
+    if (-not $SkipRootConfigFixture) {
+        [System.IO.File]::WriteAllText($rootConfigPath, (($rootConfigLines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    }
+    foreach ($key in $configKeys) {
+        if (-not $effectiveEnvVars.ContainsKey($key)) { $effectiveEnvVars[$key] = '' }
+    }
     try {
         if ($MinimalPath) {
             $sysRoot = $env:SystemRoot

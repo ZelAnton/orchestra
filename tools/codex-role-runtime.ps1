@@ -26,6 +26,17 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$commonCandidates = @((Join-Path $PSScriptRoot 'common.ps1'))
+if (-not [string]::IsNullOrWhiteSpace([string]$env:ORCHESTRA_HOME)) {
+    $commonCandidates += Join-Path $env:ORCHESTRA_HOME 'scripts/common.ps1'
+}
+$profileRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if (-not [string]::IsNullOrWhiteSpace($profileRoot)) {
+    $commonCandidates += Join-Path $profileRoot '.orchestra/scripts/common.ps1'
+}
+$commonPath = $commonCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $commonPath) { throw 'Orchestra common runtime is missing; run cc-sync from the Orchestra checkout.' }
+. $commonPath
 if ($PSVersionTable.PSVersion.Major -ge 7) {
     $global:PSNativeCommandUseErrorActionPreference = $false
 }
@@ -37,11 +48,9 @@ function Stop-Runtime {
 }
 
 function Resolve-EffectiveValue {
-    param([string]$Explicit, [string]$EnvironmentName, [string]$Default)
+    param([string]$Explicit, [string]$ConfigKey, [string]$Default, [string]$Work)
     if ($Explicit) { return $Explicit }
-    $fromEnv = [Environment]::GetEnvironmentVariable($EnvironmentName)
-    if ($fromEnv) { return $fromEnv }
-    return $Default
+    return Get-OrchestraConfigValue -Work $Work -Key $ConfigKey -Default $Default
 }
 
 function Resolve-RolePrompt {
@@ -93,11 +102,20 @@ function Resolve-CodexProcessLaunch {
 try { $resolvedRoot = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path }
 catch { Stop-Runtime 2 "project root does not exist: $Root" }
 
-$CodexCmd = Resolve-EffectiveValue $CodexCmd 'CODEX_CMD' 'codex'
-$Model = Resolve-EffectiveValue $Model 'ORCHESTRA_CODEX_MODEL' ''
-$Reasoning = Resolve-EffectiveValue $Reasoning 'ORCHESTRA_CODEX_REASONING' 'high'
-$Sandbox = Resolve-EffectiveValue $Sandbox 'ORCHESTRA_CODEX_SANDBOX' 'danger-full-access'
-$OpeningTopic = Resolve-EffectiveValue $OpeningTopic 'ORCHESTRA_CODEX_ROLE_TOPIC' ''
+$configWork = Join-Path $resolvedRoot '.work'
+$CodexCmd = Resolve-EffectiveValue $CodexCmd 'CODEX_CMD' 'codex' $configWork
+$Model = Resolve-EffectiveValue $Model 'ORCHESTRA_CODEX_MODEL' '' $configWork
+$Reasoning = Resolve-EffectiveValue $Reasoning 'ORCHESTRA_CODEX_REASONING' 'high' $configWork
+$Sandbox = Resolve-EffectiveValue $Sandbox 'ORCHESTRA_CODEX_SANDBOX' 'danger-full-access' $configWork
+function Get-CodexHome {
+    $configured = Get-OrchestraConfigValue -Work $configWork -Key 'CODEX_HOME' -Default ''
+    if ($configured -eq '~') { $configured = $HOME }
+    elseif ($configured.StartsWith('~/' ) -or $configured.StartsWith('~\')) { $configured = Join-Path $HOME $configured.Substring(2) }
+    if ($configured) { return [System.IO.Path]::GetFullPath($configured) }
+    return [System.IO.Path]::GetFullPath((Join-Path $HOME '.codex'))
+}
+# ORCHESTRA_CODEX_ROLE_TOPIC is a process-scoped launcher handoff, not configuration.
+$OpeningTopic = if ($OpeningTopic) { $OpeningTopic } else { [Environment]::GetEnvironmentVariable('ORCHESTRA_CODEX_ROLE_TOPIC') }
 # The launcher uses this process-scoped variable only to cross cmd.exe's free-form argv
 # boundary safely. Do not leak the operator's topic into the Codex child environment.
 [Environment]::SetEnvironmentVariable('ORCHESTRA_CODEX_ROLE_TOPIC', $null, 'Process')
@@ -153,6 +171,7 @@ try {
     $startInfo.FileName = $launch.FilePath
     $startInfo.WorkingDirectory = $resolvedRoot
     $startInfo.UseShellExecute = $false
+    $startInfo.Environment['CODEX_HOME'] = Get-CodexHome
     foreach ($argument in $launch.Arguments) {
         [void]$startInfo.ArgumentList.Add([string]$argument)
     }

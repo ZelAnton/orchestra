@@ -4,25 +4,18 @@
 отсутствующий ключ означает значение по умолчанию (сводка дефолтов — в таблице
 ниже) — необязательно копировать все ключи, только те, что хотите переопределить.
 
-**Исключение — ключи с фолбэком на переменные окружения ОС:** `CODEX_CODER`,
-`CODEX_REVIEWER`, `KB` и **модельные ключи ролей** `CLAUDE_CODER_FAST_MODEL`,
-`CLAUDE_CODER_MODEL`, `CLAUDE_CODER_DEEP_MODEL`, `CLAUDE_REVIEWER_STD_MODEL`,
-`CLAUDE_REVIEWER_MODEL`, `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`,
-`CODEX_REVIEWER_MODEL`, `CODEX_REVIEWER_DEEP_MODEL`. Порядок разрешения:
-`config.md` → одноимённая переменная окружения → дефолт ключа. Если файла нет
-или ключ в нём не задан, но выставлена одноимённая переменная окружения — берётся её
-значение; ключ в `config.md` всегда переопределяет окружение. Значение из окружения
-валидируется так же, как из файла — нераспознанное/пустое считается незаданным (тогда
-дефолт этого ключа). Удобно включить codex, выключить KB или сменить модель исполнителей/
-ревьюеров глобально (в профиле/CI) без правки `config.md` каждого проекта. Остальные
-ключи — только из `config.md`.
+Порядок разрешения для всех ключей: проектный `.work/config.md` →
+`~/.orchestra/root-config.md` → документированный default. Поэтому `root-config.md`
+может задать `CODEX_CODER`, `CODEX_REVIEWER`, `KB`, модели ролей и любые другие ключи
+из таблицы для всех проектов, а проектный `config.md` может переопределить проектные
+ключи. Системные переменные окружения не являются источником настроек.
 
 ## Системный выбор корневого provider
 
-Provider всего оркестра выбирается вне `.work/config.md`, чтобы агент не мог переключить
-себе backend в ходе прогона:
+Provider всего оркестра задаётся в `~/.orchestra/root-config.md`, чтобы агент не мог
+переключить себе backend в ходе прогона:
 
-- `ORCHESTRA_PROVIDER=claude|codex` — системный default (`claude`, если переменной нет);
+- `ORCHESTRA_PROVIDER: claude|codex` — root-config default (`claude`, если ключ не задан);
 - `cc-processor codex` / `cc-resume codex` / `cc-thinker codex` / `cc-audit codex` /
   `cc-enhance codex` — явное переопределение для одного запуска;
 - те же команды с аргументом `claude` — явный возврат на legacy-provider.
@@ -34,7 +27,7 @@ Provider всего оркестра выбирается вне `.work/config.m
 
 ## Системный permission mode Claude
 
-`ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions` задаёт режим всех
+`ORCHESTRA_CLAUDE_PERMISSION_MODE: auto|bypassPermissions` задаёт режим всех
 Claude-launcher’ов вне `.work/config.md`; default — `auto`. Значение
 `bypassPermissions` отключает permission-проверки root-сессии Claude и всех
 создаваемых ею subagent’ов; любое другое значение даёт fail-closed до запуска
@@ -42,7 +35,7 @@ Claude. Это только operator-owned opt-in для изолированн�
 агенты не выставляют его сами, а внутренние `policy.ps1` gates продолжают
 действовать. На Codex-native runtime переменная не влияет.
 
-Operator-owned системные настройки Codex-root и прямых Codex-ролей:
+Операторские root-настройки Codex-root и прямых Codex-ролей:
 
 | Переменная | Разрешённые значения | Default |
 |---|---|---|
@@ -127,8 +120,7 @@ REVIEWER_TIERING: true
 # CLAUDE_CODER_DEEP_MODEL: opus     # haiku | sonnet | opus | fable; дефолт opus
 # CLAUDE_REVIEWER_STD_MODEL: sonnet # haiku | sonnet | opus | fable; дефолт sonnet
 # CLAUDE_REVIEWER_MODEL: opus       # haiku | sonnet | opus | fable; дефолт opus
-                                    # ^ у всех пяти есть фолбэк на одноимённую переменную
-                                    #   окружения ОС (см. «Фолбэк на переменные окружения»)
+                                    # ^ глобальное значение можно задать в ~/.orchestra/root-config.md
 # MAIN_BRANCH: main      # по умолчанию — автоопределение (см. ниже)
 # --- Событийный outbox (.work/events.jsonl) ---
 # EVENTS_OUTBOX: off     # on (по умолч.) | off — писать ли машинные события в
@@ -156,8 +148,7 @@ REVIEWER_TIERING: true
 # CODEX_REVIEWER_DEEP_MODEL: gpt-5.6-sol
                                         # модель reviewer_codex для coder_deep
                                         #   (full и augment); пусто → gpt-5.6-sol
-                                        # ^ у всех четырёх есть фолбэк на одноимённую
-                                        #   переменную окружения ОС
+                                        # ^ глобальное значение можно задать в ~/.orchestra/root-config.md
 # CODEX_REASONING: auto        # auto | low | medium | high | xhigh
 # CODEX_SANDBOX: workspace-write
 # CODEX_NETWORK: on            # сеть в песочнице coder_codex: on (по умолч.) | off
@@ -195,24 +186,24 @@ REVIEWER_TIERING: true
 | `APPROVAL_DEADLINE_SEC` | 86400 |
 | `NOTIFY_CMD` | не задан (уведомления отключены) |
 | `REVIEWER_TIERING` | true |
-| `CLAUDE_CODER_FAST_MODEL` | sonnet (или env-переменная `CLAUDE_CODER_FAST_MODEL`) |
-| `CLAUDE_CODER_MODEL` | sonnet (или env-переменная `CLAUDE_CODER_MODEL`) |
-| `CLAUDE_CODER_DEEP_MODEL` | opus (или env-переменная `CLAUDE_CODER_DEEP_MODEL`) |
-| `CLAUDE_REVIEWER_STD_MODEL` | sonnet (или env-переменная `CLAUDE_REVIEWER_STD_MODEL`) |
-| `CLAUDE_REVIEWER_MODEL` | opus (или env-переменная `CLAUDE_REVIEWER_MODEL`) |
+| `CLAUDE_CODER_FAST_MODEL` | sonnet |
+| `CLAUDE_CODER_MODEL` | sonnet |
+| `CLAUDE_CODER_DEEP_MODEL` | opus |
+| `CLAUDE_REVIEWER_STD_MODEL` | sonnet |
+| `CLAUDE_REVIEWER_MODEL` | opus |
 | `MAIN_BRANCH` | автоопределение |
 | `EVENTS_OUTBOX` | on |
 | `KB` | on |
 | `KB_TTL` | 8 |
 | `KB_CAP` | 12 |
-| `CODEX_CODER` | off (или env-переменная `CODEX_CODER`) |
-| `CODEX_REVIEWER` | off (или env-переменная `CODEX_REVIEWER`) |
+| `CODEX_CODER` | off |
+| `CODEX_REVIEWER` | off |
 | `CODEX_CIFIX` | off |
 | `CODEX_MODEL` | не задано (дефолт codex) |
-| `CODEX_CODER_MODEL` | не задано (тогда `CODEX_MODEL`, затем дефолт codex; или env-переменная `CODEX_CODER_MODEL`) |
-| `CODEX_CODER_DEEP_MODEL` | gpt-5.6-sol (или env-переменная `CODEX_CODER_DEEP_MODEL`) |
-| `CODEX_REVIEWER_MODEL` | не задано (тогда `CODEX_MODEL`, затем дефолт codex; или env-переменная `CODEX_REVIEWER_MODEL`) |
-| `CODEX_REVIEWER_DEEP_MODEL` | gpt-5.6-sol (или env-переменная `CODEX_REVIEWER_DEEP_MODEL`) |
+| `CODEX_CODER_MODEL` | не задано (тогда `CODEX_MODEL`, затем дефолт codex) |
+| `CODEX_CODER_DEEP_MODEL` | gpt-5.6-sol |
+| `CODEX_REVIEWER_MODEL` | не задано (тогда `CODEX_MODEL`, затем дефолт codex) |
+| `CODEX_REVIEWER_DEEP_MODEL` | gpt-5.6-sol |
 | `CODEX_REASONING` | auto |
 | `CODEX_SANDBOX` | workspace-write |
 | `CODEX_NETWORK` | on |
@@ -380,8 +371,8 @@ REVIEWER_TIERING: true
   `CLAUDE_REVIEWER_STD_MODEL` / `CLAUDE_REVIEWER_MODEL` — модель Claude-роли
   соответствующего тира (`coder_fast` / `coder` / `coder_deep` / `reviewer_std` /
   `reviewer`). Допустимые значения — `haiku` | `sonnet` | `opus` | `fable`; непустое
-  значение вне этого множества в `config.md` останавливает когорту на Фазе 1.1
-  (fail-closed, без молчаливой подмены дефолта), а из окружения — считается незаданным.
+  значение вне этого множества в `config.md` или `root-config.md` останавливает когорту
+  на Фазе 1.1 (fail-closed, без молчаливой подмены дефолта).
   Пустой/незаданный ключ означает «модель из frontmatter агента» (`sonnet` для
   `coder_fast`/`coder`/`reviewer_std`, `opus` для `coder_deep`/`reviewer`), а не
   безмодельный вызов: processor просто не передаёт переопределение. Заданное значение
@@ -391,9 +382,8 @@ REVIEWER_TIERING: true
   исполнитель` по-прежнему выбирают роль) и не влияют на `planner`, `merger`,
   `full_reviewer`, кураторов и остальные роли — только на модель уже выбранной роли.
   Тир `coder_deep` дороже прочих; понижение его модели снижает и качество самой
-  ответственной работы. Фолбэк на одноимённые переменные окружения — см. абзац
-  «Исключение — ключи с фолбэком на переменные окружения ОС» в начале файла (раздел
-  «Codex-агенты» ниже описывает env-фолбэк только своих, `CODEX_*`, ключей).
+  ответственной работы. Для общего значения используй `~/.orchestra/root-config.md`;
+  project `.work/config.md` имеет приоритет.
 - `MAIN_BRANCH` — имя магистральной ветки (trunk), в которую processor ff-мержит
   и пушит. По умолчанию — **автоопределение**: в git — `origin/HEAD` → `main` →
   `master`; в jj — `main` → `master`. Задавайте явно для репозиториев, чей trunk
@@ -589,14 +579,14 @@ seed `config.md`), никогда не перезаписывая существ
 конфигурации для этого не вводится — категории живут в `.work/constraints.md`, а не в
 `config.md`. Активная human-review категория создаёт одноразовый gate перед публикацией.
 По умолчанию он ждёт решения оператора; для полностью автономной машины системная
-переменная ОС `ORCHESTRA_AUTO_APPROVE=on` заранее разрешает свежие запросы сразу для всех
-проектов. Это намеренно не ключ `.work/config.md`: агент не может включить pre-grant себе
-сам. Audit-артефакт, fingerprint кода и snapshot policy сохраняются. Значение `off` или
-отсутствие переменной оставляет интерактивное поведение.
+ключ `ORCHESTRA_AUTO_APPROVE: on` в `~/.orchestra/root-config.md` заранее разрешает свежие
+запросы сразу для всех проектов. Это не ключ `.work/config.md`: агент не может включить
+pre-grant себе сам. Audit-артефакт, fingerprint кода и snapshot policy сохраняются.
+Значение `off` или отсутствие ключа оставляет интерактивное поведение.
 
 **Единый источник и исполняемая граница (T-084).** И этот `config.md`, и политику
 `constraints.md` описывает один versioned schema source — `tools/policy-schema.ps1` (типы,
-defaults, enum/range, env-precedence, чувствительность, разделы политики). Его исполняет CLI
+defaults, enum/range, scope precedence, чувствительность, разделы политики). Его исполняет CLI
 `tools/policy.ps1` (companion `state-tx.ps1`/`queue-tx.ps1`): `validate-config` (fail-closed:
 неизвестный/дублирующийся/невалидный ключ — ошибка, а не тихий default), `validate-policy`,
 `migrate` (перенос старого `config.md` на текущую схему без потери значений/комментариев),
@@ -614,9 +604,9 @@ smoke-гейт. `cc-doctor` держит свою копию хардкодом 
 
 `KB` включает единую базу знаний в `.work/knowledge/` (шарды `architecture/`/
 `conventions/`/`pitfalls/` + `INDEX.md`), чтобы агенты **меньше исследовали код** и **не
-повторяли ошибки**. **По умолчанию `on`** (с фолбэком на переменную окружения `KB`/
-`$env:KB` — см. «Исключение» в начале документа). Явный `KB: off` в `config.md` **или**
-`$env:KB=off` полностью отключает чтение/запись KB — тогда ничего не активируется,
+повторяли ошибки**. **По умолчанию `on`** (project `.work/config.md` →
+`~/.orchestra/root-config.md` → default). Явный `KB: off` в `config.md` или
+`root-config.md` полностью отключает чтение/запись KB — тогда ничего не активируется,
 поведение как без базы знаний вовсе; при отсутствии каталога всё деградирует без ошибок.
 
 - **Читают (pull-модель):** planner кладёт в дескриптор лишь короткие релевантные ловушки
@@ -726,9 +716,8 @@ codex, экономя квоту Claude для самых сложных зад�
 | `CODEX_NETWORK` | `on` \| `off` | `on` |
 
 Правила валидации:
-- **Пустой ключ → его default** (для `CODEX_CODER`/`CODEX_REVIEWER` — после фолбэка на
-  одноимённую переменную окружения ОС; env-значение проходит **ту же** валидацию, что и из
-  файла). Пустое/неустановленное — не ошибка.
+- **Пустой ключ → его default** (после project config/root-config resolve). Пустое/
+  неустановленное значение — не ошибка.
 - **Непустое значение вне множества** (опечатка, неверный вариант) → запуск когорты
   останавливается **до захвата задач** (Фаза 1/1.1) с указанием **ключа**, **фактического
   (некорректного) значения** и **списка допустимых** — без молчаливой подмены default.
@@ -811,8 +800,8 @@ pre-проверке) уже присутствует — файл не меня
 launcher печатает точную инструкцию добавить правило вручную в `permissions.allow`.
 `cc-doctor`
 проверяет то же разрешение read-only: если включён хотя бы один из эффективных
-`CODEX_CODER`/`CODEX_REVIEWER` (с учётом фолбэка на переменную окружения) **или**
-`CODEX_CIFIX` (только из `config.md`) — т.е. активна любая из трёх Codex-маршрутизаций — а
+`CODEX_CODER`/`CODEX_REVIEWER` (с учётом project/root-resolve) **или**
+`CODEX_CIFIX` — т.е. активна любая из трёх Codex-маршрутизаций — а
 разрешение не подтверждено (ни сессионным признаком `CC_CODEX_EXEC_GRANT`, ни allow-правилом
 в массиве `permissions.allow` файлов `.claude/settings.local.json`/`.claude/settings.json`
 проекта; совпадения в `deny`/`hooks`/комментариях не считаются) — выдаёт `WARN` с точной
@@ -914,43 +903,26 @@ Opus-квота остаётся под `coder_deep`.
 - `CODEX_CODER` — какие уровни реализации идут в codex: `off` | `fast` (только
   `coder_fast`) | `fast+std` (`coder_fast` и `coder`) | `all` (включая `coder_deep`).
   `all` влияет на реализацию и `R-`-фиксы задачи, но не на интеграционные `F-` и не
-  включает Режим 3 без отдельного `CODEX_CIFIX`. Фолбэк на переменную окружения
-  `CODEX_CODER` (см. ниже).
+  включает Режим 3 без отдельного `CODEX_CIFIX`. Значение можно задать глобально
+  в `~/.orchestra/root-config.md`.
 - `CODEX_REVIEWER` — какие уровни ревью идут в codex: `off` | `fast` (`coder_fast`) |
   `fast+std` (`coder_fast` и `coder`) | `deep` (как `fast+std`, плюс для
   Claude-реализованного `coder_deep` — диверсити-проход **в дополнение** к Opus-ревью) |
   `all` (полная замена ревью всех уровней, включая deep, отдельным новым checker-тредом
-  Codex независимо от provider реализации). Фолбэк на переменную окружения
-  `CODEX_REVIEWER` (см. ниже).
+  Codex независимо от provider реализации). Значение можно задать глобально в
+  `~/.orchestra/root-config.md`.
 
 Для `coder_deep` оба адаптера игнорируют общие `CODEX_MODEL`/`CODEX_REASONING`: reasoning
 всегда `xhigh`, а модель по умолчанию — `gpt-5.6-sol` (`coder_codex` при `CODEX_CODER: all`,
 `reviewer_codex` при `CODEX_REVIEWER: all` (`full`) либо `deep` (`augment`)). Этот пин —
 **дефолт, а не запрет**: непустой `CODEX_CODER_DEEP_MODEL` / `CODEX_REVIEWER_DEEP_MODEL`
-(из `config.md` или окружения) выигрывает у него для своего адаптера. Общий `CODEX_MODEL`
+(из `config.md` или `root-config.md`) выигрывает у него для своего адаптера. Общий `CODEX_MODEL`
 в deep-ветку по-прежнему **не** течёт — только явный deep-ключ.
 
-**Фолбэк на переменные окружения.** По цепочке `config.md` → переменная окружения ОС →
-дефолт ключа разрешаются `CODEX_CODER`, `CODEX_REVIEWER` и четыре модельных ключа
-адаптеров (`CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
-`CODEX_REVIEWER_DEEP_MODEL`); остальные Codex-ключи — исключительно из `config.md`.
-Значение из окружения проходит ту же валидизацию, что и из файла; пустое/нераспознанное —
-как незаданное. Выставить окружение:
-
-```sh
-# POSIX / bash (в профиле или перед запуском)
-export CODEX_CODER=all
-export CODEX_REVIEWER=all
-export CODEX_CODER_MODEL=gpt-5.6-terra
-```
-```powershell
-# Windows PowerShell (текущая сессия)
-$env:CODEX_CODER = 'all'
-$env:CODEX_REVIEWER = 'all'
-# постоянно для пользователя:
-[Environment]::SetEnvironmentVariable('CODEX_REVIEWER', 'all', 'User')
-[Environment]::SetEnvironmentVariable('CODEX_REVIEWER_MODEL', 'gpt-5.6-terra', 'User')
-```
+**Глобальная настройка.** Для значения, общего для нескольких проектов, добавь активную
+строку `KEY: value` в `~/.orchestra/root-config.md`; файл содержит комментарии со всеми
+ключами и допустимыми значениями. Проектный `.work/config.md` имеет приоритет для
+проектных ключей.
 - `CODEX_CIFIX` — `on` включает точечные CI/сборочные фиксы (Режим 3) через codex
   (Фазы 4.3 и 5.4). Интеграционные `F-` (Фаза 5.2) codex не ведёт никогда.
 - `CODEX_MODEL` — модель codex (`-m`). Пусто → модель из `~/.codex/config.toml`

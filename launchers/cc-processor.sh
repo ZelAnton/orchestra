@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
+LAUNCHER_DIR="${0%/*}"; [ "$LAUNCHER_DIR" = "$0" ] && LAUNCHER_DIR='.'
+. "$LAUNCHER_DIR/cc-common.sh"
 # Run the processor orchestrator in the current folder (Claude or Codex provider).
 # Processes the .work/Tasks_Queue.md queue in parallel batches end to end.
 #
 # Optional flags (any order, before the remaining arguments):
 #   claude|codex     explicit provider (also --provider <claude|codex>).
 #                    Otherwise ORCHESTRA_PROVIDER is used; default is claude.
-#   ORCHESTRA_CLAUDE_PERMISSION_MODE=auto|bypassPermissions selects the
+#   ORCHESTRA_CLAUDE_PERMISSION_MODE: auto|bypassPermissions in root-config selects the
 #                    Claude-root permission mode; default is auto.
 #   --force-lock     operator force-takeover of the lease: remove the lease directory
 #                    .work/orchestrator.lock (with its lease.json) before starting -
@@ -22,18 +24,16 @@
 
 MODEL_ARG=()
 EXTRA_ARGS=()
-PROVIDER="${ORCHESTRA_PROVIDER:-claude}"
-export ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
+PROVIDER=''
+ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH=false
 
 # Agent builds are isolated runs: do not leave reusable .NET build workers behind.
 export MSBUILDDISABLENODEREUSE=1
 export DOTNET_CLI_USE_MSBUILD_SERVER=0
 # Codex xhigh reviews can exceed Claude Code's short Bash default. Auto-backgrounding
 # appends `&`, which no longer matches the pre-granted foreground runtime call. Preserve
-# explicit user/system overrides; otherwise allow the bounded 30-minute runtime call plus
-# shutdown overhead to finish in the foreground.
-export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
-export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
+# root-config values override the documented defaults and allow the bounded 30-minute
+# runtime call plus shutdown overhead to finish in the foreground.
 
 # Resolve common state-tx/processkit runtimes from the shared home first, then checkout and
 # the legacy flat mirror. Echoes the resolved path, or nothing if neither exists.
@@ -72,9 +72,14 @@ force_unlock() {
   if command -v pwsh >/dev/null 2>&1 && [ -n "$state_tx" ]; then
     echo "Force-releasing .work/orchestrator.lock via state-tx release --force - use only if you are sure the previous processor is not running."
     pwsh -NoProfile -File "$state_tx" release --force --work ".work"
-  elif [ -d ".work/orchestrator.lock" ]; then
-    echo "Removing .work/orchestrator.lock (pwsh unavailable; raw fallback) - use only if you are sure the previous processor is not running."
-    rm -rf ".work/orchestrator.lock"
+  else
+    if ! command -v pwsh >/dev/null 2>&1; then
+      ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH=true
+    fi
+    if [ -d ".work/orchestrator.lock" ]; then
+      echo "Removing .work/orchestrator.lock (pwsh unavailable or state runtime missing; raw fallback) - use only if you are sure the previous processor is not running."
+      rm -rf ".work/orchestrator.lock"
+    fi
   fi
 }
 
@@ -115,13 +120,32 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+if [ -z "$PROVIDER" ]; then
+  PROVIDER="$(orchestra_provider)" || {
+    config_rc=$?
+    if $ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH; then PROVIDER='claude'; else exit "$config_rc"; fi
+  }
+fi
+BASH_DEFAULT_TIMEOUT_MS="$(orchestra_timeout_value BASH_DEFAULT_TIMEOUT_MS)" || {
+  config_rc=$?
+  if $ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH; then BASH_DEFAULT_TIMEOUT_MS=1900000; else exit "$config_rc"; fi
+}
+BASH_MAX_TIMEOUT_MS="$(orchestra_timeout_value BASH_MAX_TIMEOUT_MS)" || {
+  config_rc=$?
+  if $ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH; then BASH_MAX_TIMEOUT_MS=1900000; else exit "$config_rc"; fi
+}
+export BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
+
 if [ "$PROVIDER" != "claude" ] && [ "$PROVIDER" != "codex" ]; then
   echo "Invalid provider '$PROVIDER'. Allowed: claude, codex." >&2
   exit 2
 fi
 
 if [ "$PROVIDER" = "claude" ]; then
-  CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+  CLAUDE_PERMISSION_MODE="$(orchestra_permission_mode)" || {
+    config_rc=$?
+    if $ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH; then CLAUDE_PERMISSION_MODE='auto'; else exit "$config_rc"; fi
+  }
   case "$CLAUDE_PERMISSION_MODE" in
     auto|bypassPermissions) ;;
     *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
@@ -129,11 +153,21 @@ if [ "$PROVIDER" = "claude" ]; then
 fi
 
 USE_PROCESSKIT_RUNTIME=false
-if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+PROCESSKIT_PYTHON_CONFIG="$(orchestra_config_get CC_PROCESSKIT_PYTHON)" || {
+  config_rc=$?
+  if $ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH; then PROCESSKIT_PYTHON_CONFIG=''; else exit "$config_rc"; fi
+}
+PROCESSKIT_CLI_CONFIG="$(orchestra_config_get CC_PROCESSKIT_CLI)" || {
+  config_rc=$?
+  if $ALLOW_CONFIG_DEFAULTS_WITHOUT_PWSH; then PROCESSKIT_CLI_CONFIG='off'; else exit "$config_rc"; fi
+}
+if [ -n "$PROCESSKIT_PYTHON_CONFIG" ]; then
   USE_PROCESSKIT_RUNTIME=true
-elif [ -n "${CC_PROCESSKIT_CLI:-}" ] && [ "${CC_PROCESSKIT_CLI}" != "off" ]; then
+elif [ -n "$PROCESSKIT_CLI_CONFIG" ] && [ "$PROCESSKIT_CLI_CONFIG" != "off" ]; then
   USE_PROCESSKIT_RUNTIME=true
-elif [ -z "${CC_PROCESSKIT_CLI:-}" ] && command -v processkit-cli >/dev/null 2>&1; then
+elif [ -z "$PROCESSKIT_CLI_CONFIG" ] && { [ -x "$ORCHESTRA_HOME/processkit-cli" ] || [ -x "$ORCHESTRA_HOME/processkit-cli.exe" ]; }; then
+  USE_PROCESSKIT_RUNTIME=true
+elif [ -z "$PROCESSKIT_CLI_CONFIG" ] && command -v processkit-cli >/dev/null 2>&1; then
   USE_PROCESSKIT_RUNTIME=true
 fi
 PROCESSKIT_RUNTIME=""

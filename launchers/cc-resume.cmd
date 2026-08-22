@@ -11,8 +11,8 @@ rem shadows cmd.exe's dynamic current-directory value (GitHub Windows runners se
 for %%I in (.) do set "PROJECT_ROOT=%%~fI"
 set "MSBUILDDISABLENODEREUSE=1"
 set "DOTNET_CLI_USE_MSBUILD_SERVER=0"
-set "PROVIDER=%ORCHESTRA_PROVIDER%"
-if not defined PROVIDER set "PROVIDER=claude"
+call "%LAUNCHER_DIR%cc-common.cmd" resolve_provider
+if errorlevel 1 exit /b %ERRORLEVEL%
 if /I "%~1"=="claude" (
   set "PROVIDER=claude"
   shift
@@ -39,11 +39,17 @@ call "%LAUNCHER_DIR%cc-common.cmd" resolve_permission_mode
 if errorlevel 1 exit /b %ERRORLEVEL%
 set "USE_PROCESSKIT_RUNTIME="
 if exist "%PROCESSKIT_RUNTIME%" set "USE_PROCESSKIT_RUNTIME=1"
-if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_PYTHON (
+call "%LAUNCHER_DIR%cc-common.cmd" config_get CC_PROCESSKIT_PYTHON
+if errorlevel 1 exit /b %ERRORLEVEL%
+set "PROCESSKIT_PYTHON_CONFIG=%CC_CONFIG_VALUE%"
+call "%LAUNCHER_DIR%cc-common.cmd" config_get CC_PROCESSKIT_CLI
+if errorlevel 1 exit /b %ERRORLEVEL%
+set "PROCESSKIT_CLI_CONFIG=%CC_CONFIG_VALUE%"
+if not defined USE_PROCESSKIT_RUNTIME if defined PROCESSKIT_PYTHON_CONFIG (
   echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
   exit /b 12
 )
-if not defined USE_PROCESSKIT_RUNTIME if defined CC_PROCESSKIT_CLI if /I not "%CC_PROCESSKIT_CLI%"=="off" (
+if not defined USE_PROCESSKIT_RUNTIME if defined PROCESSKIT_CLI_CONFIG if /I not "%PROCESSKIT_CLI_CONFIG%"=="off" (
   echo ProcessKit runtime не найден. Запусти cc-sync из checkout Orchestra.
   exit /b 12
 )
@@ -52,9 +58,13 @@ if not defined USE_PROCESSKIT_RUNTIME where processkit-cli >nul 2>&1 && (
   exit /b 12
 )
 rem Keep long codex-runtime calls in the foreground so the existing allow-rule applies.
-rem Explicit user/system values override these per-session defaults.
-if not defined BASH_DEFAULT_TIMEOUT_MS set "BASH_DEFAULT_TIMEOUT_MS=1900000"
-if not defined BASH_MAX_TIMEOUT_MS set "BASH_MAX_TIMEOUT_MS=1900000"
+rem Root-config values override these per-session defaults.
+call "%LAUNCHER_DIR%cc-common.cmd" config_get BASH_DEFAULT_TIMEOUT_MS
+if errorlevel 1 exit /b %ERRORLEVEL%
+if defined CC_CONFIG_VALUE (set "BASH_DEFAULT_TIMEOUT_MS=%CC_CONFIG_VALUE%") else set "BASH_DEFAULT_TIMEOUT_MS=1900000"
+call "%LAUNCHER_DIR%cc-common.cmd" config_get BASH_MAX_TIMEOUT_MS
+if errorlevel 1 exit /b %ERRORLEVEL%
+if defined CC_CONFIG_VALUE (set "BASH_MAX_TIMEOUT_MS=%CC_CONFIG_VALUE%") else set "BASH_MAX_TIMEOUT_MS=1900000"
 rem Возобновляет прерванную сессию processor в текущей папке (последнюю сессию
 rem Claude Code здесь — через --continue), вместо холодного старта с нуля.
 rem processor и так умеет восстанавливаться с нуля (Фаза 0 его системного промпта),

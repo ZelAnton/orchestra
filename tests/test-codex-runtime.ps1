@@ -138,7 +138,7 @@ if ($env:FAKE_CODEX_STDIN_FILE) {
 }
 if ($env:FAKE_CODEX_ENV_FILE) {
     $cacheEnv = [ordered]@{}
-    foreach ($name in @('TEMP','TMP','UV_CACHE_DIR','PIP_CACHE_DIR','NPM_CONFIG_CACHE','XDG_CACHE_HOME','PYTHONPYCACHEPREFIX')) {
+    foreach ($name in @('CODEX_HOME','TEMP','TMP','UV_CACHE_DIR','PIP_CACHE_DIR','NPM_CONFIG_CACHE','XDG_CACHE_HOME','PYTHONPYCACHEPREFIX')) {
         $cacheEnv[$name] = [Environment]::GetEnvironmentVariable($name)
     }
     [System.IO.File]::WriteAllText($env:FAKE_CODEX_ENV_FILE, ($cacheEnv | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
@@ -194,6 +194,9 @@ function Get-ArgsCaptured {
     $stdinCap = New-TempFile
     $envCap = New-TempFile
     $cwdCap = New-TempFile
+    $orchestraHome = New-TempDir
+    $configuredCodexHome = Join-Path $orchestraHome 'custom-codex-home'
+    [System.IO.File]::WriteAllText((Join-Path $orchestraHome 'root-config.md'), "CODEX_HOME: $configuredCodexHome`n", $script:Utf8)
     [System.IO.File]::WriteAllText($promptFile, "Implement the thing.`nDo it well.", $script:Utf8)
 
     $r = Invoke-Runtime -RuntimeArgs @(
@@ -202,7 +205,7 @@ function Get-ArgsCaptured {
         '--out-file', $outFile, '--stderr-file', $errFile, '--result-file', $resultFile,
         '--prompt-file', $promptFile
     ) -EnvVars @{
-        FAKE_CODEX_ARGS_FILE = $argsCap; FAKE_CODEX_STDIN_FILE = $stdinCap; FAKE_CODEX_ENV_FILE = $envCap; FAKE_CODEX_CWD_FILE = $cwdCap
+        ORCHESTRA_HOME = $orchestraHome; FAKE_CODEX_ARGS_FILE = $argsCap; FAKE_CODEX_STDIN_FILE = $stdinCap; FAKE_CODEX_ENV_FILE = $envCap; FAKE_CODEX_CWD_FILE = $cwdCap
         FAKE_CODEX_OUT_CONTENT = 'Changed foo.'; FAKE_CODEX_STDOUT = 'progress...'; FAKE_CODEX_EXIT = '0'
     }
 
@@ -228,6 +231,7 @@ function Get-ArgsCaptured {
     $stdinSeen = if (Test-Path -LiteralPath $stdinCap) { [System.IO.File]::ReadAllText($stdinCap) } else { '' }
     Assert-True ($stdinSeen -like '*Implement the thing.*Do it well.*') 'success: prompt delivered to codex on stdin'
     $cacheEnv = (Get-Content -LiteralPath $envCap -Raw -Encoding utf8) | ConvertFrom-Json
+    Assert-Equal ([IO.Path]::GetFullPath($configuredCodexHome)) $cacheEnv.CODEX_HOME 'success: CODEX_HOME is resolved from root-config for the Codex child'
     Assert-Equal (Join-Path $cacheRoot 'uv') $cacheEnv.UV_CACHE_DIR 'success: uv cache redirected inside ignored worktree .work'
     Assert-Equal (Join-Path $cacheRoot 'tmp') $cacheEnv.TEMP 'success: temp redirected inside ignored worktree .work'
     Assert-True (Test-Path -LiteralPath $cacheEnv.UV_CACHE_DIR -PathType Container) 'success: redirected cache is created before codex starts'

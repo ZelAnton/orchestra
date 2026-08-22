@@ -48,6 +48,18 @@ set "CC_PS_EXE=powershell"
 where pwsh >nul 2>nul
 if not errorlevel 1 set "CC_PS_EXE=pwsh"
 
+if exist "%ORCHESTRA_HOME%\root-config.md\" (
+  echo Failed to use %ORCHESTRA_HOME%\root-config.md ^(path is a directory, not a file^).
+  endlocal & exit /b 2
+) else if exist "%ORCHESTRA_HOME%\root-config.md" (
+  echo %ORCHESTRA_HOME%\root-config.md already exists - leaving it unchanged.
+) else (
+  call :seed_root_config
+  if errorlevel 1 (
+    endlocal & exit /b 2
+  )
+)
+
 if exist ".work\config.md" (
   echo .work\config.md already exists - leaving it unchanged.
 ) else call :seed_config
@@ -61,6 +73,33 @@ call :seed_codex_permission
 call :register_project
 set "CC_CONFIG_RC=%errorlevel%"
 endlocal & exit /b %CC_CONFIG_RC%
+
+:seed_root_config
+set "CC_ROOT_CONFIG_TEMPLATE=%~dp0..\root-config.example.md"
+if not exist "%CC_ROOT_CONFIG_TEMPLATE%" set "CC_ROOT_CONFIG_TEMPLATE=%ORCHESTRA_HOME%\root-config.example.md"
+if not exist "%CC_ROOT_CONFIG_TEMPLATE%" set "CC_ROOT_CONFIG_TEMPLATE=%~dp0root-config.example.md"
+if not exist "%CC_ROOT_CONFIG_TEMPLATE%" (
+  echo Failed to create %ORCHESTRA_HOME%\root-config.md ^(root-config.example.md not found; run cc-sync from the Orchestra checkout^).
+  exit /b 2
+)
+if exist "%CC_ROOT_CONFIG_TEMPLATE%\" (
+  echo Failed to create %ORCHESTRA_HOME%\root-config.md ^(root-config.example.md is a directory^).
+  exit /b 2
+)
+if not exist "%ORCHESTRA_HOME%" mkdir "%ORCHESTRA_HOME%"
+if not exist "%ORCHESTRA_HOME%\" (
+  echo Failed to create %ORCHESTRA_HOME%\root-config.md ^(shared Orchestra directory could not be created^).
+  exit /b 2
+)
+copy /y /b "%CC_ROOT_CONFIG_TEMPLATE%" "%ORCHESTRA_HOME%\root-config.md" >nul 2>nul
+set "CC_ROOT_CONFIG_WRITE_RC=%errorlevel%"
+if not "%CC_ROOT_CONFIG_WRITE_RC%"=="0" (
+  echo Failed to create %ORCHESTRA_HOME%\root-config.md ^(template read/write failed^).
+  exit /b %CC_ROOT_CONFIG_WRITE_RC%
+) else (
+  echo Created %ORCHESTRA_HOME%\root-config.md from root-config.example.md - edit it for this machine.
+)
+exit /b 0
 
 :seed_config
 set "CC_CONFIG_TEMPLATE=%~dp0..\config.example.md"

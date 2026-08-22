@@ -59,9 +59,9 @@ $script:ErrPrefix = 'ERR'
 $script:FaultEnv  = 'ORCHESTRA_COMMON_FAULT'
 $script:LockName  = 'resource'
 
-# Shared installed state lives outside the Claude/Codex provider homes. Operators may
-# override the location for a portable installation or tests; the default is the user's
-# .orchestra directory on both Windows and POSIX.
+# Shared installed state lives outside the Claude/Codex provider homes. ORCHESTRA_HOME is
+# a path/layout override for portable installations and tests, not a configuration source.
+# User settings are read only from root-config.md and the consuming project's config.md.
 function Get-OrchestraHome {
     $configured = [Environment]::GetEnvironmentVariable('ORCHESTRA_HOME')
     if (-not [string]::IsNullOrWhiteSpace($configured)) {
@@ -71,6 +71,12 @@ function Get-OrchestraHome {
     if ([string]::IsNullOrWhiteSpace($profile)) { $profile = [string]$HOME }
     if ([string]::IsNullOrWhiteSpace($profile)) { throw 'cannot determine the user profile for Orchestra home' }
     return [System.IO.Path]::GetFullPath((Join-Path $profile '.orchestra'))
+}
+
+function Get-OrchestraRootConfigPath {
+    param([string]$OrchestraHome = '')
+    $orchestraHomePath = if ([string]::IsNullOrWhiteSpace($OrchestraHome)) { Get-OrchestraHome } else { [System.IO.Path]::GetFullPath($OrchestraHome.Trim()) }
+    return (Join-Path $orchestraHomePath 'root-config.md')
 }
 
 function Resolve-OrchestraSharedScript {
@@ -117,6 +123,46 @@ function ConvertFrom-OrchestraConfigLine {
         Value   = $rest.Trim()
         Comment = $comment
     }
+}
+
+# Root-only settings are machine/provider policy and must not be supplied by a project.
+# Every other key follows the project-local override -> root-config -> schema default order.
+$script:OrchestraRootOnlyKeys = @(
+    'ORCHESTRA_PROVIDER', 'ORCHESTRA_CLAUDE_PERMISSION_MODE', 'ORCHESTRA_AUTO_APPROVE',
+    'ORCHESTRA_CODEX_MODEL', 'ORCHESTRA_CODEX_REASONING', 'ORCHESTRA_CODEX_SANDBOX',
+    'ORCHESTRA_CODEX_MAX_THREADS', 'CODEX_HOME', 'CC_PROCESSKIT_CLI',
+    'CC_PROCESSKIT_PYTHON', 'ORCHESTRA_REGISTRY_PATH', 'BASH_DEFAULT_TIMEOUT_MS',
+    'BASH_MAX_TIMEOUT_MS'
+)
+
+function Get-OrchestraConfigValueFromFile {
+    param([string]$Path, [Parameter(Mandatory)][string]$Key)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    foreach ($line in (Get-Content -LiteralPath $Path -Encoding UTF8)) {
+        $entry = ConvertFrom-OrchestraConfigLine -Line ([string]$line)
+        if ($null -ne $entry -and [string]::Equals($entry.Key, $Key, [System.StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrWhiteSpace($entry.Value)) {
+            return [string]$entry.Value
+        }
+    }
+    return ''
+}
+
+function Get-OrchestraConfigValue {
+    param(
+        [string]$Work = '',
+        [Parameter(Mandatory)][string]$Key,
+        [AllowEmptyString()][string]$Default = '',
+        [string]$OrchestraHome = ''
+    )
+    $root = Get-OrchestraRootConfigPath -OrchestraHome $OrchestraHome
+    $rootOnly = @($script:OrchestraRootOnlyKeys | Where-Object { $_ -ieq $Key }).Count -gt 0
+    if (-not $rootOnly -and -not [string]::IsNullOrWhiteSpace($Work)) {
+        $local = Get-OrchestraConfigValueFromFile -Path (Join-Path $Work 'config.md') -Key $Key
+        if (-not [string]::IsNullOrWhiteSpace($local)) { return $local }
+    }
+    $global = Get-OrchestraConfigValueFromFile -Path $root -Key $Key
+    if (-not [string]::IsNullOrWhiteSpace($global)) { return $global }
+    return $Default
 }
 
 # --------------------------------------------------------------------------

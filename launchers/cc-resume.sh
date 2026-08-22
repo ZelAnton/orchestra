@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+LAUNCHER_DIR="${0%/*}"; [ "$LAUNCHER_DIR" = "$0" ] && LAUNCHER_DIR='.'
+. "$LAUNCHER_DIR/cc-common.sh"
 # Resume an interrupted Claude- or Codex-backed processor session in this folder.
 # processor can recover from scratch anyway (Фаза 0 of its system prompt), but
 # --continue saves re-discovering context when the session is still alive.
@@ -33,7 +35,7 @@
 # 1.1 gate and cc-doctor read; its value stays the canonical "codex exec" prefix they
 # compare against `<CODEX_CMD> exec` (not the pwsh wrapper). With it, no persistent
 # allow-rule is required.
-PROVIDER="${ORCHESTRA_PROVIDER:-claude}"
+PROVIDER="$(orchestra_provider)" || exit $?
 if [ "${1:-}" = "claude" ] || [ "${1:-}" = "codex" ]; then
   PROVIDER="$1"
   shift
@@ -51,7 +53,7 @@ if [ "$PROVIDER" != "claude" ] && [ "$PROVIDER" != "codex" ]; then
 fi
 
 if [ "$PROVIDER" = "claude" ]; then
-  CLAUDE_PERMISSION_MODE="${ORCHESTRA_CLAUDE_PERMISSION_MODE:-auto}"
+  CLAUDE_PERMISSION_MODE="$(orchestra_permission_mode)" || exit $?
   case "$CLAUDE_PERMISSION_MODE" in
     auto|bypassPermissions) ;;
     *) printf 'Invalid ORCHESTRA_CLAUDE_PERMISSION_MODE "%s". Allowed: auto, bypassPermissions.\n' "$CLAUDE_PERMISSION_MODE" >&2; exit 2 ;;
@@ -62,9 +64,10 @@ export CC_CODEX_EXEC_GRANT="codex exec"
 export MSBUILDDISABLENODEREUSE=1
 export DOTNET_CLI_USE_MSBUILD_SERVER=0
 # Keep long codex-runtime calls in the foreground so the existing allow-rule applies.
-# Explicit user/system values override these per-session defaults.
-export BASH_DEFAULT_TIMEOUT_MS="${BASH_DEFAULT_TIMEOUT_MS:-1900000}"
-export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1900000}"
+# Root-config values override these per-session defaults.
+BASH_DEFAULT_TIMEOUT_MS="$(orchestra_timeout_value BASH_DEFAULT_TIMEOUT_MS)" || exit $?
+BASH_MAX_TIMEOUT_MS="$(orchestra_timeout_value BASH_MAX_TIMEOUT_MS)" || exit $?
+export BASH_DEFAULT_TIMEOUT_MS BASH_MAX_TIMEOUT_MS
 
 SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd)"
 export ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
@@ -76,11 +79,15 @@ if [ ! -f "$PROCESSKIT_RUNTIME" ]; then
   PROCESSKIT_RUNTIME="$SCRIPT_DIR/processkit-runtime.ps1"
 fi
 USE_PROCESSKIT_RUNTIME=false
-if [ -n "${CC_PROCESSKIT_PYTHON:-}" ]; then
+PROCESSKIT_PYTHON_CONFIG="$(orchestra_config_get CC_PROCESSKIT_PYTHON)" || exit $?
+PROCESSKIT_CLI_CONFIG="$(orchestra_config_get CC_PROCESSKIT_CLI)" || exit $?
+if [ -n "$PROCESSKIT_PYTHON_CONFIG" ]; then
   USE_PROCESSKIT_RUNTIME=true
-elif [ -n "${CC_PROCESSKIT_CLI:-}" ] && [ "${CC_PROCESSKIT_CLI}" != "off" ]; then
+elif [ -n "$PROCESSKIT_CLI_CONFIG" ] && [ "$PROCESSKIT_CLI_CONFIG" != "off" ]; then
   USE_PROCESSKIT_RUNTIME=true
-elif [ -z "${CC_PROCESSKIT_CLI:-}" ] && command -v processkit-cli >/dev/null 2>&1; then
+elif [ -z "$PROCESSKIT_CLI_CONFIG" ] && { [ -x "$ORCHESTRA_HOME/processkit-cli" ] || [ -x "$ORCHESTRA_HOME/processkit-cli.exe" ]; }; then
+  USE_PROCESSKIT_RUNTIME=true
+elif [ -z "$PROCESSKIT_CLI_CONFIG" ] && command -v processkit-cli >/dev/null 2>&1; then
   USE_PROCESSKIT_RUNTIME=true
 fi
 if $USE_PROCESSKIT_RUNTIME && [ ! -f "$PROCESSKIT_RUNTIME" ]; then

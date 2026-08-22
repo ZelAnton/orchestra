@@ -13,15 +13,18 @@ function Assert-True {
 
 $base = Join-Path ([System.IO.Path]::GetTempPath()) ('orc-codex-role-' + [Guid]::NewGuid().ToString('N'))
 $project = Join-Path $base 'project'
+$orchestraHome = Join-Path $base 'orchestra'
 $prompt = Join-Path $base 'role.md'
 $fake = Join-Path $base 'fake-codex.ps1'
 $argsFile = Join-Path $base 'args.txt'
 New-Item -ItemType Directory -Force -Path $project | Out-Null
+New-Item -ItemType Directory -Force -Path $orchestraHome | Out-Null
 Set-Content -LiteralPath $prompt -Value 'FULL-CANONICAL-ROLE-PROMPT' -Encoding utf8
 @'
 $args | Set-Content -LiteralPath $env:FAKE_ARGS_FILE -Encoding utf8
 Write-Output 'FAKE CODEX ROLE TUI'
 Write-Output ('TOPIC_ENV=' + $env:ORCHESTRA_CODEX_ROLE_TOPIC)
+Write-Output ('CODEX_HOME=' + $env:CODEX_HOME)
 $code = if ($env:FAKE_EXIT_CODE) { [int]$env:FAKE_EXIT_CODE } else { 0 }
 exit $code
 '@ | Set-Content -LiteralPath $fake -Encoding utf8
@@ -36,13 +39,27 @@ function Invoke-RoleRuntime {
     $vars = @{
         FAKE_ARGS_FILE = $argsFile
         FAKE_EXIT_CODE = '0'
-        ORCHESTRA_CODEX_MODEL = ''
-        ORCHESTRA_CODEX_REASONING = ''
-        ORCHESTRA_CODEX_SANDBOX = ''
         ORCHESTRA_CODEX_ROLE_TOPIC = ''
-        CODEX_CMD = ''
+        ORCHESTRA_HOME = $orchestraHome
     }
-    foreach ($key in $Environment.Keys) { $vars[$key] = $Environment[$key] }
+    $configKeys = @('ORCHESTRA_CODEX_MODEL', 'ORCHESTRA_CODEX_REASONING', 'ORCHESTRA_CODEX_SANDBOX', 'CODEX_HOME')
+    $configLines = @(
+        foreach ($key in $Environment.Keys) {
+            if ($configKeys -contains $key -and -not [string]::IsNullOrWhiteSpace([string]$Environment[$key])) {
+                '{0}: {1}' -f $key, $Environment[$key]
+            }
+        }
+    )
+    if (-not $Environment.ContainsKey('CODEX_HOME')) {
+        $configLines += 'CODEX_HOME: ' + (Join-Path $orchestraHome '.codex')
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $orchestraHome 'root-config.md'),
+        (($configLines -join "`n") + "`n"),
+        (New-Object System.Text.UTF8Encoding($false)))
+    foreach ($key in $Environment.Keys) {
+        if ($configKeys -notcontains $key) { $vars[$key] = $Environment[$key] }
+    }
     $old = @{}
     foreach ($key in $vars.Keys) {
         $old[$key] = [Environment]::GetEnvironmentVariable($key)
@@ -91,6 +108,7 @@ try {
     Assert-True ($bootstrap.Contains('Never invoke or fall back to Claude')) 'bootstrap reinforces the Claude-free provider boundary'
     Assert-True ($r.Out -match 'FAKE CODEX ROLE TUI') 'child TUI inherits the visible stdout stream'
     Assert-True ($r.Out -match '(?m)^TOPIC_ENV=\s*$') 'transient opening topic is removed before Codex starts'
+    Assert-True ($r.Out -match ('(?m)^CODEX_HOME=' + [regex]::Escape((Join-Path $orchestraHome '.codex')) + '\s*$')) 'direct roles pass the configured Codex home to the TUI'
 
     $r = Invoke-RoleRuntime -Role thinker -Additional @('-RequestedProvider', 'codex') `
         -Environment @{ ORCHESTRA_CODEX_ROLE_TOPIC = '-Sandbox is topic text' }

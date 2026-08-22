@@ -130,7 +130,7 @@ Desktop session.
 for one session with `cc-processor codex`, or machine-wide with:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('ORCHESTRA_PROVIDER', 'codex', 'User')
+Edit `~/.orchestra/root-config.md` and uncomment `ORCHESTRA_PROVIDER: codex`.
 ```
 
 Open a new terminal and run `cc-doctor`. A Codex-root run dispatches every canonical role
@@ -139,7 +139,7 @@ root session, and never starts or falls back to Claude. ProcessKit is invoked wi
 stdio for this provider too; without it, a captured root would hide the TUI.
 `cc-resume codex` resumes the exact root thread stored in
 `.work/codex_processor_session.json`; it does not use the ambiguous `--last`. Explicit
-`cc-processor claude`/`cc-resume claude` override the environment for one run.
+`cc-processor claude`/`cc-resume claude` override root-config for one run.
 
 To move an interrupted cohort from Claude to Codex, first stop/terminate the Claude root,
 then run:
@@ -170,10 +170,10 @@ short bootstrap points Codex at the complete canonical prompt in `agents/`; it d
 and use native Codex resume commands rather than `.work/codex_processor_session.json`, which
 belongs only to processor.
 
-The autonomous Codex root defaults to `ORCHESTRA_CODEX_REASONING=high`,
-`ORCHESTRA_CODEX_SANDBOX=danger-full-access`, and six threads. Set
+The autonomous Codex root defaults to `ORCHESTRA_CODEX_REASONING: high`,
+`ORCHESTRA_CODEX_SANDBOX: danger-full-access`, and six threads. Set
 `ORCHESTRA_CODEX_MODEL`, `ORCHESTRA_CODEX_REASONING`, `ORCHESTRA_CODEX_SANDBOX`, or
-`ORCHESTRA_CODEX_MAX_THREADS` only as operator-owned User/Machine environment variables.
+`ORCHESTRA_CODEX_MAX_THREADS` in the operator-owned `~/.orchestra/root-config.md`.
 The runtime pins approval policy `never`; agents must not modify these values or
 `.codex/agents` during a run.
 
@@ -183,17 +183,17 @@ implementer and per-task reviewer tier is operator-owned per provider:
 `CLAUDE_REVIEWER_STD_MODEL`, `CLAUDE_REVIEWER_MODEL` (`haiku|sonnet|opus|fable`) and, for
 the Codex adapters, `CODEX_CODER_MODEL`, `CODEX_CODER_DEEP_MODEL`, `CODEX_REVIEWER_MODEL`,
 `CODEX_REVIEWER_DEEP_MODEL` (free-form model ids). Each resolves `.work/config.md` → the
-same-named environment variable → its default, so a machine-wide default needs no per-project
+`~/.orchestra/root-config.md` → its default, so a machine-wide default needs no per-project
 edit. They select the model of an already chosen role only — routing and tiering are
 unchanged — and `cc-doctor` prints the effective values. In the Codex-native root mode they
 do not apply: every role runs as a native custom agent under `ORCHESTRA_CODEX_MODEL`.
 Details: [`environment-variables.md`](environment-variables.md).
 
 **Claude permission mode.** Claude launchers use `auto` by default. To run the Claude root
-and every subagent it creates with permission checks disabled, an operator may set:
+and every subagent it creates with permission checks disabled, an operator may set the root-config key:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('ORCHESTRA_CLAUDE_PERMISSION_MODE', 'bypassPermissions', 'User')
+Edit `~/.orchestra/root-config.md`: `ORCHESTRA_CLAUDE_PERMISSION_MODE: bypassPermissions`.
 ```
 
 Open a new terminal, run `cc-sync`, and check that `cc-doctor` prints the explicit warning.
@@ -210,15 +210,14 @@ does not suppress that separate background-operation prompt. Current `coder_code
 `reviewer_codex` must run the runtime in the foreground, sequentially, with an 1800-second
 runtime limit. `cc-processor` and `cc-resume` also default both Claude Bash timeouts to
 1,900,000 ms for their child session, leaving 100 seconds for runtime startup and cleanup.
-They do not overwrite an existing environment value.
+They do not overwrite an existing root-config value.
 
 Normally, starting a fresh processor/resume session is enough. To apply the same defaults to
-Claude sessions started directly, set the user environment once on Windows and open a new
-terminal:
+Claude sessions started directly, set both keys in root-config:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('BASH_DEFAULT_TIMEOUT_MS', '1900000', 'User')
-[Environment]::SetEnvironmentVariable('BASH_MAX_TIMEOUT_MS', '1900000', 'User')
+`BASH_DEFAULT_TIMEOUT_MS: 1900000`
+`BASH_MAX_TIMEOUT_MS: 1900000`
 ```
 
 These variables control waiting, not authorization: direct sessions still need the narrow
@@ -228,17 +227,16 @@ avoid waiting; if foreground execution is unavailable, the adapter must return
 
 **Unattended internal approvals.** Orchestra's `.work/approvals` gate is separate from
 Claude/Codex permissions. To keep `human-review`, `force-lock`, and `policy-bypass` gates
-autonomous across all projects, set the operator-owned user environment and open a new
-terminal:
+autonomous across all projects, set the operator-owned root-config key:
 
 ```powershell
-[Environment]::SetEnvironmentVariable('ORCHESTRA_AUTO_APPROVE', 'on', 'User')
+`ORCHESTRA_AUTO_APPROVE: on`
 ```
 
 Run `cc-doctor` to verify the effective value. The gate still records its one-time artifact,
 current code fingerprint, policy snapshot, deadline, and
-`decided_by=system-env:ORCHESTRA_AUTO_APPROVE`; it no longer parks the processor. Set `off`
-or remove the variable to restore manual decisions. Any other value fails closed. Agents
+`decided_by=root-config:ORCHESTRA_AUTO_APPROVE`; it no longer parks the processor. Set `off`
+or comment the key to restore manual decisions. Any other value fails closed. Agents
 must never set this operator consent variable themselves.
 
 ## 2. An escalated task

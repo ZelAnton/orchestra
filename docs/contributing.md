@@ -61,7 +61,7 @@ Treat the key as one contract propagated through this chain:
 
 1. Add one descriptor to `Get-SchemaConfigKeys` in
    [`tools/policy-schema.ps1`](../tools/policy-schema.ps1). Define its type, default,
-   enum/range, environment precedence, and sensitivity there; this is the versioned schema
+   enum/range, project/root scope, and sensitivity there; this is the versioned schema
    source consumed by `tools/policy.ps1`.
 2. Add the key and exact default to
    [Values by default](../config.example.md#значения-по-умолчанию). If `cc-config` should
@@ -79,14 +79,14 @@ Treat the key as one contract propagated through this chain:
    [`tools/doctor-runtime.ps1`](../tools/doctor-runtime.ps1). Doctor must work from the
    standalone `cc-sync` mirror, so it cannot load `config.example.md` from a checkout. Add
    fail-closed value validation there when the key has an enum or range. If the key also
-   resolves from the OS environment, add it to `$script:EnvFallbackKeys` there, and if it
-   is a per-tier coder/reviewer model key, to `$claudeModelAllowed` and
+   is a root-only key, add it to `Get-SchemaRootConfigKeys`; if it
+   is a per-tier coder/reviewer model key, add it to `$claudeModelAllowed` and
    `$claudeModelFrontmatter` as well.
 6. Extend the appropriate machine guard. `tools/check-consistency.ps1` Class 4 compares
    Doctor's allowlist with the documented defaults and its per-tier role-model tables with
    the schema enums, the schema defaults and the roles' own `model:` frontmatter (a new
    role-model key also needs a row in `$roleModelAgents` there), and its
-   `$script:EnvFallbackKeys` list with the schema's `envFallback` flags; Class 5 compares
+   root-key scope with the schema's root descriptors; Class 5 compares
    schema key names and Codex enums with the documentation. If the key joins the bounded
    Codex set, also update
    [`tools/check-codex-config-guard.ps1`](../tools/check-codex-config-guard.ps1) and the

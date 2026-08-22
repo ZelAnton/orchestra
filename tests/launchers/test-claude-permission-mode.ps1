@@ -102,4 +102,14 @@ exit /b %ERRORLEVEL%
         Assert-True (-not (Test-Path -LiteralPath $leakMarker)) '[scope] internal resolved mode must not leak to the calling cmd scope'
     }
     finally { Remove-Sandbox $paths }
+
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-common.cmd'
+        Remove-Item -LiteralPath (Join-Path $paths.Orchestra 'scripts/config-runtime.ps1') -Force
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-common.cmd' `
+            -LauncherArgs @('resolve_permission_mode')
+        Assert-Equal 12 $result.ExitCode '[config runtime failure] permission resolver exit code'
+    }
+    finally { Remove-Sandbox $paths }
 }

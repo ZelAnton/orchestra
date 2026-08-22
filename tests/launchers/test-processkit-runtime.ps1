@@ -26,6 +26,16 @@ function New-TempDir {
 
 function Invoke-Runtime {
     param([string[]]$Arguments, [hashtable]$Environment = @{})
+    $configHome = New-TempDir
+    $configKeys = @('CC_PROCESSKIT_CLI', 'CC_PROCESSKIT_PYTHON', 'CODEX_HOME', 'ORCHESTRA_REGISTRY_PATH')
+    $configLines = @()
+    if (-not $Environment.ContainsKey('CC_PROCESSKIT_CLI')) { $configLines += 'CC_PROCESSKIT_CLI: off' }
+    foreach ($name in $Environment.Keys) {
+        if ($configKeys -contains $name -and -not [string]::IsNullOrWhiteSpace([string]$Environment[$name])) {
+            $configLines += (('{0}: {1}' -f $name, $Environment[$name]))
+        }
+    }
+    [System.IO.File]::WriteAllText((Join-Path $configHome 'root-config.md'), (($configLines -join "`n") + "`n"), $script:Utf8)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $script:Pwsh
     $psi.UseShellExecute = $false
@@ -39,9 +49,11 @@ function Invoke-Runtime {
     } else {
         $processEnv = $psi.EnvironmentVariables
     }
-    $processEnv['CC_PROCESSKIT_CLI'] = 'off'
-    $processEnv['CC_PROCESSKIT_PYTHON'] = ''
-    foreach ($name in $Environment.Keys) { $processEnv[[string]$name] = [string]$Environment[$name] }
+    $processEnv['ORCHESTRA_HOME'] = $configHome
+    foreach ($name in $configKeys) { $processEnv[$name] = '' }
+    foreach ($name in $Environment.Keys) {
+        if ($configKeys -notcontains $name) { $processEnv[[string]$name] = [string]$Environment[$name] }
+    }
     $childArgs = @('-NoProfile', '-NonInteractive', '-File', $script:Runtime) + $Arguments
     if ($psi | Get-Member -Name 'ArgumentList' -MemberType Property -ErrorAction SilentlyContinue) {
         foreach ($arg in $childArgs) { $psi.ArgumentList.Add($arg) }
