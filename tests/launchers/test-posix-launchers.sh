@@ -241,6 +241,32 @@ run_with_config_runtime_failure() {
     pass "$name"
 }
 
+run_metrics_from_shared_mirror() {
+    local name="cc-metrics.sh (shared Orchestra runtime)"
+    local mirror_dir="$RUN_DIR/metrics-mirror"
+    local launcher_path="$mirror_dir/cc-metrics.sh"
+    local shared_scripts="$ROOT_CONFIG_DIR/scripts"
+    local rc
+
+    mkdir -p "$mirror_dir" "$shared_scripts"
+    cp "$REPO_ROOT/launchers/cc-metrics.sh" "$launcher_path"
+    chmod +x "$launcher_path"
+    printf '%s\n' '# metrics fixture' > "$shared_scripts/metrics.ps1"
+    : > "$PWSH_ARGS_FILE"
+    (
+        cd "$RUN_DIR" || exit 99
+        PATH="$MOCK_DIR:/usr/bin:/bin" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" PWSH_ARGS_FILE="$PWSH_ARGS_FILE" \
+            "$launcher_path" --last 2
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! grep -Fxq "$shared_scripts/metrics.ps1" "$PWSH_ARGS_FILE" || \
+        ! grep -Fxq -- '--last' "$PWSH_ARGS_FILE" || ! grep -Fxq '2' "$PWSH_ARGS_FILE"; then
+        fail "$name" 'shared metrics runtime was not selected with argv preserved'
+        return
+    fi
+    pass "$name"
+}
+
 run_with_shared_processkit_cli() {
     local name="cc-processor.sh (shared Orchestra ProcessKit CLI discovery)"
     local launcher_path="$REPO_ROOT/launchers/cc-processor.sh"
@@ -427,7 +453,8 @@ run_force_lock_via_state_tx() {
     : > "$PWSH_ARGS_FILE"
     (
         cd "$RUN_DIR" || exit 99
-        PATH="$MOCK_DIR" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
+        PATH="$MOCK_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" \
+            CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
             PWSH_ARGS_FILE="$PWSH_ARGS_FILE" CLAUDE_EXIT_CODE=0 \
             "$BASH" "$launcher_path" --force-lock
     )
@@ -478,7 +505,8 @@ run_force_lock_raw_fallback_without_pwsh() {
     : > "$RC_FILE"
     (
         cd "$RUN_DIR" || exit 99
-        PATH="$nopwsh_dir" CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
+        PATH="$nopwsh_dir" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" \
+            CLAUDE_ARGS_FILE="$ARGS_FILE" CLAUDE_RC_FILE="$RC_FILE" \
             CLAUDE_EXIT_CODE=0 "$BASH" "$launcher_path" --force-lock
     )
     rc=$?
@@ -512,12 +540,28 @@ test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
 run_with_mock_codex_processor cc-processor.sh start
 run_with_config_runtime_failure
+run_metrics_from_shared_mirror
 run_with_shared_processkit_cli
 run_with_mock_codex_processor cc-resume.sh resume
 run_with_mock_codex_processor cc-resume.sh handoff --from claude
 run_with_mock_codex_role cc-thinker.sh thinker
 run_with_mock_codex_role cc-audit.sh code_auditor
 run_with_mock_codex_role cc-enhance.sh enhancement_scout
+
+# The argv scenarios invoke launchers through bash and would otherwise hide a missing
+# executable bit. Real PATH commands must remain directly executable after cc-sync.
+for launcher_path in "$REPO_ROOT"/launchers/cc-*.sh; do
+    launcher_name="$(basename -- "$launcher_path")"
+    if [ "$launcher_name" = 'cc-common.sh' ]; then
+        continue
+    fi
+    if [ -x "$launcher_path" ]; then
+        pass "$launcher_name (executable mode)"
+    else
+        fail "$launcher_name (executable mode)" 'launcher is not executable'
+    fi
+done
+
 run_force_lock_via_state_tx
 run_force_lock_raw_fallback_without_pwsh
 test_installed_sync_from_checkout_cwd
@@ -527,4 +571,4 @@ if [ "$FAILURES" -ne 0 ]; then
     exit 1
 fi
 
-printf 'POSIX launcher tests passed: all 58 scenarios succeeded.\n'
+printf 'POSIX launcher tests passed.\n'

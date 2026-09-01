@@ -12,9 +12,10 @@
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $script:Tool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\notify.ps1')).Path
-$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
 $fixtureChildPid = 0
@@ -104,8 +105,9 @@ printf '%s' 'fixture-output-must-not-leak'
     $env:ORCHESTRA_NOTIFY_FIXTURE_CHILD_PID_FILE = $childPidFile
     $env:ORCHESTRA_NOTIFY_FIXTURE_ENTERED_FILE = $enteredFile
     Write-Utf8 (Join-Path $fixtureTools 'redaction.ps1') @'
+. (Join-Path $PSScriptRoot 'common.ps1')
 [System.IO.File]::WriteAllText($env:ORCHESTRA_NOTIFY_FIXTURE_ENTERED_FILE, 'entered')
-$psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$psExe = Get-PowerShellHostExecutable
 $child = Start-Process -FilePath $psExe -ArgumentList @('-NoProfile', '-NonInteractive', '-File', (Join-Path $PSScriptRoot 'fixture-child.ps1')) -PassThru
 [System.IO.File]::WriteAllText($env:ORCHESTRA_NOTIFY_FIXTURE_CHILD_PID_FILE, [string]$child.Id)
 Start-Sleep -Seconds 120

@@ -20,6 +20,7 @@
     - manifest and recovery-journal paths cannot escape their managed root.
     - POSIX manifest identity is case-sensitive, so case-only renames prune the old spelling
       in both Claude and Codex mirrors (Windows remains case-insensitive).
+    - POSIX sync reports when the installed launcher directory is not on PATH.
 
   Usage:
     pwsh -File tests/launchers/test-sync-runtime.ps1
@@ -124,6 +125,13 @@ $dest = New-Root
 $sharedDest = Join-Path $dest '.orchestra'
 $r = Invoke-Sync -Repo $repo -Dest $dest
 Assert-True ($r.ExitCode -eq 0) "clean sync exits 0 (got $($r.ExitCode); err=$($r.Err.Trim()))"
+if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)) {
+    Assert-True ($r.Out.Contains('but that directory is not on PATH')) `
+        'clean POSIX sync reports that its isolated launcher directory is not on PATH'
+    Assert-True (-not $r.Out.Contains([char]27)) `
+        'clean POSIX sync PATH guidance contains no terminal control characters'
+}
 Assert-FileText (Join-Path $dest 'agents\coder.md') "coder-v1`n" 'clean: coder.md mirrored'
 Assert-FileText (Join-Path $dest 'agents\processor.md') "processor-v1`n" 'clean: processor.md mirrored'
 Assert-True (-not (Test-Path (Join-Path $dest 'agents\coder.template.md'))) 'clean: coder.template.md excluded'
@@ -203,6 +211,14 @@ if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     $destCase = New-Root
     $rCase0 = Invoke-Sync -Repo $repoCase -Dest $destCase -Glob '*.sh'
     Assert-True ($rCase0.ExitCode -eq 0) 'case-rename: initial POSIX sync exits 0'
+    $installedLauncher = Join-Path $destCase 'scripts\cc-sync.sh'
+    Assert-True (Test-Path -LiteralPath $installedLauncher -PathType Leaf) `
+        'POSIX sync publishes the selected launcher'
+    if (Test-Path -LiteralPath $installedLauncher -PathType Leaf) {
+        $installedMode = [System.IO.File]::GetUnixFileMode($installedLauncher)
+        Assert-True (($installedMode -band [System.IO.UnixFileMode]::UserExecute) -ne 0) `
+            'POSIX sync makes the installed launcher directly executable'
+    }
 
     Rename-Item -LiteralPath (Join-Path $repoCase 'agents\coder.md') -NewName 'Coder.md'
     Rename-Item -LiteralPath (Join-Path $repoCase 'codex\agents\orchestra_coder.toml') -NewName 'Orchestra_coder.toml'

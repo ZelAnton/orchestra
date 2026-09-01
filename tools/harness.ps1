@@ -90,7 +90,7 @@ $script:Policy = Join-Path $script:ToolsDir 'policy.ps1'
 $script:Linearize = Join-Path $script:ToolsDir 'linearize.ps1'
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
-$script:PsHost = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsHost = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 
 # --------------------------------------------------------------------------
@@ -204,11 +204,12 @@ function Vcs-Init {
         Invoke-Bin 'git' @('-C', $repo, 'config', 'user.email', 't@example.invalid') | Out-Null
         Invoke-Bin 'git' @('-C', $repo, 'config', 'user.name', 'Harness') | Out-Null
         Invoke-Bin 'git' @('-C', $repo, 'config', 'commit.gpgsign', 'false') | Out-Null
+        Write-Text (Join-Path $repo '.gitignore') ".work/`n"
         Write-Text (Join-Path $repo $script:TrunkFile) "l1`nl2`nl3`nl4`nl5`n"
-        # Stage ONLY the trunk file (never a broad `add -A` in the primary worktree): the fixture's
-        # .work sandbox is created inside this repo, and the tracked set must stay provably {app.txt}
-        # so the trunk fingerprint is content-deterministic regardless of any ambient global ignore.
-        Invoke-Bin 'git' @('-C', $repo, 'add', '--', $script:TrunkFile) | Out-Null
+        # Stage only the deterministic fixture inputs (never a broad `add -A` in the primary
+        # worktree). The explicit .work ignore models the processor Phase-0 invariant and is
+        # essential for jj, whose working-copy commits snapshot every non-ignored file.
+        Invoke-Bin 'git' @('-C', $repo, 'add', '--', '.gitignore', $script:TrunkFile) | Out-Null
         $c = Invoke-Bin 'git' @('-C', $repo, 'commit', '-q', '-m', 'base'); if ($c.ExitCode -ne 0) { Fail 3 "git base commit failed: $($c.Err)" }
         $Fx.Base = (Invoke-Bin 'git' @('-C', $repo, 'rev-parse', 'HEAD')).Out.Trim()
     } else {
@@ -216,6 +217,7 @@ function Vcs-Init {
         $r = Invoke-Jj $Fx @('git', 'init'); if ($r.ExitCode -ne 0) { Fail 3 "jj git init failed: $($r.Err)" }
         Invoke-Jj $Fx @('config', 'set', '--repo', 'user.name', 'Harness') | Out-Null
         Invoke-Jj $Fx @('config', 'set', '--repo', 'user.email', 't@example.invalid') | Out-Null
+        Write-Text (Join-Path $repo '.gitignore') ".work/`n"
         Write-Text (Join-Path $repo $script:TrunkFile) "l1`nl2`nl3`nl4`nl5`n"
         Invoke-Jj $Fx @('describe', '-m', 'base') | Out-Null
         Invoke-Jj $Fx @('bookmark', 'create', 'main', '-r', '@') | Out-Null

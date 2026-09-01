@@ -88,6 +88,48 @@ function Resolve-OrchestraSharedScript {
     throw "shared Orchestra script not found: $Name"
 }
 
+# Resolve a reusable PowerShell console executable for child processes. On framework-
+# dependent installs such as `dotnet tool install --global PowerShell`, the current
+# process executable is `dotnet`, not `pwsh`; reusing MainModule.FileName would therefore
+# launch `dotnet -NoProfile ...` and fail before the child script starts. Prefer the
+# console apphost shipped in PSHOME, then the matching PATH application. The native
+# current process is only a safe fallback when it is already an actual PowerShell host.
+function Get-PowerShellHostExecutable {
+    $onWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows)
+    $coreEdition = [string]$PSVersionTable.PSEdition -eq 'Core'
+    $names = if ($coreEdition) {
+        if ($onWindows) { @('pwsh.exe', 'pwsh') } else { @('pwsh') }
+    } else {
+        @('powershell.exe')
+    }
+
+    foreach ($name in $names) {
+        $candidate = Join-Path $PSHOME $name
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [System.IO.Path]::GetFullPath($candidate)
+        }
+    }
+    foreach ($name in $names) {
+        $command = @(Get-Command $name -CommandType Application -ErrorAction SilentlyContinue) |
+            Select-Object -First 1
+        if ($command -and $command.Source) { return [string]$command.Source }
+    }
+
+    $processPath = ''
+    try { $processPath = [string][Environment]::ProcessPath } catch { }
+    if ([string]::IsNullOrWhiteSpace($processPath)) {
+        $processPath = [string]([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    }
+    $processName = [System.IO.Path]::GetFileName($processPath)
+    if (@($names | Where-Object {
+            [string]::Equals($_, $processName, [System.StringComparison]::OrdinalIgnoreCase)
+        }).Count -gt 0) {
+        return $processPath
+    }
+    throw "cannot resolve a reusable PowerShell host executable (current process: $processName)"
+}
+
 # --------------------------------------------------------------------------
 # .work/config.md line parsing.
 #

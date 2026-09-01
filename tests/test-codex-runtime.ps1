@@ -44,10 +44,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $script:Runtime = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\codex-runtime.ps1')).Path
 $script:Preflight = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\codex-preflight.ps1')).Path
-$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
 $script:TempItems = [System.Collections.Generic.List[string]]::new()
@@ -1071,7 +1072,7 @@ if ($oIdx -ge 0 -and ($oIdx + 1) -lt $args.Count -and $env:FAKE_CODEX_OUT_CONTEN
 if ($env:FAKE_CODEX_STDOUT) { [Console]::Out.Write($env:FAKE_CODEX_STDOUT) }
 $gcSleepMs = if ($env:FAKE_CODEX_GC_SLEEP_MS) { [int]$env:FAKE_CODEX_GC_SLEEP_MS } else { 120000 }
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = (Get-Process -Id $PID).Path
+$psi.FileName = $env:FAKE_CODEX_PS_HOST
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 # Deliberately DO NOT redirect the grandchild: it inherits THIS process's std handles,
@@ -1130,6 +1131,7 @@ function Stop-GcIfAlive {
             'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
             '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
         ) -EnvVars @{
+            FAKE_CODEX_PS_HOST = $script:PsExe
             FAKE_CODEX_GC_PIDFILE = $gcPidFile; FAKE_CODEX_GC_SLEEP_MS = '30000'
             FAKE_CODEX_OUT_CONTENT = 'Done.'; FAKE_CODEX_STDOUT = 'progress'; FAKE_CODEX_EXIT = '0'
         } -TimeoutMs 30000
@@ -1155,6 +1157,7 @@ function Stop-GcIfAlive {
             'run', '--codex-cmd', $fake, '--worktree', (New-TempDir), '--sandbox', 'workspace-write',
             '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile)
         ) -EnvVars @{
+            FAKE_CODEX_PS_HOST = $script:PsExe
             FAKE_CODEX_GC_PIDFILE = $gcPidFile; FAKE_CODEX_GC_SLEEP_MS = '30000'
             FAKE_CODEX_STDERR = 'boom'; FAKE_CODEX_EXIT = '1'
         } -TimeoutMs 30000
@@ -1188,6 +1191,7 @@ function Stop-GcIfAlive {
             '--reasoning', 'medium', '--out-file', (New-TempFile), '--prompt-file', (New-TempFile),
             '--timeout-sec', '8'
         ) -EnvVars @{
+            FAKE_CODEX_PS_HOST = $script:PsExe
             FAKE_CODEX_GC_PIDFILE = $gcPidFile; FAKE_CODEX_GC_SLEEP_MS = '30000'
             FAKE_CODEX_SLEEP_MS = '30000'; FAKE_CODEX_EXIT = '0'
         } -TimeoutMs 30000

@@ -11,9 +11,10 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $script:Tool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\metrics.ps1')).Path
-$script:PsExe = ([Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object Text.UTF8Encoding($false)
 $script:Failures = [Collections.Generic.List[string]]::new()
 $script:Dirs = [Collections.Generic.List[string]]::new()

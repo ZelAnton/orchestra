@@ -2,8 +2,11 @@
 # Read-only operational aggregate, cohort-budget and time-window digest metrics.
 set -u
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
+ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
 if [ -f "$SCRIPT_DIR/../tools/metrics.ps1" ]; then
   METRICS="$SCRIPT_DIR/../tools/metrics.ps1"
+elif [ -f "$ORCHESTRA_HOME/scripts/metrics.ps1" ]; then
+  METRICS="$ORCHESTRA_HOME/scripts/metrics.ps1"
 elif [ -f "$SCRIPT_DIR/metrics.ps1" ]; then
   METRICS="$SCRIPT_DIR/metrics.ps1"
 else

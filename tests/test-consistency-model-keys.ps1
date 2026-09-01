@@ -24,6 +24,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $CheckerRelPath = 'tools/check-consistency.ps1'
@@ -34,8 +35,7 @@ $TempRoots = [System.Collections.Generic.List[string]]::new()
 
 # Reuse the interpreter that runs this test instead of assuming `pwsh` is on PATH: a
 # silent skip would hide the gate rather than prove it.
-$PwshExe = (Get-Process -Id $PID).Path
-if ([string]::IsNullOrWhiteSpace($PwshExe)) { $PwshExe = 'pwsh' }
+$PwshExe = Get-PowerShellHostExecutable
 
 $SkipTopLevel = @('.git', '.jj', '.work', 'node_modules', 'target')
 

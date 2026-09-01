@@ -1068,7 +1068,7 @@ function Cmd-BrokerRun {
     # gives broker commands the same timeout and whole-process-tree cleanup as codex exec;
     # in particular dotnet/MSBuild node reuse stays disabled and leaked build workers are
     # reaped after the restore.
-    $hostExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $hostExe = Get-PowerShellHostExecutable
     $hostScript = @'
 $ErrorActionPreference = 'Stop'
 try {

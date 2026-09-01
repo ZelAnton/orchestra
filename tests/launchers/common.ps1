@@ -32,7 +32,7 @@ $script:LaunchersDir = Join-Path $script:RepoRoot 'launchers'
 $script:ConfigExamplePath = Join-Path $script:RepoRoot 'config.example.md'
 
 function New-Sandbox {
-    $root = Join-Path $env:TEMP ("orc-launcher-test-" + [Guid]::NewGuid().ToString('N'))
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("orc-launcher-test-" + [Guid]::NewGuid().ToString('N'))
     $paths = [ordered]@{
         Root    = $root
         Project = Join-Path $root 'project'

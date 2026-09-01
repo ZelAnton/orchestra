@@ -49,10 +49,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $script:Tool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\supervisor.ps1')).Path
 $script:Outbox = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\outbox.ps1')).Path
-$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
 $script:TempDirs = [System.Collections.Generic.List[string]]::new()
@@ -177,8 +178,11 @@ function Assert-NotContains { param([string]$Haystack, [string]$Needle, [string]
 function New-Worker {
     param([string]$Dir)
     $p = Join-Path $Dir 'worker.ps1'
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\tools\common.ps1') `
+        -Destination (Join-Path $Dir 'common.ps1') -Force
     $body = @'
 param()
+. (Join-Path $PSScriptRoot 'common.ps1')
 $code=0;$sleep=0;$flood=0;$cancelAfter=0;$touch='';$spawn='';$spawnReady='';$counter='';$failUntil=0;$failCode=42;$print=''
 for($i=0;$i -lt $args.Count;$i++){switch([string]$args[$i]){
  '--code'{$code=[int]$args[++$i]} '--sleep'{$sleep=[int]$args[++$i]} '--flood'{$flood=[int]$args[++$i]}
@@ -190,7 +194,7 @@ for($i=0;$i -lt $args.Count;$i++){switch([string]$args[$i]){
 if($print){ Write-Output $print }
 if($flood -gt 0){ $line=('y'*63); for($j=0;$j -lt $flood;$j++){ Write-Output $line } }
 if($spawn){
- $exe=(Get-Process -Id $PID).Path
+ $exe=Get-PowerShellHostExecutable
  # Do not let the grandchild inherit the supervisor's redirected pipes: a broken
  # tree kill must return promptly enough for the test to observe and clean the orphan.
  $child=Start-Process -FilePath $exe -ArgumentList @('-NoProfile','-NonInteractive','-Command',"Start-Sleep 120; Set-Content -LiteralPath '$spawn' done") -RedirectStandardOutput ($spawn + '.stdout') -RedirectStandardError ($spawn + '.stderr') -PassThru
@@ -829,9 +833,10 @@ Write-Output "LEN=$($bytes.Length);SHA=$hash"
     $childRecord = Join-Path $d 'redactor-pipe-child.txt'
 $fixtureRedactor = @'
 param([string]$Action)
+. (Join-Path $PSScriptRoot 'common.ps1')
 $record = [string]$env:ORCHESTRA_TEST_REDACTION_CHILD_RECORD
 $psi = New-Object System.Diagnostics.ProcessStartInfo
-$psi.FileName = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$psi.FileName = Get-PowerShellHostExecutable
 $psi.UseShellExecute = $false
 $psi.CreateNoWindow = $true
 foreach ($arg in @('-NoProfile', '-NonInteractive', '-Command', 'Start-Sleep -Seconds 120')) { $psi.ArgumentList.Add($arg) }

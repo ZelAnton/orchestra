@@ -12,6 +12,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $script:Root = Join-Path ([System.IO.Path]::GetTempPath()) ('orchestra-inbox-test-' + [guid]::NewGuid().ToString('N'))
 $script:RepoA = Join-Path $script:Root 'sender-repo'
@@ -22,7 +23,7 @@ $script:RepoE = Join-Path $script:Root 'never-audited-repo'
 $script:Registry = Join-Path $script:Root 'profile/projects.json'
 $script:RegistryTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\project-registry.ps1')).Path
 $script:InboxTool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\inbox.ps1')).Path
-$script:Pwsh = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:Pwsh = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
 

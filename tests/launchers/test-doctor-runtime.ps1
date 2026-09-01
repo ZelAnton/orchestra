@@ -28,13 +28,14 @@
 
 # ci:posix - cross-platform; run-all.ps1 runs this under pwsh on Linux in CI too.
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot '..\..\tools\common.ps1')
 
 $script:Runtime = (Resolve-Path (Join-Path $PSScriptRoot '..\..\tools\doctor-runtime.ps1')).Path
 $script:Failures = New-Object System.Collections.ArrayList
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
-$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 $script:Pwsh = (Get-Command pwsh -ErrorAction SilentlyContinue)
 if (-not $script:Pwsh) {
     Write-Host 'SKIP - pwsh not found on PATH; the cross-platform doctor runtime requires PowerShell 7.'

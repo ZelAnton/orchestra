@@ -2,9 +2,10 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $Runner = Join-Path $PSScriptRoot 'launchers\run-all.ps1'
-$PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$PsExe = Get-PowerShellHostExecutable
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $Failures = [System.Collections.Generic.List[string]]::new()
 $Roots = [System.Collections.Generic.List[string]]::new()
@@ -472,8 +473,11 @@ exit 0
     $hangPidFile = Join-Path $hangRoot 'hang-child.pid'
     $env:ORCHESTRA_RUN_ALL_HANG_PID_FILE = $hangPidFile
     $hangSupervisor = Join-Path $hangRoot 'hang-supervisor.ps1'
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\tools\common.ps1') `
+        -Destination (Join-Path $hangRoot 'common.ps1')
     Write-Utf8 $hangSupervisor @'
-$hostPath = ([Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+. (Join-Path $PSScriptRoot 'common.ps1')
+$hostPath = Get-PowerShellHostExecutable
 $child = Start-Process -FilePath $hostPath -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 90') -PassThru
 [IO.File]::WriteAllText($env:ORCHESTRA_RUN_ALL_HANG_PID_FILE, [string]$child.Id)
 Start-Sleep -Seconds 90
@@ -512,8 +516,11 @@ Start-Sleep -Seconds 90
     $outerHangPidFile = Join-Path $outerHangRoot 'outer-hang-child.pid'
     $env:ORCHESTRA_RUN_ALL_OUTER_HANG_PID_FILE = $outerHangPidFile
     $outerHangRunner = Join-Path $outerHangRoot 'outer-hang-runner.ps1'
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '..\tools\common.ps1') `
+        -Destination (Join-Path $outerHangRoot 'common.ps1')
     Write-Utf8 $outerHangRunner @'
-$hostPath = ([Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+. (Join-Path $PSScriptRoot 'common.ps1')
+$hostPath = Get-PowerShellHostExecutable
 $child = Start-Process -FilePath $hostPath -ArgumentList @('-NoProfile','-Command','Start-Sleep -Seconds 90') -PassThru
 [IO.File]::WriteAllText($env:ORCHESTRA_RUN_ALL_OUTER_HANG_PID_FILE, [string]$child.Id)
 Start-Sleep -Seconds 90

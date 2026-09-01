@@ -112,6 +112,17 @@ regenerates any template-generated coder/reviewer variant (`agents/coder.md`,
 platforms, no longer Windows-only. (The POSIX launcher therefore now requires `pwsh`
 on `PATH`; install it from <https://aka.ms/powershell> if it is missing.)
 
+On macOS/Linux, make the mirrored launcher directory available to new shells if it is
+not already on `PATH`:
+
+```sh
+export PATH="$HOME/.claude/scripts:$PATH"
+```
+
+Persist that line in the startup file for your shell (for example, `~/.profile` for a
+login shell). `cc-sync.sh` prints a note with the exact installed directory whenever
+this setup is still required.
+
 Mirroring is transactional: files are published through a staging area with a
 journal-backed rollback, so an interruption mid-publish is rolled back to the exact
 prior state rather than leaving a half-applied mirror. The runtime keeps a manifest

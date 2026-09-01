@@ -33,6 +33,13 @@ Claude Code runtime, полностью Codex-native runtime, адаптера C
 маркерам (`agents/processor.md`, `generate-codex-agents.ps1`, `tools/sync-runtime.ps1`) и
 запускает runtime из checkout. В другом каталоге mirror-команда остаётся явным no-op; это
 не позволяет случайной target-local `tools/` затенить источник Orchestra.
+On POSIX, every user-facing `launchers/cc-*.sh` file is executable in the checkout, and
+`tools/sync-runtime.ps1` reapplies the executable bit in the provider mirror. After a
+successful sync it also reports when the mirror's `scripts` directory is absent from
+`PATH`; the operator then adds that directory to the shell startup file.
+The POSIX launcher suite also runs the queue and state transaction tests, including
+concurrent writers and OS-native root normalization; their fixtures use the platform temp
+directory rather than relying on the Windows-only `TEMP` environment variable.
 Стратегические направления и порядок развития зафиксированы в
 `LOOP_ORCHESTRA_ROADMAP.md`; это план, а не действующий runtime-контракт.
 Архитектура неблокирующего human in the loop, web/Android control plane, событий и PoC
@@ -302,6 +309,10 @@ defaults и границе между пользовательскими нас�
   запуск codex — предвыдаётся, а не выпрашивается по ходу» и `agents/coder_codex.md`,
   «Резолвинг пути к runtime»), иначе вне чекаута orchestra голый относительный путь
   `tools/<script>.ps1` не резолвился бы вовсе.
+  Shared tools that spawn another PowerShell process use
+  `Get-PowerShellHostExecutable` from `tools/common.ps1`. They must not reuse
+  `MainModule.FileName`: for a framework-dependent global-tool installation that value
+  is `dotnet`, while the reusable console host is the `pwsh` apphost under `$PSHOME`.
 - **`CODEX_NETWORK` (дефолт `on`) — сеть в песочнице `coder_codex`.** При `on` `coder_codex`
   добавляет к вызову (после литерального префикса `codex exec`, не ломая грант) оверрайд
   `-c sandbox_workspace_write.network_access=true` (проверено на codex-cli 0.142.5: без него
@@ -445,8 +456,10 @@ defaults и границе между пользовательскими нас�
   наблюдаемого прерывания. Стоимость на завершённую задачу считается только из явных
   token-usage/cost полей событий; до появления T-248 она выводится `недоступно`, не нулём и
   не оценкой из prose-журнала. Инструмент не пишет в `.work/` и не берёт
-  `orchestrator.lock`; обёртки — `cc-metrics.cmd`/`.sh` (чекаут `tools/metrics.ps1` либо
-  зеркальная sibling-копия от `cc-sync`). Детерминированный тест — `tests/test-metrics.ps1`,
+  `orchestrator.lock`. The `cc-metrics.cmd`/`.sh` wrappers resolve checkout
+  `tools/metrics.ps1`, then the `cc-sync` shared mirror at
+  `~/.orchestra/scripts/metrics.ps1`, with a legacy flat-mirror fallback beside the
+  launcher. Детерминированный тест — `tests/test-metrics.ps1`,
   явно подключённый к job `validate` в `.github/workflows/ci.yml` (K-007).
 - **Пер-задачная архивная проекция.** `tools/metrics.ps1 task --work <.work> --task-id
   <T-ID> --batch-id <B-id>` соединяет строгие `operation.completed` с `usage.recorded` по

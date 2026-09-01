@@ -211,7 +211,7 @@ function Resolve-Target {
         $extraArgs = @($parsed | ForEach-Object { [string]$_ })
     }
     if ($file) {
-        $psHost = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+        $psHost = Get-PowerShellHostExecutable
         return [pscustomobject]@{ FilePath = $psHost; Args = (@('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $file) + $extraArgs); WorkingDirectory = [string](Opt 'working-directory' '') }
     }
     if ($shellCommand) {
@@ -1283,7 +1283,7 @@ function Invoke-Redact {
     $posixPgid = 0
     $redactionSucceeded = $false
     try {
-        $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+        $psExe = Get-PowerShellHostExecutable
         $launchFile = $psExe
         $launchArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $redactor, 'redact')
         if (-not [string]::IsNullOrWhiteSpace($Work)) { $launchArgs += @('--work', $Work) }

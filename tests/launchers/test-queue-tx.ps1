@@ -1,7 +1,9 @@
 ﻿# Tests for tools/queue-tx.ps1 - the transactional queue interface (task T-082).
+# ci:posix - queue transactions and concurrent writers are cross-platform.
 #
 # These are scriptable, LLM-free tests. Each scenario builds a throwaway .work
-# sandbox under $env:TEMP, drives the real tool as a child process, and asserts
+# sandbox under the platform temp directory, drives the real tool as a child process,
+# and asserts
 # on its output/exit code and the resulting Tasks_Queue.md. Nothing here touches
 # this repository's own .work/. Covered (per T-082's criteria):
 #   - allocate-id / propose / generation counter, header format preserved
@@ -30,7 +32,7 @@ $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
 if ($pwshCmd) { $script:PwshHost = $pwshCmd.Source }
 
 function New-Work {
-    $root = Join-Path $env:TEMP ("orc-queuetx-" + [Guid]::NewGuid().ToString('N'))
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("orc-queuetx-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $root | Out-Null
     return $root
 }
@@ -700,8 +702,7 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         $exitFiles = @()
         $writerWrapper = Join-Path $W 'concurrent-writer.ps1'
         $writerWrapperText = @'
-param([string]$ToolPath, [string]$Work, [string]$Title, [string]$Body, [string]$ExitFile)
-$hostPath = (Get-Process -Id $PID).Path
+param([string]$ToolPath, [string]$Work, [string]$Title, [string]$Body, [string]$ExitFile, [string]$HostPath)
 & $hostPath -NoProfile -ExecutionPolicy Bypass -File $ToolPath propose --work $Work --title $Title --body $Body
 $rc = $LASTEXITCODE
 [System.IO.File]::WriteAllText($ExitFile, [string]$rc)
@@ -713,7 +714,8 @@ exit $rc
             $exitFiles += $exitFile
             $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $writerWrapper,
                 '-ToolPath', $script:ToolPath, '-Work', $W,
-                '-Title', "Concurrent-$i", '-Body', "body-$i", '-ExitFile', $exitFile)
+                '-Title', "Concurrent-$i", '-Body', "body-$i", '-ExitFile', $exitFile,
+                '-HostPath', $script:PwshHost)
             $procs += Start-Process -FilePath $script:PwshHost -ArgumentList $a -NoNewWindow -PassThru
         }
         # PowerShell 7.6 installed through WindowsApps can leave Start-Process.Process.ExitCode

@@ -160,7 +160,7 @@ function Get-EnvironmentProfile {
             (Get-Command setsid -CommandType Application -ErrorAction SilentlyContinue)) {
             'process-group'
         } else { 'pid-tree' }
-    $hostPath = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    $hostPath = Get-PowerShellHostExecutable
     $safe = [ordered]@{
         os = $platform
         os_description = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
@@ -357,7 +357,7 @@ function Invoke-RunCommand {
         $runs = [System.Collections.Generic.List[object]]::new()
         $record = ConvertTo-VerificationRecord $verificationProfile $head $base 'running' '' @(); Write-JsonAtomic $resultFile $record
         $supervisor = Join-Path $PSScriptRoot 'supervisor.ps1'
-        $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+        $psExe = Get-PowerShellHostExecutable
         $artifactParent = Join-Path (Split-Path -Parent $resultFull) '.verification-artifacts'
         [void][System.IO.Directory]::CreateDirectory($artifactParent)
         $safeResultName = ([System.IO.Path]::GetFileName($resultFull) -replace '[^A-Za-z0-9_.-]', '_')

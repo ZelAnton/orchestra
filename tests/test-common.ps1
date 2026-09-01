@@ -78,6 +78,20 @@ function Assert-False { param([bool]$Cond, [string]$Msg) if ($Cond) { $script:Fa
 function Assert-Equal { param($Expected, $Actual, [string]$Msg) if ($Expected -ne $Actual) { $script:Failures.Add("FAIL - ${Msg}: expected [$Expected], got [$Actual]") } }
 
 # =============================================================================
+# 0. Reusable PowerShell host: framework-dependent/global-tool installs expose `dotnet`
+#    as the current native process, but child tools still need an actual pwsh executable.
+# =============================================================================
+{
+    $hostExe = Get-PowerShellHostExecutable
+    Assert-True (Test-Path -LiteralPath $hostExe -PathType Leaf) `
+        'PowerShell host resolver returns an existing executable file'
+    & $hostExe -NoProfile -NonInteractive -Command 'exit 0'
+    Assert-Equal 0 $LASTEXITCODE 'resolved PowerShell host starts a child console successfully'
+    Assert-False ([System.IO.Path]::GetFileName($hostExe) -ieq 'dotnet') `
+        'PowerShell host resolver never mistakes the framework host for the pwsh console'
+}.Invoke()
+
+# =============================================================================
 # 1. Read-LockSnapshot: reads the recorded PID and age from disk; $null when unreadable.
 # =============================================================================
 {
@@ -474,7 +488,7 @@ try {
 '@
     [System.IO.File]::WriteAllText($workerScript, $workerText, (New-Object System.Text.UTF8Encoding($false)))
 
-    $psExe = (Get-Process -Id $PID).Path
+    $psExe = Get-PowerShellHostExecutable
     $workers = @()
     for ($i = 0; $i -lt $workerCount; $i++) {
         $signal = Join-Path $dir "worker-$i-contended"

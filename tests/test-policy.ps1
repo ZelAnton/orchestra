@@ -36,12 +36,13 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $script:Tool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\policy.ps1')).Path
 $script:SchemaLib = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\policy-schema.ps1')).Path
 $script:ConfigExample = (Resolve-Path (Join-Path $PSScriptRoot '..\config.example.md')).Path
 $script:ConstraintsExample = (Resolve-Path (Join-Path $PSScriptRoot '..\constraints.example.md')).Path
-$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Failures = [System.Collections.Generic.List[string]]::new()
 $script:TempItems = [System.Collections.Generic.List[string]]::new()

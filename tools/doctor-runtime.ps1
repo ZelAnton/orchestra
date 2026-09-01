@@ -98,7 +98,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 # $IsWindows does not exist under 5.1; the RuntimeInformation probe works everywhere.
 $script:OnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     [System.Runtime.InteropServices.OSPlatform]::Windows)
-$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 
 if (-not $ProjectRoot) { $ProjectRoot = (Get-Location).Path }
 if (-not $RepoRoot)    { $RepoRoot = Split-Path -Parent $PSScriptRoot }

@@ -1,8 +1,9 @@
 # Tests for tools/state-tx.ps1 - the transactional control-plane interface
+# ci:posix - lease, liveness, and state transitions are cross-platform.
 # (owner lease + state-transition validation + control generation), task T-079.
 #
 # Scriptable, LLM-free. Each scenario builds a throwaway .work sandbox under
-# $env:TEMP, drives the real tool as a child process, and asserts on its
+# the platform temp directory, drives the real tool as a child process, and asserts on its
 # output/exit code and the resulting .work/orchestrator.lock/lease.json. Nothing
 # here touches this repository's own .work/. Covered (per T-079's criteria):
 #   - lease acquire / heartbeat (owner-only) / release / status / generation
@@ -38,7 +39,7 @@ if ($pwshCmd) { $script:PwshHost = $pwshCmd.Source }
 $env:ORCHESTRA_PROCESSKIT_ROOT_RUN_ID = 'orchestra-state-tx-test-00000000000000000000000000000001'
 
 function New-Work {
-    $root = Join-Path $env:TEMP ("orc-statetx-" + [Guid]::NewGuid().ToString('N'))
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ("orc-statetx-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $root | Out-Null
     return $root
 }
@@ -86,7 +87,7 @@ function Assert-Match {
 
 Invoke-Test -Name 'state-tx.ps1' -Body {
 
-    $ROOT = 'C:\proj\demo'
+    $ROOT = if ($script:IsWindowsHost) { 'C:\proj\demo' } else { '/project/demo' }
 
     # --- Scenario 1: acquire / status / heartbeat / release lifecycle -------
     $W = New-Work
@@ -516,18 +517,23 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
     } finally { Remove-Item -LiteralPath $W -Recurse -Force -ErrorAction SilentlyContinue }
 
     # --- Scenario 16: root comparison is normalized, not a raw string compare ----
-    # Same root spelled with forward slashes, or with a trailing separator, must
+    # Same root spelled with an OS-appropriate alternate form, or with a trailing
+    # separator, must
     # verify/adopt as a MATCH (T-285); a genuinely different root must still mismatch
     # in both directions (positive AND negative), on both call sites (verify + takeover).
-    $altSlashRoot = $ROOT -replace '\\', '/'         # 'C:\proj\demo' -> 'C:/proj/demo'
-    $altTrailingRoot = "$ROOT\"                       # 'C:\proj\demo' -> 'C:\proj\demo\'
-    $otherRoot = 'C:\proj\other'
+    $alternateRoot = if ($script:IsWindowsHost) {
+        $ROOT -replace '\\', '/'                      # 'C:\proj\demo' -> 'C:/proj/demo'
+    } else {
+        '/project/./demo'
+    }
+    $altTrailingRoot = $ROOT + [System.IO.Path]::DirectorySeparatorChar
+    $otherRoot = if ($script:IsWindowsHost) { 'C:\proj\other' } else { '/project/other' }
 
     $W = New-Work
     try {
         $owner = Get-Owner (Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--ttl', '600'))
-        $r = Run-Tool @('verify', '--work', $W, '--require-root', $altSlashRoot, '--require-role', 'processor', '--owner', $owner)
-        Assert-Equal 0 $r.ExitCode '[root-norm] verify matches despite forward-slash separators (0)'
+        $r = Run-Tool @('verify', '--work', $W, '--require-root', $alternateRoot, '--require-role', 'processor', '--owner', $owner)
+        Assert-Equal 0 $r.ExitCode '[root-norm] verify matches an alternate normalized spelling (0)'
         $r = Run-Tool @('verify', '--work', $W, '--require-root', $altTrailingRoot, '--require-role', 'processor', '--owner', $owner)
         Assert-Equal 0 $r.ExitCode '[root-norm] verify matches despite a trailing separator (0)'
         $r = Run-Tool @('verify', '--work', $W, '--require-root', $otherRoot)
@@ -537,8 +543,8 @@ Invoke-Test -Name 'state-tx.ps1' -Body {
     $W = New-Work
     try {
         Run-Tool @('acquire', '--work', $W, '--root', $ROOT, '--ttl', '600') | Out-Null
-        $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $altSlashRoot, '--force')
-        Assert-Equal 0 $r.ExitCode '[root-norm] takeover require-root matches despite forward-slash separators (0)'
+        $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $alternateRoot, '--force')
+        Assert-Equal 0 $r.ExitCode '[root-norm] takeover require-root matches an alternate normalized spelling (0)'
         $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $altTrailingRoot, '--force')
         Assert-Equal 0 $r.ExitCode '[root-norm] takeover require-root matches despite a trailing separator (0)'
         $r = Run-Tool @('takeover', '--work', $W, '--root', $ROOT, '--require-root', $otherRoot, '--force')

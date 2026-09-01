@@ -86,6 +86,26 @@ function Stop-Sync {
     exit $Code
 }
 
+function Test-DirectoryOnProcessPath {
+    param([Parameter(Mandatory)][string]$Directory)
+
+    $target = [System.IO.Path]::GetFullPath($Directory).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar)
+    foreach ($entry in ([string]$env:PATH -split [regex]::Escape([string][System.IO.Path]::PathSeparator))) {
+        if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+        try {
+            $candidate = [System.IO.Path]::GetFullPath($entry.Trim()).TrimEnd(
+                [System.IO.Path]::DirectorySeparatorChar,
+                [System.IO.Path]::AltDirectorySeparatorChar)
+            if ($script:PathComparer.Equals($candidate, $target)) { return $true }
+        } catch {
+            # Ignore malformed PATH entries; they cannot resolve this directory.
+        }
+    }
+    return $false
+}
+
 # =============================================================================
 # Path / manifest helpers
 # =============================================================================
@@ -632,6 +652,9 @@ Write-SyncInfo ("Synced {0} shared config template(s) -> {1}" -f $sharedResult.C
 Write-SyncInfo ("Synced {0} shared specification(s) -> {1}" -f $sharedResult.Counts['spec'], (Join-Path $SharedDestinationRoot 'specs'))
 Write-SyncInfo ("Synced {0} shared runtime(s) -> {1}" -f $sharedResult.Counts['runtime'], (Join-Path $SharedDestinationRoot 'scripts'))
 Write-SyncInfo ("Synced {0} Codex custom agent(s) -> {1}" -f $codexPairs.Count, (Join-Path $CodexDestinationRoot 'agents'))
+if (-not $script:OnWindows -and -not (Test-DirectoryOnProcessPath -Directory $scriptsDst)) {
+    Write-SyncWarn ("cc-sync: note - launchers were installed to {0}, but that directory is not on PATH. Add 'export PATH=`"{0}:`$PATH`"' to your shell profile and start a new shell." -f $scriptsDst)
+}
 if ($providerResult.Removed -gt 0) {
     Write-SyncInfo ("Removed {0} stale previously-managed provider entry(ies)." -f $providerResult.Removed)
 }

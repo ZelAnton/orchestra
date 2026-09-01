@@ -35,6 +35,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+. (Join-Path $PSScriptRoot '..\tools\common.ps1')
 
 $opts = @{}
 $BoolFlags = @('json')
@@ -50,7 +51,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 function Opt { param([string]$Name, $Default = $null) if ($opts.ContainsKey($Name)) { return $opts[$Name] } else { return $Default } }
 
 $script:Tool = (Resolve-Path (Join-Path $PSScriptRoot '..\tools\harness.ps1')).Path
-$script:PsExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+$script:PsExe = Get-PowerShellHostExecutable
 $script:Utf8 = New-Object System.Text.UTF8Encoding($false)
 
 function Invoke-Harness {

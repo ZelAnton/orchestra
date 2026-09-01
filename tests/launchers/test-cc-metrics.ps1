@@ -12,7 +12,7 @@ if ($env:FAKE_METRICS_ARGS) {
 if ($env:FAKE_METRICS_EXIT) { exit [int]$env:FAKE_METRICS_EXIT }
 exit 0
 '@
-    Set-Content -LiteralPath (Join-Path $Paths.Scripts 'metrics.ps1') -Value $script -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $Paths.Orchestra 'scripts\metrics.ps1') -Value $script -Encoding utf8
 }
 
 Invoke-Test -Name 'cc-metrics.cmd' -Body {
@@ -26,7 +26,7 @@ Invoke-Test -Name 'cc-metrics.cmd' -Body {
     }
     finally { Remove-Sandbox $paths }
 
-    # --- Scenario 2: every digest argument reaches the flat-mirror runner unchanged. ---
+    # --- Scenario 2: every digest argument reaches the shared-home runner unchanged. ---
     $paths = New-Sandbox
     try {
         Install-Launcher -Paths $paths -Names 'cc-metrics.cmd'

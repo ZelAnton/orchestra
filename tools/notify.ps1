@@ -58,7 +58,7 @@ function Get-RedactedShortText {
     param([string]$Text, [string]$Work)
     $redactor = Join-Path $PSScriptRoot 'redaction.ps1'
     if (-not (Test-Path -LiteralPath $redactor -PathType Leaf)) { return $null }
-    $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    $psExe = Get-PowerShellHostExecutable
     if ([string]::IsNullOrWhiteSpace($psExe)) { return $null }
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $psExe
@@ -178,7 +178,7 @@ function Cmd-Send {
         Write-Result -EventType $eventType -Status 'failed' -Reason 'supervisor-unavailable'
         return
     }
-    $psExe = ([System.Diagnostics.Process]::GetCurrentProcess()).MainModule.FileName
+    $psExe = Get-PowerShellHostExecutable
     if ([string]::IsNullOrWhiteSpace($psExe)) {
         Write-Result -EventType $eventType -Status 'failed' -Reason 'supervisor-unavailable'
         return
