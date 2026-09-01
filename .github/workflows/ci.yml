@@ -29,7 +29,7 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Lint PowerShell sources
         # K-007/K-034: explicitly run the blanket tools/tests/generators gate on both
@@ -458,7 +458,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run the extended crash matrix (git, all fault points)
         # tests/test-harness-crashmatrix.ps1 (T-093): for every scenario and every documented
