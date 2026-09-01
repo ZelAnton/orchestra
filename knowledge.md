@@ -34,9 +34,12 @@ Claude Code runtime, полностью Codex-native runtime, адаптера C
 запускает runtime из checkout. В другом каталоге mirror-команда остаётся явным no-op; это
 не позволяет случайной target-local `tools/` затенить источник Orchestra.
 On POSIX, every user-facing `launchers/cc-*.sh` file is executable in the checkout, and
-`tools/sync-runtime.ps1` reapplies the executable bit in the provider mirror. After a
-successful sync it also reports when the mirror's `scripts` directory is absent from
-`PATH`; the operator then adds that directory to the shell startup file.
+`tools/sync-runtime.ps1` mirrors both the canonical `.sh` name and a managed extensionless
+command copy (`cc-sync.sh` -> `cc-sync`), applying the executable bit to both. After a
+successful sync it reports when the mirror's `scripts` directory is absent from `PATH`;
+the operator then adds that directory to the shell startup file.
+An extensionless destination that exists outside the provider manifest is operator-owned:
+sync fails closed instead of overwriting or adopting it.
 Failure to apply the executable bit aborts the transactional sync and rolls back the
 provider mirror; an unusable launcher is never reported as a successful installation.
 The POSIX launcher suite also runs the queue and state transaction tests, including

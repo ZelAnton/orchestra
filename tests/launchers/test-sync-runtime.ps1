@@ -21,6 +21,8 @@
     - POSIX manifest identity is case-sensitive, so case-only renames prune the old spelling
       in both Claude and Codex mirrors (Windows remains case-insensitive).
     - POSIX sync reports when the installed launcher directory is not on PATH.
+    - POSIX sync installs managed extensionless commands beside the canonical `.sh`
+      launchers and prunes both names when the source launcher disappears.
     - a POSIX chmod failure aborts and rolls back the mirror instead of publishing a
       non-executable launcher as a successful sync.
 
@@ -69,6 +71,7 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'codex\agents\orchestra_reviewer.toml') "name = 'orchestra_reviewer'`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.cmd') "@echo off`r`n"
     Write-File (Join-Path $repo 'launchers\cc-doctor.cmd') "@echo off`r`n"
+    Write-File (Join-Path $repo 'launchers\cc-common.sh') "#!/usr/bin/env bash`n"
     Write-File (Join-Path $repo 'launchers\cc-sync.sh') "#!/usr/bin/env bash`n"
     # tools/*.ps1: common runners mirror into the shared home; provider runtimes remain
     # beside provider launchers. The
@@ -210,6 +213,8 @@ $destCase = $null
 $repoMode = $null
 $destMode = $null
 $fakeBin = $null
+$repoCollision = $null
+$destCollision = $null
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows)) {
     $repoCase = New-SyntheticRepo
@@ -217,16 +222,27 @@ if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     $rCase0 = Invoke-Sync -Repo $repoCase -Dest $destCase -Glob '*.sh'
     Assert-True ($rCase0.ExitCode -eq 0) 'case-rename: initial POSIX sync exits 0'
     $installedLauncher = Join-Path $destCase 'scripts\cc-sync.sh'
+    $installedCommand = Join-Path $destCase 'scripts\cc-sync'
     Assert-True (Test-Path -LiteralPath $installedLauncher -PathType Leaf) `
         'POSIX sync publishes the selected launcher'
+    Assert-FileText $installedCommand "#!/usr/bin/env bash`n" `
+        'POSIX sync publishes an extensionless command with identical content'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destCase 'scripts\cc-common'))) `
+        'POSIX sync does not expose the private cc-common helper as a command'
     if (Test-Path -LiteralPath $installedLauncher -PathType Leaf) {
         $installedMode = [System.IO.File]::GetUnixFileMode($installedLauncher)
         Assert-True (($installedMode -band [System.IO.UnixFileMode]::UserExecute) -ne 0) `
             'POSIX sync makes the installed launcher directly executable'
     }
+    if (Test-Path -LiteralPath $installedCommand -PathType Leaf) {
+        $commandMode = [System.IO.File]::GetUnixFileMode($installedCommand)
+        Assert-True (($commandMode -band [System.IO.UnixFileMode]::UserExecute) -ne 0) `
+            'POSIX sync makes the extensionless command directly executable'
+    }
 
     Rename-Item -LiteralPath (Join-Path $repoCase 'agents\coder.md') -NewName 'Coder.md'
     Rename-Item -LiteralPath (Join-Path $repoCase 'codex\agents\orchestra_coder.toml') -NewName 'Orchestra_coder.toml'
+    Remove-Item -LiteralPath (Join-Path $repoCase 'launchers\cc-sync.sh') -Force
     $rCase1 = Invoke-Sync -Repo $repoCase -Dest $destCase -Glob '*.sh'
     Assert-True ($rCase1.ExitCode -eq 0) "case-rename: renamed POSIX sync exits 0 (err=$($rCase1.Err.Trim()))"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $destCase 'agents\coder.md'))) 'case-rename: old Claude path spelling is pruned'
@@ -234,6 +250,10 @@ if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     $codexCaseDest = Join-Path $destCase '.codex'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $codexCaseDest 'agents\orchestra_coder.toml'))) 'case-rename: old Codex path spelling is pruned'
     Assert-FileText (Join-Path $codexCaseDest 'agents\Orchestra_coder.toml') "name = 'orchestra_coder'`n" 'case-rename: new Codex path spelling is published'
+    Assert-True (-not (Test-Path -LiteralPath $installedLauncher)) `
+        'stale launcher: canonical .sh mirror is pruned when its source disappears'
+    Assert-True (-not (Test-Path -LiteralPath $installedCommand)) `
+        'stale launcher: extensionless command is pruned when its source disappears'
 
     # A launcher that cannot be made executable is not a usable POSIX installation.
     # Force chmod to fail and prove the transactional mirror removes every file it had
@@ -259,6 +279,27 @@ if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         'chmod failure: partially published launcher is rolled back'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $destMode '.orchestra-sync-manifest.json'))) `
         'chmod failure: provider manifest is not committed'
+
+    # A pre-existing extensionless command was not written by cc-sync and must not be
+    # silently adopted or overwritten on the first sync that introduces managed aliases.
+    $repoCollision = New-SyntheticRepo
+    $destCollision = New-Root
+    $foreignCommand = Join-Path $destCollision 'scripts\cc-sync'
+    Write-File $foreignCommand "operator-owned`n"
+    $rCollision = Invoke-Sync -Repo $repoCollision -Dest $destCollision -Glob '*.sh'
+    Assert-True ($rCollision.ExitCode -ne 0) `
+        'alias collision: POSIX sync fails closed on an unmanaged extensionless command'
+    Assert-FileText $foreignCommand "operator-owned`n" `
+        'alias collision: operator-owned command content is preserved'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destCollision 'scripts\cc-sync.sh'))) `
+        'alias collision: canonical launcher published earlier in the transaction is rolled back'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destCollision 'scripts\cc-common.sh'))) `
+        'alias collision: private helper published earlier in the transaction is rolled back'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destCollision '.orchestra-sync-manifest.json'))) `
+        'alias collision: provider manifest is not committed'
+    Assert-True (([string]$rCollision.Err).Contains('is not managed by cc-sync')) `
+        ("alias collision: diagnostic explains why explicit operator action is required (err={0}; out={1})" -f `
+            ([string]$rCollision.Err).Trim(), ([string]$rCollision.Out).Trim())
 }
 
 # =============================================================================
@@ -442,6 +483,7 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $destE 'scripts\cc-sync.cmd
 # =============================================================================
 foreach ($d in @(
         $repo, $dest, $repoCase, $destCase, $repoMode, $destMode, $fakeBin,
+        $repoCollision, $destCollision,
         $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS, $repoE, $destE)) {
     if ($d) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
 }

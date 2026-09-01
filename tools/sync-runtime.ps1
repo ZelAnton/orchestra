@@ -186,7 +186,7 @@ function Read-Manifest {
     # a corrupted manifest) nothing is ever purged - deletions only ever target
     # files this tool provably wrote before.
     $result = [System.Collections.Generic.HashSet[string]]::new($script:PathComparer)
-    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return $result }
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { return ,$result }
     try {
         $raw = [System.IO.File]::ReadAllText($ManifestPath)
         $obj = $raw | ConvertFrom-Json
@@ -208,7 +208,10 @@ function Read-Manifest {
     } catch {
         Write-SyncWarn "cc-sync: warning - could not read the existing sync manifest ($ManifestPath); treating it as empty (no stale entries will be purged this run)."
     }
-    return $result
+    # The unary comma prevents PowerShell from pipeline-unrolling the HashSet into
+    # `$null` when empty or a plain object array when populated. Callers need set
+    # membership as well as enumeration.
+    return ,$result
 }
 
 function Write-Manifest {
@@ -319,7 +322,7 @@ function Publish-One {
     # empty-directory husk at $Dest (the directory-vs-file corruption class from
     # T-056); refuses a NON-empty directory there (may hold real data) by throwing,
     # which triggers a full rollback.
-    param($Tx, [string]$Source, [string]$Dest)
+    param($Tx, [string]$Source, [string]$Dest, [switch]$MakeExecutable)
 
     $Tx.Counter++
     $stagePath = Join-Path $Tx.Stage ("s{0}" -f $Tx.Counter)
@@ -346,7 +349,7 @@ function Publish-One {
         Copy-Item -LiteralPath $stagePath -Destination $Dest -Force
     }
 
-    if (-not $script:OnWindows -and $Dest.EndsWith('.sh')) {
+    if (-not $script:OnWindows -and $MakeExecutable) {
         try {
             & chmod '+x' $Dest 2>$null
             if ($LASTEXITCODE -ne 0) {
@@ -409,6 +412,14 @@ function Get-ProviderManagedPairs {
     if (Test-Path -LiteralPath $launchersSrc) {
         foreach ($f in (Get-ChildItem -LiteralPath $launchersSrc -File -Filter $Glob -ErrorAction SilentlyContinue | Sort-Object Name)) {
             $pairs.Add([ordered]@{ Source = $f.FullName; Dest = (Join-Path $scriptsDst $f.Name); Kind = 'launcher' })
+            if (-not $script:OnWindows -and $f.Extension -eq '.sh' -and $f.Name -ne 'cc-common.sh') {
+                $commandName = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
+                $pairs.Add([ordered]@{
+                        Source = $f.FullName
+                        Dest   = Join-Path $scriptsDst $commandName
+                        Kind   = 'launcher_alias'
+                    })
+            }
         }
     }
 
@@ -480,7 +491,17 @@ function Invoke-TransactionalMirror {
     $removed = 0
     try {
         foreach ($p in $Pairs) {
-            Publish-One -Tx $tx -Source $p.Source -Dest $p.Dest
+            $destFull = [System.IO.Path]::GetFullPath([string]$p.Dest)
+            if ([string]$p.Kind -eq 'launcher_alias' -and
+                (Test-Path -LiteralPath $destFull -PathType Leaf) -and
+                -not $previous.Contains($destFull)) {
+                throw "extensionless POSIX command '$destFull' already exists but is not managed by cc-sync; move or remove it explicitly, then re-run cc-sync"
+            }
+            $makeExecutable = (
+                -not $script:OnWindows -and
+                [string]$p.Kind -in @('launcher', 'launcher_alias') -and
+                [System.IO.Path]::GetExtension([string]$p.Source) -eq '.sh')
+            Publish-One -Tx $tx -Source $p.Source -Dest $p.Dest -MakeExecutable:$makeExecutable
             if (-not $counts.ContainsKey($p.Kind)) { $counts[$p.Kind] = 0 }
             $counts[$p.Kind]++
         }
@@ -653,6 +674,14 @@ $agentsDst = Join-Path $DestinationRoot 'agents'
 $scriptsDst = Join-Path $DestinationRoot 'scripts'
 Write-SyncInfo ("Synced {0} provider agent definition(s) -> {1}" -f $providerResult.Counts['agent'], $agentsDst)
 Write-SyncInfo ("Synced {0} launcher script(s) -> {1}" -f $providerResult.Counts['launcher'], $scriptsDst)
+$launcherAliasCount = if ($providerResult.Counts.ContainsKey('launcher_alias')) {
+    [int]$providerResult.Counts['launcher_alias']
+} else {
+    0
+}
+if ($launcherAliasCount -gt 0) {
+    Write-SyncInfo ("Synced {0} extensionless POSIX command(s) -> {1}" -f $launcherAliasCount, $scriptsDst)
+}
 Write-SyncInfo ("Synced {0} provider runtime(s) -> {1}" -f $providerResult.Counts['runtime'], $scriptsDst)
 Write-SyncInfo ("Synced {0} Codex processor prompt(s) -> {1}" -f $providerResult.Counts['codex_prompt'], $scriptsDst)
 Write-SyncInfo ("Synced {0} shared config template(s) -> {1}" -f $sharedResult.Counts['template'], $SharedDestinationRoot)

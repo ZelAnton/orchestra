@@ -3,9 +3,9 @@
 Orchestra is a kit of Claude Code system prompts, Codex CLI adapters, and
 cross-platform launchers for autonomously processing a task queue with Claude Code /
 Codex agents. It is not an application or a library you import; it is agent
-definitions plus launcher entry points — `.cmd` on Windows, `.sh` on macOS/Linux —
-that you install into your Claude Code environment and then run against any target
-project.
+definitions plus launcher entry points — `.cmd` on Windows and executable `.sh` files
+with extensionless command copies on macOS/Linux — that you install into your Claude
+Code environment and then run against any target project.
 
 ## What problem it solves
 
@@ -98,7 +98,8 @@ It mirrors:
   where `claude --agent <name>` loads them from;
 - the launchers into your Claude scripts directory (`%USERPROFILE%\.claude\scripts`
   or `~/.claude/scripts`, which should be on `PATH`) — `launchers\*.cmd` on Windows,
-  `launchers/*.sh` on macOS/Linux. Common `config.example.md`,
+  `launchers/*.sh` on macOS/Linux plus managed extensionless commands such as
+  `cc-sync`, `cc-doctor`, and `cc-processor`. Common `config.example.md`,
   `constraints.example.md`, `docs/inbox_contract.md`, and orchestration runtimes are
   installed under `~/.orchestra` (`%USERPROFILE%\.orchestra` on Windows).
 
@@ -121,7 +122,9 @@ export PATH="$HOME/.claude/scripts:$PATH"
 
 Persist that line in the startup file for your shell (for example, `~/.profile` for a
 login shell). `cc-sync.sh` prints a note with the exact installed directory whenever
-this setup is still required.
+this setup is still required. The initial checkout invocation uses
+`launchers/cc-sync.sh`; after that sync completes, both `cc-sync` and `cc-sync.sh` are
+available from the mirror.
 
 Mirroring is transactional: files are published through a staging area with a
 journal-backed rollback, so an interruption mid-publish is rolled back to the exact
@@ -140,9 +143,9 @@ otherwise the selected provider keeps using its previous mirror.
 
 Run these from the root of the project whose task queue you want Orchestra to
 process (any project on your machine, not this repository). The command names below
-are extensionless: on Windows they resolve to the `.cmd` launchers via `PATH`; on
-macOS/Linux invoke the `.sh` variants instead (`cc-config.sh`, `cc-queue.sh`,
-`cc-processor.sh`, and so on):
+are extensionless on every supported platform: Windows resolves the `.cmd` launchers,
+while macOS/Linux uses the managed executable copies installed beside the canonical
+`.sh` launchers. The explicit `.sh` names remain available too.
 
 1. `cc-config` — seeds `.work\config.md` for the project from the template block in
    `config.example.md`, and `.work\constraints.md` from the whole of

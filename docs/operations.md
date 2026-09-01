@@ -533,6 +533,11 @@ verified.
 `cc-sync.sh` are thin wrappers over one engine, `tools/sync-runtime.ps1`, which mirrors
 this repo's agent `*.md`, the launchers, and provider runtimes into your Claude environment,
 and common configuration, specifications, and orchestration runtimes into `~/.orchestra`.
+On POSIX, every user-facing `.sh` launcher is also mirrored as a managed extensionless
+executable (`cc-sync.sh` -> `cc-sync`, and so on), so the same command names work on all
+platforms once the mirror directory is on `PATH`. A pre-existing extensionless file that
+is not already present in the sync manifest is treated as an operator-owned collision:
+sync fails without overwriting it and asks the operator to move or remove it explicitly.
 Mirroring is **transactional**: every
 file is published through a staging area with a journal-backed rollback, so an
 interruption mid-publish (or a hard crash, recovered on the next run) is rolled back to
