@@ -702,21 +702,29 @@ Invoke-Test -Name 'queue-tx.ps1' -Body {
         $exitFiles = @()
         $writerWrapper = Join-Path $W 'concurrent-writer.ps1'
         $writerWrapperText = @'
-param([string]$ToolPath, [string]$Work, [string]$Title, [string]$Body, [string]$ExitFile, [string]$HostPath)
+param([string]$ToolPath, [string]$Work, [string]$Title, [string]$Body, [string]$ExitFile)
+$hostPath = [string]$env:ORCHESTRA_TEST_PWSH_HOST
 & $hostPath -NoProfile -ExecutionPolicy Bypass -File $ToolPath propose --work $Work --title $Title --body $Body
 $rc = $LASTEXITCODE
 [System.IO.File]::WriteAllText($ExitFile, [string]$rc)
 exit $rc
 '@
         [System.IO.File]::WriteAllText($writerWrapper, $writerWrapperText, (New-Object System.Text.UTF8Encoding($false)))
-        for ($i = 1; $i -le $N; $i++) {
-            $exitFile = Join-Path $W ("writer-$i.exit")
-            $exitFiles += $exitFile
-            $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $writerWrapper,
-                '-ToolPath', $script:ToolPath, '-Work', $W,
-                '-Title', "Concurrent-$i", '-Body', "body-$i", '-ExitFile', $exitFile,
-                '-HostPath', $script:PwshHost)
-            $procs += Start-Process -FilePath $script:PwshHost -ArgumentList $a -NoNewWindow -PassThru
+        $previousHost = [Environment]::GetEnvironmentVariable('ORCHESTRA_TEST_PWSH_HOST', 'Process')
+        try {
+            [Environment]::SetEnvironmentVariable(
+                'ORCHESTRA_TEST_PWSH_HOST', $script:PwshHost, 'Process')
+            for ($i = 1; $i -le $N; $i++) {
+                $exitFile = Join-Path $W ("writer-$i.exit")
+                $exitFiles += $exitFile
+                $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $writerWrapper,
+                    '-ToolPath', $script:ToolPath, '-Work', $W,
+                    '-Title', "Concurrent-$i", '-Body', "body-$i", '-ExitFile', $exitFile)
+                $procs += Start-Process -FilePath $script:PwshHost -ArgumentList $a -NoNewWindow -PassThru
+            }
+        } finally {
+            [Environment]::SetEnvironmentVariable(
+                'ORCHESTRA_TEST_PWSH_HOST', $previousHost, 'Process')
         }
         # PowerShell 7.6 installed through WindowsApps can leave Start-Process.Process.ExitCode
         # as $null even after WaitForExit()/Refresh(). Each wrapper therefore persists the real
