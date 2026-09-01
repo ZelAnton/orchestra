@@ -5,8 +5,8 @@
 
 set -u
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd)"
 RUN_DIR="$(mktemp -d)"
 MOCK_DIR="$(mktemp -d)"
 MISSING_PATH="$(mktemp -d)"
@@ -17,7 +17,6 @@ PWSH_ARGS_FILE="$MOCK_DIR/pwsh-args"
 FAILURES=0
 ROOT_CONFIG_DIR="$RUN_DIR/.orchestra"
 ROOT_CONFIG_FILE="$ROOT_CONFIG_DIR/root-config.md"
-ORIGINAL_PATH="$PATH"
 AWK_PATH="$(command -v awk 2>/dev/null || true)"
 mkdir -p "$ROOT_CONFIG_DIR"
 
@@ -151,7 +150,7 @@ run_without_claude() {
 
     set +e
     clear_root_config
-    output=$(cd "$RUN_DIR" && PATH="$MISSING_PATH:$PW_ONLY_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" ORCHESTRA_CLAUDE_PERMISSION_MODE= \
+    output=$(cd "$RUN_DIR" && PATH="$MISSING_PATH:$PW_ONLY_DIR" ORCHESTRA_HOME="$ROOT_CONFIG_DIR" ORCHESTRA_CLAUDE_PERMISSION_MODE='' \
         "$BASH" "$launcher_path" 2>&1)
     rc=$?
     set -e

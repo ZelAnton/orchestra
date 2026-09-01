@@ -1061,9 +1061,10 @@ function Cmd-BrokerRun {
     $tool = [string]$tokens[0]
     $toolArgs = if ($tokens.Count -gt 1) { @($tokens[1..($tokens.Count - 1)]) } else { @() }
 
-    # Run through a fresh instance of the CURRENT PowerShell executable. This safely
-    # handles both native binaries and Windows *.cmd package-manager shims. The -Command
-    # body is a fixed literal; validated tool/args travel in child-only environment values
+    # Run through a fresh instance of the reusable PowerShell console host. This safely
+    # handles framework-dependent PowerShell installs and Windows *.cmd package-manager
+    # shims. Its -Command body is a fixed literal; validated tool/args travel in child-only
+    # environment values
     # (args as JSON), never interpolated into code or a shell command. Invoke-Captured
     # gives broker commands the same timeout and whole-process-tree cleanup as codex exec;
     # in particular dotnet/MSBuild node reuse stays disabled and leaked build workers are

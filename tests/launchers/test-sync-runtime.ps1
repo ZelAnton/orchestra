@@ -21,6 +21,8 @@
     - POSIX manifest identity is case-sensitive, so case-only renames prune the old spelling
       in both Claude and Codex mirrors (Windows remains case-insensitive).
     - POSIX sync reports when the installed launcher directory is not on PATH.
+    - a POSIX chmod failure aborts and rolls back the mirror instead of publishing a
+      non-executable launcher as a successful sync.
 
   Usage:
     pwsh -File tests/launchers/test-sync-runtime.ps1
@@ -205,6 +207,9 @@ Assert-FileText (Join-Path $codexDest 'agents\custom_local.toml') "name = 'mine'
 # =============================================================================
 $repoCase = $null
 $destCase = $null
+$repoMode = $null
+$destMode = $null
+$fakeBin = $null
 if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows)) {
     $repoCase = New-SyntheticRepo
@@ -229,6 +234,31 @@ if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
     $codexCaseDest = Join-Path $destCase '.codex'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $codexCaseDest 'agents\orchestra_coder.toml'))) 'case-rename: old Codex path spelling is pruned'
     Assert-FileText (Join-Path $codexCaseDest 'agents\Orchestra_coder.toml') "name = 'orchestra_coder'`n" 'case-rename: new Codex path spelling is published'
+
+    # A launcher that cannot be made executable is not a usable POSIX installation.
+    # Force chmod to fail and prove the transactional mirror removes every file it had
+    # already published before surfacing the failure.
+    $repoMode = New-SyntheticRepo
+    $destMode = New-Root
+    $fakeBin = New-Root
+    $fakeChmod = Join-Path $fakeBin 'chmod'
+    Write-File $fakeChmod "#!/bin/sh`nexit 23`n"
+    & chmod '+x' $fakeChmod
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = $fakeBin + [System.IO.Path]::PathSeparator + $savedPath
+        $rMode = Invoke-Sync -Repo $repoMode -Dest $destMode -Glob '*.sh'
+    } finally {
+        $env:PATH = $savedPath
+    }
+    Assert-True ($rMode.ExitCode -ne 0) 'chmod failure: POSIX sync fails closed'
+    Assert-True (([string]$rMode.Err).Contains('cannot make mirrored POSIX launcher executable')) `
+        ("chmod failure: diagnostic identifies the executable-mode failure (err={0}; out={1})" -f `
+            ([string]$rMode.Err).Trim(), ([string]$rMode.Out).Trim())
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destMode 'scripts\cc-sync.sh'))) `
+        'chmod failure: partially published launcher is rolled back'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destMode '.orchestra-sync-manifest.json'))) `
+        'chmod failure: provider manifest is not committed'
 }
 
 # =============================================================================
@@ -410,7 +440,9 @@ Assert-True (-not (Test-Path -LiteralPath (Join-Path $destE 'scripts\cc-sync.cmd
 # =============================================================================
 # Report + cleanup
 # =============================================================================
-foreach ($d in @($repo, $dest, $repoCase, $destCase, $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS, $repoE, $destE)) {
+foreach ($d in @(
+        $repo, $dest, $repoCase, $destCase, $repoMode, $destMode, $fakeBin,
+        $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS, $repoE, $destE)) {
     if ($d) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
 }
 Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue

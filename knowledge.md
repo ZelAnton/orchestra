@@ -37,6 +37,8 @@ On POSIX, every user-facing `launchers/cc-*.sh` file is executable in the checko
 `tools/sync-runtime.ps1` reapplies the executable bit in the provider mirror. After a
 successful sync it also reports when the mirror's `scripts` directory is absent from
 `PATH`; the operator then adds that directory to the shell startup file.
+Failure to apply the executable bit aborts the transactional sync and rolls back the
+provider mirror; an unusable launcher is never reported as a successful installation.
 The POSIX launcher suite also runs the queue and state transaction tests, including
 concurrent writers and OS-native root normalization; their fixtures use the platform temp
 directory rather than relying on the Windows-only `TEMP` environment variable.

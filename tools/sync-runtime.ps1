@@ -347,7 +347,14 @@ function Publish-One {
     }
 
     if (-not $script:OnWindows -and $Dest.EndsWith('.sh')) {
-        try { & chmod '+x' $Dest 2>$null } catch { }
+        try {
+            & chmod '+x' $Dest 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                throw "chmod exited with code $LASTEXITCODE"
+            }
+        } catch {
+            throw "cannot make mirrored POSIX launcher executable '$Dest': $($_.Exception.Message)"
+        }
     }
 }
 
