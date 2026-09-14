@@ -147,6 +147,35 @@ are extensionless on every supported platform: Windows resolves the `.cmd` launc
 while macOS/Linux uses the managed executable copies installed beside the canonical
 `.sh` launchers. The explicit `.sh` names remain available too.
 
+For the separate serial Claude/Codex workflow directly on `main`, use
+[`cc-focus`](docs/sequential-cycle.md). It supports file-based handoff, persistent
+role sessions, cross-provider review loops, blocker recovery and a publication CI
+barrier. It does not use the queue processor's model or concurrency defaults.
+It also accepts a project directory containing independent Git repositories on
+`main`: list them in `focus-project.json` or use direct Git child directories.
+Each iteration reviews their combined changes and publishes only the repositories
+it changed, with separate commit/push recovery and CI for every target.
+Live messages, actions, command results and errors show the current work; use
+`--output compact` for activity-only output and `cc-focus status` for saved state.
+On a capable terminal, a permanent input line accepts instructions for the active
+invocation and `/pause`, `/stop`, `/resume`, `/exit`, `/correct`, `/messages` and `/help`.
+Above the log, an adaptive status panel shows the current task, phase timeline,
+review streaks and completed passes, activity timers and operator notices.
+Use `/status` for full details in a small terminal; task titles reuse the existing
+coordinator call and add no model invocation.
+Use `--ui off` for the ordinary text interface. Pausing releases runtime ownership
+while keeping the terminal open; uncertain message delivery requires an explicit
+retry/discard decision rather than silently moving to another role.
+Use `cc-focus stop` for
+a safe-boundary stop, or `cc-focus stop --now` for emergency interruption; launch
+`cc-focus` again to continue. Existing `cc-cycle` sessions and state are retained.
+After stopping, use `cc-focus correct --message "..."` or `--file correction.md`,
+then `cc-focus`, to apply an operator correction to the same unpublished stage
+with preserved sessions and renewed mandatory reviews.
+For completed coding stuck behind a rejected final report, use the guarded
+[`cc-focus recover --review-from` procedure](docs/sequential-cycle.md#recovering-a-rejected-coding-report)
+to validate the saved coding result and pause before mandatory reviews.
+
 1. `cc-config` — seeds `.work\config.md` for the project from the template block in
    `config.example.md`, and `.work\constraints.md` from the whole of
    `constraints.example.md` (an existing target file is never overwritten). It also

@@ -42,6 +42,14 @@ approval; any other value fails closed.
 
 ## Testing Guidelines
 
+The explicitly selected `cc-focus` mode is separate from the queue processor.
+Its fixed serial main-branch workflow, models, efforts and CLI permission flags
+are defined in `tools/cycle_prompts.py` and `docs/sequential-cycle.md`. This is an
+operator-requested exception to the default launcher profile above, not permission
+for a running role to widen its own settings. Do not apply queue worktrees, model
+routing, concurrency or loop limits to that mode. Do not rewrite generated agent
+frontmatter or user settings to implement it.
+
 Test role boundaries: file ownership, VCS permissions, status transitions, retry limits, and fallbacks. For launchers, verify argument parsing and failures. Use a disposable repository for destructive flow tests.
 
 ## Commit & Pull Request Guidelines

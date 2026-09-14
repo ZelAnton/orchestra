@@ -36,6 +36,8 @@ timeouts) из project config игнорируются.
 
 - ORCHESTRA_PROCESSKIT_ROOT_RUN_ID, CC_CODEX_EXEC_GRANT, ORCHESTRA_CODEX_ROLE_TOPIC,
   ORCHESTRA_BROKER_*, RUNTIME_LAYOUT;
+- ORCHESTRA_CYCLE_PWSH and ORCHESTRA_FOCUS_PROCESSKIT_CLI: focus launcher-owned
+  executable paths used for the shared lease and exact-run emergency control;
 - *_FAULT, *_DEBUG и test synchronization signals;
 - MSBUILDDISABLENODEREUSE, DOTNET_CLI_USE_MSBUILD_SERVER;
 - стандартные переменные внешних инструментов, которые читает сам инструмент.

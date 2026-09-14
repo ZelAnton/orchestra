@@ -54,6 +54,265 @@ runtime-контракты.
 
 ## Основной поток
 
+### Opt-in sequential main-branch workflow
+
+`launchers/cc-focus.sh` and `cc-focus.cmd` delegate to `tools/focus-runtime.ps1`.
+This is a separate operator-selected profile, not a queue processor variant.
+The wrapper requires Python 3.10+ and a ProcessKit root with inherited stdio.
+`tools/cc_focus.py` owns CLI arguments and lifecycle; `cycle_state.py` owns durable
+state, Git fingerprints and the shared processor lease; `cycle_transport.py`
+owns serial Claude print/Codex app-server sessions and operator approval callbacks;
+`cycle_workflow.py` owns phase barriers, review counters, recovery and exact-SHA CI.
+`cycle_prompts.py` is the canonical fixed profile and prompt source, independent
+of generated agent roles. These runtime files are shared cc-sync assets.
+`focus_project.py` discovers a project outside its member repositories, either
+from direct Git children or `focus-project.json` (version 1, repositories: relative
+paths). Member roots must be nonoverlapping primary Git main checkouts without
+symlink escapes. `focus_publication.py` applies one coding/review cycle to their
+combined diff, with separate policy, commit/push reconciliation and CI per changed
+repository. Unchanged repositories are never publication targets. These two modules
+are shared cc-sync assets; `tests/test_focus_project.py` covers their integration.
+`focus_reconcile.py` owns explicit operator handover of changed shared context and
+protected member files; it is also installed by cc-sync.
+`focus_progress.py` renders bounded actual provider events and a 15-second activity
+heartbeat, persisting `.work/cycle/progress.json` without raw commands or reasoning.
+`focus_output.py` renders public message deltas, actions, command results and errors
+in live mode (the CLI default); `--output compact` disables these payloads. It
+neutralizes terminal controls, caps per-item display, deduplicates recent streamed
+and final snapshots, and excludes reasoning/protocol envelopes. Transport logs keep
+the original events, including trailing stderr; logs and live payloads can contain
+secrets and must not be treated as redacted.
+`focus_control.py` owns addressed stop requests, run identity, acknowledgement and
+exact-ProcessKit-run emergency cleanup. The public command is now `cc-focus`;
+each provider has its own durable ProcessKit run address, including on weak
+process-group backends where the root's container cannot cover another group.
+Internal `cycle_*` modules, `.work/cycle/` and old invocation markers are retained
+to resume existing sessions without migrating another project's files.
+
+`focus_terminal.py` owns the optional standard-library TTY composer, bounded
+scrollback, key decoding, terminal restoration and redirected-output fallback.
+It caches wrapped output at the current width and the visible log window, so typing
+in old scrollback does not rescan history. Cached lines stay bounded by the retained
+3000 lines plus one tail entry; output/scroll/resize invalidate the visible window.
+Only changed terminal rows are emitted, unchanged status ticks do not redraw, and
+provider-text sanitization runs outside the input lock. Session reuse is unchanged.
+`focus_status.py` projects workflow state into a six-line panel separated from the
+log, with a three-line compact layout for narrow/short terminals. It shows the
+task, actual role/model, five-phase timeline, review streaks and completed totals,
+invocation/event timers and priority operator notices. `/status` retains full
+details. Timer ticks run once a second without disk access or history scans;
+message notices use an iteration-scoped cache refreshed on delivery changes.
+`task` is nullable display metadata from the existing coordinate/code report:
+plan-relative path, selected stage ID and title. Paths must resolve inside the
+project; later reports cannot switch the current iteration's task identity.
+Older reports can omit it, and invalid metadata cannot block the workflow.
+Provider output schemas require the nullable field; the saved-report parser keeps
+the original required fields. Unknown legacy titles use `Задача N` until a valid
+report supplies one. No additional model call or stage-selection authority is added.
+`display_reviews` counts validated completed passes separately from the existing
+gate counters; `display_review_events` keeps the latest 12 outcomes/reset reasons.
+Interrupted/rejected passes earn no completed credit. Legacy totals remain marked
+as lower bounds. Metadata is archived and reset on the next iteration; CI display
+is bound to the publication SHA. All display fields are observational and do not
+grant review, publication or CI credit. `focus_status.py` is a shared cc-sync asset;
+`tests/test_focus_status.py` covers projections, workflow transitions and rendering.
+`focus_input.py` is the single input owner for slash commands, explicit approvals
+and active-invocation targeting. `/exit` requests a safe pause and closes the terminal
+after ownership is released; empty-input Ctrl+D uses the same command. `/resume`
+continues a stopped workflow and retries an escalated blocker when needed; the
+noninteractive `--retry` flag and message-delivery retry commands remain available.
+Repository admission runs before opening the interactive composer, so an invalid
+root or detached HEAD exits with a visible shell diagnostic instead of parking at
+`starting`. The check is repeated before ownership on initial entry and UI resume.
+Cycles in disjoint projects have independent conversations. A project cycle holds
+its own lock/lease plus every member's lock/lease, excluding overlapping project,
+single-member and queue-processor runs. Provider processes inherit all POSIX lock
+descriptors. Member `project-owner.json` records also require confirmation of the
+parent provider's exit after a crash; they are removed after confirmed shutdown.
+Member `status` identifies the owning project; member `stop` refuses to target a
+stale independent member run and directs the operator to the parent project.
+`--handoff` only imports context. Every member still requires Git `main`; detached
+colocated Jujutsu checkouts are not admitted or automatically converted.
+Project snapshots prefix file paths and store HEAD/index per repository, retaining
+the existing single-repository snapshot/state format. Membership is pinned across
+resume. Files outside member repositories are sealed read-only context; they cannot
+be implementation changes with no publication owner. Per-member lease owner intent
+lives in the parent state; per-member CI artifacts live under
+`.work/cycle/repositories/<relative-path>/ci/`. Publication targets pin remote and
+push URL before any publisher call. Partial commits/pushes are reconciled separately
+before retry; all changed repositories must finish publication and CI before the
+next iteration. The aggregate publication hash is display identity, never a Git SHA
+sent to a remote or CI API. Cross-repository pushes are not atomic.
+An explicit retry refreshes every published member's CI deadline consistently.
+New reviewed fixes after a partial push reopen that member's publication; an old
+confirmed push cannot hide remaining changes. A PAUSE file at the project or any
+member is honored at the normal safe boundary, including stopped-state recovery.
+`focus_messages.py` stores hashed message identity
+and delivery state under `.work/cycle/messages/ITERATION/`; uncertain delivery is
+an operator pause, never automatic healing or implicit resend. Codex delivery uses
+asynchronous `turn/steer` replies correlated alongside normal protocol events.
+Claude keeps stream-json stdin open and sends queued input after the current
+response, requiring its replay acknowledgement and its own result; fix counts
+from earlier responses are retained. Accepted stage messages enter later context.
+Review intervention clears earlier clean credit; Claude intervention returns to
+Astra. Publication/CI cannot be steered. Pending delivery prevents phase advancement
+and cannot be bypassed by a cached result, stopped-stage correction or old-report
+recovery. The terminal may remain parked after releasing runtime ownership; external
+stop distinguishes a parked UI from a still-running provider. Root termination
+holds the control-identity lock to avoid killing a newer epoch in the same UI.
+Before a live parked UI is replaced, admission requires confirmation that its
+recorded provider exited; losing the local lock is not itself proof of leaf exit.
+The model-free `messages`, `retry-message --id` and `discard-message --id` commands
+support non-TTY recovery. All three new modules are shared cc-sync runtime assets;
+`tests/test_focus_terminal.py` adds protocol, lifecycle and POSIX PTY fixtures.
+
+The flow is Luna/xhigh coordination, Fable/high coding, Astra/high review to three
+clean passes, Fable/xhigh review to two implementation-clean passes, Luna/high
+commit/push, and configured CI. Substantial second-review fixes return to Astra.
+Recoverable blockers receive one Astra/xhigh recovery attempt before an operator-visible stop.
+The `heal` role has its own persisted conversation, separate from coding and both
+review roles. Technical failures, including remote Git queries, generic provider
+API errors and model-reported requests for human intervention, go to that role.
+The healer verifies the diagnosis and existing authorization, performs necessary
+engineering repairs within the task/member scope and tests them before escalating.
+Product authentication code is not the agent's own runtime/account permissions;
+protected existing work and actual permission boundaries remain enforced.
+Only explicit account-access/approval barriers bypass model recovery, as do
+`cleanup-incomplete`/`turn-active`, where another provider cannot safely start.
+The blocker records `escalation_reason`: manual action, unsafe provider state,
+failed healer, failed post-repair verification or an already-attempted blocker.
+Terminal output explains whether recovery is starting or why human action remains.
+Claude-generated API errors (`assistant`, `<synthetic>`, `is_api_error_message=true`
+and a matching session) are classified before model pin validation.
+`oauth_org_not_allowed` becomes `claude-access-denied`; other such errors become
+`claude-api-error` with their provider detail. Access refusals also preserve the
+provider detail and direct the operator to the active login and subscription/payment
+status; an organization-labelled error alone does not identify managed billing.
+The access refusal stops directly;
+generic API failures receive the normal Astra/xhigh recovery attempt. Neither
+replaces the session or earns review credit. They preserve the required model, phase and
+conversation for operator continuation after access/provider recovery. Ordinary
+answers from another model still fail as `model-rerouted`; quoted error text does
+not trigger the API classifier. Synthetic errors are terminal failures, never
+successful reports, even if the CLI has not emitted initialization yet.
+Claude also receives `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in its process and
+inline settings, with Bash timeouts of 30 minutes by default and six hours maximum.
+Monitor, cron creation, wakeups, remote triggers and Workflow are disabled alongside
+native delegation. The six-hour outer deadline remains in force. This enforces the
+serial contract without changing user/project settings or conversation identity.
+For native continuation from older sessions/CLI versions, task start/completion
+events and queued turns keep a result provisional. The runtime stores it under
+`deferred-*.txt`, keeps consuming events and requires a later final report; it does
+not close stdin, send queued operator input or grant review credit at that point.
+Any fixes reported provisionally remain a lower bound in the final response, then
+the normal operator-response aggregation applies. Native EOF without the final
+report still blocks. Only a final response starts the 30-second process-exit grace.
+An unresolved blocker does not cause model polling. Luna gets short results and
+artifact paths; Astra gets the complete coding final message. Review invocations
+each perform one pass; the runtime owns clean counters and rejects incomplete
+reports; evidence entries must contain non-whitespace text. Only the publisher may
+commit/push, and existing dirty files are protected.
+The report parser preserves long summaries instead of treating the 1200-character
+presentation budget as a workflow blocker. `concise_summary` bounds only printed
+previews and persisted coordinator/status summaries, including coding recovery;
+saved reports and Claude multi-response aggregation retain the full content.
+Report types, fix-count consistency and mandatory review evidence stay strict.
+`report_object` unwraps one final JSON object after plain prose or a single Markdown
+fence; the raw artifact/handoff stays unchanged. It rejects multiple/nested objects,
+trailing commentary, duplicate keys and malformed JSON without guessing a repair.
+Formatting-only wrappers no longer launch a healer. Recovery still requires the
+exact original checkout snapshot; later healer/other edits need a fresh coding report.
+An older summary-length blocker is retried with `--retry` after runtime sync;
+the rejected pass is not automatically credited or used to skip review gates.
+Remote-main evidence is queried at the single push URL, with at most three
+60-second attempts and a two-second delay on transient network errors/timeouts.
+`Repository.remote_head` disables terminal/GCM login only for that query, preserving
+credential helpers and operator settings. `Cycle.remote_head` labels progress as
+a runtime Git check instead of an active coordinator. Exhausted timeouts and other
+remote access failures become `remote-query-timeout`/`remote-query-failed` and go
+through Astra/xhigh recovery; unchanged review seals, phase and sessions survive.
+Any repair changing reviewed files must pass both reviews. After restoring access,
+`--retry` also resumes legacy `command-unavailable` Git timeouts. Publication and CI
+still require live remote evidence; successful pushes reconcile before model replay.
+Check authentication as the launcher OS user: root's missing login says nothing
+about an operator account. `gh auth status` can succeed with SSH selected while the
+actual push URL remains HTTPS without a Git credential helper. Diagnose the push
+URL directly; the operator can connect an existing GitHub login to HTTPS Git with
+`gh auth setup-git --hostname github.com`. The runtime never changes credentials or
+remote URLs automatically; see the publication recovery guide in `docs/sequential-cycle.md`.
+
+State, invocation intents/results and immutable handoffs live in `.work/cycle/`.
+Internal role session IDs persist automatically. `--handoff FILE` imports context;
+the current project plan referenced in that handoff is the source of stages, not
+the task queue or conversation memory. Missing or ambiguous plans block selection.
+`--new-sessions` resets conversations without resetting progress or deleting WIP;
+`--retry` is the operator action after a blocked stop. Session ID import is absent.
+`cc-focus recover --review-from <saved-code-result>` is a separate, model-free
+operator transition for already completed coding whose report was rejected.
+`Cycle.recover_review` validates the original coding intent/result, current
+iteration, unchanged HEAD/index/files and protected work; it archives the previous
+state under `.work/cycle/recoveries/` and exits paused at Astra with zero review
+credit. It does not accept healer prose as phase authority. Coding report parsing
+allows substantial new implementation with no review-fix count; review/healing
+classification remains strict. The code recovery context permits finalizing a
+lost report instead of selecting another implementation stage.
+`cc-focus correct --message <text>` or `--file <path>` is a stopped-only, model-free
+transition under the local lock and shared lease. It copies/hashes operator text
+and the previous stage context under `.work/cycle/corrections/`, retains the current
+iteration and sessions, replaces pending intent with a new correction revision,
+and returns the same stage to coding with zero review credit. Context validates
+the immutable artifacts and carries corrections through both reviews; old coding
+results cannot acknowledge a newer revision. Publication/CI, changed HEAD/protected
+work and unstarted stages fail closed. After coding, `correction_pending` clears;
+after publication/CI, the archived iteration retains corrections and the new stage
+starts without them. `--retry` and `--new-sessions` do not remove corrections.
+`cc-focus reconcile --plan-out .work/focus-reconcile.json` prepares a model-free
+handover plan for `project-context-changed`/`protected-work`; `--apply-plan FILE`
+is explicit operator acceptance, never an action for a healer/provider to grant
+itself ownership. Plans seal all work, HEADs/index and semantic runtime state;
+only admission timestamps and lease bookkeeping are ignored. Applying a stale or
+edited plan fails, including work changing during correction artifact creation.
+Changed loose context receives new read-only expectations. Listed protected member
+files are handed over in full, including their pre-existing uncommitted content;
+their publication baselines become Git HEAD checkout fingerprints (absent for new
+files), so earlier dirty content stays owned even if coding reverts the latest edit.
+The archive retains the original dirty baselines. Unlisted work
+stays protected. The original state and exact plan are archived through
+`Cycle.record_correction`; the same stage returns to code with sessions preserved,
+a fresh correction revision and no review credit. Source/index/HEAD are untouched.
+Admission holds normal project/member locks and leases, honors PAUSE and uncertain
+messages, and refuses changed HEAD/protected staging, layout changes and any
+publication/CI phase. Plans never widen provider permissions or publication scope
+to files outside Git. Neither handoff import nor retry implicitly accepts these
+ownership changes. See the handover guide in `docs/sequential-cycle.md`.
+Plan destinations exclude shared runtime control files such as `.work/control_state.json`,
+even when those files do not exist yet.
+Publication/CI validation also rechecks protected staging in single-repository mode
+before archiving an iteration; the next stage cannot silently accept a changed index.
+`cc-focus stop` waits for a safe boundary, including CI if publication has started;
+`stop --now` interrupts the current attempt and may hard-kill only its recorded
+contained run. Stop requests never launch blocker recovery; continuation does.
+Run control uses `.work/cycle/active.json`, `stop.json`, `runs/<nonce>.json` and
+`control.lock`. These are separate from operator-owned `.work/PAUSE`, which is
+still checked only at boundaries. An old request cannot stop a newly started run.
+The mode explicitly pins Codex full-access/on-request and Claude bypass permissions
+without changing global settings or role frontmatter. Read `docs/sequential-cycle.md`
+for the ownership, CI, crash-recovery and filesystem-durability boundaries.
+Codex processes and thread start/resume also pin `features.memories=false`:
+memory consolidation is a separate tool-using agent, not covered by
+`features.multi_agent=false`. Diagnostic evidence showed such a background thread
+editing stage files and launching mutation tests in the consuming checkout while
+the healer itself performed only report repair. Its calls were present in native
+Codex logs under a different thread ID with the same provider PID, but absent from
+the healer's app-server tool transcript. The override preserves global settings,
+memory files and role sessions; it does not erase already-injected context or stop
+independent running providers. Do not infer an external overlapping run from the
+healer's prose alone, and do not force an old report onto a changed snapshot.
+`tests/test_cycle.py`, invoked by `tests/launchers/test-cc-focus.ps1`, uses only
+protocol fixtures and disposable Git repositories; it never starts paid models.
+
+### Queue processor workflow
+
 ```text
 источник задачи -> Tasks_Queue.md -> planner -> task.md
     -> coder в отдельном worktree -> reviewer <-> coder
@@ -1171,6 +1430,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 | `.work/constraints.md` | человекочитаемая политика ограничений проекта (denylist путей, ветки/remotes, push/merge policy, обязательные проверки, пороги, human-review категории); шаблон — `constraints.example.md`, сеет `cc-config`; читают processor/planner/coder/reviewer, нет файла — деградация без ошибок |
 | `.work/orchestrator.lock` | аренда владельца прогона (каталог; защита от двух processor независимо от provider). Содержит `lease.json` — запись аренды (owner/session id, корень, host, heartbeat, TTL, pid+время создания как доказательство живости, поколение и опциональный `processkit_run_id`); ведётся через `tools/state-tx.ps1`, см. `docs/queue_contract.md`, §14-§16 |
 | `.work/codex_processor_session.json` | адресованный UUID root-thread Codex-provider (`orchestra/codex-processor-session@1`), provider/root/timestamps и `last_action=start\|resume\|handoff`; атомарно пишет только `tools/codex-processor-runtime.ps1`, читает `cc-resume codex`; handoff инвалидирует старый UUID после lease-preflight и записывает новый thread, файл не заменяет lease и не используется Claude-provider |
+| `.work/cycle/` | Separate sequential-profile state: checksummed phase/session state, invocation intents and reports, immutable handoffs, publication/CI evidence, session archives and an OS-held runtime lock. Owned only by the cycle runtime, never by queue roles; the shared processor lease still excludes concurrent owners. |
 | `.work/codex-processor-runtime.lock` | OS-held exclusive file lock внешнего Codex TUI root process; сериализует `start`/`resume`/`handoff` до модельного `orchestrator.lock`, чтобы конкурентные rollout `session_meta` не перезаписали addressed UUID. Пустой файл может оставаться, владение определяется только открытым handle и автоматически исчезает при crash |
 | `.work/orchestrator.lock/lease.json` | запись аренды (`schema: orchestra/lease@1`); мутируется только транзакционно через `tools/state-tx.ps1` (acquire/heartbeat/release/takeover) |
 | `.work/state-tx.lock` | краткоживущий атомарный лок мутации control plane (аренда/поколение состояния); держит `state-tx.ps1` на время одной транзакции; отдельный от `orchestrator.lock` и `queue-tx.lock` |

@@ -85,6 +85,9 @@ function New-SyntheticRepo {
     Write-File (Join-Path $repo 'tools\state-tx.ps1') "state-tx-v1`n"
     Write-File (Join-Path $repo 'tools\queue-tx.ps1') "queue-tx-v1`n"
     Write-File (Join-Path $repo 'tools\verification.ps1') "verification-v1`n"
+    foreach ($name in @('focus-runtime.ps1', 'cc_focus.py', 'cycle_prompts.py', 'cycle_state.py', 'cycle_transport.py', 'cycle_workflow.py', 'focus_control.py', 'focus_progress.py', 'focus_output.py', 'focus_messages.py', 'focus_input.py', 'focus_terminal.py', 'focus_status.py', 'focus_project.py', 'focus_publication.py', 'focus_reconcile.py')) {
+        Write-File (Join-Path $repo ('tools/' + $name)) "$name-v1`n"
+    }
     Write-File (Join-Path $repo 'tools\sync-runtime.ps1') "sync-rt-SELF`n"
     Write-File (Join-Path $repo 'config.example.md') "config-v1`n"
     Write-File (Join-Path $repo 'constraints.example.md') "constraints-v1`n"
@@ -155,6 +158,10 @@ Assert-FileText (Join-Path $dest 'scripts\codex-role-runtime.ps1') "codex-role-r
 Assert-FileText (Join-Path $sharedDest 'scripts\state-tx.ps1') "state-tx-v1`n" 'clean: state-tx.ps1 mirrored to shared home'
 Assert-FileText (Join-Path $sharedDest 'scripts\queue-tx.ps1') "queue-tx-v1`n" 'clean: queue-tx.ps1 mirrored to shared home'
 Assert-FileText (Join-Path $sharedDest 'scripts\verification.ps1') "verification-v1`n" 'clean: verification.ps1 mirrored to shared home'
+foreach ($name in @('focus-runtime.ps1', 'cc_focus.py', 'cycle_prompts.py', 'cycle_state.py', 'cycle_transport.py', 'cycle_workflow.py', 'focus_control.py', 'focus_progress.py', 'focus_output.py', 'focus_messages.py', 'focus_input.py', 'focus_terminal.py', 'focus_status.py', 'focus_project.py', 'focus_publication.py', 'focus_reconcile.py')) {
+    Assert-FileText (Join-Path $sharedDest ('scripts/' + $name)) "$name-v1`n" "clean: $name mirrored to shared home"
+    Assert-True (-not (Test-Path (Join-Path $dest ('scripts/' + $name)))) "clean: $name is not a provider-local runtime"
+}
 Assert-True (-not (Test-Path (Join-Path $sharedDest 'scripts\sync-runtime.ps1'))) 'clean: sync-runtime.ps1 remains checkout-only'
 $codexDest = Join-Path $dest '.codex'
 Assert-FileText (Join-Path $codexDest 'agents\orchestra_coder.toml') "name = 'orchestra_coder'`n" 'clean: generated Codex coder role installed under isolated CODEX_HOME'
@@ -479,11 +486,35 @@ Assert-True ($r.Err -match 'bare LF') "cmd-eol: failure explains the CRLF contra
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $destE 'scripts\cc-sync.cmd'))) 'cmd-eol: malformed launcher is not published'
 
 # =============================================================================
+# Focus rename preserves local state and prunes only previously managed names.
+# =============================================================================
+$repoFocus = New-SyntheticRepo
+$destFocus = New-Root
+Write-File (Join-Path $repoFocus 'launchers/cc-cycle.cmd') "@echo off`r`n"
+Write-File (Join-Path $repoFocus 'launchers/cc-cycle.sh') "#!/usr/bin/env bash`n"
+$r = Invoke-Sync -Repo $repoFocus -Dest $destFocus -Glob '*'
+Assert-True ($r.ExitCode -eq 0) 'focus rename: old launcher fixture installs'
+Write-File (Join-Path $destFocus '.work/cycle/state.json') 'preserved session state'
+Rename-Item -LiteralPath (Join-Path $repoFocus 'launchers/cc-cycle.cmd') -NewName 'cc-focus.cmd'
+Rename-Item -LiteralPath (Join-Path $repoFocus 'launchers/cc-cycle.sh') -NewName 'cc-focus.sh'
+$r = Invoke-Sync -Repo $repoFocus -Dest $destFocus -Glob '*'
+Assert-True ($r.ExitCode -eq 0) 'focus rename: new launcher fixture installs'
+Assert-True (Test-Path -LiteralPath (Join-Path $destFocus 'scripts/cc-focus.cmd')) 'focus rename: Windows launcher exists'
+Assert-True (Test-Path -LiteralPath (Join-Path $destFocus 'scripts/cc-focus.sh')) 'focus rename: POSIX launcher exists'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $destFocus 'scripts/cc-cycle.cmd'))) 'focus rename: managed old Windows launcher pruned'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $destFocus 'scripts/cc-cycle.sh'))) 'focus rename: managed old POSIX launcher pruned'
+if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $destFocus 'scripts/cc-focus')) 'focus rename: extensionless command exists'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destFocus 'scripts/cc-cycle'))) 'focus rename: managed old alias pruned'
+}
+Assert-FileText (Join-Path $destFocus '.work/cycle/state.json') 'preserved session state' 'focus rename: state untouched'
+
+# =============================================================================
 # Report + cleanup
 # =============================================================================
 foreach ($d in @(
         $repo, $dest, $repoCase, $destCase, $repoMode, $destMode, $fakeBin,
-        $repoCollision, $destCollision,
+        $repoCollision, $destCollision, $repoFocus, $destFocus,
         $repoR, $destR, $repoH, $destH, $repoC, $destC, $repoS, $destS, $repoE, $destE)) {
     if ($d) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
 }
