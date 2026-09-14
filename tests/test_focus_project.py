@@ -28,6 +28,7 @@ class ProjectTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="focus-project-")
         self.root = Path(self.temp.name) / "project with spaces"
         self.root.mkdir()
+        self.root = self.root.resolve()  # Match production root canonicalization.
         self.members = {}
         self.remotes = {}
         for name in ("Core", "Root", "Specification"):
@@ -196,6 +197,22 @@ class ProjectTests(unittest.TestCase):
         (self.root / "HANDOFF.md").write_text("Another change")
         with self.assertRaisesRegex(Blocked, "read-only cycle context"):
             self.cycle.check_protected(self.project.snapshot())
+
+    def test_precode_context_handover_allows_exhausted_plan_without_inventing_work(self):
+        (self.root / "HANDOFF.md").write_text("Current plan is exhausted.\n")
+        path = self.root / ".work/precode-plan.json"
+        plan = focus_reconcile.write_plan(self.cycle, path)
+        self.assertEqual([(row["path"], row["action"]) for row in plan["changes"]],
+                         [("HANDOFF.md", "refresh-context")])
+        before = self.project.snapshot()
+        focus_reconcile.apply(self.cycle, path)
+        self.assertFalse(self.state["code_started"])
+        self.assertIsNone(self.state["correction_pending"])
+        self.assertEqual(self.project.snapshot(), before)
+        self.transport.actions = [("coordinate", fixtures.report(status="complete"))]
+        self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual(self.state["status"], "complete")
+        self.assertFalse(self.state["code_started"])
 
     def test_reconciliation_rejects_stale_work_state_and_edited_plan(self):
         path, plan = self.reconciliation_fixture()

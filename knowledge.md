@@ -280,6 +280,17 @@ The archive retains the original dirty baselines. Unlisted work
 stays protected. The original state and exact plan are archived through
 `Cycle.record_correction`; the same stage returns to code with sessions preserved,
 a fresh correction revision and no review credit. Source/index/HEAD are untouched.
+An iteration blocked before its first coding invocation can also be reconciled.
+Its correction records `before_code=true`, preserves `code_started=false`, clears
+the provisional task label, and guides selection from the current plan instead of reopening the prior published
+stage. It has no mandatory correction acknowledgement for a nonexistent stage;
+the usual unpublished-diff barrier still requires coding and both reviews for
+adopted work. A loose-context-only handover may finish an exhausted plan without
+inventing implementation. Fresh coding prompts no longer describe an initial
+invocation as report recovery; resumed/previously attempted invocations still do.
+Focus tests use the launcher's UTF-8 Python profile, canonical temporary roots
+(including Windows 8.3 aliases), and check lock contents only after releasing a
+Windows byte-range lock; probing a held lock still checks that metadata is unchanged.
 Admission holds normal project/member locks and leases, honors PAUSE and uncertain
 messages, and refuses changed HEAD/protected staging, layout changes and any
 publication/CI phase. Plans never widen provider permissions or publication scope

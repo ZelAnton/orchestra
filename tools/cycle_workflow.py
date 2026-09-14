@@ -64,7 +64,9 @@ class Cycle:
     def check_protected(self, snapshot):
         touched = set(changed(self.state["baseline"], snapshot)) & set(self.state["protected"])
         if touched:
-            raise Blocked("protected-work", "Pre-existing work was changed; preserve and reconcile it: " + ", ".join(sorted(touched)))
+            raise Blocked("protected-work", "Pre-existing work was changed; preserve and reconcile it: " + ", ".join(sorted(touched)) +
+                          ". For intentional operator changes, prepare and inspect a cc-focus reconcile plan, then explicitly "
+                          "accept it with --apply-plan. --retry alone does not transfer ownership; provider roles must not approve their own changes.")
         if self.repo.index_entries(self.state["protected"]) != self.state["protected_index"]:
             raise Blocked("protected-index", "Pre-existing index entries changed; preserve the operator's staging before resuming.")
 
@@ -110,17 +112,28 @@ class Cycle:
         if corrections:
             context["operator_corrections"] = corrections
             context["correction_pending"] = state.get("correction_pending")
+            before_code = corrections[-1].get("before_code", False)
+            selection = (
+                "The latest handover occurred BEFORE coding began in this iteration. Read the current versions of its listed "
+                "instruction files and the current project plan. Select the next unfinished stage only if coding has not "
+                "already selected/started a stage in THIS iteration; otherwise finish that selected stage, including a lost report. "
+                "The last result or an older session may describe a previous published stage: do not reopen it. "
+                if before_code else
+                "The operator stopped this SAME project stage. Do not select the next unfinished project-plan stage. "
+                "If the original stage cannot be identified from saved evidence, report blocked. ")
             context["correction_instructions"] = (
-                "The operator stopped this SAME project stage and supplied corrections, oldest to newest. "
+                selection + "The operator supplied corrections, oldest to newest. "
                 "Read the immutable correction files; later corrections supersede earlier conflicting task details, "
-                "not role or permission boundaries. The archive paths preserve the original stage selection and "
-                "interrupted invocation. Do not select the next unfinished project-plan stage. "
-                "If the original stage cannot be identified from saved evidence, report blocked. "
-                "In code, apply the corrections to the preserved stage even if its earlier report says complete; "
+                "not role or permission boundaries. The archive paths preserve the original iteration and "
+                "interrupted invocation. In code, apply the corrections to this iteration's work; "
                 "do not merely reconstruct the old report. Identify the correction IDs and disposition in evidence. "
                 "Coordinate confirms this route without implementing it. Reviews verify the corrected stage anew. "
-                "Only a done coding result can acknowledge pending corrections; complete cannot skip them.")
-        if state["phase"] == "code" and state.get("code_started"):
+                "Only a done coding result can acknowledge pending corrections; complete cannot skip them. "
+                "A handover before coding carries no claim that a stage started; complete still requires an exhausted plan "
+                "and no unpublished changes, including adopted files.")
+        pending = state.get("pending") or {}
+        if (state["phase"] == "code" and state.get("code_started")
+                and (pending.get("resume_code", True) or pending.get("attempts", 0))):
             context["coding_recovery"] = "This stage already started. The code phase includes reconstructing its lost/rejected final report without repeating completed implementation. Pending reviews do not require choosing another stage. Only the runtime advances the phase after validating the coding result."
         if role == "publish":
             context.update(remote=state["remote"], ref="refs/heads/main",
@@ -268,7 +281,7 @@ class Cycle:
         path = self.store.artifact(f"corrections/{correction_id}.md", data)
         corrections.append({"id": correction_id, "iteration": state["iteration"],
                             "path": path, "sha256": digest(data), "archive": archive,
-                            "archive_sha256": digest(archive_bytes)})
+                            "archive_sha256": digest(archive_bytes), "before_code": not state.get("code_started", False)})
         if validate:
             validate()
         previous = copy.deepcopy(state)
@@ -277,10 +290,14 @@ class Cycle:
                 state.clear()
                 state.update(candidate)
             self.reset_reviews("Оператор изменил требования")
+            if not state.get("code_started"):
+                # A coordinator's provisional label must not pin the old plan's
+                # stage before the operator's updated instructions are read.
+                state["task"] = None
             state.update(phase="code", status="paused", pending=None, blocker=None,
                          healed=[], recovery_unverified=False, coordination=None,
                          corrections=corrections, correction_revision=correction_id,
-                         correction_pending=correction_id, last_snapshot=current)
+                         correction_pending=correction_id if state.get("code_started") else None, last_snapshot=current)
             self.save()
         except BaseException:
             # The CLI may save an interrupted status while handling this error.
@@ -288,8 +305,10 @@ class Cycle:
             state.clear()
             state.update(previous)
             raise
+        continuation = ("Paused before coding the SAME stage; both reviews must run again." if state.get("code_started") else
+                        "Paused before stage selection from the current plan; any unpublished work requires coding and both reviews.")
         print(f"cc-focus: correction {correction_id[:12]} saved for iteration {state['iteration']}. "
-              "Paused before coding the SAME stage; both reviews must run again. Sessions and work preserved.", flush=True)
+              + continuation + " Sessions and work preserved.", flush=True)
         print("Run cc-focus to apply the correction and continue. No model was started.", flush=True)
 
     def recover_review(self, source):

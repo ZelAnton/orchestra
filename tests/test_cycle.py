@@ -57,6 +57,7 @@ class CycleTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="orc-cycle-test-")
         self.root = Path(self.temp.name) / "repo with spaces"
         self.root.mkdir()
+        self.root = self.root.resolve()  # Windows TEMP may use an 8.3 alias.
         self.repo = Repository(self.root)
         self.repo.git("init", "--initial-branch=main")
         self.repo.git("config", "user.email", "test@example.invalid")
@@ -547,6 +548,85 @@ class CycleTests(unittest.TestCase):
             self.assertIn("Do not select the next unfinished", self.cycle.context(role))
         with self.assertRaisesRegex(Blocked, "not a coding result"):
             self.cycle.recover_review(old_result)
+
+    def precode_reconciliation_fixture(self):
+        import focus_reconcile
+        self.edit(content="pre-existing operator work\n")()
+        self.edit(name="untouched.txt", content="protected unrelated work\n")()
+        self.state = fresh_state(self.repo)
+        self.state.update(iteration=9, status="blocked", last={"role": "publish", "summary": "Previous stage published"},
+                          task={"id": "old-proposal", "title": "Provisional task", "plan": "source.txt", "iteration": 9},
+                          sessions={"code": "previous-coding-session"},
+                          blocker={"code": "protected-work", "status": "blocked"})
+        self.cycle.state = self.state
+        self.edit(content="current operator work\n")()
+        self.store.save(self.state)
+        plan = self.root / ".work/precode-plan.json"
+        focus_reconcile.write_plan(self.cycle, plan)
+        return plan
+
+    def test_reconcile_before_coding_is_model_free_and_preserves_iteration(self):
+        import cc_focus
+        path = self.precode_reconciliation_fixture()
+        before = self.repo.snapshot()
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
+                patch("cycle_transport.Transport.run", side_effect=AssertionError("No model during handover")):
+            lease.return_value.__enter__.return_value.pwsh = "pwsh"
+            self.assertEqual(cc_focus.main(["reconcile", "--apply-plan", str(path)]), 0)
+        state = self.store.read()
+        self.assertEqual((state["iteration"], state["phase"], state["status"]), (9, "code", "paused"))
+        self.assertFalse(state["code_started"])
+        self.assertIsNone(state["task"])
+        self.assertEqual(state["sessions"], {"code": "previous-coding-session"})
+        self.assertNotIn("source.txt", state["protected"])
+        self.assertIn("untouched.txt", state["protected"])
+        self.assertEqual(self.repo.snapshot(), before)
+        self.assertTrue(state["corrections"][-1]["before_code"])
+        self.cycle.state = state
+        self.cycle.check_protected(before)
+        context = self.cycle.context("coordinate")
+        self.assertIn("BEFORE coding began", context)
+        self.assertIn("do not reopen it", context)
+        self.assertNotIn("If the original stage cannot be identified", context)
+
+    def test_precode_reconciliation_requires_coding_and_both_reviews(self):
+        import focus_reconcile
+        self.remote()
+        path = self.precode_reconciliation_fixture()
+        focus_reconcile.apply(self.cycle, path)
+        self.transport.actions = [
+            ("coordinate", report()), ("code", self.edit(content="next stage implementation\n")),
+            ("coordinate", report()), *[("astra", report())] * 3,
+            ("coordinate", report()), *[("claude", report())] * 2,
+            ("coordinate", report()), ("publish", self.commit_stage),
+            ("coordinate", report(status="complete")),
+        ]
+        self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual([role for role, _ in self.transport.calls if role != "coordinate"],
+                         ["code", "astra", "astra", "astra", "claude", "claude", "publish"])
+        coding_context = next(prompt for role, prompt in self.transport.calls if role == "code")
+        self.assertNotIn('"coding_recovery"', coding_context)
+        self.assertIn("next unfinished stage", coding_context)
+        archived = json.loads((self.store.directory / "iterations/000009.json").read_text())
+        self.assertTrue(archived["corrections"][-1]["before_code"])
+        self.assertEqual(self.state["iteration"], 10)
+        self.assertEqual(self.state["corrections"], [])
+
+    def test_precode_reconciliation_cannot_complete_with_unpublished_adopted_work(self):
+        import focus_reconcile
+        path = self.precode_reconciliation_fixture()
+        focus_reconcile.apply(self.cycle, path)
+        self.transport.actions = [("coordinate", report(status="complete")), ("heal", report(status="blocked"))]
+        self.assertEqual(self.cycle.run(), 3)
+        self.assertEqual(self.state["blocker"]["code"], "premature-completion")
+        self.assertFalse(self.state["code_started"])
+        self.assertEqual(self.state["iteration"], 9)
+
+    def test_coding_recovery_context_requires_a_previous_attempt(self):
+        self.state.update(code_started=True, pending={"role": "code", "resume_code": False})
+        self.assertNotIn('"coding_recovery"', self.cycle.context("code"))
+        self.state["pending"]["attempts"] = 1
+        self.assertIn('"coding_recovery"', self.cycle.context("code"))
 
     def test_corrected_cycle_requires_coding_and_all_reviews_before_publication(self):
         self.remote()
@@ -1678,11 +1758,15 @@ class CycleTests(unittest.TestCase):
         self.assertFalse(self.store.directory.exists())
 
     def test_status_lock_probe_does_not_write_existing_lock(self):
+        self.store.directory.mkdir(parents=True, exist_ok=True)
+        path = self.store.directory / "runtime.lock"
+        path.write_bytes(b"\0")
+        before = path.read_bytes(), path.stat().st_mtime_ns
         with LocalLock(self.store.directory):
-            path = self.store.directory / "runtime.lock"
-            before = path.read_bytes(), path.stat().st_mtime_ns
             self.assertTrue(runtime_active(self.store))
-            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+            # Windows byte-range locks forbid a second handle from reading the
+            # locked byte. Check metadata while held and content after release.
+            self.assertEqual(path.stat().st_mtime_ns, before[1])
         self.assertFalse(runtime_active(self.store))
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
 

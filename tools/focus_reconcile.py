@@ -46,10 +46,11 @@ def committed_base(repo, names, snapshot):
 
 def prepare(cycle):
     state, repo = cycle.state, cycle.repo
-    if (not state.get("code_started") or state.get("status") == "complete"
+    if (state.get("status") == "complete"
             or state["phase"] not in ("code", "astra", "claude")
+            or (state["phase"] != "code" and not state.get("code_started"))
             or state.get("published") or state.get("publication_started")):
-        raise Blocked("reconcile-phase", "Reconciliation requires a started stage before publication; it cannot rewind commit, push or CI.")
+        raise Blocked("reconcile-phase", "Reconciliation requires a code/review iteration before publication; it cannot rewind commit, push or CI.")
     if cycle.messages.unresolved(state["iteration"]):
         raise Blocked("reconcile-messages", "Resolve queued/uncertain operator messages before reconciling their stage.")
     if repo.paused() or (cycle.control and cycle.control.boundary()):
@@ -88,12 +89,14 @@ def prepare(cycle):
     for row in rows:
         if row["action"] == "adopt-file":
             row["publication_base"] = bases[row["path"]]
+    continuation = ("Sessions and the current stage are preserved." if state.get("code_started") else
+                    "Sessions and the current iteration are preserved. Coding has not begun: select work from the current project plan, not the previous published stage.")
     return {"schema": SCHEMA, "root": str(repo.root), "iteration": state["iteration"],
             "task": state.get("task"), "state_sha256": state_fingerprint(state),
             "snapshot_sha256": digest(encode(current)), "changes": rows,
             "effect": "refresh-context updates read-only expectations outside Git; adopt-file transfers the WHOLE protected file, "
                       "including pre-existing uncommitted content, into this iteration for coding, both reviews and publication. "
-                      "No source, index or Git history is changed by reconciliation. Sessions and the current stage are preserved."}
+                      "No source, index or Git history is changed by reconciliation. " + continuation}
 
 
 def write_plan(cycle, path):
@@ -156,14 +159,21 @@ def apply(cycle, path):
             candidate["baseline"]["files"][name] = baseline
     candidate["protected"] = [name for name in candidate["protected"] if name not in adopted]
     candidate["protected_index"] = {name: value for name, value in candidate["protected_index"].items() if name not in adopted}
+    continuation = ("Continue the SAME stage using the current instructions; implement any remaining authorized requirements. "
+                    "Do not merely reconstruct the old coding report. " if cycle.state.get("code_started") else
+                    "Coding has not begun in this iteration. Read the current project plan to select its next unfinished stage; "
+                    "do not reopen the previous published stage from an older handoff, result or conversation. "
+                    "If coding later starts but its report is interrupted, finish that iteration's selected stage instead of selecting another. ")
+    reviews = ("Both review loops must run again. " if cycle.state.get("code_started") else
+               "Any unpublished work requires coding and both reviews before publication. If the current plan is exhausted "
+               "and only read-only context was refreshed, do not invent a new stage. ")
     text = ("The operator explicitly reconciled the saved context and handed over the listed protected files. "
             "Read the current versions of the listed context/instruction files; this correction supersedes older "
-            "handoff task details within the same stage, not runtime or permission boundaries. "
-            "Continue the SAME stage using the current instructions; implement any remaining authorized requirements. "
-            "Do not merely reconstruct the old coding report. Review the full contents/diffs of adopted files, "
+            "handoff task details within this iteration, not runtime or permission boundaries. " + continuation +
+            "Review the full contents/diffs of adopted files, "
             "including their pre-existing uncommitted work, before publication. Other protected files remain protected. "
             "Shared files outside repositories remain read-only and are never publication targets. "
-            "Both review loops must run again. The prior state and exact handover plan are in this correction's archive.\n\n" +
+            + reviews + "The prior state and exact handover plan are in this correction's archive.\n\n" +
             "\n".join(row["action"] + ": " + row["path"] for row in plan["changes"]))
     cycle.record_correction(text.encode("utf-8"), current, candidate=candidate,
                             metadata={"reconciliation": plan}, validate=lambda: validate_current(cycle, plan))

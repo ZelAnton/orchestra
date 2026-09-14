@@ -5,6 +5,9 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $python = Get-Command python3, python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($null -eq $python) { throw 'Python 3.10+ is required for cc-focus regression tests.' }
 $env:PYTHONDONTWRITEBYTECODE = '1'
+# Match focus-runtime.ps1 rather than the host's legacy Windows code page.
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 & $python.Source (Join-Path $repo 'tests/test_cycle.py')
 if ($LASTEXITCODE -ne 0) { throw "Cycle regression tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_focus_terminal.py')

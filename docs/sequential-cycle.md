@@ -426,12 +426,20 @@ a new plan; lease identities and save timestamps alone do not invalidate it. The
 runtime rechecks immediately before the state transition. It archives the prior
 state and exact plan in a checksummed correction, keeps sessions and the current
 stage, clears the old pending invocation and all review credit, and exits paused
-before coding. Coding must apply the current instructions to that same stage;
-both review loops must run again. Existing source files, index and Git history are
-preserved. The new correction remains visible through publication and CI.
+before coding. If coding already started, it must apply the current instructions
+to that same stage and both review loops must run again. If the iteration stopped
+before coding began, reconciliation preserves that fact and clears any provisional
+task label: select the next stage
+from the current project plan, without reopening the previous published stage from
+an old conversation or handoff. Any adopted work must still complete coding and
+both reviews before publication. A context-only handover with no unpublished
+changes can finish if the plan is exhausted; it must not invent a stage.
+Existing source files, index and Git history are preserved. The new correction
+remains visible through publication and CI.
 
-Handover requires an already-started code/Astra/Claude stage with unchanged HEADs
-and protected staging. It refuses publication/CI, unresolved operator messages,
+Handover requires a code iteration (including one not yet started) or an
+already-started Astra/Claude stage, with unchanged HEADs and protected staging.
+It refuses publication/CI, unresolved operator messages,
 PAUSE, changed repository membership and unconfirmed provider shutdown. It cannot
 rewind a commit or push, change runtime permission settings, or turn shared files
 outside Git into implementation files. Do not edit `.work/cycle/state.json` by hand.
