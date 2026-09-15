@@ -19,13 +19,14 @@ REPO = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.path.insert(0, str(REPO / "tools"))
-from cycle_state import Blocked, Lease, LocalLock, Repository, Store, atomic_write, changed, command, encode
+from cycle_state import Blocked, ProviderQuota, Lease, LocalLock, Repository, Store, atomic_write, changed, command, encode
 from cycle_prompts import PROFILES
 from cycle_transport import Process, Rpc, Transport, concise_summary, parse_report
 from cycle_workflow import Cycle, fresh_state
 from focus_control import Control, FocusStop, request_stop, runtime_active, status
 from focus_progress import Progress, safe_text
 from focus_output import LiveOutput
+from focus_messages import MessagePending
 
 
 def report(**kwargs):
@@ -1521,6 +1522,204 @@ class CycleTests(unittest.TestCase):
             transport.run("claude", "same review", {"id": "native-stop"}, directory)
         self.assertFalse((directory / "result.json").exists())
 
+    def test_claude_quota_requires_matching_structured_refusal_and_valid_reset(self):
+        for variant, expected in (("quota", "claude-quota"), ("quota-result", "claude-quota"),
+                                  ("quota-preinit", "claude-quota"), ("quota-work", "claude-quota"),
+                                  ("quota-event-only", None), ("quota-warning", None), ("quota-allowed", None),
+                                  ("quota-wrong-session", "provider-profile"),
+                                  ("quota-error-wrong-session", "provider-profile"),
+                                  ("quota-no-reset", "claude-api-error"), ("quota-no-event", "claude-api-error"),
+                                  ("quota-reset-string", "claude-api-error"), ("quota-reset-bool", "claude-api-error"),
+                                  ("quota-reset-inf", "claude-api-error"), ("quota-reset-nan", "claude-api-error"),
+                                  ("quota-reset-huge", "claude-api-error"), ("quota-reset-negative", "claude-api-error"),
+                                  ("quota-allowed-error", "claude-api-error"),
+                                  ("quota-access", "claude-access-denied")):
+            with self.subTest(variant=variant):
+                self.state["sessions"]["claude"] = "saved-review-session"
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
+                directory = self.store.directory / variant
+                directory.mkdir(parents=True)
+                if expected:
+                    with self.assertRaises(Blocked) as caught:
+                        transport.run("claude", "same review", {"id": variant}, directory)
+                    self.assertEqual(caught.exception.code, expected)
+                    if expected == "claude-quota":
+                        self.assertEqual(caught.exception.resets_at, 1789482000)
+                        self.assertEqual(caught.exception.no_work, variant != "quota-work")
+                else:
+                    self.assertEqual(parse_report(transport.run("claude", "same review", {"id": variant}, directory))["status"], "done")
+                self.assertEqual(self.state["sessions"]["claude"], "saved-review-session")
+
+    def test_quota_cleanup_failure_still_prevents_automatic_retry(self):
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "quota"]
+        directory = self.store.directory / "quota-cleanup"
+        directory.mkdir(parents=True)
+        close = Process.close
+        def unsafe_close(process):
+            close(process)
+            raise Blocked("cleanup-incomplete", "Fixture containment failure")
+        with patch.object(Process, "close", unsafe_close), self.assertRaises(Blocked) as caught:
+            transport.run("claude", "same review", {"id": "quota-cleanup"}, directory)
+        self.assertEqual(caught.exception.code, "cleanup-incomplete")
+
+    def test_quota_wait_retries_same_invocation_without_healing_or_resetting_clean_passes(self):
+        self.state.update(phase="claude", coordinated="claude", astra_clean=3, claude_clean=1,
+                          sessions={"claude": "same-native-session"})
+        original = self.repo.snapshot()
+        clock, waited, ids = [1000.0], [], []
+        def reject():
+            pending = self.state["pending"]
+            pending["attempts"] = 1
+            ids.append(pending["id"])
+            raise ProviderQuota(1100, no_work=True)
+        def retry():
+            ids.append(self.state["pending"]["id"])
+            self.assertEqual(self.state["claude_clean"], 1)
+            self.assertGreaterEqual(clock[0], 1105)
+            return report()
+        def tick(delay):
+            self.assertLessEqual(delay, 0.25)
+            saved = self.store.read()
+            waited.append(saved["pending"]["quota_wait"])
+            self.assertEqual((saved["phase"], saved["claude_clean"]), ("claude", 1))
+            self.assertIsNone(saved["blocker"])
+            self.assertEqual(saved["display_reviews"]["claude"]["completed"], 0)
+            clock[0] += 60
+        control = type("ControlFixture", (), {"boundary": lambda _, window: self.state["phase"] == "publish"})()
+        self.cycle.control = control
+        self.transport.actions = [("claude", reject), ("claude", retry)]
+        with patch("cycle_workflow.time", wraps=time) as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = tick
+            self.assertEqual(self.cycle.run(), 0)
+        self.assertTrue(waited)
+        self.assertEqual(ids, [ids[0], ids[0]])
+        self.assertEqual([role for role, _ in self.transport.calls], ["claude", "claude"])
+        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (3, 2))
+        self.assertEqual(self.state["sessions"], {"claude": "same-native-session"})
+        self.assertEqual(self.repo.snapshot(), original)
+        self.assertIsNone(self.state["pending"])
+
+    def test_quota_wait_survives_pause_restart_and_a_repeated_stale_reset(self):
+        self.state.update(phase="code", coordinated="code")
+        def reject():
+            self.state["pending"]["attempts"] = self.state["pending"].get("attempts", 0) + 1
+            raise ProviderQuota(900, no_work=True)
+        self.transport.actions = [("code", reject), ("code", reject), ("code", report(status="complete"))]
+        clock = [1000.0]
+        def pause(delay):
+            (self.root / ".work" / "PAUSE").touch()
+        with patch("cycle_workflow.time", wraps=time) as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = pause
+            self.assertEqual(self.cycle.run(), 0)
+        saved = self.store.read()
+        self.assertEqual(saved["status"], "paused")
+        self.assertEqual(saved["pending"]["quota_wait"]["retry_at"], 1060)
+        invocation = saved["pending"]["id"]
+        (self.root / ".work" / "PAUSE").unlink()
+        self.state = saved
+        self.cycle = Cycle(self.repo, self.store, saved, self.transport, lambda: None, REPO / "tools", "pwsh")
+        waits = []
+        def tick(delay):
+            waits.append(self.state["pending"]["quota_wait"]["retry_at"])
+            self.assertEqual(self.state["pending"]["id"], invocation)
+            clock[0] += 60
+        with patch("cycle_workflow.time", wraps=time) as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = tick
+            self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual(waits, [1060, 1120])
+        self.assertEqual([role for role, _ in self.transport.calls], ["code", "code", "code"])
+        self.assertEqual(self.state["status"], "complete")
+
+    def test_quota_retry_after_started_work_or_checkout_drift_cannot_keep_review_credit(self):
+        self.state.update(phase="claude", coordinated="claude", astra_clean=3, claude_clean=1)
+        for started, drift in ((True, False), (False, True)):
+            with self.subTest(started=started, drift=drift):
+                before = self.repo.snapshot()
+                self.state.update(phase="claude", claude_clean=1, astra_clean=3,
+                                  pending={"id": str(started), "role": "claude", "attempts": 1, "before": before})
+                self.cycle.defer_quota(ProviderQuota(1, no_work=not started))
+                if drift:
+                    self.edit()()
+                self.transport.actions = [("claude", report(other_fixes=int(drift)))]
+                self.cycle.review("claude")
+                self.assertEqual(self.state["claude_clean"], 0 if drift else 1)
+                self.assertEqual(self.state["phase"], "astra" if drift else "claude")
+
+    def test_quota_refusal_cannot_hide_protected_file_changes(self):
+        self.edit(name="operator.txt", content="owned by operator")()
+        self.state = fresh_state(self.repo)
+        self.cycle.state = self.state
+        self.state.update(coordinated="code")
+        def refuse_after_edit():
+            self.edit(name="operator.txt", content="unexpected mutation")()
+            raise ProviderQuota(time.time() + 3600, no_work=True)
+        self.transport.actions = [("code", refuse_after_edit), ("heal", report(status="blocked"))]
+        self.assertEqual(self.cycle.run(), 3)
+        self.assertEqual(self.state["blocker"]["code"], "protected-work")
+        self.assertEqual([role for role, _ in self.transport.calls], ["code", "heal"])
+
+    def test_quota_wait_honors_safe_and_emergency_stops_without_a_provider(self):
+        for emergency in (False, True):
+            with self.subTest(emergency=emergency):
+                control = Control(self.store)
+                control.begin()
+                self.cycle.control = control
+                self.state.update(status="ready", pending={"id": "waiting", "role": "code",
+                                  "quota_wait": {"retry_at": time.time() + 3600}})
+                with patch("cycle_workflow.time", wraps=time) as timer:
+                    timer.sleep.side_effect = lambda _: control.submit_stop(now=emergency)
+                    if emergency:
+                        with self.assertRaises(FocusStop):
+                            self.cycle.run()
+                    else:
+                        self.assertEqual(self.cycle.run(), 0)
+                        self.assertEqual(self.store.read()["status"], "paused")
+                self.assertEqual(self.state["pending"]["id"], "waiting")
+                self.assertEqual(self.transport.calls, [])
+                control.finish(self.state, 0)
+
+    def test_quota_never_resends_uncertain_delivery(self):
+        self.state.update(coordinated="code")
+        def reject():
+            pending = self.state["pending"]
+            record = self.cycle.messages.add({"iteration": 1, "invocation": pending["id"], "role": "code"}, "Keep this instruction")
+            self.cycle.messages.update(record, "sending")
+            raise ProviderQuota(time.time() + 3600, no_work=True)
+        self.transport.actions = [("code", reject)]
+        with self.assertRaises(MessagePending):
+            self.cycle.run()
+        saved = self.store.read()
+        self.assertIn("quota_wait", saved["pending"])
+        self.assertIsNone(saved["blocker"])
+        message = self.cycle.messages.unresolved(1)[0]
+        self.assertEqual(message["identity"]["invocation"], saved["pending"]["id"])
+        self.assertEqual(message["status"], "sending")
+        self.assertEqual([role for role, _ in self.transport.calls], ["code"])
+
+    def test_quota_retry_checks_ownership_and_head_before_starting_a_provider(self):
+        self.edit(name="operator.txt", content="operator work")()
+        self.state = fresh_state(self.repo)
+        self.cycle.state = self.state
+        self.state.update(phase="claude", pending={"id": "quota-guard", "role": "claude", "attempts": 1,
+                          "before": self.repo.snapshot(), "quota_wait": {"no_work": True}})
+        self.edit(name="operator.txt", content="changed during wait")()
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.invoke("claude")
+        self.assertEqual(caught.exception.code, "protected-work")
+        self.edit(name="operator.txt", content="operator work")()
+        self.edit()()
+        self.repo.git("add", "source.txt")
+        self.repo.git("commit", "-m", "External update during wait")
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.invoke("claude")
+        self.assertEqual(caught.exception.code, "unauthorized-commit")
+        self.assertEqual(self.transport.calls, [])
+
     def test_claude_synthetic_api_errors_keep_the_cause_and_session(self):
         for variant, expected in (("synthetic-org", "claude-access-denied"),
                                   ("synthetic-org-preinit", "claude-access-denied"),
@@ -2184,8 +2383,34 @@ def fixture(provider):
             return
         if missing_session:
             assert "clean continuation" in prompt
-        if "synthetic-org-preinit" not in args:
+        if "synthetic-org-preinit" not in args and "quota-preinit" not in args:
             emit({"type": "system", "subtype": "init", "model": "claude-fable-5-1", "session_id": sid, "permissionMode": "bypassPermissions"})
+        quota_variant = next((arg for arg in args if arg.startswith("quota")), None)
+        if quota_variant:
+            reset = {"quota-no-reset": None, "quota-reset-string": "1789482000", "quota-reset-bool": True,
+                     "quota-reset-inf": float("inf"), "quota-reset-nan": float("nan"),
+                     "quota-reset-huge": 10**100, "quota-reset-negative": -1}.get(quota_variant, 1789482000)
+            info = {"status": "rejected", "resetsAt": reset, "rateLimitType": "five_hour",
+                    "overageStatus": "rejected", "overageDisabledReason": "org_level_disabled"}
+            if quota_variant in ("quota-allowed", "quota-allowed-error"):
+                info["status"] = "allowed"
+            if quota_variant == "quota-warning":
+                info["status"] = "allowed_warning"
+            if quota_variant != "quota-no-event":
+                emit({"type": "rate_limit_event", "rate_limit_info": info,
+                      "session_id": "foreign" if quota_variant == "quota-wrong-session" else sid})
+            if quota_variant == "quota-work":
+                emit({"type": "assistant", "message": {"model": "claude-fable-5-1", "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "fixture-command"}}]}})
+            if quota_variant == "quota-result":
+                emit({"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error",
+                      "api_error_status": 429, "session_id": sid, "result": "Session quota rejected"})
+                return
+            if quota_variant not in ("quota-event-only", "quota-warning", "quota-allowed"):
+                emit({"type": "assistant", "session_id": "foreign" if quota_variant == "quota-error-wrong-session" else sid,
+                      "is_api_error_message": True, "error": "oauth_org_not_allowed" if quota_variant == "quota-access" else "rate_limit",
+                      "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Session quota rejected"}]}})
+                return
         api_variant = next((arg for arg in args if arg.startswith("synthetic-") or arg in ("wrong-model", "quoted-api-error")), None)
         if api_variant:
             api_message = {"type": "assistant", "session_id": sid, "is_api_error_message": True,

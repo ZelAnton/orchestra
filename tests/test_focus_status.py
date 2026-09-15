@@ -117,6 +117,32 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(self.state["display_reviews"]["astra"]["completed"], 1)
         self.assertIn("не зачтено · серия 0/3", self.panel_text())
 
+    def test_quota_panel_shows_deadline_countdown_and_keeps_stop_priority(self):
+        self.state.update(phase="claude", claude_clean=1, pending={"role": "claude", "quota_wait": {
+            "resets_at": 1789482000, "retry_at": 1789482005, "no_work": True}})
+        with patch("focus_status.time.time", return_value=1789481945):
+            panel = self.panel_text(live={"role": "claude", "active": True})
+            self.assertIn("ОЖИДАНИЕ КВОТЫ", panel)
+            self.assertIn("2026-09-15 14:20:05 UTC", panel)
+            self.assertIn("через 01:00", panel)
+            self.assertIn("модель не запущена", panel)
+            self.assertNotIn("проход 1 выполняется", panel)
+            self.assertIn("ПАУЗА", self.panel_text(paused=True))
+            self.assertIn("ОСТАНОВКА", self.panel_text(stop="now"))
+            self.assertIn("НУЖНО СОГЛАСИЕ", self.panel_text(approval=True))
+        self.assertEqual(status(self.store, self.state)["quota_wait"], self.state["pending"]["quota_wait"])
+
+    def test_quota_activity_is_a_runtime_wait_without_stale_model_events(self):
+        progress = Progress(self.store, self.state)
+        self.cycle.progress = progress
+        self.state["pending"] = {"role": "code", "quota_wait": {"retry_at": time.time() + 60}}
+        with patch("cycle_workflow.time.sleep"):
+            self.assertTrue(self.cycle.wait_quota())
+        self.assertFalse(progress.view()["active"])
+        self.assertIsNone(progress.view()["role"])
+        self.assertEqual(progress.view()["operation"], "quota")
+        self.assertIn("no model is running", progress.view()["activity"])
+
     def test_legacy_history_is_explicitly_incomplete_and_bounded(self):
         del self.state["display_reviews"]
         self.state.update(phase="astra", astra_passes=4, astra_clean=1, claude_clean=0)

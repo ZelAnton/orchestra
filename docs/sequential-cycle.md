@@ -584,7 +584,8 @@ Claude's CLI can emit an API error as an `assistant` event with model `<syntheti
 and `is_api_error_message=true`. This is classified as a provider failure before
 checking the pinned answer model. In particular, `oauth_org_not_allowed` stops as
 `claude-access-denied`: the provider says Claude Code subscription access is disabled
-for the organization. Other marked synthetic errors become `claude-api-error`
+for the organization. Other marked synthetic errors, except structured quota
+refusals described below, become `claude-api-error`
 with the original error detail and receive the normal Astra/xhigh recovery attempt.
 The explicit account-access refusal bypasses recovery because the agent cannot
 restore the operator's subscription authority. Neither error replaces the native
@@ -605,6 +606,28 @@ The runtime never switches billing credentials, accounts, models or permissions
 to work around the refusal. After access is restored, use `/resume` or `--retry`.
 An old `model-rerouted` blocker also resumes this way after cc-sync and a restart;
 the healer's report is not a completed review and must not be used for recovery credit.
+
+A structured Claude quota refusal with a valid `resetsAt` deadline is a runtime
+wait. A matching-session `rate_limit_event` with status `rejected` must be followed
+by a synthetic `rate_limit` error or an HTTP 429 API-error result. Warnings,
+successful results and reset times mentioned only in text do not trigger this path.
+The runtime confirms provider cleanup, saves the deadline with the pending
+invocation and waits without starting Astra or another provider. The panel shows
+the UTC retry time and countdown; `cc-focus status` exposes `quota_wait`.
+At reset plus five seconds it retries the same phase, invocation and native
+conversation. Every refusal imposes at least a 60-second delay, including stale
+reset times. A new refusal schedules another wait; the timestamp alone never
+proves that the provider admitted the request.
+
+Stop, emergency stop, PAUSE and uncertain-message checks remain active while
+waiting. Restarting retains the deadline; corrections that replace an invocation
+also retire its wait. Admission refusal before any model work on an unchanged
+checkout preserves earlier clean passes and grants no new credit. Ownership and
+HEAD are checked again before starting the retry. Work already
+started or checkout drift uses the normal interrupted-review rules. Missing or
+invalid reset data retains the ordinary provider-error recovery path. Existing
+blocked runs need operator continuation after cc-sync and runtime restart; updating
+the installation does not resume them or change an already-running process.
 
 On recoverable blockers, the runtime starts the dedicated Astra/xhigh `heal` role,
 whose persisted conversation is separate from coding and review. It receives the

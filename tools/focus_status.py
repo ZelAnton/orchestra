@@ -116,7 +116,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     blocker = state.get("blocker") or {}
     complete = state.get("status") == "complete"
     blocked = blocker.get("status") == "blocked"
-    active_role = live.get("role") if live.get("active") and not paused else None
+    quota = (state.get("pending") or {}).get("quota_wait")
+    active_role = live.get("role") if live.get("active") and not paused and not quota else None
     mode, tone = ("В РАБОТЕ", "normal")
     if complete:
         mode, tone = "ПЛАН ЗАВЕРШЁН", "good"
@@ -128,6 +129,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
         mode, tone = "ОСТАНОВКА" if stop == "now" else "ОЖИДАНИЕ ПАУЗЫ", "warning"
     elif paused:
         mode, tone = "ПРЕРВАНО" if state.get("status") == "interrupted" else "ПАУЗА", "warning"
+    elif quota:
+        mode, tone = "ОЖИДАНИЕ КВОТЫ", "warning"
     elif active_role == "heal" or blocker.get("status") == "healing":
         mode, tone = "ВОССТАНОВЛЕНИЕ", "warning"
     role_label = NAMES.get(active_role or phase, phase)
@@ -201,6 +204,9 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
         activity = notice
     elif paused:
         activity = "/resume — продолжить · /messages — сообщения · /exit — закрыть"
+    elif quota:
+        retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
+        activity = f"Claude · повтор {retry} · через {duration(quota['retry_at'] - time.time())} · автоматически · модель не запущена"
     lines = tuple(clean(line, 400) for line in (title, headline, timeline, *reviews, activity))
     compact_progress = (f"{role_label} · {index + 1}/5 · Astra {state.get('astra_clean', 0)}/3"
                         f" · Claude {state.get('claude_clean', 0)}/2") if not complete else position

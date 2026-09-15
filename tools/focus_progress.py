@@ -92,7 +92,10 @@ class Progress:
         if self.on_update:
             self.on_update()
         if now - self.last_print >= 15:
-            self.line(f"{self.role or self.state['phase']} active {int(now-self.started)}s; {self.activity}; last event {int(now-self.last_event)}s ago; events={self.events}")
+            if self.operation == "quota":
+                self.line(self.activity)
+            else:
+                self.line(f"{self.role or self.state['phase']} active {int(now-self.started)}s; {self.activity}; last event {int(now-self.last_event)}s ago; events={self.events}")
         if force or now - self.last_write >= 2:
             self.store.artifact("progress.json", encode({"run_nonce": self.run_nonce, "updated": time.time(),
                 "phase": self.state["phase"], "iteration": self.state["iteration"], "role": self.role,

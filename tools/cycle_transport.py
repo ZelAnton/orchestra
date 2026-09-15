@@ -14,7 +14,7 @@ import time
 import uuid
 
 from cycle_prompts import CONTRACT, PROFILES, REPORT_SCHEMA
-from cycle_state import Blocked, atomic_write, encode
+from cycle_state import Blocked, ProviderQuota, atomic_write, encode
 from focus_messages import MessagePending, message_text
 
 
@@ -397,6 +397,8 @@ class Transport:
             earlier_reports = []
             active_tasks = set()
             deferred_reports = []
+            quota_reset = None
+            work_started = False
             sent_at = None
             def await_ack():
                 if current_message and time.monotonic() - sent_at > 30:
@@ -404,6 +406,18 @@ class Transport:
             process.on_poll = await_ack
             while True:
                 event = process.receive()
+                if event.get("type") == "rate_limit_event":
+                    if event.get("session_id") != session:
+                        raise Blocked("provider-profile", "Claude quota event belongs to a different session.")
+                    info = event.get("rate_limit_info")
+                    reset = info.get("resetsAt") if isinstance(info, dict) else None
+                    # Warning/allowed windows are telemetry, not refusal. Never
+                    # infer a deadline from model prose or an overage setting.
+                    quota_reset = (reset if isinstance(info, dict) and info.get("status") == "rejected"
+                                   and type(reset) in (int, float) and 0 < reset <= 253402300799 else None)
+                if (event.get("type") in ("stream_event", "tool_progress")
+                        or event.get("type") == "system" and event.get("subtype") == "task_started"):
+                    work_started = True
                 if event.get("type") == "system" and event.get("subtype") in ("task_started", "task_notification"):
                     if event.get("session_id") != session:
                         raise Blocked("provider-profile", "Claude task event belongs to a different session.")
@@ -436,10 +450,13 @@ class Transport:
                                           "For managed access, ask the organization administrator; otherwise contact Anthropic support "
                                           "if access remains unavailable. Restore authorized access, then resume this same phase. "
                                           "This invocation did not complete; no review credit is granted.")
+                        if code == "rate_limit" and quota_reset is not None:
+                            raise ProviderQuota(quota_reset, no_work=not work_started)
                         raise Blocked("claude-api-error", f"Claude API error ({str(code)[:120]}): {detail[:2000]} "
                                       "Resolve the provider error, then resume this same phase; no review credit is granted.")
                     if message.get("model") != model:
                         raise Blocked("model-rerouted", "Claude emitted an answer from a different model; refusing the result.")
+                    work_started = True
                 if (current_message and event.get("type") == "user" and event.get("session_id") == session
                         and event.get("uuid") == str(uuid.UUID(current_message["identity"]["id"]))):
                     self.interaction.ack(current_message, True)
@@ -452,9 +469,13 @@ class Transport:
                         raise Blocked("claude-session-missing", "Claude has no native conversation for the saved identifier.")
                     if not initialized or event.get("session_id") != session:
                         raise Blocked("provider-profile", "Claude result lacks the matching initialization/session.")
+                    if (event.get("is_error") is True and event.get("terminal_reason") == "api_error"
+                            and event.get("api_error_status") == 429 and quota_reset is not None):
+                        raise ProviderQuota(quota_reset, no_work=not work_started)
                     if event.get("is_error") or event.get("subtype") != "success":
                         raise Blocked("claude-failed", str(event.get("errors") or event.get("result") or event)[-4000:])
                     raw = event.get("result", "")
+                    work_started = True
                     if active_tasks or event.get("queued_turn_count", 0):
                         # Older conversations/CLI versions can yield a result
                         # while native tasks still own the turn. Keep reading

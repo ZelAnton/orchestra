@@ -9,7 +9,7 @@ import time
 import uuid
 
 from cycle_prompts import PROMPTS
-from cycle_state import Blocked, changed, command, digest, encode
+from cycle_state import Blocked, ProviderQuota, changed, command, digest, encode
 from cycle_transport import concise_summary, parse_report
 from focus_status import accept_task, new_reviews, reset_notice, review_event
 from focus_output import terminal_text
@@ -209,7 +209,16 @@ class Cycle:
             if self.snapshot(result["after"]) != self.snapshot():
                 raise Blocked("result-drift", "Repository changed after the recorded result; review evidence is stale.")
         else:
-            if pending.get("attempts", 0) and role in ("astra", "claude"):
+            quota = pending.get("quota_wait")
+            unchanged_refusal = False
+            if quota:
+                current = self.snapshot()
+                self.check_protected(current)
+                if self.snapshot(pending["before"])["head"] != current["head"]:
+                    raise Blocked("unauthorized-commit", "HEAD changed across the quota wait; work was preserved.")
+                unchanged_refusal = quota["no_work"] and self.snapshot(pending["before"]) == current
+                pending.pop("quota_wait")
+            if pending.get("attempts", 0) and role in ("astra", "claude") and not unchanged_refusal:
                 # An interrupted pass may have fixed implementation before its
                 # final report was lost. Earlier clean passes cannot certify that
                 # new content, even if the resumed pass itself makes no fixes.
@@ -218,6 +227,8 @@ class Cycle:
                 if role == "claude" and self.changes(pending["before"], self.snapshot()):
                     pending["return_to_astra"] = True
                 self.save()
+            if quota:
+                self.save()  # A later interruption is not an admission refusal.
             raw = self.transport.run(role, prompt, pending, directory)
             if self.messages.unresolved(state["iteration"], pending["id"]):
                 raise MessagePending("Input remains undelivered; the saved invocation cannot advance yet.")
@@ -532,6 +543,40 @@ class Cycle:
         self.state.update(blocker=None, status="ready", recovery_unverified=True)
         self.complete_invocation()
 
+    def defer_quota(self, error):
+        pending = self.state["pending"]
+        current = self.snapshot()
+        self.check_protected(current)
+        if self.snapshot(pending["before"])["head"] != current["head"]:
+            raise Blocked("unauthorized-commit", "Claude changed HEAD before its quota refusal; work was preserved.")
+        no_work = error.no_work and self.snapshot(pending["before"]) == current
+        if not no_work and pending["role"] in ("astra", "claude"):
+            reset_notice(self.state, "Квота прервала начатый проход", (pending["role"],))
+            self.state[pending["role"] + "_clean"] = 0
+            if pending["role"] == "claude" and self.changes(pending["before"], current):
+                pending["return_to_astra"] = True
+        # A stale reset or repeated rejection must not create a tight retry loop.
+        pending["quota_wait"] = {"resets_at": error.resets_at,
+                                 "retry_at": max(error.resets_at + 5, time.time() + 60),
+                                 "no_work": no_work}
+        self.save()
+        retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(pending["quota_wait"]["retry_at"]))
+        print(f"cc-focus: quota wait until {retry}; same phase/session will retry automatically. No review credit earned.", flush=True)
+
+    def wait_quota(self):
+        quota = (self.state.get("pending") or {}).get("quota_wait")
+        if not quota or time.time() >= quota["retry_at"]:
+            return False
+        if self.progress:
+            if self.progress.operation != "quota":
+                self.progress.runtime("quota")
+            retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
+            self.progress.activity = f"Waiting for Claude quota until {retry}; automatic retry; no model is running"
+            self.progress.pulse()
+        # Re-enter the normal boundary for stop, PAUSE, lease and input checks.
+        time.sleep(min(0.25, max(0, quota["retry_at"] - time.time())))
+        return True
+
     def run(self):
         while self.state["status"] != "complete":
             self.heartbeat()
@@ -568,6 +613,8 @@ class Cycle:
             try:
                 if blocker:
                     self.heal()
+                    continue
+                if self.wait_quota():
                     continue
                 if phase == "ci":
                     if self.progress:
@@ -612,6 +659,13 @@ class Cycle:
                     raise Blocked("invalid-phase", f"Unknown phase: {phase}")
             except Blocked as error:
                 print(terminal_text(f"cc-focus: {error.code}: {error}"), flush=True)
+                if isinstance(error, ProviderQuota):
+                    try:
+                        self.defer_quota(error)
+                    except Blocked as guard_error:
+                        error = guard_error
+                    else:
+                        continue
                 if self.messages.unresolved(self.state["iteration"]) and self.state.get("pending"):
                     # Retain the exact delivery target across transport failure.
                     # A healer/new intent must not orphan queued or uncertain input.

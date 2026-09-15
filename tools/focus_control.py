@@ -192,6 +192,7 @@ def status(store, state):
         progress["stale"] = not progress["live"]
     from focus_status import build_panel
     brief.update(task=state.get("task"), review_events=state.get("display_review_events", []),
+                 quota_wait=(state.get("pending") or {}).get("quota_wait"),
                  dashboard=list(build_panel(state, progress if progress and progress["live"] else None,
                                             paused=not live).lines))
     if state.get("baseline", {}).get("repositories"):

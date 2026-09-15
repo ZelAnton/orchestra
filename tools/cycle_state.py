@@ -22,6 +22,14 @@ class Blocked(RuntimeError):
         self.code = code
 
 
+class ProviderQuota(Blocked):
+    """A protocol-confirmed refusal with a server-advertised reset, not a report."""
+    def __init__(self, resets_at, no_work=False):
+        self.resets_at, self.no_work = resets_at, no_work
+        reset = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(resets_at))
+        super().__init__("claude-quota", f"Claude quota rejected; advertised reset: {reset}.")
+
+
 def digest(value):
     return hashlib.sha256(value).hexdigest()
 

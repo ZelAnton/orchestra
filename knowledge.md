@@ -197,12 +197,27 @@ failed healer, failed post-repair verification or an already-attempted blocker.
 Terminal output explains whether recovery is starting or why human action remains.
 Claude-generated API errors (`assistant`, `<synthetic>`, `is_api_error_message=true`
 and a matching session) are classified before model pin validation.
-`oauth_org_not_allowed` becomes `claude-access-denied`; other such errors become
+`oauth_org_not_allowed` becomes `claude-access-denied`; except for the structured
+quota refusals below, other such errors become
 `claude-api-error` with their provider detail. Access refusals also preserve the
 provider detail and direct the operator to the active login and subscription/payment
 status; an organization-labelled error alone does not identify managed billing.
+Claude quota refusals are a separate transport/runtime path: `ProviderQuota` requires
+a matching-session rejected `rate_limit_event` with a finite positive `resetsAt`
+and a synthetic `rate_limit` refusal or HTTP 429 API-error result. Telemetry alone,
+warnings and model prose do not trigger it. After confirmed provider cleanup,
+`Cycle.defer_quota` stores `pending.quota_wait`; `wait_quota` yields through the
+normal stop/PAUSE/message/lease boundary until reset plus five seconds, with a
+60-second minimum backoff on every refusal. No healer runs. The same invocation,
+phase and session retry automatically; stopping/restarting preserves the deadline,
+while retiring the invocation retires its wait. Initial no-work refusal plus an
+unchanged full snapshot preserves prior clean passes; partial work or drift uses
+normal interrupted-review resets. Ownership and HEAD are checked again before
+the retry starts a provider. No refusal earns review credit. Progress and
+the status panel show runtime waiting, UTC deadline and countdown; status JSON
+exposes `quota_wait`. Invalid/missing reset data uses ordinary API-error recovery.
 The access refusal stops directly;
-generic API failures receive the normal Astra/xhigh recovery attempt. Neither
+other generic API failures receive the normal Astra/xhigh recovery attempt. Neither
 replaces the session or earns review credit. They preserve the required model, phase and
 conversation for operator continuation after access/provider recovery. Ordinary
 answers from another model still fail as `model-rerouted`; quoted error text does
