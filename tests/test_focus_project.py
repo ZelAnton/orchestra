@@ -140,6 +140,114 @@ class ProjectTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "read-only cycle context"):
             self.cycle.check_protected(self.project.snapshot())
 
+    def test_project_starts_without_handoff_input_or_file(self):
+        (self.root / "HANDOFF.md").unlink()
+        self.state = fresh_state(self.project)
+        self.cycle.state = self.state
+        self.transport.actions = [("coordinate", fixtures.report(status="complete"))]
+        self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual(self.state["status"], "complete")
+        self.assertEqual(self.state["handoffs"], [])
+
+    def test_imported_loose_source_can_disappear_during_coordination(self):
+        source = self.root / "HANDOFF.md"
+        imported = self.store.handoff(source)
+        self.state["handoffs"] = [imported]
+        baseline = copy.deepcopy(self.state["baseline"])
+        def coordinate():
+            source.unlink()  # Simulate the operator removing a transfer input.
+            return fixtures.report(status="complete")
+        self.transport.actions = [("coordinate", coordinate)]
+        self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual(self.state["baseline"], baseline)
+        self.assertEqual(self.state["status"], "complete")
+        self.assertFalse(source.exists())
+        self.assertIn("Read Core/PLAN.md", Path(imported["path"]).read_text())
+        self.assertIn('"optional_handoff_sources": ["HANDOFF.md"]', self.transport.calls[0][1])
+
+    def test_imported_source_change_keeps_review_credit_and_publishes_only_members(self):
+        source = self.root / "HANDOFF.md"
+        self.state["handoffs"] = [self.store.handoff(source)]
+        self.seal(names=("Core",))  # Legacy reviewed snapshot includes the source.
+        source.write_text("New transfer notes must not enter the reviewed diff.\n")
+        self.assertTrue(self.cycle.prepare_publish())
+        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (3, 2))
+        self.assertEqual(set(self.state["publication_targets"]), {"Core"})
+        self.commit("Core")
+        source.unlink()
+        self.assertTrue(self.cycle.reconcile_publish())
+        self.cycle.next_stage()
+        self.assertEqual(self.state["iteration"], 2)
+        self.assertNotIn("HANDOFF.md", self.state["baseline"]["files"])
+
+    def test_legacy_cached_coding_result_survives_source_removal_without_rewriting_artifacts(self):
+        source = self.root / "HANDOFF.md"
+        self.state["handoffs"] = [self.store.handoff(source)]
+        self.transport.actions = [("code", fixtures.report())]
+        self.cycle.invoke("code")
+        invocation = self.store.directory / "invocations" / self.state["pending"]["id"]
+        result_path = invocation / "result.json"
+        result = json.loads(result_path.read_text())
+        # Simulate the old format, including physical source bytes in both snapshots.
+        legacy = self.project.snapshot()
+        self.state["pending"]["before"] = legacy
+        result.update(before=legacy, after=legacy)
+        result_path.write_bytes(encode(result))
+        saved = result_path.read_bytes()
+        source.unlink()
+        self.transport.calls.clear()
+        self.cycle.invoke("code")
+        self.assertFalse(self.transport.calls)
+        self.assertEqual(result_path.read_bytes(), saved)
+        self.assertIn("HANDOFF.md", self.state["pending"]["before"]["files"])
+        self.edit("Core", text="Unreviewed content must still reject the cached result.\n")
+        with self.assertRaisesRegex(Blocked, "changed after the recorded result"):
+            self.cycle.invoke("code")
+
+    def test_source_is_not_read_again_but_imported_copy_remains_immutable(self):
+        source = self.root / "HANDOFF.md"
+        imported = self.store.handoff(source)
+        self.state["handoffs"] = [imported]
+        original = Path.open
+        def guarded(path, *args, **kwargs):
+            if path == source:
+                raise AssertionError("Imported source must not be opened again")
+            return original(path, *args, **kwargs)
+        with patch.object(Path, "open", guarded):
+            self.cycle.check_protected(self.cycle.snapshot())
+        source.unlink()
+        Path(imported["path"]).write_text("Tampered runtime copy\n")
+        with self.assertRaisesRegex(Blocked, "handoff snapshot"):
+            self.cycle.context("coordinate")
+
+    def test_handoff_import_does_not_exempt_live_instructions_or_member_files(self):
+        for name in ("AGENTS.md", "CLAUDE.md", "PLAN.md", "focus-project.json", "roadmap.md", "Core/source.txt"):
+            with self.subTest(name=name):
+                path = self.root / name
+                if name == "focus-project.json":
+                    path.write_text(json.dumps({"version": 1, "repositories": list(self.members)}))
+                else:
+                    path.write_text("Required live project document\n")
+                self.state = fresh_state(self.project)
+                self.cycle.state = self.state
+                if name == "roadmap.md":
+                    self.state["task"] = {"id": "stage", "plan": name, "title": "Current stage"}
+                self.state["handoffs"] = [self.store.handoff(path)]
+                path.write_text(path.read_text() + "\n")
+                with self.assertRaises(Blocked):
+                    self.cycle.check_protected(self.cycle.snapshot())
+
+    def test_reconciliation_after_import_does_not_require_accepting_source_deletion(self):
+        path, _ = self.reconciliation_fixture()
+        self.state["handoffs"] = [self.store.handoff(self.root / "HANDOFF.md")]
+        (self.root / "HANDOFF.md").unlink()
+        updated = self.root / ".work/without-source.json"
+        plan = focus_reconcile.write_plan(self.cycle, updated)
+        self.assertEqual({row["path"] for row in plan["changes"]}, {"Core/AGENTS.md", "Root/source.txt"})
+        focus_reconcile.apply(self.cycle, updated)
+        self.cycle.check_protected(self.cycle.snapshot())
+        self.assertIsNotNone(self.state["correction_pending"])
+
     def reconciliation_fixture(self):
         self.edit("Core", "AGENTS.md", "previous operator instructions\n")
         self.edit("Root", text="previous operator work\n")

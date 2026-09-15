@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from cycle_state import Blocked, Repository, changed, digest, encode
+from cycle_state import Blocked, Repository, digest, encode
 
 
 SCHEMA = "orchestra/focus-reconcile@1"
@@ -59,13 +59,13 @@ def prepare(cycle):
     repo.assert_main()
     if hasattr(repo, "validate_state"):
         repo.validate_state(state)
-    current = repo.snapshot()
+    current = cycle.snapshot()
     if current["head"] != state["baseline"]["head"]:
         raise Blocked("reconcile-head", "Repository HEAD changed since this stage started; reconcile publication first.")
     if repo.index_entries(state["protected"]) != state["protected_index"]:
         raise Blocked("reconcile-index", "Protected index entries changed; preserve the original staging before handing over files.")
     rows = []
-    for path in changed(state["baseline"], current):
+    for path in cycle.changes(state["baseline"], current):
         loose = hasattr(repo, "owner") and repo.owner(path) is None
         if not loose and path not in state["protected"]:
             continue
@@ -143,7 +143,7 @@ def apply(cycle, path):
     plan = read_plan(path)
     if encode(plan) != encode(prepare(cycle)):
         raise Blocked("reconcile-stale", "The plan or saved work changed since preparation. Prepare and review a new plan; nothing was accepted.")
-    current = cycle.repo.snapshot()
+    current = cycle.snapshot()
     if digest(encode(current)) != plan["snapshot_sha256"]:
         raise Blocked("reconcile-stale", "Files changed during reconciliation; prepare a new plan.")
     candidate = copy.deepcopy(cycle.state)

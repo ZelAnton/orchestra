@@ -63,8 +63,9 @@ cover their combined changes. Publication checks every changed repository's poli
 and remote before starting the publisher, then commits/pushes each repository's
 reviewed files to its own remote main. Untouched repositories receive no commit or
 push. Existing unrelated files and index entries remain protected per repository.
-Project-root files such as handoffs, shared instructions and the membership manifest
-are read-only cycle context; place editable plans and source inside a member repository.
+Project-root shared instructions and the membership manifest are read-only cycle
+context; place editable plans and source inside a member repository. An imported
+handoff source outside member repositories is optional transfer input as described below.
 
 Publication across repositories is not atomic. After an interruption, the runtime
 compares each member's reviewed files, local HEAD and remote main before invoking
@@ -79,12 +80,24 @@ publication. A `.work/PAUSE` file at the project or any member is respected at t
 same safe boundary; publication and CI finish together before a safe pause.
 
 On Windows use the same arguments with `cc-focus.cmd`. Quote paths containing
-spaces. A handoff is a nonempty UTF-8 file, at most 4 MiB. Identify the project plan
+spaces. `--handoff` is optional, including on the first run; no file named
+`HANDOFF.md` is required. A supplied handoff is a nonempty UTF-8 file, at most 4 MiB. Identify the project plan
 and describe completed work, unfinished work and verification commands.
 Each imported file is copied and hashed under `.work/cycle/handoffs/`.
 Changing the original file later does not silently change the imported context.
+Original sources outside member Git repositories may be moved, changed or deleted
+after import. Their contents are excluded from cycle work comparisons, including
+when replaying older saved snapshots/results; immutable artifacts are not rewritten.
+The copied handoff remains checksummed historical context. Use current instructions
+and plans to continue development; an old transfer description cannot override them.
+Shared `AGENTS.md`, `CLAUDE.md`, `PLAN.md`, `focus-project.json` and the selected
+task's plan retain their live context checks even if supplied as handoff input. Files inside a Git repository
+retain normal work, staging and publication checks. Unimported shared files remain
+read-only context; this is not a blanket exception for files named `HANDOFF.md`.
 
-The referenced project plan is the source of stages. Before selecting a new stage,
+The current project plan is the source of stages; locate it through project
+instructions and saved task metadata, using a handoff only as an optional reference.
+Before selecting a new stage,
 read its current contents and follow its order, dependencies and completion state;
 do not substitute the queue or remembered conversation. Interrupted coding finishes
 the same stage first. A missing, unreadable or ambiguous plan is a blocker, not
@@ -420,8 +433,9 @@ written by a model. Only the operator may apply the plan; provider roles must ne
 approve their own handover. A plan currently covers all detected context/protected
 file changes; editing the JSON to omit paths is rejected.
 
-Application checks the plan against the saved task/state and the entire current
-checkout, including repository HEADs and index. A change after preparation requires
+Application checks the plan against the saved task/state and the current work
+snapshot, including repository HEADs and index. Already-imported loose handoff
+sources are excluded as described above. A work change after preparation requires
 a new plan; lease identities and save timestamps alone do not invalidate it. The
 runtime rechecks immediately before the state transition. It archives the prior
 state and exact plan in a checksummed correction, keeps sessions and the current

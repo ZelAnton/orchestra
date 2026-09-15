@@ -93,7 +93,26 @@ class Project:
                 "files": {path[len(name) + 1:]: value for path, value in snapshot["files"].items()
                           if self.owner(path) == name}}
 
-    def loose_files(self):
+    def handoff_sources(self, state):
+        """Imported loose files are disposable inputs, not live project documents."""
+        sources = set()
+        plan = (state.get("task") or {}).get("plan")
+        for handoff in state.get("handoffs", []):
+            if not isinstance(handoff.get("source"), str):
+                continue
+            source = Path(handoff["source"])
+            if not source.is_absolute() or not source.is_relative_to(self.root):
+                continue
+            relative = source.relative_to(self.root)
+            name = relative.as_posix()
+            if (not relative.parts or any(part in ("..", ".git", ".work") for part in relative.parts)
+                    or self.owner(name) is not None or name == plan
+                    or relative.name.casefold() in ("agents.md", "claude.md", "plan.md", MANIFEST.casefold())):
+                continue
+            sources.add(name)
+        return sources
+
+    def loose_files(self, exclude_context=()):
         files = {}
         members = {repo.root for repo in self.repositories.values()}
         for directory, dirs, names in os.walk(self.root, followlinks=False):
@@ -104,6 +123,8 @@ class Project:
             for name in names + links:
                 path = parent / name
                 relative = path.relative_to(self.root).as_posix()
+                if relative in exclude_context:
+                    continue
                 if path.is_symlink():
                     files[relative] = "link:" + digest(os.fsencode(os.readlink(path)))
                 elif path.is_file():
@@ -116,9 +137,9 @@ class Project:
                     raise Blocked("unsupported-path", f"Cannot seal project context: {relative}")
         return files
 
-    def snapshot(self):
+    def snapshot(self, exclude_context=()):
         self.assert_main()
-        result = {"head": {}, "index": {}, "files": self.loose_files(), "repositories": list(self.repositories)}
+        result = {"head": {}, "index": {}, "files": self.loose_files(exclude_context), "repositories": list(self.repositories)}
         for name, repo in self.repositories.items():
             snapshot = repo.snapshot()
             result["head"][name], result["index"][name] = snapshot["head"], snapshot["index"]

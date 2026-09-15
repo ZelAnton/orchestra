@@ -133,6 +133,19 @@ Member `status` identifies the owning project; member `stop` refuses to target a
 stale independent member run and directs the operator to the parent project.
 `--handoff` only imports context. Every member still requires Git `main`; detached
 colocated Jujutsu checkouts are not admitted or automatically converted.
+Handoff is optional on initial and resumed runs. The current project plan and
+instructions govern stage selection; an imported snapshot is historical context.
+`Project.handoff_sources` identifies imported source paths outside member Git
+repositories, excluding shared AGENTS/CLAUDE/PLAN files, the selected task's plan
+and the membership manifest.
+`Cycle.snapshot` and `Cycle.changes` omit these disposable input paths from work
+comparisons; project scanning does not read them again. Old baseline, pending and
+result snapshots are projected the same way without rewriting immutable artifacts.
+Deleting or updating an imported loose source cannot block coordination, invalidate
+review credit, prevent cached-result recovery or become a publication target.
+Files in Git and unimported shared context keep their existing protections; the
+checksummed imported copies remain protected. New runtime behavior takes effect on
+the next process launch, without changing an already running consuming cycle.
 Project snapshots prefix file paths and store HEAD/index per repository, retaining
 the existing single-repository snapshot/state format. Membership is pinned across
 resume. Files outside member repositories are sealed read-only context; they cannot

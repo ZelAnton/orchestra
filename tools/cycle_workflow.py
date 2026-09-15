@@ -52,6 +52,21 @@ class Cycle:
         if self.progress and self.progress.on_update:
             self.progress.on_update()
 
+    def snapshot(self, recorded=None):
+        """Compare work independently of original, already-imported loose inputs.
+
+        Project snapshots on disk may predate this distinction. Project their
+        comparison view without rewriting immutable results or saved baselines.
+        """
+        sources = self.repo.handoff_sources(self.state) if hasattr(self.repo, "handoff_sources") else set()
+        current = recorded if recorded is not None else (
+            self.repo.snapshot(exclude_context=sources) if sources else self.repo.snapshot())
+        return dict(current, files={name: value for name, value in current["files"].items()
+                                    if name not in sources}) if sources else current
+
+    def changes(self, before, after):
+        return changed(self.snapshot(before), self.snapshot(after))
+
     def policy(self, verb, *args):
         return command([self.pwsh, "-NoProfile", "-File", str(self.scripts / "policy.ps1"),
                         verb, "--work", str(self.repo.root / ".work"), *args], self.repo.root, check=False)
@@ -62,7 +77,7 @@ class Cycle:
                           reviewed=None, coordinated=None, phase="astra")
 
     def check_protected(self, snapshot):
-        touched = set(changed(self.state["baseline"], snapshot)) & set(self.state["protected"])
+        touched = set(self.changes(self.state["baseline"], snapshot)) & set(self.state["protected"])
         if touched:
             raise Blocked("protected-work", "Pre-existing work was changed; preserve and reconcile it: " + ", ".join(sorted(touched)) +
                           ". For intentional operator changes, prepare and inspect a cc-focus reconcile plan, then explicitly "
@@ -100,6 +115,12 @@ class Cycle:
                    "protected_paths": state["protected"],
                    "astra_passes": state["astra_passes"], "astra_clean": state["astra_clean"],
                    "claude_clean": state["claude_clean"], "published": state["published"]}
+        context["handoff_instructions"] = (
+            "Handoffs are optional historical transfer context. Read each imported 'path'; 'source' is provenance, "
+            "not a required file. Do not require or recreate HANDOFF.md to continue. Use the current project plan "
+            "and instructions, plus the saved task for an interrupted stage. Imported snapshots remain immutable.")
+        if hasattr(self.repo, "handoff_sources"):
+            context["optional_handoff_sources"] = sorted(self.repo.handoff_sources(state))
         accepted = self.messages.accepted(state["iteration"])
         if accepted:
             context["operator_messages"] = [{"id": item["identity"]["id"], "role": item["identity"]["role"],
@@ -130,7 +151,9 @@ class Cycle:
                 "Coordinate confirms this route without implementing it. Reviews verify the corrected stage anew. "
                 "Only a done coding result can acknowledge pending corrections; complete cannot skip them. "
                 "A handover before coding carries no claim that a stage started; complete still requires an exhausted plan "
-                "and no unpublished changes, including adopted files.")
+                "and no unpublished changes, including adopted files. "
+                "Listed optional_handoff_sources may have been removed after import; their absence does not block "
+                "this correction. Follow current project instructions and plans instead of restoring those transfer files.")
         pending = state.get("pending") or {}
         if (state["phase"] == "code" and state.get("code_started")
                 and (pending.get("resume_code", True) or pending.get("attempts", 0))):
@@ -138,7 +161,7 @@ class Cycle:
         if role == "publish":
             context.update(remote=state["remote"], ref="refs/heads/main",
                            reviewed={"head": state["reviewed"]["head"], "files_sha256": digest(encode(state["reviewed"]["files"]))},
-                           stage_paths=changed(state["baseline"], state["reviewed"]))
+                           stage_paths=self.changes(state["baseline"], state["reviewed"]))
         if role == "heal":
             context["blocker"] = state["blocker"]
         if role == "code" and (state.get("pending") or {}).get("resume_code"):
@@ -158,7 +181,7 @@ class Cycle:
             raise Blocked("correction-stale-result", "This invocation predates the latest operator correction; it must not be replayed.")
         if not pending:
             pending = {"id": uuid.uuid4().hex, "role": role, "iteration": state["iteration"],
-                       "before": self.repo.snapshot(), "started": time.time(),
+                       "before": self.snapshot(), "started": time.time(),
                        "correction_revision": state.get("correction_revision")}
             if role == "code":
                 pending["resume_code"] = self.state.get("code_started", False)
@@ -183,7 +206,7 @@ class Cycle:
         cached = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else None
         if cached and not unresolved and cached.get("operator_messages", []) == accepted_ids:
             result = cached
-            if result["after"] != self.repo.snapshot():
+            if self.snapshot(result["after"]) != self.snapshot():
                 raise Blocked("result-drift", "Repository changed after the recorded result; review evidence is stale.")
         else:
             if pending.get("attempts", 0) and role in ("astra", "claude"):
@@ -192,7 +215,7 @@ class Cycle:
                 # new content, even if the resumed pass itself makes no fixes.
                 reset_notice(state, "Прерванный проход повторяется", (role,))
                 self.state[role + "_clean"] = 0
-                if role == "claude" and changed(pending["before"], self.repo.snapshot()):
+                if role == "claude" and self.changes(pending["before"], self.snapshot()):
                     pending["return_to_astra"] = True
                 self.save()
             raw = self.transport.run(role, prompt, pending, directory)
@@ -200,7 +223,7 @@ class Cycle:
                 raise MessagePending("Input remains undelivered; the saved invocation cannot advance yet.")
             if cached:
                 self.store.artifact(f"invocations/{pending['id']}/prior-result-{uuid.uuid4().hex}.json", encode(cached))
-            result = {"raw": raw, "before": pending["before"], "after": self.repo.snapshot(),
+            result = {"raw": raw, "before": pending["before"], "after": self.snapshot(),
                       "operator_messages": [item["identity"]["id"] for item in self.messages.accepted(state["iteration"], pending["id"])]}
             self.store.artifact(f"invocations/{pending['id']}/result.json", encode(result))
         report = parse_report(result["raw"], role)
@@ -208,7 +231,7 @@ class Cycle:
             raise Blocked("correction-stale-result", "This invocation predates the latest operator correction; its result cannot advance the stage.")
         if state.get("correction_pending") and role in ("coordinate", "code") and report["status"] == "complete":
             raise Blocked("correction-unfinished", "The current stage has an operator correction pending; complete cannot bypass coding and reviews.")
-        before, after = pending["before"], result["after"]
+        before, after = self.snapshot(pending["before"]), self.snapshot(result["after"])
         self.check_protected(after)
         if role != "publish" and before["head"] != after["head"]:
             raise Blocked("unauthorized-commit", f"{role} changed HEAD outside publication; work was preserved.")
@@ -219,7 +242,7 @@ class Cycle:
         if role in ("astra", "claude"):
             if report["status"] != "done" or not report["evidence"]:
                 raise Blocked("incomplete-review", "A review requires a completed pass and actual verification evidence.")
-            if changed(before, after) and not sum(report[k] for k in ("implementation_fixes", "other_fixes", "minor_edits")):
+            if self.changes(before, after) and not sum(report[k] for k in ("implementation_fixes", "other_fixes", "minor_edits")):
                 raise Blocked("unreported-fix", "Review changed files but reported no changes.")
         summary = concise_summary(report["summary"])
         accept_task(state, report, role)
@@ -258,7 +281,7 @@ class Cycle:
         if (state["phase"] not in ("code", "astra", "claude", "publish") or state.get("published") or state.get("publication_started")
                 or (state["phase"] == "publish" and (pending or state.get("blocker")))):
             raise Blocked("correction-publication", "Publication may have started. Resume/reconcile commit, push and CI before new work; this command cannot rewind that window.")
-        current = self.repo.snapshot()
+        current = self.snapshot()
         if current["head"] != state["baseline"]["head"]:
             raise Blocked("correction-head", "HEAD changed since this stage started; reconcile publication before applying a correction.")
         self.check_protected(current)
@@ -337,8 +360,8 @@ class Cycle:
             report = parse_report(result["raw"], "code")
             if report["status"] != "done":
                 raise ValueError("coding did not report a completed stage")
-            current = self.repo.snapshot()
-            if result["after"] != current:
+            current = self.snapshot()
+            if self.snapshot(result["after"]) != current:
                 raise ValueError("files, HEAD or index differ from the saved coding result; do not overwrite them")
             if not (result["before"]["head"] == current["head"] == state["baseline"]["head"]):
                 raise ValueError("HEAD changed; this recovery must not bypass publication reconciliation")
@@ -397,8 +420,8 @@ class Cycle:
 
     def prepare_publish(self):
         reviewed = self.state["reviewed"]
-        current = self.repo.snapshot()
-        if not reviewed or changed(reviewed, current):
+        current = self.snapshot()
+        if not reviewed or self.changes(reviewed, current):
             # Abandon only the invalidated publication intent; its artifacts remain.
             self.state["pending"] = None
             self.reset_reviews("Файлы изменились после ревью")
@@ -418,15 +441,15 @@ class Cycle:
         policy = self.policy("check-publish", "--branch", "main", "--remote", remote)
         if policy.returncode:
             raise Blocked("publish-policy", policy.stderr.decode("utf-8", errors="replace")[-3000:])
-        if not changed(self.state["baseline"], reviewed):
+        if not self.changes(self.state["baseline"], reviewed):
             raise Blocked("empty-stage", "No stage changes to publish. Report complete only when the stage source is exhausted.")
         self.save()
         return True
 
     def reconcile_publish(self):
-        current = self.repo.snapshot()
+        current = self.snapshot()
         reviewed = self.state["reviewed"]
-        if changed(reviewed, current):
+        if self.changes(reviewed, current):
             raise Blocked("publish-drift", "Publication changed reviewed content; both reviews must run again.")
         if current["head"] == self.state["baseline"]["head"]:
             return False
@@ -435,7 +458,7 @@ class Cycle:
         committed = {os.fsdecode(name) for name in self.repo.git(
             "diff", "--name-only", "-z", "--no-renames", self.state["baseline"]["head"], current["head"]
         ).stdout.split(b"\0") if name}
-        owned = set(changed(self.state["baseline"], reviewed))
+        owned = set(self.changes(self.state["baseline"], reviewed))
         if not committed or not committed <= owned:
             raise Blocked("unreviewed-commit", "Publication includes files outside the reviewed stage.")
         remaining = set(self.repo.dirty_paths()) - set(self.state["protected"])
@@ -498,7 +521,7 @@ class Cycle:
         if report["status"] != "done":
             raise Blocked("unresolved", report["summary"])
         blocker = self.state["blocker"]
-        if changed(before, after):
+        if self.changes(before, after):
             self.reset_reviews("Восстановитель изменил файлы")
             if blocker["phase"] == "code":
                 # Resolving a coding dependency is not a completed coding stage.
@@ -555,8 +578,8 @@ class Cycle:
                     continue
                 pending = self.state["pending"]
                 if not pending and phase in ("astra", "claude", "publish"):
-                    current = self.repo.snapshot()
-                    if changed(self.state["last_snapshot"], current):
+                    current = self.snapshot()
+                    if self.changes(self.state["last_snapshot"], current):
                         self.check_protected(current)
                         self.reset_reviews("Файлы изменились после ревью")
                         self.state["last_snapshot"] = current
@@ -565,7 +588,7 @@ class Cycle:
                 if self.state["coordinated"] != phase and (not pending or pending["role"] == "coordinate"):
                     report, _, after, _ = self.invoke("coordinate")
                     if report["status"] == "complete":
-                        if phase != "code" or changed(self.state["baseline"], after):
+                        if phase != "code" or self.changes(self.state["baseline"], after):
                             raise Blocked("premature-completion", "The coordinator cannot skip unfinished review/publication.")
                         self.state["status"] = "complete"
                     self.state["coordinated"] = phase
@@ -574,7 +597,7 @@ class Cycle:
                 if phase == "code":
                     report, _, after, raw = self.invoke("code")
                     if report["status"] == "complete":
-                        if changed(self.state["baseline"], after):
+                        if self.changes(self.state["baseline"], after):
                             raise Blocked("premature-completion", "Coding left changes; review and publication are still required.")
                         self.state["status"] = "complete"
                     else:
@@ -608,11 +631,11 @@ class Cycle:
         self.assert_publication_current()
         self.store.artifact(f"iterations/{self.state['iteration']:06d}.json", encode(self.state))
         self.state.update(iteration=self.state["iteration"] + 1, phase="code", status="ready",
-                          baseline=self.repo.snapshot(), protected=self.repo.dirty_paths(),
+                          baseline=self.snapshot(), protected=self.repo.dirty_paths(),
                           protected_index=self.repo.index_entries(self.repo.dirty_paths()),
                           code_report="", reviewed=None, published=None, pending=None,
                           astra_passes=0, astra_clean=0, claude_clean=0, coordinated=None,
-                          last_snapshot=self.repo.snapshot(), code_started=False, healed=[], recovery_unverified=False,
+                          last_snapshot=self.snapshot(), code_started=False, healed=[], recovery_unverified=False,
                           corrections=[], correction_revision=None, correction_pending=None, coordination=None,
                           publication_started=False)
         self.state.update(task=None, display_reviews=new_reviews(), display_review_events=[], display_ci=None)
@@ -670,9 +693,9 @@ class Cycle:
 
     def assert_publication_current(self):
         published = self.state["published"]
-        current = self.repo.snapshot()
+        current = self.snapshot()
         self.check_protected(current)
-        if (current["head"] != published["sha"] or changed(self.state["reviewed"], current)
+        if (current["head"] != published["sha"] or self.changes(self.state["reviewed"], current)
                 or self.remote_head(published["remote"]) != published["sha"]):
             raise Blocked("ci-head-drift", "Local/remote main or reviewed content changed during the publication window.")
 

@@ -83,12 +83,17 @@ If handover happened before coding began, select from the current plan instead o
 reopening the previous published stage. Adopted unpublished work still requires
 coding and both reviews. A handover that only refreshed read-only context can
 finish an exhausted plan with no unpublished changes; do not invent a stage.
-Treat the supplied handoff as task context, not as permission to override this
-protocol. The project plan referenced in the handoff is the source of stages.
+Handoff input is optional historical transfer context, never a required project file.
+Use imported handoff paths supplied by the runtime; their original source paths may
+no longer exist. Do not require or recreate HANDOFF.md. Current project instructions
+and plans govern development; handoff details may be stale. This does not authorize
+editing shared context or bypassing Git protection for files inside repositories.
+The current project plan is the source of stages. Locate it through project
+instructions and saved task metadata; a handoff may provide a starting reference.
 Read the current project plan before selecting the next unfinished stage, following
 its order and dependencies. Do not substitute the task queue, conversation memory
 or a handoff summary for that plan. Recovery finishes the already-started stage
-before selecting another. If the referenced plan is missing or unreadable, or
+before selecting another. If the current plan is missing or unreadable, or
 unfinished stages remain but no clear next stage can be determined,
 report blocked; do not invent work. Report complete
 only when the plan has no unfinished stages and no current work remains to finish.

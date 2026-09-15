@@ -2,7 +2,7 @@
 
 import time
 
-from cycle_state import Blocked, Store, changed, digest, encode
+from cycle_state import Blocked, Store, digest, encode
 from cycle_workflow import Cycle
 
 
@@ -20,7 +20,7 @@ class MemberCycle(Cycle):
 
 class ProjectCycle(Cycle):
     def check_protected(self, snapshot):
-        loose = [path for path in changed(self.state["baseline"], snapshot) if self.repo.owner(path) is None]
+        loose = [path for path in self.changes(self.state["baseline"], snapshot) if self.repo.owner(path) is None]
         if loose:
             raise Blocked("project-context-changed", "Files outside member repositories are read-only cycle context: " + ", ".join(loose) +
                           ". If these are intentional operator changes, prepare an explicit handover with "
@@ -41,7 +41,7 @@ class ProjectCycle(Cycle):
             details["publication_targets"] = [{"path": name, "remote": target["remote"],
                 "push_url": target["push_url"], "ref": "refs/heads/main",
                 "baseline_head": self.state["baseline"]["head"][name],
-                "stage_paths": self.repo.local_paths(name, changed(self.state["baseline"], self.state["reviewed"])),
+                "stage_paths": self.repo.local_paths(name, self.changes(self.state["baseline"], self.state["reviewed"])),
                 "published": (self.state.get("publication_repositories", {}).get(name, {}).get("published")
                               if self.state.get("publication_repositories", {}).get(name, {}).get("confirmed") else None)}
                 for name, target in self.state["publication_targets"].items()]
@@ -94,14 +94,14 @@ class ProjectCycle(Cycle):
                 raise Blocked("remote-changed", f"{name}: publication remote or push URL changed.")
 
     def prepare_publish(self):
-        reviewed, current = self.state["reviewed"], self.repo.snapshot()
-        if not reviewed or changed(reviewed, current):
+        reviewed, current = self.state["reviewed"], self.snapshot()
+        if not reviewed or self.changes(reviewed, current):
             self.state["pending"] = None
             self.reset_reviews("Файлы изменились после ревью")
             self.save()
             return False
         self.check_protected(current)
-        names = sorted({self.repo.owner(path) for path in changed(self.state["baseline"], reviewed)})
+        names = sorted({self.repo.owner(path) for path in self.changes(self.state["baseline"], reviewed)})
         if not names:
             raise Blocked("empty-stage", "No repository changes to publish in this iteration.")
         old = self.state.get("publication_targets")
@@ -134,9 +134,9 @@ class ProjectCycle(Cycle):
         return True
 
     def reconcile_publish(self):
-        current = self.repo.snapshot()
+        current = self.snapshot()
         self.check_protected(current)
-        if changed(self.state["reviewed"], current):
+        if self.changes(self.state["reviewed"], current):
             raise Blocked("publish-drift", "Publication changed reviewed project content; both reviews must run again.")
         self.validate_targets(current)
         complete = True
@@ -162,9 +162,9 @@ class ProjectCycle(Cycle):
         return True
 
     def assert_publication_current(self):
-        current = self.repo.snapshot()
+        current = self.snapshot()
         self.check_protected(current)
-        if changed(self.state["reviewed"], current):
+        if self.changes(self.state["reviewed"], current):
             raise Blocked("ci-head-drift", "Reviewed project content changed during publication/CI.")
         self.validate_targets(current)
         published = self.state["published"]["repositories"]
