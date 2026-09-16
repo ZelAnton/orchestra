@@ -8,7 +8,7 @@ publication behavior or permissions. It does not consume or rewrite the task que
 
 ```text
 Luna coordination -> Claude implementation -> Astra review loop
-    -> Claude review loop -> Luna commit/push -> exact-revision CI -> next stage
+    -> Claude review loop -> Luna readiness + runtime commit/push -> CI -> next stage
          | substantial implementation fixes |
          +--------------> Astra <-----------+
 ```
@@ -19,7 +19,7 @@ Luna coordination -> Claude implementation -> Astra review loop
 | Implementation | claude-fable-5-1 | high |
 | First review | gpt-6-astra | high |
 | Second review | claude-fable-5-1 | xhigh |
-| Commit and push | gpt-5.6-luna | high |
+| Publication preparation (read-only) | gpt-5.6-luna | high |
 | Blocker resolution | gpt-6-astra | xhigh |
 
 ## Start and resume
@@ -497,13 +497,42 @@ short outcome and artifact paths, with detailed evidence available when needed.
 
 ## Publication, CI and interruptions
 
-Only the publishing role commits and pushes, without force or history rewriting.
+The publishing model prepares a commit subject in its report's `summary` and
+confirms readiness read-only. Only the runtime stages, commits and pushes, without
+force or history rewriting. This supersedes older commit/push instructions in
+saved publisher conversations; the model, effort and native session are retained.
 The main upstream must point to a remote `refs/heads/main`. Verification uses that
 remote's single push URL; fetch and push URLs may differ. Publication policy in
 `.work/constraints.md` remains applicable. Reviewed content is sealed before
 publication and rechecked afterward, together with actual local/remote Git state.
 An already completed commit/push is reconciled before another publication call.
 Changes made by hooks or recovery require renewed review.
+
+`focus_commit.py` passes the exact reviewed file names through a NUL-delimited
+pathspec file with literal matching. It never replaces files with directory
+prefixes or glob patterns. `git commit --only` excludes unrelated staged entries;
+protected untracked files and unstaged work remain outside the commit. The runtime
+checks protected files/index entries and every new commit's paths before push,
+including extra files introduced and removed again in intermediate commits.
+Merge history is rejected in this serial publication flow. In a project, all
+member commits validate before the first push, and the combined scope is checked
+again before each remaining member. Push names the approved SHA and pinned push URL,
+and disables automatic tag publication and recursive submodule pushes.
+The iteration retains previously authorized `publication_paths`: a renewed review
+can restore a published file's original bytes without making that file foreign
+to the stage. Legacy state derives these paths only from an already-confirmed
+published commit, never from an unconfirmed local commit or a failed push report.
+
+Git commands and hooks use the existing process containment, heartbeat and stop
+handling. Scope manifests and command logs live under `.work/cycle/publication/`,
+or `.work/cycle/repositories/<member>/publication/` in a project. Prepared subjects
+are sealed in `publication_prepared`; an interrupted Git operation resumes without
+another model preparation when the reviewed snapshot is unchanged. Existing safe
+publication artifacts remain reconcilable; completed pushes are never repeated.
+A protected-index failure after HEAD moved can mean extra protected files were
+committed, even when `git diff --cached` is empty. Inspect the saved scope and Git
+history. `--retry` does not authorize those files or undo a push; an already
+published out-of-scope commit needs an explicit operator decision.
 
 Remote-main queries use at most three 60-second `git ls-remote` attempts, with a
 two-second delay between transient network failures/timeouts. Progress names the

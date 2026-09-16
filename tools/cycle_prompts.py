@@ -20,7 +20,12 @@ PROMPTS = {
 
 не пушь""",
     "claude": """проводи ревью, исправляй, повторяй в цикле пока в последних двух проходах не будет сделано ни одного исправления имплементации""",
-    "publish": "commit и push",
+    "publish": """Prepare the reviewed stage for runtime publication. Inspect the supplied exact
+stage_paths and current Git state read-only. Return done when ready, with summary
+as a concise imperative commit subject suitable for the affected repositories;
+omit task identifiers. The runtime will perform staging, commit and push after
+validating your report. Do not run git add, commit, push, reset or modify files.
+Do not claim publication occurred when you only prepared it.""",
     "coordinate": """Coordinate the sequential main-branch workflow using the supplied concise
 outcome and artifact paths. Do not implement, review, run another provider, modify
 files, commit or push. Confirm the proposed phase, or report a concrete blocker.
@@ -117,19 +122,17 @@ For review and healing reports, substantial=true requires implementation_fixes>0
 A coding report may instead describe substantial NEW implementation with zero
 fixes; its classification never earns review credit. Both review loops still run.
 
-Except in the publish role, do not commit or push. In publish, preserve the exact
-reviewed working tree, stage only the reviewed stage files, and use an ordinary
-non-force push to each supplied repository's remote and refs/heads/main. For a
-multi-repository project, run Git in each publication target's directory. Never
-commit or push untouched repositories, and do not repeat an already confirmed
-publication. Report every repository's actual outcome, including partial failure.
-Do not amend, reset,
-rebase, add unrelated files, or create an empty commit. If a commit or push already
-happened, reconcile actual HEAD and remote before taking another action. If a
-hook changes files, stop and report blocked so they receive review.
-Preserve unrelated staged entries as well as working files. Use an explicit-path
-commit (`git commit --only -- <reviewed stage paths>`) when unrelated staged work
-exists; a plain commit must not accidentally publish the operator's staging.
+No provider role may stage, commit or push. The publish role is read-only and
+prepares the commit subject in summary; the outer runtime performs Git writes.
+This supersedes older publication instructions in resumed native conversations.
+The runtime uses exact literal stage_paths, never directory prefixes or pathspec
+patterns. Existing untracked/unstaged work is not automatically owned by this
+iteration, even if it is a dependency or was inspected during review. Only explicit
+operator handover can transfer protected files. Preserve unrelated staged entries
+and working files. Do not amend, reset, rebase, discard work or repeat publication.
+If Git changes already happened, report the observed state accurately; do not
+repair or approve an expanded publication scope yourself. The runtime reconciles
+each supplied member's commit and remote before proceeding.
 
 Return ONE JSON object (no Markdown fence), with all fields in this schema.
 description is your FULL final account of what was done, how, what remains and

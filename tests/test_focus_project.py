@@ -551,8 +551,6 @@ class ProjectTests(unittest.TestCase):
     def test_only_changed_repositories_publish_and_receive_separate_ci_evidence(self):
         self.seal()
         def publish():
-            self.commit("Core")
-            self.commit("Specification")
             return fixtures.report()
         self.transport.actions = [("publish", publish)]
         self.cycle.publish()
@@ -572,6 +570,20 @@ class ProjectTests(unittest.TestCase):
         self.assertNotIn("publication_targets", saved)
         self.assertNotIn("publication_repositories", saved)
         self.assertNotIn("remote", saved)
+
+    @unittest.skipIf(os.name == "nt", "POSIX Git hook fixture")
+    def test_every_member_commit_is_checked_before_any_project_push(self):
+        self.seal()
+        hook = self.members["Specification"].root / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\nprintf unreviewed > ../Core/source.txt\n")
+        hook.chmod(0o755)
+        self.transport.actions = [("publish", fixtures.report())]
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.publish()
+        self.assertEqual(caught.exception.code, "publish-drift")
+        for name in self.members:
+            self.assertEqual(self.members[name].remote_head("origin"), self.state["baseline"]["head"][name])
+        self.assertEqual((self.members["Core"].root / "source.txt").read_text(), "unreviewed")
 
     def test_partial_push_survives_resume_without_repeating_a_completed_commit(self):
         self.seal()
@@ -596,21 +608,17 @@ class ProjectTests(unittest.TestCase):
         def interrupted():
             self.commit("Core")
             raise FocusStop("fixture interruption")
-        self.transport.actions = [("publish", interrupted)]
-        with self.assertRaises(FocusStop):
+        self.transport.actions = [("publish", fixtures.report())]
+        with patch.object(self.cycle, "execute_publication", side_effect=lambda _: interrupted()), self.assertRaises(FocusStop):
             self.cycle.publish()
         saved = self.store.read()
-        invocation = saved["pending"]["id"]
+        prepared = saved["publication_prepared"]
         first_head = self.members["Core"].text("rev-parse", "HEAD")
         restarted = ProjectCycle(self.project, self.store, saved, self.transport, lambda: None,
                                  fixtures.REPO / "tools", "pwsh")
-        def finish():
-            self.assertEqual(saved["pending"]["id"], invocation)
-            self.assertEqual(saved["publication_repositories"]["Core"]["published"]["sha"], first_head)
-            self.commit("Specification")
-            return fixtures.report()
-        self.transport.actions = [("publish", finish)]
         restarted.publish()
+        self.assertEqual(saved["publication_prepared"], prepared)
+        self.assertEqual(len(self.transport.calls), 1)
         self.assertEqual(self.members["Core"].text("rev-parse", "HEAD"), first_head)
         self.assertEqual(saved["phase"], "ci")
 
@@ -621,8 +629,6 @@ class ProjectTests(unittest.TestCase):
             return fixtures.report(description="One project stage changes Core and Specification.")
         def publish():
             self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (3, 2))
-            self.commit("Core")
-            self.commit("Specification")
             return fixtures.report()
         done = fixtures.report()
         self.transport.actions = [("coordinate", done), ("code", code), ("coordinate", done),
@@ -634,6 +640,25 @@ class ProjectTests(unittest.TestCase):
         archived = json.loads((self.store.directory / "iterations/000001.json").read_text())
         self.assertEqual(set(archived["published"]["repositories"]), {"Core", "Specification"})
         self.assertEqual(archived["display_ci"]["status"], "not-configured")
+
+    def test_legacy_project_ci_fix_can_restore_an_already_published_member(self):
+        self.seal()
+        self.cycle.prepare_publish()
+        self.commit("Core")
+        self.commit("Specification")
+        self.assertTrue(self.cycle.reconcile_publish())
+        first = {name: self.members[name].text("rev-parse", "HEAD") for name in self.members}
+        self.state.pop("publication_paths")  # simulate a publication before scope retention
+        self.edit("Core", text="original\n")
+        self.state.update(phase="publish", reviewed=self.project.snapshot())
+        self.transport.actions = [("publish", fixtures.report(summary="Restore reviewed Core behavior"))]
+        self.cycle.publish()
+        self.assertEqual(set(self.state["publication_targets"]), {"Core", "Specification"})
+        self.assertIn("Core/source.txt", self.state["publication_paths"])
+        self.assertNotEqual(self.members["Core"].text("rev-parse", "HEAD"), first["Core"])
+        for name in ("Root", "Specification"):
+            self.assertEqual(self.members[name].text("rev-parse", "HEAD"), first[name])
+        self.assertEqual(self.state["phase"], "ci")
 
     def test_member_ci_failure_cannot_advance_the_project(self):
         self.seal()

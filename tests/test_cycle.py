@@ -599,7 +599,7 @@ class CycleTests(unittest.TestCase):
             ("coordinate", report()), ("code", self.edit(content="next stage implementation\n")),
             ("coordinate", report()), *[("astra", report())] * 3,
             ("coordinate", report()), *[("claude", report())] * 2,
-            ("coordinate", report()), ("publish", self.commit_stage),
+            ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
         self.assertEqual(self.cycle.run(), 0)
@@ -638,7 +638,7 @@ class CycleTests(unittest.TestCase):
             ("coordinate", report()), ("code", self.edit(content="corrected\n")),
             ("coordinate", report()), *[("astra", report())] * 3,
             ("coordinate", report()), *[("claude", report())] * 2,
-            ("coordinate", report()), ("publish", self.commit_stage),
+            ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
         self.transport.calls.clear()
@@ -852,7 +852,7 @@ class CycleTests(unittest.TestCase):
             ("coordinate", report()), ("code", self.edit(description="Full unabridged implementation description")),
             ("coordinate", report()), *[("astra", report())] * 3,
             ("coordinate", report()), *[("claude", report())] * 2,
-            ("coordinate", report()), ("publish", self.commit_stage),
+            ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
         with patch.object(self.cycle, "wait_ci", wraps=self.cycle.wait_ci) as wait:
@@ -1294,6 +1294,24 @@ class CycleTests(unittest.TestCase):
         self.commit_stage()
         self.assertTrue(self.cycle.reconcile_publish())
 
+    def test_legacy_ci_fix_can_restore_baseline_bytes_without_losing_owned_scope(self):
+        self.remote()
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        self.commit_stage()
+        self.assertTrue(self.cycle.reconcile_publish())
+        self.assertNotIn("publication_paths", self.state)  # old published-state format
+        first = self.state["published"]["sha"]
+        self.edit(content="initial\n")()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot())
+        self.transport.actions = [("publish", report(summary="Restore reviewed baseline behavior"))]
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")):
+            self.cycle.publish()
+        self.assertNotEqual(self.state["published"]["sha"], first)
+        self.assertEqual(self.repo.text("diff", "--name-only", self.state["baseline"]["head"], "HEAD"), "")
+        self.assertEqual(self.state["publication_paths"], ["source.txt"])
+        self.assertEqual(self.state["phase"], "ci")
+
     def test_final_ci_barrier_detects_late_worktree_change(self):
         self.remote()
         self.edit()()
@@ -1319,6 +1337,150 @@ class CycleTests(unittest.TestCase):
         self.assertTrue(self.cycle.reconcile_publish())
         self.assertEqual(self.repo.text("diff", "--cached", "--name-only"), "operator.txt")
         self.assertEqual(self.repo.git("cat-file", "-e", "HEAD:operator.txt", check=False).returncode, 128)
+
+    def test_runtime_publication_uses_literal_files_and_preserves_siblings_and_staging(self):
+        self.remote()
+        (self.root / "pieces").mkdir()
+        (self.root / "pieces/part1.txt").write_text("operator sibling")
+        (self.root / "operator.txt").write_text("operator staging")
+        self.repo.git("add", "operator.txt")
+        self.state = fresh_state(self.repo)
+        self.cycle.state = self.state
+        protected = dict(self.state["protected_index"])
+        self.edit()()
+        names = ["pieces/part[1].txt", "-leading.txt"]
+        if os.name != "nt":
+            names += [":(glob)magic", "line\nbreak.txt"]
+        for name in names:
+            (self.root / name).write_text("reviewed")
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        self.transport.actions = [("publish", report(summary="Update reviewed files"))]
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")):
+            self.cycle.publish()
+        committed = set(os.fsdecode(n) for n in self.repo.git("diff", "--name-only", "-z", self.state["baseline"]["head"], "HEAD").stdout.split(b"\0") if n)
+        self.assertEqual(committed, {"source.txt", *names})
+        self.assertEqual(self.repo.index_entries(self.state["protected"]), protected)
+        self.assertEqual(self.repo.text("diff", "--cached", "--name-only"), "operator.txt")
+        self.assertEqual((self.root / "pieces/part1.txt").read_text(), "operator sibling")
+        self.assertEqual(self.state["phase"], "ci")
+
+    @unittest.skipIf(os.name == "nt", "POSIX Git hook fixture")
+    def test_commit_hook_cannot_push_an_extra_protected_file(self):
+        self.remote()
+        (self.root / "operator.txt").write_text("private pre-existing work")
+        self.state = fresh_state(self.repo)
+        self.cycle.state = self.state
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        hook = self.root / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\ngit add -- operator.txt\n")
+        hook.chmod(0o755)
+        self.transport.actions = [("publish", report())]
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")), self.assertRaises(Blocked) as caught:
+            self.cycle.publish()
+        self.assertIn(caught.exception.code, ("protected-index", "unreviewed-commit"))
+        self.assertEqual(self.repo.remote_head("origin"), self.state["baseline"]["head"])
+        self.assertNotEqual(self.repo.text("rev-parse", "HEAD"), self.state["baseline"]["head"])
+        self.assertEqual((self.root / "operator.txt").read_text(), "private pre-existing work")
+
+    def test_reverted_unreviewed_file_in_history_is_rejected_before_push(self):
+        self.remote()
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        (self.root / "extra.txt").write_text("unreviewed intermediate data")
+        self.repo.git("add", "source.txt", "extra.txt")
+        self.repo.git("commit", "-m", "Include an extra file")
+        self.repo.git("rm", "extra.txt")
+        self.repo.git("commit", "-m", "Remove the extra file")
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.publish()
+        self.assertEqual(caught.exception.code, "unreviewed-commit")
+        self.assertEqual(self.repo.remote_head("origin"), self.state["baseline"]["head"])
+        self.assertEqual(self.transport.calls, [])
+
+    def test_readonly_publisher_cannot_stage_even_owned_paths(self):
+        self.remote()
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        def stage():
+            self.repo.git("add", "source.txt")
+            return report()
+        self.transport.actions = [("publish", stage)]
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")), self.assertRaises(Blocked) as caught:
+            self.cycle.publish()
+        self.assertEqual(caught.exception.code, "publisher-mutation")
+        self.assertEqual(self.repo.remote_head("origin"), self.state["baseline"]["head"])
+        self.assertEqual(self.repo.text("rev-parse", "HEAD"), self.state["baseline"]["head"])
+
+    def test_runtime_push_response_loss_does_not_repeat_publication_or_provider(self):
+        import focus_commit
+        self.remote()
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        self.transport.actions = [("publish", report())]
+        run_git = focus_commit.run_git
+        def lost(cycle, *args):
+            run_git(cycle, *args)
+            if args[0] == "push":
+                raise FocusStop("Push receipt lost")
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")):
+            with patch.object(focus_commit, "run_git", side_effect=lost), self.assertRaises(FocusStop):
+                self.cycle.publish()
+            head = self.repo.text("rev-parse", "HEAD")
+            self.assertIsNotNone(self.store.read()["publication_prepared"])
+            self.cycle.publish()
+        self.assertEqual(self.repo.text("rev-parse", "HEAD"), head)
+        self.assertEqual(self.state["phase"], "ci")
+        self.assertEqual(len(self.transport.calls), 1)
+
+    @unittest.skipIf(os.name == "nt", "POSIX Git hook fixture")
+    def test_commit_hook_cannot_redirect_runtime_push(self):
+        self.remote()
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        hook = self.root / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\ngit config remote.origin.pushurl /unapproved-push-destination\n")
+        hook.chmod(0o755)
+        self.transport.actions = [("publish", report())]
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")), self.assertRaises(Blocked) as caught:
+            self.cycle.publish()
+        self.assertEqual(caught.exception.code, "remote-changed")
+        # Query the original bare repository directly: the hook changed only
+        # the fixture's local push URL, never any real account or configuration.
+        original = subprocess.check_output(["git", "-C", str(Path(self.temp.name) / "bare.git"), "rev-parse", "main"]).decode().strip()
+        self.assertEqual(original, self.state["baseline"]["head"])
+
+    def test_runtime_push_does_not_publish_operator_tags(self):
+        self.remote()
+        self.repo.git("tag", "-a", "operator-tag", "-m", "Private annotated tag")
+        self.repo.git("config", "push.followTags", "true")
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        self.transport.actions = [("publish", report())]
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")):
+            self.cycle.publish()
+        self.assertEqual(self.repo.text("ls-remote", "--tags", "origin"), "")
+        self.assertEqual(self.state["phase"], "ci")
+
+    @unittest.skipIf(os.name == "nt", "POSIX Git hook fixture")
+    def test_emergency_stop_during_git_hook_contains_children_and_prevents_push(self):
+        self.remote()
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
+        marker = self.root / ".work/hook-running"
+        hook = self.root / ".git/hooks/pre-commit"
+        hook.write_text("#!/bin/sh\ntouch .work/hook-running\nsleep 600\n")
+        hook.chmod(0o755)
+        def heartbeat():
+            if marker.exists():
+                raise FocusStop("Fixture emergency stop during hook")
+        self.cycle.heartbeat = heartbeat
+        self.transport.actions = [("publish", report())]
+        with patch.object(self.cycle, "policy", return_value=subprocess.CompletedProcess([], 0, b"", b"")), self.assertRaises(FocusStop):
+            self.cycle.publish()
+        self.assertEqual(self.repo.remote_head("origin"), self.state["baseline"]["head"])
+        self.assertIsNotNone(self.store.read()["publication_prepared"])
+        self.assertEqual((self.root / "source.txt").read_text(), "changed\n")
 
     def test_unstaging_protected_work_is_detected(self):
         self.edit()()

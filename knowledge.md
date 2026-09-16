@@ -74,6 +74,26 @@ repository. Unchanged repositories are never publication targets. These two modu
 are shared cc-sync assets; `tests/test_focus_project.py` covers their integration.
 `focus_reconcile.py` owns explicit operator handover of changed shared context and
 protected member files; it is also installed by cc-sync.
+`focus_commit.py` owns publication Git writes after a read-only Luna preparation.
+It is a shared cc-sync asset. Exact reviewed file names go through literal NUL
+pathspecs and `commit --only`, preserving unrelated staged, unstaged and untracked
+work. Git/hook processes reuse transport containment, stop and lease heartbeats.
+`Cycle.validate_publication_commit` checks protected work/index and every new
+commit's path scope (not just the final net diff); merge history is rejected.
+Project publication validates all local commits before the first push and again
+before each remaining member. Pushes name a verified SHA and pinned push URL,
+disabling automatic tags and recursive submodule publication.
+Prepared subjects are sealed in `publication_prepared`, so interrupted Git work
+can resume without another model call. New publisher attempts must leave their
+entry snapshot unchanged; legacy cached publication artifacts still pass the
+ordinary scope and remote reconciliation. Publication scope manifests and raw Git
+logs live in the cycle's `publication/` directory, per member for projects, and
+their paths are supplied to the publisher/healer. A post-commit `protected-index`
+failure can identify extra committed protected files despite an empty staged diff;
+retry neither adopts those files nor rewrites an already-published commit.
+The iteration retains `publication_paths` across renewed reviews/CI fixes, including
+files restored to their original bytes. For legacy state only an already-certified
+published SHA can supply historical scope; an unconfirmed local commit cannot.
 `focus_progress.py` renders bounded actual provider events and a 15-second activity
 heartbeat, persisting `.work/cycle/progress.json` without raw commands or reasoning.
 `focus_output.py` renders public message deltas, actions, command results and errors
@@ -181,7 +201,8 @@ support non-TTY recovery. All three new modules are shared cc-sync runtime asset
 
 The flow is Luna/xhigh coordination, Fable/high coding, Astra/high review to three
 clean passes, Fable/xhigh review to two implementation-clean passes, Luna/high
-commit/push, and configured CI. Substantial second-review fixes return to Astra.
+read-only publication preparation, runtime commit/push, and configured CI.
+Substantial second-review fixes return to Astra.
 Recoverable blockers receive one Astra/xhigh recovery attempt before an operator-visible stop.
 The `heal` role has its own persisted conversation, separate from coding and both
 review roles. Technical failures, including remote Git queries, generic provider
@@ -238,8 +259,8 @@ report still blocks. Only a final response starts the 30-second process-exit gra
 An unresolved blocker does not cause model polling. Luna gets short results and
 artifact paths; Astra gets the complete coding final message. Review invocations
 each perform one pass; the runtime owns clean counters and rejects incomplete
-reports; evidence entries must contain non-whitespace text. Only the publisher may
-commit/push, and existing dirty files are protected.
+reports; evidence entries must contain non-whitespace text. Only the runtime may
+stage/commit/push after publisher preparation; existing dirty files are protected.
 The report parser preserves long summaries instead of treating the 1200-character
 presentation budget as a workflow blocker. `concise_summary` bounds only printed
 previews and persisted coordinator/status summaries, including coding recovery;

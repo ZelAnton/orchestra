@@ -1,5 +1,6 @@
 """One reviewed project iteration, independently reconciled repository pushes."""
 
+import os
 import time
 
 from cycle_state import Blocked, Store, digest, encode
@@ -35,16 +36,19 @@ class ProjectCycle(Cycle):
                    "instructions": "Paths are relative to the project root. Work only inside the listed repositories. "
                    "Files outside them are read-only context. Review the entire iteration across all affected repositories. "
                    "Each repository retains its own main, protected work, commit, remote and CI. "
-                   "Do not commit or push repositories absent from publication_targets. "
+                   "Only the runtime commits and pushes the publication_targets; provider roles are read-only during publication. "
                    "A partial publication is not an atomic project publication: reconcile each repository before retrying."}
         if role == "publish":
             details["publication_targets"] = [{"path": name, "remote": target["remote"],
                 "push_url": target["push_url"], "ref": "refs/heads/main",
                 "baseline_head": self.state["baseline"]["head"][name],
-                "stage_paths": self.repo.local_paths(name, self.changes(self.state["baseline"], self.state["reviewed"])),
+                "stage_paths": self.repo.local_paths(name, self.publication_paths()),
                 "published": (self.state.get("publication_repositories", {}).get(name, {}).get("published")
                               if self.state.get("publication_repositories", {}).get(name, {}).get("confirmed") else None)}
                 for name, target in self.state["publication_targets"].items()]
+        if role in ("publish", "heal"):
+            details["publication_artifacts"] = {name: str(self.store.directory / "repositories" / name / "publication")
+                                                for name in self.state.get("publication_targets", {})}
         import json
         return prompt + "\n\nProject context:\n" + json.dumps(details, ensure_ascii=False)
 
@@ -64,6 +68,8 @@ class ProjectCycle(Cycle):
                      protected_index={path[len(name) + 1:]: value for path, value in self.state["protected_index"].items()
                                       if self.repo.owner(path) == name},
                      remote=self.state["publication_targets"][name]["remote"],
+                     publication_push_url=self.state["publication_targets"][name]["push_url"],
+                     publication_paths=self.repo.local_paths(name, self.publication_paths()),
                      published=record.get("published"), display_ci=record.get("display_ci"), pending=None)
         member = MemberCycle(repo, store, state, self.transport, self.heartbeat, self.scripts, self.pwsh,
                              control=self.control, progress=self.progress)
@@ -101,7 +107,13 @@ class ProjectCycle(Cycle):
             self.save()
             return False
         self.check_protected(current)
-        names = sorted({self.repo.owner(path) for path in self.changes(self.state["baseline"], reviewed)})
+        names = {self.repo.owner(path) for path in self.changes(self.state["baseline"], reviewed)}
+        # A reviewed revert can erase the final diff of an already committed
+        # member. Keep that member, while still detecting withdrawn work in a
+        # member whose publication never produced a commit.
+        names.update(self.repo.owner(path) for path in self.publication_paths()
+                     if current["head"][self.repo.owner(path)] != self.state["baseline"]["head"][self.repo.owner(path)])
+        names = sorted(names)
         if not names:
             raise Blocked("empty-stage", "No repository changes to publish in this iteration.")
         old = self.state.get("publication_targets")
@@ -124,13 +136,15 @@ class ProjectCycle(Cycle):
             self.state["remote"] = {name: target["remote"] for name, target in targets.items()}
             self.save()
         self.validate_targets(current)
-        # Every repository passes its policy and live-remote check before a model
-        # may publish any member. Each completed push is reconciled independently.
+        # Every repository passes its policy and live-remote check before the
+        # runtime publishes any member. Completed pushes reconcile independently.
         for name in names:
             if not self.member(name).prepare_publish():
                 self.reset_reviews("Файлы изменились после ревью")
                 self.save()
                 return False
+        self.state["publication_paths"] = self.publication_paths()
+        self.save()
         return True
 
     def reconcile_publish(self):
@@ -160,6 +174,40 @@ class ProjectCycle(Cycle):
         self.update_ci_display()
         self.save()
         return True
+
+    def publication_paths(self):
+        paths = set(super().publication_paths())
+        if not self.state.get("publication_paths"):
+            for name, record in self.state.get("publication_repositories", {}).items():
+                if not record.get("published"):
+                    continue
+                paths.update(name + "/" + os.fsdecode(path) for path in self.repo.repositories[name].git(
+                    "diff", "--name-only", "-z", "--no-renames", self.state["baseline"]["head"][name], record["published"]["sha"]
+                ).stdout.split(b"\0") if path)
+        return sorted(paths)
+
+    def validate_publication_commit(self):
+        current = self.snapshot()
+        self.check_protected(current)
+        if self.changes(self.state["reviewed"], current):
+            raise Blocked("publish-drift", "Publication changed reviewed project content.")
+        self.validate_targets(current)
+        ready = True
+        for name in self.state["publication_targets"]:
+            ready = self.member(name).validate_publication_commit() and ready
+        return ready
+
+    def execute_publication(self, subject):
+        from focus_commit import commit_reviewed, push_reviewed
+        for name in self.state["publication_targets"]:
+            commit_reviewed(self.member(name), subject)
+        # All members must validate before the first push. A commit hook in one
+        # member may have touched another member's reviewed or protected work.
+        for name in self.state["publication_targets"]:
+            if not self.validate_publication_commit():
+                raise Blocked("uncommitted-stage", "Every target must be committed before project publication.")
+            self.validate_targets(self.snapshot())
+            push_reviewed(self.member(name))
 
     def assert_publication_current(self):
         current = self.snapshot()

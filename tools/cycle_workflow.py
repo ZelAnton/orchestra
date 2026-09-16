@@ -83,7 +83,12 @@ class Cycle:
                           ". For intentional operator changes, prepare and inspect a cc-focus reconcile plan, then explicitly "
                           "accept it with --apply-plan. --retry alone does not transfer ownership; provider roles must not approve their own changes.")
         if self.repo.index_entries(self.state["protected"]) != self.state["protected_index"]:
-            raise Blocked("protected-index", "Pre-existing index entries changed; preserve the operator's staging before resuming.")
+            actual = self.repo.index_entries(self.state["protected"])
+            expected = self.state["protected_index"]
+            paths = sorted(name for name in actual.keys() | expected.keys() if actual.get(name) != expected.get(name))
+            detail = ", ".join(paths[:12]) + (f" (+{len(paths) - 12} more)" if len(paths) > 12 else "")
+            raise Blocked("protected-index", "Pre-existing index entries changed; preserve the operator's staging before resuming: "
+                          + detail + ". If HEAD changed, inspect the committed/pushed scope; --retry does not authorize extra files.")
 
     def validate_corrections(self):
         state = self.state
@@ -161,7 +166,10 @@ class Cycle:
         if role == "publish":
             context.update(remote=state["remote"], ref="refs/heads/main",
                            reviewed={"head": state["reviewed"]["head"], "files_sha256": digest(encode(state["reviewed"]["files"]))},
-                           stage_paths=self.changes(state["baseline"], state["reviewed"]))
+                           stage_paths=self.publication_paths())
+        if role in ("publish", "heal"):
+            context["publication_executor"] = "runtime; provider roles must not stage, commit or push"
+            context["publication_artifacts"] = str(self.store.directory / "publication")
         if role == "heal":
             context["blocker"] = state["blocker"]
         if role == "code" and (state.get("pending") or {}).get("resume_code"):
@@ -188,6 +196,7 @@ class Cycle:
                 self.state["code_started"] = True
             if role == "publish":
                 self.state["publication_started"] = True
+                pending["publication_readonly"] = True
             state["pending"] = pending
             self.save()  # The intent is durable before a provider can do any work.
         directory = self.store.directory / "invocations" / pending["id"]
@@ -209,6 +218,10 @@ class Cycle:
             if self.snapshot(result["after"]) != self.snapshot():
                 raise Blocked("result-drift", "Repository changed after the recorded result; review evidence is stale.")
         else:
+            if role == "publish":
+                pending["publication_readonly"] = True
+                pending["publication_before"] = self.snapshot()
+                self.save()
             quota = pending.get("quota_wait")
             unchanged_refusal = False
             if quota:
@@ -248,6 +261,9 @@ class Cycle:
             raise Blocked("unauthorized-commit", f"{role} changed HEAD outside publication; work was preserved.")
         if role == "coordinate" and before != after:
             raise Blocked("coordinator-mutation", "The coordinator changed repository state; its role is read-only.")
+        if (role == "publish" and pending.get("publication_readonly")
+                and self.snapshot(pending.get("publication_before", pending["before"])) != after):
+            raise Blocked("publisher-mutation", "The publisher changed repository state; only the runtime may stage, commit or push.")
         if report["status"] == "blocked":
             raise Blocked("reported-blocker", report["summary"] + "\n" + report["description"])
         if role in ("astra", "claude"):
@@ -439,10 +455,15 @@ class Cycle:
             self.save()
             return False
         self.check_protected(current)
+        self.validate_publication_commit()
         remote = self.state.get("remote") or self.repo.remote()
         if self.repo.remote() != remote:
             raise Blocked("remote-changed", "The publication remote changed since the stage was reviewed.")
         self.state["remote"] = remote
+        push_url = self.repo.push_url(remote)
+        if self.state.get("publication_push_url", push_url) != push_url:
+            raise Blocked("remote-changed", "The publication push URL changed since preparation.")
+        self.state["publication_push_url"] = push_url
         remote_head = self.remote_head(remote)
         known_heads = {self.state["baseline"]["head"], current["head"]}
         if self.state.get("published"):
@@ -452,24 +473,42 @@ class Cycle:
         policy = self.policy("check-publish", "--branch", "main", "--remote", remote)
         if policy.returncode:
             raise Blocked("publish-policy", policy.stderr.decode("utf-8", errors="replace")[-3000:])
-        if not self.changes(self.state["baseline"], reviewed):
+        if not self.publication_paths():
             raise Blocked("empty-stage", "No stage changes to publish. Report complete only when the stage source is exhausted.")
+        self.state["publication_paths"] = self.publication_paths()
         self.save()
         return True
 
-    def reconcile_publish(self):
+    def publication_paths(self):
+        paths = set(self.state.get("publication_paths", [])) | set(self.changes(self.state["baseline"], self.state["reviewed"]))
+        published = self.state.get("published")
+        if not self.state.get("publication_paths") and published and isinstance(self.state["baseline"]["head"], str):
+            # Legacy state already certified this commit. Preserve its owned
+            # paths when a newly reviewed CI fix restores their baseline bytes.
+            paths.update(os.fsdecode(name) for name in self.repo.git(
+                "diff", "--name-only", "-z", "--no-renames", self.state["baseline"]["head"], published["sha"]
+            ).stdout.split(b"\0") if name)
+        return sorted(paths)
+
+    def validate_publication_commit(self):
         current = self.snapshot()
         reviewed = self.state["reviewed"]
+        self.check_protected(current)
         if self.changes(reviewed, current):
             raise Blocked("publish-drift", "Publication changed reviewed content; both reviews must run again.")
         if current["head"] == self.state["baseline"]["head"]:
             return False
         if self.repo.git("merge-base", "--is-ancestor", self.state["baseline"]["head"], current["head"], check=False).returncode:
             raise Blocked("rewritten-history", "Published history is not a descendant of the stage baseline.")
-        committed = {os.fsdecode(name) for name in self.repo.git(
-            "diff", "--name-only", "-z", "--no-renames", self.state["baseline"]["head"], current["head"]
-        ).stdout.split(b"\0") if name}
-        owned = set(self.changes(self.state["baseline"], reviewed))
+        committed = set()
+        for revision in self.repo.text("rev-list", "--parents", self.state["baseline"]["head"] + ".." + current["head"]).splitlines():
+            fields = revision.split()
+            if len(fields) != 2:
+                raise Blocked("publication-history", "Publication requires serial commits, not merge history.")
+            committed.update(os.fsdecode(name) for name in self.repo.git(
+                "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", fields[0]
+            ).stdout.split(b"\0") if name)
+        owned = set(self.publication_paths())
         if not committed or not committed <= owned:
             raise Blocked("unreviewed-commit", "Publication includes files outside the reviewed stage.")
         remaining = set(self.repo.dirty_paths()) - set(self.state["protected"])
@@ -477,6 +516,12 @@ class Cycle:
             raise Blocked("uncommitted-stage", "Reviewed stage files remain uncommitted: " + ", ".join(sorted(remaining)))
         if remaining:
             return False
+        return True
+
+    def reconcile_publish(self):
+        if not self.validate_publication_commit():
+            return False
+        current = self.snapshot()
         if self.remote_head(self.state["remote"]) != current["head"]:
             return False
         self.state["published"] = {"sha": current["head"], "at": time.time(), "remote": self.state["remote"]}
@@ -490,9 +535,27 @@ class Cycle:
         # Reconcile before the model is allowed to repeat a possibly completed push.
         if self.reconcile_publish():
             return
-        report, _, _, _ = self.invoke("publish")
-        if report["status"] != "done" or not self.reconcile_publish():
+        prepared = self.state.get("publication_prepared")
+        fingerprint = digest(encode(self.snapshot(self.state["reviewed"])))
+        if not prepared or prepared["reviewed_sha256"] != fingerprint:
+            report, _, _, _ = self.invoke("publish")
+            if report["status"] != "done":
+                raise Blocked("publication-unconfirmed", "The publisher did not confirm readiness for publication.")
+            subject = " ".join("".join(c if c.isprintable() else " " for c in report["summary"]).split())[:160]
+            prepared = {"reviewed_sha256": fingerprint, "subject": subject or "Publish reviewed changes"}
+            self.state["publication_prepared"] = prepared
+            self.complete_invocation()
+        # Revalidate policy, remote, work and ownership after the read-only model.
+        if not self.prepare_publish():
+            return
+        self.execute_publication(prepared["subject"])
+        if not self.reconcile_publish():
             raise Blocked("publication-unconfirmed", "Commit/push did not produce the reviewed stage at remote main.")
+
+    def execute_publication(self, subject):
+        from focus_commit import commit_reviewed, push_reviewed
+        commit_reviewed(self, subject)
+        push_reviewed(self)
 
     def handle_block(self, error):
         state = self.state
@@ -692,6 +755,9 @@ class Cycle:
                           last_snapshot=self.snapshot(), code_started=False, healed=[], recovery_unverified=False,
                           corrections=[], correction_revision=None, correction_pending=None, coordination=None,
                           publication_started=False)
+        self.state.pop("publication_prepared", None)
+        self.state.pop("publication_push_url", None)
+        self.state.pop("publication_paths", None)
         self.state.update(task=None, display_reviews=new_reviews(), display_review_events=[], display_ci=None)
         if self.state["baseline"].get("repositories"):
             for key in ("publication_targets", "publication_repositories", "remote"):
