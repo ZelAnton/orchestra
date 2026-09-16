@@ -17,10 +17,10 @@ def state_fingerprint(state):
                           if key not in ("updated", "lease_owner", "lease_owners", "repository_leases")}))
 
 
-def committed_base(repo, names, snapshot):
-    """Use Git HEAD as the publication baseline for whole-file ownership transfer."""
+def committed_base(repo, names, snapshot, revision="HEAD"):
+    """Use checkout bytes at a Git revision for whole-file ownership transfer."""
     wanted, bases = set(names), dict.fromkeys(names)
-    for raw in repo.git("ls-tree", "-r", "-z", "HEAD").stdout.split(b"\0"):
+    for raw in repo.git("ls-tree", "-r", "-z", revision).stdout.split(b"\0"):
         if not raw:
             continue
         metadata, raw_name = raw.split(b"\t", 1)
@@ -99,7 +99,7 @@ def prepare(cycle):
                       "No source, index or Git history is changed by reconciliation. " + continuation}
 
 
-def write_plan(cycle, path):
+def write_plan(cycle, path, *, prepare_plan=prepare):
     path = Path(path).absolute()
     resolved = path.resolve()
     if resolved.is_relative_to(cycle.repo.root):
@@ -110,7 +110,7 @@ def write_plan(cycle, path):
     if (resolved.is_relative_to(cycle.repo.root) and not hasattr(cycle.repo, "owner")
             and cycle.repo.git("check-ignore", "--quiet", "--", resolved.relative_to(cycle.repo.root).as_posix(), check=False).returncode):
         raise Blocked("reconcile-output", "This plan would be part of the Git work snapshot. Use an ignored .work JSON destination or a path outside the repository.")
-    plan = prepare(cycle)
+    plan = prepare_plan(cycle)
     path.parent.mkdir(parents=True, exist_ok=True)
     # A plan is operator input. Never overwrite an existing file implicitly.
     with path.open("xb") as stream:
@@ -118,7 +118,7 @@ def write_plan(cycle, path):
     return plan
 
 
-def read_plan(path):
+def read_plan(path, *, schema=SCHEMA):
     def unique(pairs):
         value = {}
         for key, item in pairs:
@@ -132,7 +132,7 @@ def read_plan(path):
         if len(data) > 2 * 1024 * 1024:
             raise ValueError("plan exceeds 2 MiB")
         value = json.loads(data, object_pairs_hook=unique)
-        if not isinstance(value, dict) or value.get("schema") != SCHEMA:
+        if not isinstance(value, dict) or value.get("schema") != schema:
             raise ValueError("unsupported reconciliation plan")
         return value
     except (OSError, ValueError, TypeError) as error:

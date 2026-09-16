@@ -16,5 +16,7 @@ if ($LASTEXITCODE -ne 0) { throw "Focus terminal regression tests failed: $LASTE
 if ($LASTEXITCODE -ne 0) { throw "Focus status regression tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_focus_project.py')
 if ($LASTEXITCODE -ne 0) { throw "Focus project regression tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_publication_recovery.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus publication recovery tests failed: $LASTEXITCODE" }
 & (Join-Path $repo 'tools/focus-runtime.ps1') --help
 if ($LASTEXITCODE -ne 0) { throw 'Cycle PowerShell help smoke failed.' }

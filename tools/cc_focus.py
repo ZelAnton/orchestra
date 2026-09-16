@@ -37,6 +37,7 @@ def main(argv=None, interaction=None):
     correction.add_argument("--message", help="With correct: save an operator correction for the stopped current stage.")
     correction.add_argument("--file", type=Path, help="With correct: import a UTF-8 correction file, at most 64 KiB.")
     reconciliation = parser.add_mutually_exclusive_group()
+    parser.add_argument("--publication", action="store_true", help="With reconcile: explicitly accept a preserved already-pushed protected scope and restart both reviews.")
     reconciliation.add_argument("--plan-out", type=Path, help="With reconcile: write a reviewable handover plan to a new file; accept no changes yet.")
     reconciliation.add_argument("--apply-plan", type=Path, help="With reconcile: explicitly accept this exact plan, transfer its protected files to the cycle, and restart coding/reviews.")
     args = parser.parse_args(argv)
@@ -52,8 +53,8 @@ def main(argv=None, interaction=None):
         parser.error("correct requires --message or --file; those options are only valid with correct")
     if (args.command in ("retry-message", "discard-message")) != bool(args.id):
         parser.error("retry-message/discard-message require --id; that option is only valid with these commands")
-    if args.command != "reconcile" and (args.plan_out or args.apply_plan):
-        parser.error("--plan-out and --apply-plan require reconcile")
+    if args.command != "reconcile" and (args.plan_out or args.apply_plan or args.publication):
+        parser.error("--plan-out, --apply-plan and --publication require reconcile")
     repo = Repository(Path.cwd())
     try:
         store = Store(repo.root)
@@ -156,7 +157,10 @@ def main(argv=None, interaction=None):
                         if repo.paused() or control.boundary():
                             raise Blocked("recovery-paused", "Recovery was not applied: clear the operator pause/stop before requesting this state transition.")
                         if args.command == "reconcile":
-                            import focus_reconcile
+                            if args.publication:
+                                import focus_publication_recovery as focus_reconcile
+                            else:
+                                import focus_reconcile
                             if args.apply_plan:
                                 focus_reconcile.apply(cycle, args.apply_plan)
                             else:

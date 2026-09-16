@@ -74,6 +74,16 @@ repository. Unchanged repositories are never publication targets. These two modu
 are shared cc-sync assets; `tests/test_focus_project.py` covers their integration.
 `focus_reconcile.py` owns explicit operator handover of changed shared context and
 protected member files; it is also installed by cc-sync.
+`focus_publication_recovery.py` provides the separate operator-only
+`reconcile --publication --plan-out/--apply-plan` mode for an already-pushed
+protected scope. It pins state, snapshot and live remote HEADs, rejects content,
+staging, destination and history drift, and adopts only the exact published
+protected paths. It preserves original baseline HEADs and all Git/source state;
+adopted file baselines use the original commits, not the expanded current HEAD.
+The checksummed correction archives the prior state/plan and pauses the same task
+before Astra with both review streaks and publication/CI credit cleared. No model
+or Git write runs during acceptance. This shared cc-sync asset is covered by
+`tests/test_focus_publication_recovery.py`; normal reconciliation stays unchanged.
 `focus_commit.py` owns publication Git writes after a read-only Luna preparation.
 It is a shared cc-sync asset. Exact reviewed file names go through literal NUL
 pathspecs and `commit --only`, preserving unrelated staged, unstaged and untracked

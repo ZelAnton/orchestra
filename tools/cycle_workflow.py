@@ -39,6 +39,21 @@ def fresh_state(repository):
             "code_started": False, "task": None, "display_reviews": new_reviews(), "display_review_events": []}
 
 
+def publication_history(repo, baseline, head):
+    """Inspect every new commit, including paths hidden by a later revert."""
+    if repo.git("merge-base", "--is-ancestor", baseline, head, check=False).returncode:
+        raise Blocked("rewritten-history", "Published history is not a descendant of the stage baseline.")
+    committed = set()
+    for revision in repo.text("rev-list", "--parents", baseline + ".." + head).splitlines():
+        fields = revision.split()
+        if len(fields) != 2:
+            raise Blocked("publication-history", "Publication requires serial commits, not merge history.")
+        committed.update(os.fsdecode(name) for name in repo.git(
+            "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", fields[0]
+        ).stdout.split(b"\0") if name)
+    return committed
+
+
 class Cycle:
     def __init__(self, repository, store, state, transport, heartbeat, scripts, pwsh, control=None, progress=None):
         self.repo, self.store, self.state = repository, store, state
@@ -87,8 +102,11 @@ class Cycle:
             expected = self.state["protected_index"]
             paths = sorted(name for name in actual.keys() | expected.keys() if actual.get(name) != expected.get(name))
             detail = ", ".join(paths[:12]) + (f" (+{len(paths) - 12} more)" if len(paths) > 12 else "")
+            recovery = (" For operator acceptance of an already-pushed scope, inspect a cc-focus reconcile --publication "
+                        "--plan-out plan, then explicitly use --publication --apply-plan. Providers must not accept their own scope changes."
+                        if self.state["phase"] == "publish" and self.state.get("publication_started") else "")
             raise Blocked("protected-index", "Pre-existing index entries changed; preserve the operator's staging before resuming: "
-                          + detail + ". If HEAD changed, inspect the committed/pushed scope; --retry does not authorize extra files.")
+                          + detail + ". If HEAD changed, inspect the committed/pushed scope; --retry does not authorize extra files." + recovery)
 
     def validate_corrections(self):
         state = self.state
@@ -159,6 +177,13 @@ class Cycle:
                 "and no unpublished changes, including adopted files. "
                 "Listed optional_handoff_sources may have been removed after import; their absence does not block "
                 "this correction. Follow current project instructions and plans instead of restoring those transfer files.")
+            if corrections[-1].get("publication_recovery"):
+                context["publication_recovery"] = (
+                    "The operator accepted the exact already-committed protected files listed in the latest correction archive. "
+                    "The original baseline HEAD and existing commits are preserved. Review the SAME stage, including the "
+                    "full adopted files and publication history, through both review loops anew. Ownership acceptance earns "
+                    "no review or CI credit. Do not repeat completed implementation or perform Git writes. "
+                    "The runtime will reconcile existing pushes and finish remaining reviewed publication afterward.")
         pending = state.get("pending") or {}
         if (state["phase"] == "code" and state.get("code_started")
                 and (pending.get("resume_code", True) or pending.get("attempts", 0))):
@@ -314,9 +339,11 @@ class Cycle:
         self.check_protected(current)
         self.record_correction(data, current)
 
-    def record_correction(self, data, current, *, candidate=None, metadata=None, validate=None):
+    def record_correction(self, data, current, *, candidate=None, metadata=None, validate=None, resume_phase="code"):
         """Persist an already-validated operator transition; never a provider action."""
         state = self.state
+        if resume_phase not in ("code", "astra"):
+            raise ValueError("An operator correction must resume coding or first review.")
         if not data.strip() or len(data) > 65536 or b"\0" in data:
             raise Blocked("correction-text", "Correction text must be nonempty UTF-8 without NUL, at most 64 KiB.")
         corrections = list(state.get("corrections", []))
@@ -332,6 +359,8 @@ class Cycle:
         corrections.append({"id": correction_id, "iteration": state["iteration"],
                             "path": path, "sha256": digest(data), "archive": archive,
                             "archive_sha256": digest(archive_bytes), "before_code": not state.get("code_started", False)})
+        if resume_phase == "astra":
+            corrections[-1]["publication_recovery"] = True
         if validate:
             validate()
         previous = copy.deepcopy(state)
@@ -339,15 +368,15 @@ class Cycle:
             if candidate is not None:
                 state.clear()
                 state.update(candidate)
-            self.reset_reviews("Оператор изменил требования")
+            self.reset_reviews("Оператор согласовал область публикации" if resume_phase == "astra" else "Оператор изменил требования")
             if not state.get("code_started"):
                 # A coordinator's provisional label must not pin the old plan's
                 # stage before the operator's updated instructions are read.
                 state["task"] = None
-            state.update(phase="code", status="paused", pending=None, blocker=None,
+            state.update(phase=resume_phase, status="paused", pending=None, blocker=None,
                          healed=[], recovery_unverified=False, coordination=None,
                          corrections=corrections, correction_revision=correction_id,
-                         correction_pending=correction_id if state.get("code_started") else None, last_snapshot=current)
+                         correction_pending=correction_id if state.get("code_started") and resume_phase == "code" else None, last_snapshot=current)
             self.save()
         except BaseException:
             # The CLI may save an interrupted status while handling this error.
@@ -355,7 +384,8 @@ class Cycle:
             state.clear()
             state.update(previous)
             raise
-        continuation = ("Paused before coding the SAME stage; both reviews must run again." if state.get("code_started") else
+        continuation = ("Paused before first review of the SAME stage; both review loops must run again." if resume_phase == "astra" else
+                        "Paused before coding the SAME stage; both reviews must run again." if state.get("code_started") else
                         "Paused before stage selection from the current plan; any unpublished work requires coding and both reviews.")
         print(f"cc-focus: correction {correction_id[:12]} saved for iteration {state['iteration']}. "
               + continuation + " Sessions and work preserved.", flush=True)
@@ -498,16 +528,7 @@ class Cycle:
             raise Blocked("publish-drift", "Publication changed reviewed content; both reviews must run again.")
         if current["head"] == self.state["baseline"]["head"]:
             return False
-        if self.repo.git("merge-base", "--is-ancestor", self.state["baseline"]["head"], current["head"], check=False).returncode:
-            raise Blocked("rewritten-history", "Published history is not a descendant of the stage baseline.")
-        committed = set()
-        for revision in self.repo.text("rev-list", "--parents", self.state["baseline"]["head"] + ".." + current["head"]).splitlines():
-            fields = revision.split()
-            if len(fields) != 2:
-                raise Blocked("publication-history", "Publication requires serial commits, not merge history.")
-            committed.update(os.fsdecode(name) for name in self.repo.git(
-                "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", fields[0]
-            ).stdout.split(b"\0") if name)
+        committed = publication_history(self.repo, self.state["baseline"]["head"], current["head"])
         owned = set(self.publication_paths())
         if not committed or not committed <= owned:
             raise Blocked("unreviewed-commit", "Publication includes files outside the reviewed stage.")

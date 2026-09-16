@@ -458,6 +458,41 @@ PAUSE, changed repository membership and unconfirmed provider shutdown. It canno
 rewind a commit or push, change runtime permission settings, or turn shared files
 outside Git into implementation files. Do not edit `.work/cycle/state.json` by hand.
 
+### Accepting an already-published protected scope
+
+If an older publisher committed protected files beyond its supplied scope, an
+operator may explicitly accept those exact files without rewriting published
+history. This is a separate mode, not a relaxation of ordinary reconciliation:
+
+```sh
+cc-focus reconcile --publication --plan-out .work/publication-recovery.json
+# Inspect the exact adopted paths, baseline/current commits and live remote main.
+cc-focus reconcile --publication --apply-plan .work/publication-recovery.json
+```
+
+`focus_publication_recovery.py` requires a stopped publish phase with unchanged
+reviewed working files. Every target HEAD must match live remote main at its
+pinned push URL. History must descend linearly from the original baseline. Only
+extra committed paths that were protected may be adopted; unrelated intermediate
+paths, changed shared context, new content, altered staging or another destination
+are rejected. Adopted paths must match the published content with no additional
+staging. Other protected work and staging stay protected.
+
+Preparation accepts nothing. Application requires the exact unedited plan and
+rechecks state, files, HEADs, index and live remotes before acceptance under the
+normal project/member ownership locks. The prior state and plan are archived in
+an immutable correction. Original baseline HEADs and Git history remain intact;
+adopted file baselines come from those original commits, so the full adopted work
+remains visible in the iteration's review scope.
+
+Acceptance grants ownership only. Review counters and publication/CI credit are
+cleared, sessions and the same task are retained, and the command exits paused
+before Astra review. It starts no model, commits or pushes nothing, and never
+resumes the cycle. After the operator resumes, both review loops must finish
+before runtime publication reconciles existing pushes and publishes any remaining
+reviewed files. An archive omitted from an earlier commit remains pending work.
+Provider roles must never apply this command to authorize their own scope changes.
+
 ### Upgrading a running cc-cycle installation
 
 The rename retains `.work/cycle/`, native role sessions and durable invocation
