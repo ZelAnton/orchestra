@@ -81,7 +81,7 @@ staging, destination and history drift, and adopts only the exact published
 protected paths. It preserves original baseline HEADs and all Git/source state;
 adopted file baselines use the original commits, not the expanded current HEAD.
 The checksummed correction archives the prior state/plan and pauses the same task
-before Astra with both review streaks and publication/CI credit cleared. No model
+before Sol with all three review streaks and publication/CI credit cleared. No model
 or Git write runs during acceptance. This shared cc-sync asset is covered by
 `tests/test_focus_publication_recovery.py`; normal reconciliation stays unchanged.
 `focus_commit.py` owns publication Git writes after a read-only Luna preparation.
@@ -126,9 +126,9 @@ in old scrollback does not rescan history. Cached lines stay bounded by the reta
 3000 lines plus one tail entry; output/scroll/resize invalidate the visible window.
 Only changed terminal rows are emitted, unchanged status ticks do not redraw, and
 provider-text sanitization runs outside the input lock. Session reuse is unchanged.
-`focus_status.py` projects workflow state into a six-line panel separated from the
+`focus_status.py` projects workflow state into a seven-line panel separated from the
 log, with a three-line compact layout for narrow/short terminals. It shows the
-task, actual role/model, five-phase timeline, review streaks and completed totals,
+task, actual role/model, six-phase timeline, review streaks and completed totals,
 invocation/event timers and priority operator notices. `/status` retains full
 details. Timer ticks run once a second without disk access or history scans;
 message notices use an iteration-scoped cache refreshed on delivery changes.
@@ -197,8 +197,8 @@ asynchronous `turn/steer` replies correlated alongside normal protocol events.
 Claude keeps stream-json stdin open and sends queued input after the current
 response, requiring its replay acknowledgement and its own result; fix counts
 from earlier responses are retained. Accepted stage messages enter later context.
-Review intervention clears earlier clean credit; Claude intervention returns to
-Astra. Publication/CI cannot be steered. Pending delivery prevents phase advancement
+Review intervention clears earlier clean credit; Opus/final Astra intervention returns to
+Sol. Publication/CI cannot be steered. Pending delivery prevents phase advancement
 and cannot be bypassed by a cached result, stopped-stage correction or old-report
 recovery. The terminal may remain parked after releasing runtime ownership; external
 stop distinguishes a parked UI from a still-running provider. Root termination
@@ -209,12 +209,20 @@ The model-free `messages`, `retry-message --id` and `discard-message --id` comma
 support non-TTY recovery. All three new modules are shared cc-sync runtime assets;
 `tests/test_focus_terminal.py` adds protocol, lifecycle and POSIX PTY fixtures.
 
-The flow is Luna/xhigh coordination, Fable/high coding, Astra/high review to three
-clean passes, Fable/xhigh review to two implementation-clean passes, Luna/high
+The flow is Luna/xhigh coordination, Fable/high coding, Sol/xhigh review to three
+clean passes, Opus/xhigh review to two implementation-clean passes, Astra/xhigh
+final review to one clean pass, Luna/high
 read-only publication preparation, runtime commit/push, and configured CI.
-Substantial second-review fixes return to Astra.
+Substantial Opus or final Astra implementation fixes return to Sol and repeat all three reviews.
+`review_profile=2` identifies the new role/counter layout (`sol`, `claude`, `astra`).
+On normal resume the runtime archives legacy state under `review-profiles/`, retires
+only old reviewer session IDs, and restarts unfinished reviews at Sol with zero credit.
+An already-started publication/CI window retains its old seal and reconciliation;
+new work uses the new profile. Message uncertainty prevents migration. No source or
+Git writes occur. Opus uses the `opus` CLI alias, validates its resolved family at
+initialization and pins that version across the invocation and its retries.
 Recoverable blockers receive one Astra/xhigh recovery attempt before an operator-visible stop.
-The `heal` role has its own persisted conversation, separate from coding and both
+The `heal` role has its own persisted conversation, separate from coding and all three
 review roles. Technical failures, including remote Git queries, generic provider
 API errors and model-reported requests for human intervention, go to that role.
 The healer verifies the diagnosis and existing authorization, performs necessary
@@ -267,7 +275,7 @@ Any fixes reported provisionally remain a lower bound in the final response, the
 the normal operator-response aggregation applies. Native EOF without the final
 report still blocks. Only a final response starts the 30-second process-exit grace.
 An unresolved blocker does not cause model polling. Luna gets short results and
-artifact paths; Astra gets the complete coding final message. Review invocations
+artifact paths; Sol gets the complete coding final message. Review invocations
 each perform one pass; the runtime owns clean counters and rejects incomplete
 reports; evidence entries must contain non-whitespace text. Only the runtime may
 stage/commit/push after publisher preparation; existing dirty files are protected.
@@ -290,7 +298,7 @@ credential helpers and operator settings. `Cycle.remote_head` labels progress as
 a runtime Git check instead of an active coordinator. Exhausted timeouts and other
 remote access failures become `remote-query-timeout`/`remote-query-failed` and go
 through Astra/xhigh recovery; unchanged review seals, phase and sessions survive.
-Any repair changing reviewed files must pass both reviews. After restoring access,
+Any repair changing reviewed files must pass all three reviews. After restoring access,
 `--retry` also resumes legacy `command-unavailable` Git timeouts. Publication and CI
 still require live remote evidence; successful pushes reconcile before model replay.
 Check authentication as the launcher OS user: root's missing login says nothing
@@ -310,7 +318,7 @@ the task queue or conversation memory. Missing or ambiguous plans block selectio
 operator transition for already completed coding whose report was rejected.
 `Cycle.recover_review` validates the original coding intent/result, current
 iteration, unchanged HEAD/index/files and protected work; it archives the previous
-state under `.work/cycle/recoveries/` and exits paused at Astra with zero review
+state under `.work/cycle/recoveries/` and exits paused at Sol with zero review
 credit. It does not accept healer prose as phase authority. Coding report parsing
 allows substantial new implementation with no review-fix count; review/healing
 classification remains strict. The code recovery context permits finalizing a
@@ -320,7 +328,7 @@ transition under the local lock and shared lease. It copies/hashes operator text
 and the previous stage context under `.work/cycle/corrections/`, retains the current
 iteration and sessions, replaces pending intent with a new correction revision,
 and returns the same stage to coding with zero review credit. Context validates
-the immutable artifacts and carries corrections through both reviews; old coding
+the immutable artifacts and carries corrections through all three reviews; old coding
 results cannot acknowledge a newer revision. Publication/CI, changed HEAD/protected
 work and unstarted stages fail closed. After coding, `correction_pending` clears;
 after publication/CI, the archived iteration retains corrections and the new stage
@@ -343,7 +351,7 @@ An iteration blocked before its first coding invocation can also be reconciled.
 Its correction records `before_code=true`, preserves `code_started=false`, clears
 the provisional task label, and guides selection from the current plan instead of reopening the prior published
 stage. It has no mandatory correction acknowledgement for a nonexistent stage;
-the usual unpublished-diff barrier still requires coding and both reviews for
+the usual unpublished-diff barrier still requires coding and all three reviews for
 adopted work. A loose-context-only handover may finish an exhausted plan without
 inventing implementation. Fresh coding prompts no longer describe an initial
 invocation as report recovery; resumed/previously attempted invocations still do.

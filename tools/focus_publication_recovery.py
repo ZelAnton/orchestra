@@ -103,7 +103,7 @@ def prepare(cycle):
             "effect": "Accept exactly the listed already-published protected files into this SAME iteration. "
                       "Preserve all working files, index entries, commits, original baseline HEADs and sessions. "
                       "Archive the prior state, invalidate review/publication/CI credit and pause before first review. "
-                      "Both review loops must run anew; remaining reviewed work still needs publication and exact-SHA CI. "
+                      "All three review loops must run anew; remaining reviewed work still needs publication and exact-SHA CI. "
                       "This command starts no model, commits nothing, pushes nothing and never resumes the cycle."}
 
 
@@ -139,10 +139,10 @@ def apply(cycle, path):
     text = ("The operator explicitly accepted the already-published protected files listed in this correction's "
             "publication_reconciliation archive. Preserve the current stage, all existing commits and the original "
             "baseline HEADs. Review the full adopted files and their committed history as part of the SAME stage. "
-            "This accepts ownership only, not correctness or completion. Both review loops restart with zero clean "
+            "This accepts ownership only, not correctness or completion. All three review loops restart with zero clean "
             "credit. Do not repeat completed implementation, stage files, commit, push or rewrite history. The runtime "
             "will later reconcile actual remote HEADs, finish remaining reviewed publication and verify CI. "
             "Other protected files and staging remain protected. No model was started by this recovery.\n\n" +
             "\n".join("adopt-published-file: " + row["path"] for row in plan["changes"]))
     cycle.record_correction(text.encode("utf-8"), current, candidate=candidate,
-                            metadata={"publication_reconciliation": plan}, validate=validate, resume_phase="astra")
+                            metadata={"publication_reconciliation": plan}, validate=validate, resume_phase="sol")

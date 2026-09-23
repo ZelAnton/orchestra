@@ -7,20 +7,37 @@ Queue configuration does not change its models, efforts, review thresholds,
 publication behavior or permissions. It does not consume or rewrite the task queue.
 
 ```text
-Luna coordination -> Claude implementation -> Astra review loop
-    -> Claude review loop -> Luna readiness + runtime commit/push -> CI -> next stage
+Luna coordination -> Fable implementation -> Sol review loop
+    -> Opus review loop -> Astra final review -> Luna readiness + runtime commit/push -> CI -> next stage
          | substantial implementation fixes |
-         +--------------> Astra <-----------+
+         +--------------> Sol <-------------+
 ```
 
 | Role | Model | Effort |
 | --- | --- | --- |
 | Coordinator | gpt-5.6-luna | xhigh |
 | Implementation | claude-fable-5-1 | high |
-| First review | gpt-6-astra | high |
-| Second review | claude-fable-5-1 | xhigh |
+| First review (3 clean passes) | gpt-6-sol | xhigh |
+| Second review (2 implementation-clean passes) | opus | xhigh |
+| Third review (1 clean pass) | gpt-6-astra | xhigh |
 | Publication preparation (read-only) | gpt-5.6-luna | high |
 | Blocker resolution | gpt-6-astra | xhigh |
+
+`opus` is the Claude Code model alias (currently Opus 5.5 on the Anthropic
+provider), rather than the menu display label. The runtime requires an Opus model
+in the initialization event, records its resolved version in the invocation, and
+rejects a different family or a version change during that invocation, including
+retries. See [Claude model aliases](https://code.claude.com/docs/en/model-config#model-aliases).
+
+Existing states upgrade under normal runtime ownership on the next run. Previous
+state, counters and reviewer session IDs are archived under
+`.work/cycle/review-profiles/`; new reviewer conversations start without inheriting
+old review credit. Coding, coordinator, publisher and healer sessions are retained.
+An iteration awaiting review or publication preparation restarts at Sol. An
+already-started commit/push or CI window retains its original reviewed snapshot
+and pending publication through CI, preserving partial-push reconciliation; the
+next stage uses the new profile. Unresolved operator messages must be resolved
+before migration. No source, Git history, staging or ownership is changed.
 
 ## Start and resume
 
@@ -58,7 +75,7 @@ directory or create/convert repositories. Membership is fixed for the saved cycl
 Repository admission errors are printed before opening the interactive panel and
 exit with code 3, preserving the diagnostic in shell scrollback.
 
-One iteration may change several member repositories. Coding and both review loops
+One iteration may change several member repositories. Coding and all three review loops
 cover their combined changes. Publication checks every changed repository's policy
 and remote before starting the publisher, then commits/pushes each repository's
 reviewed files to its own remote main. Untouched repositories receive no commit or
@@ -188,15 +205,16 @@ ordinary typing redraws only the input row. Repeated unchanged status updates do
 not repaint the screen. These UI optimizations retain the existing role sessions.
 `--output compact` still controls whether public provider payloads are displayed.
 
-The panel uses six lines and a horizontal separator when the terminal has at
-least 70 columns and 14 rows. For example, during an Astra review:
+The panel uses seven lines and a horizontal separator when the terminal has at
+least 70 columns and 15 rows. For example, during a Sol review:
 
 ```text
 Interlink · V9f-4 · Supplier disclosure and message retries
-В РАБОТЕ · Ревью Astra · high · шаг 2/5 · этапов впереди: 3
-✓ Реализация ─ ▶ Astra ─ ○ Claude ─ ○ Публикация ─ ○ CI
-Astra: проход 4 выполняется · серия 1/3 · нужно ≥2
-Claude: впереди · нужно 2 чистых подряд · завершено 0
+В РАБОТЕ · Ревью Sol · xhigh · шаг 2/6 · этапов впереди: 4
+✓ Реализация ─ ▶ Sol ─ ○ Opus ─ ○ Astra ─ ○ Публикация ─ ○ CI
+Sol: проход 4 выполняется · серия 1/3 · нужно ≥2
+Opus: впереди · нужно 2 чистых подряд · завершено 0
+Astra: впереди · нужно 1 чистых подряд · завершено 0
 Команда выполняется · вызов 04:12 · событие 3 с назад
 ────────────────────────────────────────────────────────────
 ```
@@ -206,7 +224,7 @@ coordinator/coder report. The coordinator can shorten it in that same call; no
 extra model is started. Older saved runs show `Задача N` until a report identifies
 the stage. The title is display metadata and cannot advance or select work.
 
-The timeline shows the five main phases of this task, including returns to review.
+The timeline shows the six main phases of this task, including returns to review.
 Coordination, recovery, Git remote checks and CI waiting appear as actual current
 activities. Remaining phases and the minimum clean passes still needed are counts,
 not a time estimate: fixes can add more passes. Review rows distinguish pending,
@@ -254,8 +272,8 @@ follow the [Codex app-server protocol](https://learn.chatgpt.com/docs/app-server
 and [Claude CLI streaming flags](https://code.claude.com/docs/en/cli-reference).
 
 Instructions cannot steer publication, CI or recovery inside that window. Review
-instructions invalidate previous clean credit; an intervened Claude review returns
-to Astra before publication. Accepted instructions are referenced in later stage
+instructions invalidate previous clean credit; an intervened Opus or final Astra review returns
+to Sol before publication. Accepted instructions are referenced in later stage
 context. Messages never silently move to the next invocation or stage. A message
 arriving at completion instead pauses the workflow with its original target intact.
 `/resume` can retry queued (not yet sent) input in that same invocation. Delivery
@@ -366,9 +384,9 @@ same project-plan stage to apply the correction, even if that stage's earlier
 implementation report said it was complete. This is a fresh turn in the retained
 coding conversation, not a replay of the interrupted turn. The old invocation and
 its result remain available, but cannot acknowledge the new correction. Corrections
-are ordered oldest to newest, and remain in context through both review loops.
+are ordered oldest to newest, and remain in context through all three review loops.
 All clean-pass credit and the publication seal are invalidated. Only a validated
-coding result acknowledges the pending correction; all three Astra and two Claude
+coding result acknowledges the pending correction; all three Sol and two Claude
 clean passes must then be earned again. New sessions or `--retry` do not erase it.
 
 Corrections live under `.work/cycle/corrections/` with checksums for both text and
@@ -441,18 +459,18 @@ runtime rechecks immediately before the state transition. It archives the prior
 state and exact plan in a checksummed correction, keeps sessions and the current
 stage, clears the old pending invocation and all review credit, and exits paused
 before coding. If coding already started, it must apply the current instructions
-to that same stage and both review loops must run again. If the iteration stopped
+to that same stage and all three review loops must run again. If the iteration stopped
 before coding began, reconciliation preserves that fact and clears any provisional
 task label: select the next stage
 from the current project plan, without reopening the previous published stage from
 an old conversation or handoff. Any adopted work must still complete coding and
-both reviews before publication. A context-only handover with no unpublished
+all three reviews before publication. A context-only handover with no unpublished
 changes can finish if the plan is exhausted; it must not invent a stage.
 Existing source files, index and Git history are preserved. The new correction
 remains visible through publication and CI.
 
 Handover requires a code iteration (including one not yet started) or an
-already-started Astra/Claude stage, with unchanged HEADs and protected staging.
+already-started Sol/Opus/Astra stage, with unchanged HEADs and protected staging.
 It refuses publication/CI, unresolved operator messages,
 PAUSE, changed repository membership and unconfirmed provider shutdown. It cannot
 rewind a commit or push, change runtime permission settings, or turn shared files
@@ -487,8 +505,8 @@ remains visible in the iteration's review scope.
 
 Acceptance grants ownership only. Review counters and publication/CI credit are
 cleared, sessions and the same task are retained, and the command exits paused
-before Astra review. It starts no model, commits or pushes nothing, and never
-resumes the cycle. After the operator resumes, both review loops must finish
+before Sol review. It starts no model, commits or pushes nothing, and never
+resumes the cycle. After the operator resumes, all three review loops must finish
 before runtime publication reconciles existing pushes and publishes any remaining
 reviewed files. An archive omitted from an earlier commit remains pending work.
 Provider roles must never apply this command to authorize their own scope changes.
@@ -512,11 +530,12 @@ The original step prompts are retained in `tools/cycle_prompts.py`. The runtime
 adds a structured reporting protocol and invokes one complete review pass per
 turn in the persistent reviewer conversation. It owns the counters:
 
-- Astra requires three consecutive clean passes. During its first three passes,
+- Sol requires three consecutive clean passes. During its first three passes,
   implementation and other substantive fixes reset the counter; afterward only
   implementation fixes count. Minor edits never reset it.
-- Claude requires two consecutive passes without implementation fixes.
-- Substantial Claude implementation fixes return to Astra, then Claude again.
+- Opus requires two consecutive passes without implementation fixes.
+- Astra requires one pass without implementation or other substantive fixes; minor edits do not reset it.
+- Substantial implementation fixes by Opus or Astra return to Sol and repeat all three reviews.
   Contract, workflow, algorithm, permission or test-outcome changes are substantial;
   uncertain cases must be classified conservatively.
 
@@ -759,10 +778,10 @@ the transition. No phase transition is inferred from a healer's prose.
 
 Recovery holds the same local lock and shared lease as processing. It archives
 the previous state and source hash under `.work/cycle/recoveries/`, retains the
-original report and native sessions, resets both review counters, and **exits
-paused before Astra**. It starts no model, performs no review, changes no project
+original report and native sessions, resets all three review counters, and **exits
+paused before Sol**. It starts no model, performs no review, changes no project
 source or Git history, and does not push. A separate `cc-focus` resumes all three
-required Astra passes and both Claude passes; only then may publication occur.
+required Sol passes, both Opus passes and the final Astra pass; only then may publication occur.
 Never edit checksummed state by hand or overwrite files to force a snapshot match.
 
 If recovery observes tests or edits that were not in its own tool transcript,
@@ -776,7 +795,7 @@ This does not stop independent Codex processes that are already running.
 When later source or plan edits have invalidated the original coding snapshot,
 `recover --review-from` must still refuse it, even if its JSON can now be parsed.
 Once competing work has stopped, use `cc-focus --retry` to reconcile the preserved
-changes and finalize a fresh report for the same stage. Both reviews remain required.
+changes and finalize a fresh report for the same stage. All three reviews remain required.
 Do not treat a stopped mutation test as proof that its temporary source edits were
 restored; reconciliation must inspect the current files and verification evidence.
 

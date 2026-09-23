@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 
-from cycle_prompts import PROMPTS
+from cycle_prompts import PROMPTS, REVIEW_PROFILE_VERSION, REVIEW_ROLES
 from cycle_state import Blocked, ProviderQuota, changed, command, digest, encode
 from cycle_transport import concise_summary, parse_report
 from focus_status import accept_task, new_reviews, reset_notice, review_event
@@ -34,7 +34,8 @@ def fresh_state(repository):
             "sessions": {}, "session_generation": 1, "handoffs": [], "baseline": baseline,
             "protected": protected, "protected_index": repository.index_entries(protected), "pending": None, "blocker": None,
             "healed": [], "coordinated": None, "last": None, "code_report": "",
-            "astra_passes": 0, "astra_clean": 0, "claude_clean": 0,
+            "review_profile": REVIEW_PROFILE_VERSION,
+            "sol_passes": 0, "sol_clean": 0, "claude_clean": 0, "astra_clean": 0,
             "reviewed": None, "published": None, "status": "ready", "last_snapshot": baseline,
             "code_started": False, "task": None, "display_reviews": new_reviews(), "display_review_events": []}
 
@@ -88,8 +89,57 @@ class Cycle:
 
     def reset_reviews(self, reason="Реализация завершена; ревью требуется заново"):
         reset_notice(self.state, reason)
-        self.state.update(astra_passes=0, astra_clean=0, claude_clean=0,
-                          reviewed=None, coordinated=None, phase="astra")
+        self.state.pop("publication_review_profile", None)
+        self.state.update(sol_passes=0, sol_clean=0, claude_clean=0, astra_clean=0,
+                          reviewed=None, coordinated=None, phase="sol")
+
+    def upgrade_review_profile(self):
+        """Archive legacy credit/sessions before using the three-review profile.
+
+        Called only with runtime ownership and no unresolved message delivery.
+        An already-started publication retains its original seal through CI;
+        changing it would strand partial pushes and operator reconciliation.
+        Before that boundary, the current work receives all three new reviews.
+        """
+        state = self.state
+        if state.get("review_profile") == REVIEW_PROFILE_VERSION:
+            return
+        if state.get("review_profile", 1) != 1:
+            raise Blocked("review-profile-version", "This saved review profile requires a newer runtime; work was preserved.")
+        if self.messages.unresolved(state["iteration"]):
+            raise MessagePending("Resolve pending messages before changing the review profile.")
+        previous = copy.deepcopy(state)
+        archive = self.store.artifact(f"review-profiles/{uuid.uuid4().hex}.json", encode(previous))
+        pending = state.get("pending")
+        publishing = state["phase"] == "publish" and state.get("publication_started")
+        restart = state["phase"] in (*REVIEW_ROLES, "publish") and not publishing
+        # A fresh conversation is essential: the old Astra was the first
+        # reviewer, and the old Claude conversation used Fable.
+        for role in REVIEW_ROLES:
+            state["sessions"].pop(role, None)
+        state.update(review_profile=REVIEW_PROFILE_VERSION, sol_passes=0,
+                     sol_clean=0, claude_clean=0, astra_clean=0,
+                     display_reviews=new_reviews(), display_review_events=[])
+        state.pop("astra_passes", None)
+        if publishing or state["phase"] == "ci":
+            state["publication_review_profile"] = 1
+        if restart:
+            self.reset_reviews("Новый профиль: Sol → Opus → Astra")
+            if pending and pending["role"] != "heal":
+                state["pending"] = None
+            if state.get("blocker"):
+                state["blocker"]["phase"] = "sol"
+            state.pop("publication_prepared", None)
+        state["review_profile_archive"] = str(archive)
+        try:
+            self.save()
+        except BaseException:
+            state.clear()
+            state.update(previous)
+            raise
+        print(f"cc-focus: review profile updated to Sol/Opus/Astra; old review credit archived: {archive}", flush=True)
+        if publishing or state["phase"] == "ci":
+            print("cc-focus: the already-started publication retains its original review seal through CI; new work uses all three reviews.", flush=True)
 
     def check_protected(self, snapshot):
         touched = set(self.changes(self.state["baseline"], snapshot)) & set(self.state["protected"])
@@ -136,12 +186,19 @@ class Cycle:
         context = {"phase": state["phase"], "iteration": state["iteration"],
                    "handoffs": state["handoffs"], "last": state["last"],
                    "protected_paths": state["protected"],
-                   "astra_passes": state["astra_passes"], "astra_clean": state["astra_clean"],
-                   "claude_clean": state["claude_clean"], "published": state["published"]}
+                   "sol_passes": state["sol_passes"], "sol_clean": state["sol_clean"],
+                   "claude_clean": state["claude_clean"], "astra_clean": state.get("astra_clean", 0),
+                   "review_order": list(REVIEW_ROLES), "published": state["published"]}
         context["handoff_instructions"] = (
             "Handoffs are optional historical transfer context. Read each imported 'path'; 'source' is provenance, "
             "not a required file. Do not require or recreate HANDOFF.md to continue. Use the current project plan "
             "and instructions, plus the saved task for an interrupted stage. Imported snapshots remain immutable.")
+        if state.get("publication_review_profile") == 1:
+            context["publication_review_profile"] = (
+                "This publication already started under the previous two-review profile. Its original reviewed "
+                "snapshot and publication/CI reconciliation remain valid. Do not require retrospective new-model "
+                "review passes to finish this existing publication. New work or changed reviewed content must "
+                "pass Sol, Opus and Astra. Original review evidence is archived at " + state["review_profile_archive"])
         if hasattr(self.repo, "handoff_sources"):
             context["optional_handoff_sources"] = sorted(self.repo.handoff_sources(state))
         accepted = self.messages.accepted(state["iteration"])
@@ -181,7 +238,7 @@ class Cycle:
                 context["publication_recovery"] = (
                     "The operator accepted the exact already-committed protected files listed in the latest correction archive. "
                     "The original baseline HEAD and existing commits are preserved. Review the SAME stage, including the "
-                    "full adopted files and publication history, through both review loops anew. Ownership acceptance earns "
+                    "full adopted files and publication history, through all three review loops anew. Ownership acceptance earns "
                     "no review or CI credit. Do not repeat completed implementation or perform Git writes. "
                     "The runtime will reconcile existing pushes and finish remaining reviewed publication afterward.")
         pending = state.get("pending") or {}
@@ -200,7 +257,7 @@ class Cycle:
         if role == "code" and (state.get("pending") or {}).get("resume_code"):
             context["recovery"] = "Coding for this iteration already started. Finish that SAME stage; do not select another stage, even if prior conversation text says it was completed. Reconstruct and report its result if only the final response was lost."
         prompt = PROMPTS[role]
-        if role == "astra":
+        if role == "sol":
             prompt = prompt.replace("%%DESCRIPTION%%", state["code_report"] or "No coding report was completed; review the preserved in-progress changes and handoff.")
         context["task"] = state.get("task")
         return prompt + "\n\nRuntime context:\n" + json.dumps(context, ensure_ascii=False)
@@ -256,14 +313,14 @@ class Cycle:
                     raise Blocked("unauthorized-commit", "HEAD changed across the quota wait; work was preserved.")
                 unchanged_refusal = quota["no_work"] and self.snapshot(pending["before"]) == current
                 pending.pop("quota_wait")
-            if pending.get("attempts", 0) and role in ("astra", "claude") and not unchanged_refusal:
+            if pending.get("attempts", 0) and role in ("sol", "claude", "astra") and not unchanged_refusal:
                 # An interrupted pass may have fixed implementation before its
                 # final report was lost. Earlier clean passes cannot certify that
                 # new content, even if the resumed pass itself makes no fixes.
                 reset_notice(state, "Прерванный проход повторяется", (role,))
                 self.state[role + "_clean"] = 0
-                if role == "claude" and self.changes(pending["before"], self.snapshot()):
-                    pending["return_to_astra"] = True
+                if role in ("claude", "astra") and self.changes(pending["before"], self.snapshot()):
+                    pending["return_to_sol"] = True
                 self.save()
             if quota:
                 self.save()  # A later interruption is not an admission refusal.
@@ -291,7 +348,7 @@ class Cycle:
             raise Blocked("publisher-mutation", "The publisher changed repository state; only the runtime may stage, commit or push.")
         if report["status"] == "blocked":
             raise Blocked("reported-blocker", report["summary"] + "\n" + report["description"])
-        if role in ("astra", "claude"):
+        if role in ("sol", "claude", "astra"):
             if report["status"] != "done" or not report["evidence"]:
                 raise Blocked("incomplete-review", "A review requires a completed pass and actual verification evidence.")
             if self.changes(before, after) and not sum(report[k] for k in ("implementation_fixes", "other_fixes", "minor_edits")):
@@ -314,7 +371,7 @@ class Cycle:
     def complete_invocation(self):
         if self.state["pending"]["role"] == "code":
             self.state["correction_pending"] = None
-        if self.state["pending"]["role"] in ("code", "astra", "claude"):
+        if self.state["pending"]["role"] in ("code", "sol", "claude", "astra"):
             self.state["recovery_unverified"] = False
         self.state["pending"] = None
         self.save()
@@ -330,7 +387,7 @@ class Cycle:
         if not state.get("code_started") or state["status"] == "complete":
             raise Blocked("correction-stage", "No started stage is available to correct. Use a handoff for new work; a completed publication cannot be reopened here.")
         pending = state.get("pending")
-        if (state["phase"] not in ("code", "astra", "claude", "publish") or state.get("published") or state.get("publication_started")
+        if (state["phase"] not in ("code", "sol", "claude", "astra", "publish") or state.get("published") or state.get("publication_started")
                 or (state["phase"] == "publish" and (pending or state.get("blocker")))):
             raise Blocked("correction-publication", "Publication may have started. Resume/reconcile commit, push and CI before new work; this command cannot rewind that window.")
         current = self.snapshot()
@@ -342,7 +399,7 @@ class Cycle:
     def record_correction(self, data, current, *, candidate=None, metadata=None, validate=None, resume_phase="code"):
         """Persist an already-validated operator transition; never a provider action."""
         state = self.state
-        if resume_phase not in ("code", "astra"):
+        if resume_phase not in ("code", "sol"):
             raise ValueError("An operator correction must resume coding or first review.")
         if not data.strip() or len(data) > 65536 or b"\0" in data:
             raise Blocked("correction-text", "Correction text must be nonempty UTF-8 without NUL, at most 64 KiB.")
@@ -359,7 +416,7 @@ class Cycle:
         corrections.append({"id": correction_id, "iteration": state["iteration"],
                             "path": path, "sha256": digest(data), "archive": archive,
                             "archive_sha256": digest(archive_bytes), "before_code": not state.get("code_started", False)})
-        if resume_phase == "astra":
+        if resume_phase == "sol":
             corrections[-1]["publication_recovery"] = True
         if validate:
             validate()
@@ -368,7 +425,7 @@ class Cycle:
             if candidate is not None:
                 state.clear()
                 state.update(candidate)
-            self.reset_reviews("Оператор согласовал область публикации" if resume_phase == "astra" else "Оператор изменил требования")
+            self.reset_reviews("Оператор согласовал область публикации" if resume_phase == "sol" else "Оператор изменил требования")
             if not state.get("code_started"):
                 # A coordinator's provisional label must not pin the old plan's
                 # stage before the operator's updated instructions are read.
@@ -384,9 +441,9 @@ class Cycle:
             state.clear()
             state.update(previous)
             raise
-        continuation = ("Paused before first review of the SAME stage; both review loops must run again." if resume_phase == "astra" else
-                        "Paused before coding the SAME stage; both reviews must run again." if state.get("code_started") else
-                        "Paused before stage selection from the current plan; any unpublished work requires coding and both reviews.")
+        continuation = ("Paused before first review of the SAME stage; all three review loops must run again." if resume_phase == "sol" else
+                        "Paused before coding the SAME stage; all three reviews must run again." if state.get("code_started") else
+                        "Paused before stage selection from the current plan; any unpublished work requires coding and all three reviews.")
         print(f"cc-focus: correction {correction_id[:12]} saved for iteration {state['iteration']}. "
               + continuation + " Sessions and work preserved.", flush=True)
         print("Run cc-focus to apply the correction and continue. No model was started.", flush=True)
@@ -436,32 +493,39 @@ class Cycle:
                      code_report=result["raw"], last_snapshot=current, coordination=None,
                      last={"role": "code", "summary": concise_summary(report["summary"]), "report": str(path)})
         self.save()
-        print(f"cc-focus: recovered coding result; paused before Astra review. No review credit or publication was granted. Backup: {archive}", flush=True)
+        print(f"cc-focus: recovered coding result; paused before Sol review. No review credit or publication was granted. Backup: {archive}", flush=True)
         print("Run cc-focus to start the required reviews; native sessions and project files were preserved.", flush=True)
 
     def review(self, role):
         report, before, after, _ = self.invoke(role)
-        counted = report["implementation_fixes"] + (report["other_fixes"] if role == "astra" and self.state["astra_passes"] < 3 else 0)
+        counted = report["implementation_fixes"] + (report["other_fixes"] if role == "astra" or
+                   role == "sol" and self.state["sol_passes"] < 3 else 0)
         review_event(self.state, role, "исправления" if counted else "чисто",
                      f"Зачитываемых исправлений: {counted}" if counted else "", completed=True)
-        if role == "astra":
-            self.state["astra_passes"] += 1
+        if role == "sol":
+            self.state["sol_passes"] += 1
             count = report["implementation_fixes"]
-            if self.state["astra_passes"] <= 3:
+            if self.state["sol_passes"] <= 3:
                 count += report["other_fixes"]
-            self.state["astra_clean"] = 0 if count else self.state["astra_clean"] + 1
-            if self.state["astra_clean"] >= 3:
+            self.state["sol_clean"] = 0 if count else self.state["sol_clean"] + 1
+            if self.state["sol_clean"] >= 3:
                 self.state.update(phase="claude", claude_clean=0, coordinated=None)
-        else:
+        elif role == "claude":
             count = report["implementation_fixes"]
             self.state["claude_clean"] = 0 if count else self.state["claude_clean"] + 1
-            if (count and report["substantial"]) or self.state["pending"].get("return_to_astra"):
-                self.reset_reviews("Claude изменил реализацию; возврат к Astra")
+            if (count and report["substantial"]) or self.state["pending"].get("return_to_sol"):
+                self.reset_reviews("Opus изменил реализацию; возврат к Sol")
             elif self.state["claude_clean"] >= 2:
+                self.state.update(phase="astra", astra_clean=0, coordinated=None)
+        elif role == "astra":
+            self.state["astra_clean"] = 0 if counted else self.state.get("astra_clean", 0) + 1
+            if report["substantial"] or self.state["pending"].get("return_to_sol"):
+                self.reset_reviews("Astra изменила реализацию; возврат к Sol")
+            elif self.state["astra_clean"] >= 1:
                 self.state.update(phase="publish", reviewed=after, coordinated=None)
         self.complete_invocation()
         if self.progress:
-            self.progress.note(f"Review complete: Astra clean={self.state['astra_clean']}/3, Claude clean={self.state['claude_clean']}/2; next={self.state['phase']}")
+            self.progress.note(f"Review complete: Sol clean={self.state['sol_clean']}/3, Opus clean={self.state['claude_clean']}/2, Astra clean={self.state['astra_clean']}/1; next={self.state['phase']}")
 
     def remote_head(self, remote):
         def progress(attempt, attempts):
@@ -525,7 +589,7 @@ class Cycle:
         reviewed = self.state["reviewed"]
         self.check_protected(current)
         if self.changes(reviewed, current):
-            raise Blocked("publish-drift", "Publication changed reviewed content; both reviews must run again.")
+            raise Blocked("publish-drift", "Publication changed reviewed content; all three reviews must run again.")
         if current["head"] == self.state["baseline"]["head"]:
             return False
         committed = publication_history(self.repo, self.state["baseline"]["head"], current["head"])
@@ -582,12 +646,11 @@ class Cycle:
         state = self.state
         if state.get("pending"):
             role = state["pending"]["role"]
-            if role in ("astra", "claude"):
+            if role in ("sol", "claude", "astra"):
                 review_event(state, role, "не зачтено", error.code)
-            if state["pending"]["role"] == "astra":
-                state["astra_clean"] = 0
-            if state["pending"]["role"] == "claude":
-                state["claude_clean"] = 0
+                state[role + "_clean"] = 0
+                if role in ("claude", "astra") and self.changes(state["pending"]["before"], self.snapshot()):
+                    self.reset_reviews("Прерванное ревью изменило файлы; возврат к Sol")
         signature = digest(encode({"code": error.code, "message": str(error)}))
         if state.get("blocker") and state["blocker"]["status"] == "healing":
             state["blocker"].update(status="blocked", resolution=str(error), escalation_reason="healer-failed")
@@ -634,11 +697,11 @@ class Cycle:
         if self.snapshot(pending["before"])["head"] != current["head"]:
             raise Blocked("unauthorized-commit", "Claude changed HEAD before its quota refusal; work was preserved.")
         no_work = error.no_work and self.snapshot(pending["before"]) == current
-        if not no_work and pending["role"] in ("astra", "claude"):
+        if not no_work and pending["role"] in ("sol", "claude", "astra"):
             reset_notice(self.state, "Квота прервала начатый проход", (pending["role"],))
             self.state[pending["role"] + "_clean"] = 0
-            if pending["role"] == "claude" and self.changes(pending["before"], current):
-                pending["return_to_astra"] = True
+            if pending["role"] in ("claude", "astra") and self.changes(pending["before"], current):
+                pending["return_to_sol"] = True
         # A stale reset or repeated rejection must not create a tight retry loop.
         pending["quota_wait"] = {"resets_at": error.resets_at,
                                  "retry_at": max(error.resets_at + 5, time.time() + 60),
@@ -668,6 +731,9 @@ class Cycle:
             pending_id = (self.state.get("pending") or {}).get("id")
             if any(item["status"] != "queued" or item["identity"]["invocation"] != pending_id for item in unresolved):
                 raise MessagePending("Message delivery needs an operator decision. Use cc-focus messages; retry-message --id ID may resend, discard-message --id ID abandons delivery.")
+            if self.state.get("review_profile") != REVIEW_PROFILE_VERSION:
+                self.upgrade_review_profile()
+                continue
             blocker = self.state.get("blocker")
             if blocker and blocker["status"] == "blocked":
                 reason = ESCALATION_REASONS.get(blocker.get("escalation_reason"))
@@ -708,7 +774,7 @@ class Cycle:
                     self.next_stage()
                     continue
                 pending = self.state["pending"]
-                if not pending and phase in ("astra", "claude", "publish"):
+                if not pending and phase in ("sol", "claude", "astra", "publish"):
                     current = self.snapshot()
                     if self.changes(self.state["last_snapshot"], current):
                         self.check_protected(current)
@@ -735,7 +801,7 @@ class Cycle:
                         self.state["code_report"] = raw
                         self.reset_reviews()
                     self.complete_invocation()
-                elif phase in ("astra", "claude"):
+                elif phase in ("sol", "claude", "astra"):
                     self.review(phase)
                 elif phase == "publish":
                     self.publish()
@@ -772,13 +838,14 @@ class Cycle:
                           baseline=self.snapshot(), protected=self.repo.dirty_paths(),
                           protected_index=self.repo.index_entries(self.repo.dirty_paths()),
                           code_report="", reviewed=None, published=None, pending=None,
-                          astra_passes=0, astra_clean=0, claude_clean=0, coordinated=None,
+                          sol_passes=0, sol_clean=0, claude_clean=0, astra_clean=0, coordinated=None,
                           last_snapshot=self.snapshot(), code_started=False, healed=[], recovery_unverified=False,
                           corrections=[], correction_revision=None, correction_pending=None, coordination=None,
                           publication_started=False)
         self.state.pop("publication_prepared", None)
         self.state.pop("publication_push_url", None)
         self.state.pop("publication_paths", None)
+        self.state.pop("publication_review_profile", None)
         self.state.update(task=None, display_reviews=new_reviews(), display_review_events=[], display_ci=None)
         if self.state["baseline"].get("repositories"):
             for key in ("publication_targets", "publication_repositories", "remote"):

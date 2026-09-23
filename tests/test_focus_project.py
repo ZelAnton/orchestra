@@ -73,7 +73,7 @@ class ProjectTests(unittest.TestCase):
             self.edit(name)
         reviewed = self.project.snapshot()
         self.state.update(phase="publish", coordinated="publish", reviewed=reviewed,
-                          last_snapshot=reviewed, astra_clean=3, claude_clean=2)
+                          last_snapshot=reviewed, sol_clean=3, claude_clean=2)
 
     def commit(self, name, push=True, file="source.txt"):
         repo = self.members[name]
@@ -171,7 +171,7 @@ class ProjectTests(unittest.TestCase):
         self.seal(names=("Core",))  # Legacy reviewed snapshot includes the source.
         source.write_text("New transfer notes must not enter the reviewed diff.\n")
         self.assertTrue(self.cycle.prepare_publish())
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (3, 2))
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (3, 2))
         self.assertEqual(set(self.state["publication_targets"]), {"Core"})
         self.commit("Core")
         source.unlink()
@@ -253,9 +253,9 @@ class ProjectTests(unittest.TestCase):
         self.edit("Root", text="previous operator work\n")
         self.edit("Root", "untouched.txt", "other operator work\n")
         self.state = fresh_state(self.project)
-        self.state.update(phase="astra", status="blocked", code_started=True, astra_clean=2, claude_clean=1,
+        self.state.update(phase="sol", status="blocked", code_started=True, sol_clean=2, claude_clean=1,
                           task={"id": "P04.2", "plan": "Core/PLAN.md", "title": "Current stage"},
-                          sessions={"code": "coding", "astra": "review", "heal": "healing"},
+                          sessions={"code": "coding", "sol": "review", "heal": "healing"},
                           code_report=json.dumps(fixtures.report()),
                           blocker={"code": "project-context-changed", "status": "blocked"})
         self.cycle.state = self.state
@@ -278,7 +278,7 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual((self.state["phase"], self.state["status"]), ("code", "paused"))
         self.assertEqual(self.state["sessions"], before["sessions"])
         self.assertEqual(self.state["task"], before["task"])
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertIsNotNone(self.state["correction_pending"])
         self.assertEqual(self.state["baseline"]["files"]["HANDOFF.md"], snapshot["files"]["HANDOFF.md"])
         self.assertNotIn("Core/AGENTS.md", self.state["protected"])
@@ -334,7 +334,7 @@ class ProjectTests(unittest.TestCase):
                 if variant == "work":
                     self.edit("Core", "owned.txt", "new concurrent work")
                 elif variant == "state":
-                    self.state["astra_clean"] = 0
+                    self.state["sol_clean"] = 0
                 elif variant == "plan":
                     edited["changes"].pop()
                 else:
@@ -492,7 +492,7 @@ class ProjectTests(unittest.TestCase):
         # Simulate completed coding and both reviews of the newly owned files.
         reviewed = self.project.snapshot()
         self.state.update(phase="publish", coordinated="publish", correction_pending=None,
-                          reviewed=reviewed, astra_clean=3, claude_clean=2)
+                          reviewed=reviewed, sol_clean=3, claude_clean=2)
         self.assertTrue(self.cycle.prepare_publish())
         self.assertEqual(set(self.state["publication_targets"]), {"Core", "Root"})
         core = self.members["Core"]
@@ -628,12 +628,13 @@ class ProjectTests(unittest.TestCase):
             self.edit("Specification")
             return fixtures.report(description="One project stage changes Core and Specification.")
         def publish():
-            self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (3, 2))
+            self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (3, 2))
             return fixtures.report()
         done = fixtures.report()
         self.transport.actions = [("coordinate", done), ("code", code), ("coordinate", done),
-            ("astra", done), ("astra", done), ("astra", done), ("coordinate", done),
-            ("claude", done), ("claude", done), ("coordinate", done), ("publish", publish),
+            ("sol", done), ("sol", done), ("sol", done), ("coordinate", done),
+            ("claude", done), ("claude", done), ("coordinate", done), ("astra", done),
+            ("coordinate", done), ("publish", publish),
             ("coordinate", fixtures.report(status="complete"))]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual(self.state["iteration"], 2)
@@ -816,13 +817,13 @@ class ProjectTests(unittest.TestCase):
             self.cycle.prepare_publish()
 
     def test_review_rejects_a_commit_in_any_member(self):
-        self.state.update(phase="astra", coordinated="astra")
+        self.state.update(phase="sol", coordinated="sol")
         def bad_review():
             self.members["Root"].git("commit", "--allow-empty", "-m", "Unauthorized")
             return fixtures.report()
-        self.transport.actions = [("astra", bad_review)]
+        self.transport.actions = [("sol", bad_review)]
         with self.assertRaisesRegex(Blocked, "changed HEAD outside publication"):
-            self.cycle.review("astra")
+            self.cycle.review("sol")
 
     def test_member_and_project_locks_exclude_overlapping_cycles(self):
         with contextlib.ExitStack() as stack:

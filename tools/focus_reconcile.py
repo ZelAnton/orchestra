@@ -47,7 +47,7 @@ def committed_base(repo, names, snapshot, revision="HEAD"):
 def prepare(cycle):
     state, repo = cycle.state, cycle.repo
     if (state.get("status") == "complete"
-            or state["phase"] not in ("code", "astra", "claude")
+            or state["phase"] not in ("code", "sol", "claude", "astra")
             or (state["phase"] != "code" and not state.get("code_started"))
             or state.get("published") or state.get("publication_started")):
         raise Blocked("reconcile-phase", "Reconciliation requires a code/review iteration before publication; it cannot rewind commit, push or CI.")
@@ -95,7 +95,7 @@ def prepare(cycle):
             "task": state.get("task"), "state_sha256": state_fingerprint(state),
             "snapshot_sha256": digest(encode(current)), "changes": rows,
             "effect": "refresh-context updates read-only expectations outside Git; adopt-file transfers the WHOLE protected file, "
-                      "including pre-existing uncommitted content, into this iteration for coding, both reviews and publication. "
+                      "including pre-existing uncommitted content, into this iteration for coding, all three reviews and publication. "
                       "No source, index or Git history is changed by reconciliation. " + continuation}
 
 
@@ -164,8 +164,8 @@ def apply(cycle, path):
                     "Coding has not begun in this iteration. Read the current project plan to select its next unfinished stage; "
                     "do not reopen the previous published stage from an older handoff, result or conversation. "
                     "If coding later starts but its report is interrupted, finish that iteration's selected stage instead of selecting another. ")
-    reviews = ("Both review loops must run again. " if cycle.state.get("code_started") else
-               "Any unpublished work requires coding and both reviews before publication. If the current plan is exhausted "
+    reviews = ("All three review loops must run again. " if cycle.state.get("code_started") else
+               "Any unpublished work requires coding and all three reviews before publication. If the current plan is exhausted "
                "and only read-only context was refreshed, do not invent a new stage. ")
     text = ("The operator explicitly reconciled the saved context and handed over the listed protected files. "
             "Read the current versions of the listed context/instruction files; this correction supersedes older "

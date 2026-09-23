@@ -151,7 +151,7 @@ class ProjectCycle(Cycle):
         current = self.snapshot()
         self.check_protected(current)
         if self.changes(self.state["reviewed"], current):
-            raise Blocked("publish-drift", "Publication changed reviewed project content; both reviews must run again.")
+            raise Blocked("publish-drift", "Publication changed reviewed project content; all three reviews must run again.")
         self.validate_targets(current)
         complete = True
         for name in self.state["publication_targets"]:

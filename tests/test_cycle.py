@@ -141,7 +141,7 @@ class CycleTests(unittest.TestCase):
         import focus_reconcile
         self.edit(content="previous operator work\n")()
         self.state = fresh_state(self.repo)
-        self.state.update(phase="astra", status="blocked", code_started=True, astra_clean=2)
+        self.state.update(phase="sol", status="blocked", code_started=True, sol_clean=2)
         self.cycle.state = self.state
         self.edit(content="current operator work\n")()
         snapshot = self.repo.snapshot()
@@ -151,7 +151,7 @@ class CycleTests(unittest.TestCase):
         focus_reconcile.apply(self.cycle, plan)
         self.cycle.check_protected(self.repo.snapshot())
         self.assertEqual(self.repo.snapshot(), snapshot)
-        self.assertEqual((self.state["phase"], self.state["astra_clean"], self.state["claude_clean"]), ("code", 0, 0))
+        self.assertEqual((self.state["phase"], self.state["sol_clean"], self.state["claude_clean"]), ("code", 0, 0))
         self.assertEqual(self.state["protected"], [])
         self.assertFalse(self.transport.calls)
 
@@ -204,7 +204,7 @@ class CycleTests(unittest.TestCase):
                       report(summary=""), report(evidence=[1]), report(implementation_fixes=-1),
                       report(extra="field"), report(status="unknown")):
             with self.subTest(value=value), self.assertRaises(Blocked):
-                parse_report("Final report:\n" + json.dumps(value), "astra")
+                parse_report("Final report:\n" + json.dumps(value), "sol")
 
     def test_prefaced_coding_report_advances_without_healer_and_preserves_raw(self):
         raw = "Everything is in place; final report follows.\n\n" + json.dumps(report(substantial=True))
@@ -216,19 +216,19 @@ class CycleTests(unittest.TestCase):
         with patch.object(self.transport, "run", side_effect=finish_code) as provider:
             self.assertEqual(self.cycle.run(), 0)
         provider.assert_called_once()
-        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual(self.state["phase"], "sol")
         self.assertEqual(self.state["code_report"], raw)
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertEqual(json.loads(Path(self.state["last"]["report"]).read_bytes())["raw"], raw)
 
     def test_prefaced_review_report_cannot_hide_blocker_or_missing_evidence(self):
         for value in (report(status="blocked"), report(evidence=[])):
             with self.subTest(value=value):
-                self.state.update(phase="astra", astra_clean=0, pending=None)
+                self.state.update(phase="sol", sol_clean=0, pending=None)
                 with patch.object(self.transport, "run", return_value="Final report:\n" + json.dumps(value)):
                     with self.assertRaises(Blocked):
-                        self.cycle.review("astra")
-                self.assertEqual(self.state["astra_clean"], 0)
+                        self.cycle.review("sol")
+                self.assertEqual(self.state["sol_clean"], 0)
 
     def test_long_summary_preserves_the_complete_validated_report(self):
         for length in (1199, 1200, 1201, 12000):
@@ -251,7 +251,7 @@ class CycleTests(unittest.TestCase):
 
     def test_long_summary_bounds_projections_but_keeps_raw_and_cached_results(self):
         value = report(summary="Result " * 400 + "unique ending")
-        for role in ("coordinate", "code", "astra", "claude", "heal"):
+        for role in ("coordinate", "code", "sol", "claude", "heal"):
             with self.subTest(role=role):
                 self.transport.actions = [(role, value)]
                 parsed, before, after, raw = self.cycle.invoke(role)
@@ -270,10 +270,10 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(len(self.transport.calls), 5)
 
     def test_long_review_summary_preserves_clean_pass_and_fix_gates(self):
-        cases = [(0, False, "publish", 2), (1, False, "claude", 0), (1, True, "astra", 0)]
+        cases = [(0, False, "astra", 2), (1, False, "claude", 0), (1, True, "sol", 0)]
         for fixes, substantial, phase, clean in cases:
             with self.subTest(fixes=fixes, substantial=substantial):
-                self.state.update(phase="claude", astra_passes=3, astra_clean=3, claude_clean=1)
+                self.state.update(phase="claude", sol_passes=3, sol_clean=3, claude_clean=1)
                 self.transport.actions = [("claude", report(summary="x" * 1201,
                     implementation_fixes=fixes, substantial=substantial))]
                 self.cycle.review("claude")
@@ -295,7 +295,7 @@ class CycleTests(unittest.TestCase):
 
     def test_retry_legacy_summary_blocker_preserves_review_phase_and_sessions(self):
         import cc_focus
-        self.state.update(phase="claude", coordinated="claude", astra_clean=3,
+        self.state.update(phase="claude", coordinated="claude", sol_clean=3,
                           claude_clean=1, recovery_unverified=True,
                           sessions={"claude": "preserved-review-session"})
         self.transport.actions = [("claude", report(summary="x" * 1201))]
@@ -312,14 +312,14 @@ class CycleTests(unittest.TestCase):
         self.assertIsNone(current["blocker"])
         self.assertEqual(current["phase"], "claude")
         self.assertEqual(current["sessions"], self.state["sessions"])
-        self.assertEqual(current["astra_clean"], 3)
+        self.assertEqual(current["sol_clean"], 3)
         self.assertEqual(current["claude_clean"], 0)
         self.assertEqual(result_path.read_bytes(), saved)
 
     def test_new_coding_work_does_not_require_review_fix_counts(self):
         raw = json.dumps(report(substantial=True))
         self.assertTrue(parse_report(raw, "code")["substantial"])
-        for role in (None, "astra", "claude", "heal", "coordinate"):
+        for role in (None, "sol", "claude", "heal", "coordinate"):
             with self.subTest(role=role), self.assertRaises(Blocked):
                 parse_report(raw, role)
 
@@ -343,11 +343,11 @@ class CycleTests(unittest.TestCase):
         intent_path.write_bytes(encode(intent))
         snapshot = self.repo.snapshot()
         raw_bytes = path.read_bytes()
-        self.state.update(astra_clean=2, claude_clean=1)
+        self.state.update(sol_clean=2, claude_clean=1)
         self.cycle.recover_review(path)
-        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual(self.state["phase"], "sol")
         self.assertEqual(self.state["status"], "paused")
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertEqual(self.state["sessions"]["code"], "preserved-code-session")
         self.assertIsNone(self.state["blocker"])
         self.assertIsNone(self.state["pending"])
@@ -357,9 +357,9 @@ class CycleTests(unittest.TestCase):
         backups = list((self.store.directory / "recoveries").glob("*.json"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(json.loads(backups[0].read_text())["previous_state"]["phase"], "code")
-        self.assertEqual(self.store.read()["phase"], "astra")
+        self.assertEqual(self.store.read()["phase"], "sol")
 
-    def test_coding_recovery_bounds_summary_without_shortening_astra_context(self):
+    def test_coding_recovery_bounds_summary_without_shortening_sol_context(self):
         path = self.rejected_coding_fixture()
         result = json.loads(path.read_bytes())
         value = json.loads(result["raw"])
@@ -369,7 +369,7 @@ class CycleTests(unittest.TestCase):
         saved = path.read_bytes()
         self.cycle.recover_review(path)
         self.assertLessEqual(len(self.state["last"]["summary"]), 1200)
-        self.assertIn("unique summary ending", self.cycle.context("astra"))
+        self.assertIn("unique summary ending", self.cycle.context("sol"))
         self.assertNotIn("unique summary ending", self.cycle.context("coordinate"))
         self.assertEqual(path.read_bytes(), saved)
 
@@ -393,8 +393,8 @@ class CycleTests(unittest.TestCase):
         path.write_bytes(encode(result))
         saved, snapshot = path.read_bytes(), self.repo.snapshot()
         self.cycle.recover_review(path)
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertEqual(self.state["code_report"], result["raw"])
         self.assertEqual(path.read_bytes(), saved)
         self.assertEqual(self.repo.snapshot(), snapshot)
@@ -405,10 +405,10 @@ class CycleTests(unittest.TestCase):
         def finish_review():
             self.stop_request(control)
             return report()
-        self.transport.actions += [("coordinate", report()), ("astra", finish_review)]
+        self.transport.actions += [("coordinate", report()), ("sol", finish_review)]
         self.assertEqual(self.cycle.run(), 0)
-        self.assertEqual([role for role, _ in self.transport.calls], ["coordinate", "code", "coordinate", "astra"])
-        self.assertEqual(self.state["astra_clean"], 1)
+        self.assertEqual([role for role, _ in self.transport.calls], ["coordinate", "code", "coordinate", "sol"])
+        self.assertEqual(self.state["sol_clean"], 1)
 
     def test_recovered_code_still_requires_all_review_passes(self):
         path = self.rejected_coding_fixture()
@@ -418,12 +418,13 @@ class CycleTests(unittest.TestCase):
             self.stop_request(control)
             return report()
         self.transport.calls.clear()
-        self.transport.actions = [("coordinate", report()), *[("astra", report())] * 3,
-                                  ("coordinate", report()), ("claude", report()), ("claude", finish_reviews)]
+        self.transport.actions = [("coordinate", report()), *[("sol", report())] * 3,
+                                  ("coordinate", report()), ("claude", report()), ("claude", report()),
+                                  ("coordinate", report()), ("astra", finish_reviews)]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual(self.state["phase"], "publish")
         self.assertEqual([role for role, _ in self.transport.calls],
-                         ["coordinate", "astra", "astra", "astra", "coordinate", "claude", "claude"])
+                         ["coordinate", "sol", "sol", "sol", "coordinate", "claude", "claude", "coordinate", "astra"])
 
     def test_review_recovery_rejects_working_tree_and_index_drift(self):
         path = self.rejected_coding_fixture()
@@ -456,7 +457,7 @@ class CycleTests(unittest.TestCase):
         external.write_bytes(path.read_bytes())
         with self.assertRaisesRegex(Blocked, "repository's saved code"):
             self.cycle.recover_review(external)
-        for phase in ("astra", "claude", "publish", "ci"):
+        for phase in ("sol", "claude", "publish", "ci"):
             self.state["phase"] = phase
             with self.subTest(phase=phase), self.assertRaisesRegex(Blocked, "stopped, already-started code"):
                 self.cycle.recover_review(path)
@@ -515,7 +516,7 @@ class CycleTests(unittest.TestCase):
             lease.return_value.__enter__.return_value.pwsh = "pwsh"
             self.assertEqual(cc_focus.main(["recover", "--review-from", str(path)]), 0)
         self.assertEqual(self.store.read()["status"], "paused")
-        self.assertEqual(self.store.read()["phase"], "astra")
+        self.assertEqual(self.store.read()["phase"], "sol")
 
     def test_recover_command_rejects_ambiguous_arguments(self):
         import cc_focus
@@ -528,7 +529,7 @@ class CycleTests(unittest.TestCase):
 
     def test_correction_preserves_stage_sessions_work_and_restarts_reviews(self):
         old_result = self.rejected_coding_fixture()
-        self.state.update(phase="claude", astra_passes=3, astra_clean=3, claude_clean=1,
+        self.state.update(phase="claude", sol_passes=3, sol_clean=3, claude_clean=1,
                           reviewed=self.repo.snapshot())
         before = self.repo.snapshot()
         self.cycle.correct("Keep the existing stage; handle empty input explicitly.")
@@ -537,14 +538,14 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.state["iteration"], 1)
         self.assertEqual(self.repo.snapshot(), before)
         self.assertEqual(self.state["sessions"]["code"], "preserved-code-session")
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertIsNone(self.state["pending"])
         self.assertIsNone(self.state["blocker"])
         self.assertIsNone(self.state["reviewed"])
         correction = self.store.read()["corrections"][0]
         self.assertIn("empty input", Path(correction["path"]).read_text())
         self.assertEqual(json.loads(Path(correction["archive"]).read_text())["previous_state"]["phase"], "claude")
-        for role in ("coordinate", "code", "astra", "claude", "heal"):
+        for role in ("coordinate", "code", "sol", "claude", "heal"):
             self.assertIn(correction["id"], self.cycle.context(role))
             self.assertIn("Do not select the next unfinished", self.cycle.context(role))
         with self.assertRaisesRegex(Blocked, "not a coding result"):
@@ -597,14 +598,15 @@ class CycleTests(unittest.TestCase):
         focus_reconcile.apply(self.cycle, path)
         self.transport.actions = [
             ("coordinate", report()), ("code", self.edit(content="next stage implementation\n")),
-            ("coordinate", report()), *[("astra", report())] * 3,
+            ("coordinate", report()), *[("sol", report())] * 3,
             ("coordinate", report()), *[("claude", report())] * 2,
+            ("coordinate", report()), ("astra", report()),
             ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual([role for role, _ in self.transport.calls if role != "coordinate"],
-                         ["code", "astra", "astra", "astra", "claude", "claude", "publish"])
+                         ["code", "sol", "sol", "sol", "claude", "claude", "astra", "publish"])
         coding_context = next(prompt for role, prompt in self.transport.calls if role == "code")
         self.assertNotIn('"coding_recovery"', coding_context)
         self.assertIn("next unfinished stage", coding_context)
@@ -636,15 +638,16 @@ class CycleTests(unittest.TestCase):
         correction_id = self.state["correction_revision"]
         self.transport.actions = [
             ("coordinate", report()), ("code", self.edit(content="corrected\n")),
-            ("coordinate", report()), *[("astra", report())] * 3,
+            ("coordinate", report()), *[("sol", report())] * 3,
             ("coordinate", report()), *[("claude", report())] * 2,
+            ("coordinate", report()), ("astra", report()),
             ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
         self.transport.calls.clear()
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual([role for role, _ in self.transport.calls if role != "coordinate"],
-                         ["code", "astra", "astra", "astra", "claude", "claude", "publish"])
+                         ["code", "sol", "sol", "sol", "claude", "claude", "astra", "publish"])
         archived = json.loads((self.store.directory / "iterations/000001.json").read_text())
         self.assertEqual(archived["correction_revision"], correction_id)
         self.assertIsNone(archived["correction_pending"])
@@ -796,8 +799,8 @@ class CycleTests(unittest.TestCase):
         source = self.store.directory / "invocations" / self.state["pending"]["id"] / "result.json"
         self.cycle.recover_review(source)
         self.assertIsNone(self.state["correction_pending"])
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
 
     @unittest.skipIf(os.name == "nt", "POSIX directory symlink fixture")
     def test_correction_archive_cannot_escape_runtime_directory(self):
@@ -833,7 +836,7 @@ class CycleTests(unittest.TestCase):
         self.assertFalse(forbidden.exists())
         self.assertFalse(runtime_active(self.store))
         self.assertFalse((self.root / ".work/orchestrator.lock/lease.json").exists())
-        self.assertEqual(self.store.read()["phase"], "astra")
+        self.assertEqual(self.store.read()["phase"], "sol")
         self.assertEqual(self.store.read()["status"], "paused")
 
         correction = subprocess.run(["pwsh", "-NoProfile", "-File", str(REPO / "tools/focus-runtime.ps1"),
@@ -850,8 +853,9 @@ class CycleTests(unittest.TestCase):
         self.remote()
         self.transport.actions = [
             ("coordinate", report()), ("code", self.edit(description="Full unabridged implementation description")),
-            ("coordinate", report()), *[("astra", report())] * 3,
+            ("coordinate", report()), *[("sol", report())] * 3,
             ("coordinate", report()), *[("claude", report())] * 2,
+            ("coordinate", report()), ("astra", report()),
             ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
@@ -861,42 +865,212 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.state["iteration"], 2)
         self.assertEqual(self.state["status"], "complete")
         for role, prompt in self.transport.calls:
-            if role == "astra":
+            if role == "sol":
                 self.assertIn("Full unabridged implementation description", prompt)
             if role == "coordinate":
                 self.assertNotIn("Full unabridged implementation description", prompt)
 
-    def test_astra_counter_changes_after_third_pass(self):
-        self.state.update(phase="astra", coordinated="astra")
+    def test_three_reviewer_profiles_are_fixed(self):
+        self.assertEqual(PROFILES['sol'], ('codex', 'gpt-6-sol', 'xhigh'))
+        self.assertEqual(PROFILES['claude'], ('claude', 'opus', 'xhigh'))
+        self.assertEqual(PROFILES['astra'], ('codex', 'gpt-6-astra', 'xhigh'))
+        self.assertEqual(PROFILES['code'], ('claude', 'claude-fable-5-1', 'high'))
+        self.assertEqual(PROFILES['heal'], ('codex', 'gpt-6-astra', 'xhigh'))
+
+    def test_final_review_repeats_until_clean_and_seals_latest_work(self):
+        self.state.update(phase='astra', sol_clean=3, claude_clean=2)
+        self.transport.actions = [('astra', self.edit(other_fixes=1)),
+                                  ('astra', self.edit(content='small fix\n', implementation_fixes=1)),
+                                  ('astra', report())]
+        for _ in range(2):
+            self.cycle.review('astra')
+            self.assertEqual(self.state['phase'], 'astra')
+            self.assertEqual(self.state['astra_clean'], 0)
+            self.assertIsNone(self.state['reviewed'])
+        self.cycle.review('astra')
+        self.assertEqual(self.state['phase'], 'publish')
+        self.assertEqual(self.state['astra_clean'], 1)
+        self.assertEqual(self.state['reviewed'], self.repo.snapshot())
+        self.assertEqual(self.state['display_reviews']['astra']['completed'], 3)
+
+    def test_final_substantial_fix_invalidates_all_review_credit(self):
+        self.state.update(phase='astra', sol_clean=3, claude_clean=2)
+        self.transport.actions = [('astra', self.edit(implementation_fixes=1, substantial=True))]
+        self.cycle.review('astra')
+        self.assertEqual(self.state['phase'], 'sol')
+        self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [0, 0, 0])
+        self.assertIsNone(self.state['reviewed'])
+
+    def test_final_incomplete_or_unreported_change_cannot_publish(self):
+        for response in (report(evidence=[]), report(status='complete'), self.edit()):
+            with self.subTest(response=response):
+                self.state.update(phase='astra', pending=None, sol_clean=3, claude_clean=2)
+                self.transport.actions = [('astra', response)]
+                with self.assertRaises(Blocked):
+                    self.cycle.review('astra')
+                self.assertIsNone(self.state['reviewed'])
+                self.assertEqual(self.state['astra_clean'], 0)
+
+    def test_interrupted_final_review_with_changes_returns_to_sol(self):
+        self.state.update(phase='astra', sol_clean=3, claude_clean=2,
+                          pending={'id': 'interrupted-final', 'role': 'astra', 'before': self.repo.snapshot(), 'attempts': 1})
+        self.edit()()
+        self.transport.actions = [('astra', report(other_fixes=1))]
+        self.cycle.review('astra')
+        self.assertEqual(self.state['phase'], 'sol')
+        self.assertEqual(self.state['sol_clean'], 0)
+
+    def test_final_review_failure_after_edits_cannot_reuse_prior_credit(self):
+        self.state.update(phase='astra', sol_clean=3, claude_clean=2)
+        self.transport.actions = [('astra', self.edit(status='blocked', implementation_fixes=1))]
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.review('astra')
+        self.cycle.handle_block(caught.exception)
+        self.assertEqual(self.state['blocker']['phase'], 'sol')
+        self.assertEqual(self.state['sol_clean'], 0)
+        self.assertEqual(self.state['claude_clean'], 0)
+
+    def test_legacy_review_profile_archives_credit_and_keeps_work(self):
+        self.edit()()
+        self.state.pop('review_profile')
+        self.state.update(phase='publish', sol_clean=0, astra_passes=3, astra_clean=3,
+                          claude_clean=2, reviewed=self.repo.snapshot(), publication_started=False,
+                          publication_paths=['source.txt'], publication_prepared={'subject': 'Old preparation'},
+                          sessions={'code': 'coder', 'astra': 'old-first', 'claude': 'old-fable', 'heal': 'healer'},
+                          pending={'id': 'old-publisher', 'role': 'publish'})
+        previous = json.loads(json.dumps(self.state))
+        work = self.repo.snapshot()
+        self.cycle.upgrade_review_profile()
+        self.assertEqual(json.loads(Path(self.state['review_profile_archive']).read_text()), previous)
+        self.assertEqual(self.state['phase'], 'sol')
+        self.assertEqual(self.state['sessions'], {'code': 'coder', 'heal': 'healer'})
+        self.assertEqual(self.state['publication_paths'], ['source.txt'])
+        self.assertFalse(self.state['publication_started'])
+        self.assertIsNone(self.state['pending'])
+        self.assertIsNone(self.state['reviewed'])
+        self.assertNotIn('publication_prepared', self.state)
+        self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [0, 0, 0])
+        self.assertEqual(self.repo.snapshot(), work)
+        after = json.loads(json.dumps(self.state))
+        self.cycle.upgrade_review_profile()
+        self.assertEqual(self.state, after)
+
+    def test_legacy_resume_runs_all_new_reviews_before_publication(self):
+        self.edit()()
+        self.state.pop('review_profile')
+        self.state.pop('sol_clean')
+        self.state.pop('sol_passes')
+        self.state.update(phase='claude', astra_passes=3, astra_clean=3, claude_clean=1,
+                          code_started=True, code_report='Original completed implementation',
+                          last_snapshot=self.repo.snapshot(),
+                          pending={'id': 'legacy-review', 'role': 'claude', 'attempts': 1},
+                          sessions={'astra': 'old-astra', 'claude': 'old-fable'})
+        control = self.focus_control()
+        def final_pass():
+            self.stop_request(control)
+            return report()
+        self.transport.actions = [('coordinate', report()), *[('sol', report())] * 3,
+                                  ('coordinate', report()), *[('claude', report())] * 2,
+                                  ('coordinate', report()), ('astra', final_pass)]
+        self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual([role for role, _ in self.transport.calls if role != 'coordinate'],
+                         ['sol', 'sol', 'sol', 'claude', 'claude', 'astra'])
+        self.assertEqual((self.state['phase'], self.state['status']), ('publish', 'paused'))
+        self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [3, 2, 1])
+        self.assertEqual(self.state['code_report'], 'Original completed implementation')
+        self.assertNotIn('astra', self.state['sessions'])  # The fake transport creates no sessions.
+        self.assertEqual(self.state['reviewed'], self.repo.snapshot())
+
+    def test_profile_upgrade_keeps_coding_and_completed_publication_continuation(self):
+        for phase in ('code', 'publish', 'ci'):
+            with self.subTest(phase=phase):
+                self.state.pop('review_profile', None)
+                self.state.update(phase=phase, pending={'id': phase, 'role': phase},
+                                  publication_started=True, reviewed=self.repo.snapshot(), published={'sha': 'known-pushed-sha'})
+                self.cycle.upgrade_review_profile()
+                self.assertEqual(self.state['phase'], phase)
+                self.assertEqual(self.state['pending']['id'], phase)
+                self.assertEqual(self.state['published']['sha'], 'known-pushed-sha')
+                self.assertEqual(self.state['reviewed'], self.repo.snapshot())
+
+    def test_profile_upgrade_failure_preserves_state_and_future_profiles(self):
+        self.state.pop('review_profile')
+        previous = json.loads(json.dumps(self.state))
+        with patch.object(self.store, 'save', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                self.cycle.upgrade_review_profile()
+        self.assertEqual(self.state, previous)
+        self.state['review_profile'] = 999
+        with self.assertRaisesRegex(Blocked, 'newer runtime'):
+            self.cycle.upgrade_review_profile()
+        self.assertEqual(self.state['review_profile'], 999)
+
+    def test_profile_upgrade_preserves_unresolved_delivery_without_mutating(self):
+        self.state.pop('review_profile')
+        self.state.update(phase='astra', pending={'id': 'old-pass', 'role': 'astra'})
+        target = {'iteration': 1, 'invocation': 'old-pass', 'role': 'astra', 'generation': 1}
+        self.cycle.messages.add(target, 'Do not lose this instruction')
+        before = json.loads(json.dumps(self.state))
+        with self.assertRaises(MessagePending):
+            self.cycle.upgrade_review_profile()
+        self.assertEqual(self.state, before)
+        self.assertFalse((self.store.directory / 'review-profiles').exists())
+
+    def test_opus_alias_rejects_wrong_family_and_model_changes(self):
+        for variant, code in [('opus-wrong-family', 'provider-profile'), ('opus-switch', 'model-rerouted'),
+                              ('opus-before-init', 'model-rerouted')]:
+            with self.subTest(variant=variant):
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands['claude'] = [sys.executable, str(Path(__file__).resolve()), 'fixture', 'claude', variant]
+                directory = self.store.directory / variant
+                directory.mkdir(parents=True)
+                with self.assertRaises(Blocked) as caught:
+                    transport.run('claude', 'Review with Opus', {'id': variant}, directory)
+                self.assertEqual(caught.exception.code, code)
+
+    def test_opus_alias_records_resolved_version_and_rejects_resume_drift(self):
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands['claude'] = [sys.executable, str(Path(__file__).resolve()), 'fixture', 'claude']
+        directory = self.store.directory / 'opus-version'
+        directory.mkdir(parents=True)
+        pending = {'id': 'opus-version'}
+        transport.run('claude', 'Review with Opus', pending, directory)
+        self.assertEqual(pending['resolved_model'], 'claude-opus-5-5')
+        pending['resolved_model'] = 'claude-opus-5'
+        with self.assertRaisesRegex(Blocked, 'interrupted invocation'):
+            transport.run('claude', 'Continue same review', pending, directory)
+
+    def test_sol_counter_changes_after_third_pass(self):
+        self.state.update(phase="sol", coordinated="sol")
         for index, other in enumerate((0, 0, 1, 1, 1, 1), start=1):
-            self.transport.actions.append(("astra", report(other_fixes=other)))
-            self.cycle.review("astra")
+            self.transport.actions.append(("sol", report(other_fixes=other)))
+            self.cycle.review("sol")
             if index == 3:
-                self.assertEqual(self.state["astra_clean"], 0)
-        self.assertEqual(self.state["astra_clean"], 3)
+                self.assertEqual(self.state["sol_clean"], 0)
+        self.assertEqual(self.state["sol_clean"], 3)
         self.assertEqual(self.state["phase"], "claude")
 
     def test_minor_edits_do_not_reset_clean_passes(self):
-        self.state.update(phase="astra", coordinated="astra")
-        self.transport.actions = [("astra", self.edit(content=str(i), minor_edits=1)) for i in range(3)]
+        self.state.update(phase="sol", coordinated="sol")
+        self.transport.actions = [("sol", self.edit(content=str(i), minor_edits=1)) for i in range(3)]
         for _ in range(3):
-            self.cycle.review("astra")
+            self.cycle.review("sol")
         self.assertEqual(self.state["phase"], "claude")
 
-    def test_substantial_claude_fixes_return_to_astra(self):
-        self.state.update(phase="claude", astra_passes=3, astra_clean=3, claude_clean=1)
+    def test_substantial_claude_fixes_return_to_sol(self):
+        self.state.update(phase="claude", sol_passes=3, sol_clean=3, claude_clean=1)
         self.transport.actions = [("claude", self.edit(implementation_fixes=1, substantial=True))]
         self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertEqual(self.state["astra_clean"], 0)
+        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["sol_clean"], 0)
         self.assertEqual(self.state["claude_clean"], 0)
 
     def test_failed_or_unreported_review_does_not_count(self):
-        self.state.update(phase="astra", astra_clean=1)
-        self.transport.actions = [("astra", self.edit())]
+        self.state.update(phase="sol", sol_clean=1)
+        self.transport.actions = [("sol", self.edit())]
         with self.assertRaisesRegex(Blocked, "reported no changes"):
-            self.cycle.review("astra")
-        self.assertEqual(self.state["astra_clean"], 1)
+            self.cycle.review("sol")
+        self.assertEqual(self.state["sol_clean"], 1)
 
     def test_coder_cannot_commit(self):
         def bad_coder():
@@ -916,13 +1090,13 @@ class CycleTests(unittest.TestCase):
             self.cycle.invoke("code")
 
     def test_recorded_result_replays_without_provider(self):
-        self.transport.actions = [("astra", report())]
-        self.state["phase"] = "astra"
-        self.cycle.invoke("astra")
+        self.transport.actions = [("sol", report())]
+        self.state["phase"] = "sol"
+        self.cycle.invoke("sol")
         pending_id = self.state["pending"]["id"]
-        self.cycle.review("astra")
+        self.cycle.review("sol")
         self.assertEqual(len(self.transport.calls), 1)
-        self.assertEqual(self.state["astra_clean"], 1)
+        self.assertEqual(self.state["sol_clean"], 1)
         self.assertTrue((self.store.directory / "invocations" / pending_id / "result.json").exists())
 
     def test_pause_stops_before_any_provider(self):
@@ -933,10 +1107,10 @@ class CycleTests(unittest.TestCase):
         self.assertFalse(self.transport.calls)
 
     def test_blocker_heals_once_then_escalates_without_spin(self):
-        self.state.update(phase="astra", coordinated="astra")
+        self.state.update(phase="sol", coordinated="sol")
         problem = Blocked("fixture", "same unavailable dependency")
-        self.transport.actions = [("astra", problem), ("heal", report()),
-                                  ("coordinate", report()), ("astra", problem)]
+        self.transport.actions = [("sol", problem), ("heal", report()),
+                                  ("coordinate", report()), ("sol", problem)]
         self.assertEqual(self.cycle.run(), 3)
         self.assertEqual([role for role, _ in self.transport.calls].count("heal"), 1)
         self.assertEqual(self.state["blocker"]["escalation_reason"], "verification-failed")
@@ -948,14 +1122,14 @@ class CycleTests(unittest.TestCase):
         self.state.update(phase="publish", reviewed=self.repo.snapshot(), blocker={"phase": "publish", "status": "healing"})
         self.transport.actions = [("heal", self.edit(implementation_fixes=1, substantial=True))]
         self.cycle.heal()
-        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual(self.state["phase"], "sol")
         self.assertIsNone(self.state["reviewed"])
 
     def test_changing_error_details_cannot_spin_recovery(self):
-        self.state.update(phase="astra", coordinated="astra")
-        self.transport.actions = [("astra", Blocked("dependency", "failed request at timestamp one")),
+        self.state.update(phase="sol", coordinated="sol")
+        self.transport.actions = [("sol", Blocked("dependency", "failed request at timestamp one")),
                                   ("heal", report()), ("coordinate", report()),
-                                  ("astra", Blocked("dependency", "failed request at timestamp two"))]
+                                  ("sol", Blocked("dependency", "failed request at timestamp two"))]
         self.assertEqual(self.cycle.run(), 3)
         self.assertEqual([role for role, _ in self.transport.calls].count("heal"), 1)
         self.assertEqual(self.state["blocker"]["status"], "blocked")
@@ -1056,7 +1230,7 @@ class CycleTests(unittest.TestCase):
         self.edit()()
         reviewed = self.repo.snapshot()
         self.state.update(phase="publish", coordinated="publish", reviewed=reviewed, last_snapshot=reviewed,
-                          astra_clean=3, claude_clean=2, sessions={"codex": "saved-session"})
+                          sol_clean=3, claude_clean=2, sessions={"codex": "saved-session"})
         for code in ("remote-query-timeout", "remote-query-failed"):
             with self.subTest(code=code), patch.object(self.repo, "remote_head", side_effect=Blocked(code, "Remote unavailable")):
                 self.state.update(blocker=None, status="ready", healed=[], recovery_unverified=False)
@@ -1067,7 +1241,7 @@ class CycleTests(unittest.TestCase):
                 self.assertEqual(saved["phase"], "publish")
                 self.assertEqual(saved["blocker"]["status"], "blocked")
                 self.assertEqual(saved["reviewed"], reviewed)
-                self.assertEqual((saved["astra_clean"], saved["claude_clean"]), (3, 2))
+                self.assertEqual((saved["sol_clean"], saved["claude_clean"]), (3, 2))
                 self.assertEqual(saved["sessions"], {"codex": "saved-session"})
                 self.assertIsNone(saved["published"])
                 self.assertEqual(len(saved["healed"]), 1)
@@ -1080,7 +1254,7 @@ class CycleTests(unittest.TestCase):
         self.edit()()
         reviewed = self.repo.snapshot()
         self.state.update(phase="publish", coordinated="publish", reviewed=reviewed, last_snapshot=reviewed,
-                          remote="origin", astra_clean=3, claude_clean=2)
+                          remote="origin", sol_clean=3, claude_clean=2)
         self.commit_stage()
         with patch.object(self.repo, "remote_head", side_effect=Blocked("remote-query-timeout", "Timed out")):
             with self.assertRaises(Blocked) as raised:
@@ -1100,7 +1274,7 @@ class CycleTests(unittest.TestCase):
         self.edit()()
         reviewed = self.repo.snapshot()
         self.state.update(phase="publish", coordinated="publish", reviewed=reviewed, last_snapshot=reviewed,
-                          astra_clean=3, claude_clean=2, sessions={"codex": "saved-session"}, recovery_unverified=True)
+                          sol_clean=3, claude_clean=2, sessions={"codex": "saved-session"}, recovery_unverified=True)
         self.cycle.handle_block(Blocked("command-unavailable", "git: ls-remote timed out after 60 seconds"))
         with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
                 patch("cc_focus.Cycle.run", return_value=0):
@@ -1110,7 +1284,7 @@ class CycleTests(unittest.TestCase):
         self.assertIsNone(current["blocker"])
         self.assertEqual(current["phase"], "publish")
         self.assertEqual(current["reviewed"], reviewed)
-        self.assertEqual((current["astra_clean"], current["claude_clean"]), (3, 2))
+        self.assertEqual((current["sol_clean"], current["claude_clean"]), (3, 2))
         self.assertEqual(current["sessions"], {"codex": "saved-session"})
 
     def test_remote_query_progress_does_not_report_a_running_coordinator(self):
@@ -1138,7 +1312,7 @@ class CycleTests(unittest.TestCase):
         self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
         self.edit(content="unreviewed hook output")()
         self.assertFalse(self.cycle.prepare_publish())
-        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual(self.state["phase"], "sol")
 
     def test_wrong_sha_and_pending_ci_cannot_pass(self):
         self.remote()
@@ -1165,7 +1339,7 @@ class CycleTests(unittest.TestCase):
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         for provider in ("codex", "claude"):
             transport.commands[provider] = [sys.executable, str(Path(__file__).resolve()), "fixture", provider]
-        for role in ("code", "astra", "coordinate", "claude", "publish", "heal"):
+        for role in ("code", "sol", "astra", "coordinate", "claude", "publish", "heal"):
             for attempt in range(2):
                 invocation = {"id": role + str(attempt)}
                 directory = self.store.directory / invocation["id"]
@@ -1177,7 +1351,7 @@ class CycleTests(unittest.TestCase):
                 self.assertIn("Do not require or recreate HANDOFF.md", prompt)
                 self.assertIn("Read the current project plan before selecting the next unfinished stage", prompt)
                 self.assertIn("report blocked; do not invent work", prompt)
-        self.assertEqual(len(set(self.state["sessions"].values())), 6)
+        self.assertEqual(len(set(self.state["sessions"].values())), 7)
 
     def test_failed_ci_never_starts_next_stage(self):
         self.remote()
@@ -1238,17 +1412,17 @@ class CycleTests(unittest.TestCase):
         self.assertFalse(changed(reviewed, self.repo.snapshot()))
 
     def test_failed_pass_resets_existing_clean_streak(self):
-        self.state.update(phase="astra", astra_clean=2, pending={"id": "interrupted", "role": "astra"})
+        self.state.update(phase="sol", sol_clean=2, pending={"id": "interrupted", "role": "sol"})
         self.cycle.handle_block(Blocked("failed-test", "Verification failed"))
-        self.assertEqual(self.state["astra_clean"], 0)
+        self.assertEqual(self.state["sol_clean"], 0)
 
     def test_external_edit_invalidates_claude_clean_streak(self):
-        self.state.update(phase="claude", astra_clean=3, claude_clean=1)
+        self.state.update(phase="claude", sol_clean=3, claude_clean=1)
         self.edit(content="external change")()
         self.transport.actions = [("coordinate", report(status="blocked")), ("heal", report(status="blocked"))]
         self.assertEqual(self.cycle.run(), 3)
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertEqual(self.state["astra_clean"], 0)
+        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["sol_clean"], 0)
 
     def test_lost_acquire_reply_uses_persisted_owner_intent(self):
         self.state["lease_owners"] = ["old-intended-owner"]
@@ -1536,13 +1710,13 @@ class CycleTests(unittest.TestCase):
                 self.cycle.wait_ci()
 
     def test_codex_completed_turn_is_recovered_without_turn_start(self):
-        self.state["sessions"]["astra"] = "known-session"
+        self.state["sessions"]["sol"] = "known-session"
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         transport.commands["codex"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex", "recover"]
         pending = {"id": "recovered", "turn_id": "finished-turn"}
         directory = self.store.directory / "recover"
         directory.mkdir(parents=True)
-        self.assertEqual(parse_report(transport.run("astra", "recover same stage", pending, directory))["status"], "done")
+        self.assertEqual(parse_report(transport.run("sol", "recover same stage", pending, directory))["status"], "done")
         log = (directory / "protocol.jsonl").read_text()
         self.assertNotIn('turn/completed', log)
 
@@ -1558,7 +1732,7 @@ class CycleTests(unittest.TestCase):
     def test_all_codex_roles_disable_memory_agents_on_start_and_resume(self):
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         transport.commands["codex"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex"]
-        for role in ("coordinate", "astra", "publish", "heal"):
+        for role in ("coordinate", "sol", "astra", "publish", "heal"):
             for attempt in range(2):
                 with self.subTest(role=role, resume=bool(attempt)):
                     previous = self.state["sessions"].get(role)
@@ -1570,32 +1744,32 @@ class CycleTests(unittest.TestCase):
                         self.assertEqual(self.state["sessions"][role], previous)
 
     def test_interrupted_review_cannot_reuse_old_clean_streak(self):
-        self.state.update(phase="astra", astra_clean=2, pending={
-            "id": "interrupted-review", "role": "astra", "before": self.repo.snapshot(), "attempts": 1})
+        self.state.update(phase="sol", sol_clean=2, pending={
+            "id": "interrupted-review", "role": "sol", "before": self.repo.snapshot(), "attempts": 1})
         self.edit(content="fixed before power loss")()
-        self.transport.actions = [("astra", report(minor_edits=1))]
-        self.cycle.review("astra")
-        self.assertEqual(self.state["astra_clean"], 1)
-        self.assertEqual(self.state["phase"], "astra")
+        self.transport.actions = [("sol", report(minor_edits=1))]
+        self.cycle.review("sol")
+        self.assertEqual(self.state["sol_clean"], 1)
+        self.assertEqual(self.state["phase"], "sol")
 
-    def test_uncertain_interrupted_claude_changes_return_to_astra(self):
-        self.state.update(phase="claude", claude_clean=1, astra_clean=3, pending={
+    def test_uncertain_interrupted_claude_changes_return_to_sol(self):
+        self.state.update(phase="claude", claude_clean=1, sol_clean=3, pending={
             "id": "interrupted-claude", "role": "claude", "before": self.repo.snapshot(), "attempts": 1})
         self.edit(content="changed before response was lost")()
         self.transport.actions = [("claude", report(minor_edits=1))]
         self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertEqual(self.state["astra_clean"], 0)
+        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["sol_clean"], 0)
 
     def test_unmaterialized_codex_session_recovers_same_phase(self):
-        self.state["sessions"]["astra"] = "unmaterialized-session"
+        self.state["sessions"]["sol"] = "unmaterialized-session"
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         transport.commands["codex"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex", "missing-session"]
         pending = {"id": "cold-continuation", "attempts": 1}
         directory = self.store.directory / "cold-continuation"
         directory.mkdir(parents=True)
-        self.assertEqual(parse_report(transport.run("astra", "same phase", pending, directory))["status"], "done")
-        self.assertNotEqual(self.state["sessions"]["astra"], "unmaterialized-session")
+        self.assertEqual(parse_report(transport.run("sol", "same phase", pending, directory))["status"], "done")
+        self.assertNotEqual(self.state["sessions"]["sol"], "unmaterialized-session")
         self.assertEqual(self.state["session_recoveries"][0]["missing"], "unmaterialized-session")
 
     def test_publication_reconciles_unicode_filenames(self):
@@ -1662,13 +1836,13 @@ class CycleTests(unittest.TestCase):
                 self.assertFalse((directory / "result.json").exists())
 
     def test_claude_native_fix_cannot_count_as_a_clean_review(self):
-        self.state.update(phase="claude", coordinated="claude", astra_passes=4, astra_clean=3, claude_clean=1)
+        self.state.update(phase="claude", coordinated="claude", sol_passes=4, sol_clean=3, claude_clean=1)
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "native-fixes"]
         self.cycle.transport = transport
         self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertEqual(self.state["display_reviews"]["claude"]["completed"], 1)
         self.assertIsNone(self.state["published"])
 
@@ -1727,7 +1901,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "cleanup-incomplete")
 
     def test_quota_wait_retries_same_invocation_without_healing_or_resetting_clean_passes(self):
-        self.state.update(phase="claude", coordinated="claude", astra_clean=3, claude_clean=1,
+        self.state.update(phase="claude", coordinated="claude", sol_clean=3, claude_clean=1,
                           sessions={"claude": "same-native-session"})
         original = self.repo.snapshot()
         clock, waited, ids = [1000.0], [], []
@@ -1749,7 +1923,7 @@ class CycleTests(unittest.TestCase):
             self.assertIsNone(saved["blocker"])
             self.assertEqual(saved["display_reviews"]["claude"]["completed"], 0)
             clock[0] += 60
-        control = type("ControlFixture", (), {"boundary": lambda _, window: self.state["phase"] == "publish"})()
+        control = type("ControlFixture", (), {"boundary": lambda _, window: self.state["phase"] == "astra"})()
         self.cycle.control = control
         self.transport.actions = [("claude", reject), ("claude", retry)]
         with patch("cycle_workflow.time", wraps=time) as timer:
@@ -1759,7 +1933,7 @@ class CycleTests(unittest.TestCase):
         self.assertTrue(waited)
         self.assertEqual(ids, [ids[0], ids[0]])
         self.assertEqual([role for role, _ in self.transport.calls], ["claude", "claude"])
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (3, 2))
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (3, 2))
         self.assertEqual(self.state["sessions"], {"claude": "same-native-session"})
         self.assertEqual(self.repo.snapshot(), original)
         self.assertIsNone(self.state["pending"])
@@ -1798,11 +1972,11 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.state["status"], "complete")
 
     def test_quota_retry_after_started_work_or_checkout_drift_cannot_keep_review_credit(self):
-        self.state.update(phase="claude", coordinated="claude", astra_clean=3, claude_clean=1)
+        self.state.update(phase="claude", coordinated="claude", sol_clean=3, claude_clean=1)
         for started, drift in ((True, False), (False, True)):
             with self.subTest(started=started, drift=drift):
                 before = self.repo.snapshot()
-                self.state.update(phase="claude", claude_clean=1, astra_clean=3,
+                self.state.update(phase="claude", claude_clean=1, sol_clean=3,
                                   pending={"id": str(started), "role": "claude", "attempts": 1, "before": before})
                 self.cycle.defer_quota(ProviderQuota(1, no_work=not started))
                 if drift:
@@ -1810,7 +1984,7 @@ class CycleTests(unittest.TestCase):
                 self.transport.actions = [("claude", report(other_fixes=int(drift)))]
                 self.cycle.review("claude")
                 self.assertEqual(self.state["claude_clean"], 0 if drift else 1)
-                self.assertEqual(self.state["phase"], "astra" if drift else "claude")
+                self.assertEqual(self.state["phase"], "sol" if drift else "claude")
 
     def test_quota_refusal_cannot_hide_protected_file_changes(self):
         self.edit(name="operator.txt", content="owned by operator")()
@@ -1919,7 +2093,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(parse_report(transport.run("claude", "same review", {"id": "quoted"}, directory))["status"], "done")
 
     def test_provider_api_refusal_stops_review_without_healing_and_can_resume(self):
-        self.state.update(phase="claude", coordinated="claude", astra_passes=4, astra_clean=3, claude_clean=1,
+        self.state.update(phase="claude", coordinated="claude", sol_passes=4, sol_clean=3, claude_clean=1,
                           sessions={"claude": "saved-review-session"})
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         fixture = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude"]
@@ -1932,7 +2106,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(saved["blocker"]["code"], "claude-access-denied")
         self.assertEqual(saved["blocker"]["status"], "blocked")
         self.assertEqual(saved["phase"], "claude")
-        self.assertEqual((saved["astra_clean"], saved["claude_clean"]), (3, 0))
+        self.assertEqual((saved["sol_clean"], saved["claude_clean"]), (3, 0))
         self.assertEqual(saved["healed"], [])
         self.assertEqual(saved["display_reviews"]["claude"]["completed"], 0)
         self.assertEqual(self.repo.snapshot(), before)
@@ -1944,7 +2118,7 @@ class CycleTests(unittest.TestCase):
         self.cycle.review("claude")
         self.assertEqual(self.state["phase"], "claude")
         self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "publish")
+        self.assertEqual(self.state["phase"], "astra")
         self.assertEqual(self.state["sessions"], {"claude": "saved-review-session"})
 
     def test_unknown_structured_api_failure_tries_healing_before_stopping(self):
@@ -2056,13 +2230,13 @@ class CycleTests(unittest.TestCase):
 
     def test_safe_stop_finishes_current_pass_but_not_next_one(self):
         control = self.focus_control()
-        self.state.update(phase="astra", coordinated="astra")
+        self.state.update(phase="sol", coordinated="sol")
         def finish_pass():
             self.stop_request(control)
             return report()
-        self.transport.actions = [("astra", finish_pass)]
+        self.transport.actions = [("sol", finish_pass)]
         self.assertEqual(self.cycle.run(), 0)
-        self.assertEqual(self.state["astra_clean"], 1)
+        self.assertEqual(self.state["sol_clean"], 1)
         self.assertIsNone(self.state["pending"])
         self.assertEqual(len(self.transport.calls), 1)
 
@@ -2082,14 +2256,14 @@ class CycleTests(unittest.TestCase):
 
     def test_operator_stop_does_not_start_blocker_healer(self):
         control = self.focus_control()
-        self.state.update(phase="astra", coordinated="astra")
+        self.state.update(phase="sol", coordinated="sol")
         def fail_after_stop():
             self.stop_request(control)
             raise Blocked("fixture", "failed check")
-        self.transport.actions = [("astra", fail_after_stop)]
+        self.transport.actions = [("sol", fail_after_stop)]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual(self.state["blocker"]["status"], "healing")
-        self.assertEqual([role for role, _ in self.transport.calls], ["astra"])
+        self.assertEqual([role for role, _ in self.transport.calls], ["sol"])
 
     def test_emergency_stop_never_becomes_model_blocker(self):
         control = self.focus_control()
@@ -2185,7 +2359,7 @@ class CycleTests(unittest.TestCase):
         self.assertNotIn("\x1b", safe_text("\x1b[31mhello\nworld"))
 
     def test_live_codex_output_streams_messages_commands_and_errors_without_duplicates(self):
-        renderer = LiveOutput("astra")
+        renderer = LiveOutput("sol")
         def item(kind, **values):
             renderer.event({"method": "item/" + kind, "params": {"item": values}})
         with contextlib.redirect_stdout(io.StringIO()) as output:
@@ -2226,7 +2400,7 @@ class CycleTests(unittest.TestCase):
         self.assertNotIn("PRIVATE IMAGE", output.getvalue())
 
     def test_live_output_hides_reasoning_protocol_and_structured_final_report(self):
-        renderer = LiveOutput("astra")
+        renderer = LiveOutput("sol")
         with contextlib.redirect_stdout(io.StringIO()) as output:
             for event in (
                 {"method": "item/reasoning/textDelta", "params": {"delta": "PRIVATE"}},
@@ -2261,7 +2435,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(len(renderer.items), renderer.ITEMS)
 
     def test_live_final_json_messages_and_updated_plans_are_not_echoed_twice(self):
-        renderer = LiveOutput("astra")
+        renderer = LiveOutput("sol")
         with contextlib.redirect_stdout(io.StringIO()) as output:
             for value in ('{"example": 1}', '{"example": 1}'):
                 renderer.feed("message", "message", value, final=True, message=True)
@@ -2271,7 +2445,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(output.getvalue().count("inProgress: inspect"), 1)
 
     def test_live_changed_json_snapshots_share_one_display_budget(self):
-        renderer = LiveOutput("astra")
+        renderer = LiveOutput("sol")
         with contextlib.redirect_stdout(io.StringIO()) as output:
             renderer.feed("message", "message", json.dumps({"text": "a" * 32000}), final=True, message=True)
             renderer.feed("message", "message", json.dumps({"text": "b" * 64000}), final=True, message=True)
@@ -2279,7 +2453,7 @@ class CycleTests(unittest.TestCase):
         self.assertIn("display truncated", output.getvalue())
 
     def test_live_tools_include_structured_results_and_changed_file_diffs(self):
-        renderer = LiveOutput("astra")
+        renderer = LiveOutput("sol")
         events = [
             {"id": "files", "type": "fileChange", "changes": [{"path": "source.py", "diff": "+fixed edge case"}], "status": "completed"},
             {"id": "mcp", "type": "mcpToolCall", "server": "fixture", "tool": "query", "arguments": {"query": "example"},
@@ -2327,7 +2501,7 @@ class CycleTests(unittest.TestCase):
         self.assertNotIn("VISIBLE", (self.store.directory / "progress.json").read_text())
 
     def test_live_transport_outputs_both_provider_events_and_trailing_stderr(self):
-        for role, provider in (("code", "claude"), ("astra", "codex")):
+        for role, provider in (("code", "claude"), ("sol", "codex")):
             with self.subTest(provider=provider), contextlib.redirect_stdout(io.StringIO()) as output:
                 progress = Progress(self.store, self.state, "run", live=True)
                 directory = self.store.directory / ("live-" + provider)
@@ -2376,7 +2550,7 @@ class CycleTests(unittest.TestCase):
         self.state.update(phase="publish", reviewed=self.repo.snapshot(), pending={"id": "old-publish", "role": "publish"})
         self.edit()()
         self.assertFalse(self.cycle.prepare_publish())
-        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual(self.state["phase"], "sol")
         self.assertIsNone(self.state["pending"])
 
     def start_focus_fixture(self, mode="normal", native=False):
@@ -2507,7 +2681,7 @@ def fixture(provider):
                     if args == ["crash"]:
                         os._exit(1)
                     process.receive()
-                    state.update(pending=None, status="paused", phase="astra")
+                    state.update(pending=None, status="paused", phase="sol")
                 finally:
                     process.close()
             except FocusStop:
@@ -2526,7 +2700,9 @@ def fixture(provider):
         print(json.dumps(value), flush=True)
     if provider == "claude":
         assert args[args.index("--permission-mode") + 1] == "bypassPermissions"
-        assert args[args.index("--model") + 1] == "claude-fable-5-1"
+        requested_model = args[args.index("--model") + 1]
+        assert requested_model in ("claude-fable-5-1", "opus")
+        effective_model = "claude-opus-5-5" if requested_model == "opus" else requested_model
         assert args[args.index("--effort") + 1] == os.environ["CLAUDE_CODE_EFFORT_LEVEL"]
         settings = json.loads(args[args.index("--settings") + 1])
         for key, value in {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_DEFAULT_TIMEOUT_MS": "1800000",
@@ -2545,8 +2721,14 @@ def fixture(provider):
             return
         if missing_session:
             assert "clean continuation" in prompt
+        if 'opus-wrong-family' in args:
+            effective_model = 'claude-fable-5-1'
+        if 'opus-before-init' in args:
+            emit({'type': 'assistant', 'message': {'model': effective_model}})
         if "synthetic-org-preinit" not in args and "quota-preinit" not in args:
-            emit({"type": "system", "subtype": "init", "model": "claude-fable-5-1", "session_id": sid, "permissionMode": "bypassPermissions"})
+            emit({"type": "system", "subtype": "init", "model": effective_model, "session_id": sid, "permissionMode": "bypassPermissions"})
+        if 'opus-switch' in args:
+            emit({'type': 'assistant', 'message': {'model': 'claude-opus-5'}})
         quota_variant = next((arg for arg in args if arg.startswith("quota")), None)
         if quota_variant:
             reset = {"quota-no-reset": None, "quota-reset-string": "1789482000", "quota-reset-bool": True,
@@ -2562,7 +2744,7 @@ def fixture(provider):
                 emit({"type": "rate_limit_event", "rate_limit_info": info,
                       "session_id": "foreign" if quota_variant == "quota-wrong-session" else sid})
             if quota_variant == "quota-work":
-                emit({"type": "assistant", "message": {"model": "claude-fable-5-1", "content": [
+                emit({"type": "assistant", "message": {"model": effective_model, "content": [
                     {"type": "tool_use", "name": "Bash", "input": {"command": "fixture-command"}}]}})
             if quota_variant == "quota-result":
                 emit({"type": "result", "subtype": "success", "is_error": True, "terminal_reason": "api_error",
@@ -2588,12 +2770,12 @@ def fixture(provider):
                 if api_variant == "wrong-model":
                     api_message["message"]["model"] = "unexpected-model"
                 elif api_variant == "quoted-api-error":
-                    api_message["message"]["model"] = "claude-fable-5-1"
+                    api_message["message"]["model"] = effective_model
             emit(api_message)
             if api_variant != "quoted-api-error":
                 return
         if live:
-            emit({"type": "assistant", "message": {"id": "m", "model": "claude-fable-5-1", "content": [
+            emit({"type": "assistant", "message": {"id": "m", "model": effective_model, "content": [
                 {"type": "text", "text": "Public fixture message"},
                 {"type": "thinking", "thinking": "PRIVATE REASONING"},
                 {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "fixture-command"}}]}})
@@ -2623,7 +2805,7 @@ def fixture(provider):
                       "result": "Waiting for remaining verification", "queued_turn_count": 1 if native == "queued-turn" else 0})
             if native != "queued-turn":
                 task("task_notification", "monitor")
-            emit({"type": "assistant", "message": {"model": "claude-fable-5-1", "content": [
+            emit({"type": "assistant", "message": {"model": effective_model, "content": [
                 {"type": "text", "text": "Native tasks finished; completing verification"}]}})
         first = report(implementation_fixes=1, substantial=True) if "prior-fix" in args else report()
         if "long-summary" in args:
@@ -2658,7 +2840,7 @@ def fixture(provider):
             result = {"userAgent": "fixture"}
         elif method == "model/list":
             result = {"data": [{"model": model, "supportedReasoningEfforts": [{"reasoningEffort": "high"}, {"reasoningEffort": "xhigh"}]}
-                               for model in ("gpt-6-astra", "gpt-5.6-luna")], "nextCursor": None}
+                               for model in ("gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna")], "nextCursor": None}
         elif method in ("thread/start", "thread/resume"):
             assert params["config"]["features.memories"] is False
             if method == "thread/resume" and missing_session:

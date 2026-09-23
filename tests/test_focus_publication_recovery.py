@@ -36,7 +36,7 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.edit("Specification", "missing.zip", "reviewed archive\n")
         self.state.update(reviewed=self.project.snapshot(), code_started=True,
                           task={"id": "current", "iteration": 1, "plan": "Core/PLAN.md", "title": "Current stage"},
-                          code_report="Original completed coding report", sessions={"astra": "old-review-session"})
+                          code_report="Original completed coding report", sessions={"sol": "old-review-session"})
         self.cycle.prepare_publish()
         core.git("add", "source.txt", "operator.txt", "tracked.txt")
         core.git("commit", "-m", "Publish expanded scope")
@@ -63,8 +63,8 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.assertNotIn("Core/operator.txt", self.state["baseline"]["files"])
         self.assertEqual(self.state["sessions"], old["sessions"])
         self.assertEqual(self.state["task"], old["task"])
-        self.assertEqual((self.state["phase"], self.state["status"]), ("astra", "paused"))
-        self.assertEqual((self.state["astra_passes"], self.state["astra_clean"], self.state["claude_clean"]), (0, 0, 0))
+        self.assertEqual((self.state["phase"], self.state["status"]), ("sol", "paused"))
+        self.assertEqual((self.state["sol_passes"], self.state["sol_clean"], self.state["claude_clean"]), (0, 0, 0))
         self.assertIsNone(self.state["reviewed"])
         self.assertIsNone(self.state["published"])
         self.assertIsNone(self.state["correction_pending"])
@@ -77,10 +77,11 @@ class PublicationRecoveryTests(unittest.TestCase):
         archive = json.loads(fixtures.Path(correction["archive"]).read_text())
         self.assertEqual(archive["previous_state"], old)
         self.assertEqual(archive["publication_reconciliation"], plan)
-        self.assertIn('"publication_recovery"', self.cycle.context("astra"))
+        self.assertIn('"publication_recovery"', self.cycle.context("sol"))
         done = fixtures.report()
-        self.transport.actions = [("coordinate", done), ("astra", done), ("astra", done), ("astra", done),
-            ("coordinate", done), ("claude", done), ("claude", done), ("coordinate", done), ("publish", done),
+        self.transport.actions = [("coordinate", done), ("sol", done), ("sol", done), ("sol", done),
+            ("coordinate", done), ("claude", done), ("claude", done), ("coordinate", done), ("astra", done),
+            ("coordinate", done), ("publish", done),
             ("coordinate", fixtures.report(status="complete"))]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual(self.members["Core"].text("rev-parse", "HEAD"), before["head"]["Core"])
@@ -182,7 +183,7 @@ class PublicationRecoveryTests(unittest.TestCase):
                 recovery.apply(self.cycle, path)
             self.assertEqual(self.state, before)
         path.write_bytes(encode(plan))
-        self.state["astra_clean"] = 0
+        self.state["sol_clean"] = 0
         with self.assertRaisesRegex(Blocked, "changed since preparation"):
             recovery.apply(self.cycle, path)
 
@@ -209,7 +210,7 @@ class PublicationRecoveryTests(unittest.TestCase):
     def test_respects_phase_pause_messages_and_cli_lock_without_a_provider(self):
         import cc_focus
         path = self.publication()
-        for phase in ("code", "astra", "ci"):
+        for phase in ("code", "sol", "ci"):
             self.state["phase"] = phase
             with self.assertRaisesRegex(Blocked, "stopped, already-started publication"):
                 recovery.prepare(self.cycle)
@@ -226,7 +227,7 @@ class PublicationRecoveryTests(unittest.TestCase):
             lease.return_value.__enter__.return_value.pwsh = "pwsh"
             self.assertEqual(cc_focus.main(["reconcile", "--publication", "--plan-out", str(path)]), 0)
             self.assertEqual(cc_focus.main(["reconcile", "--publication", "--apply-plan", str(path)]), 0)
-        self.assertEqual((self.store.read()["phase"], self.store.read()["status"]), ("astra", "paused"))
+        self.assertEqual((self.store.read()["phase"], self.store.read()["status"]), ("sol", "paused"))
 
     def test_publication_flag_requires_reconciliation(self):
         import cc_focus
@@ -261,7 +262,7 @@ class SinglePublicationRecoveryTests(unittest.TestCase):
         recovery.apply(self.cycle, path)
         self.assertEqual(self.repo.snapshot(), before)
         self.assertEqual(self.state["baseline"]["head"], baseline)
-        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual(self.state["phase"], "sol")
         self.cycle.check_protected(before)
         self.assertEqual(self.repo.text("diff", "--cached", "--name-only"), "staged.txt")
 

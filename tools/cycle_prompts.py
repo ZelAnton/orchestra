@@ -3,15 +3,20 @@
 PROFILES = {
     "coordinate": ("codex", "gpt-5.6-luna", "xhigh"),
     "code": ("claude", "claude-fable-5-1", "high"),
-    "astra": ("codex", "gpt-6-astra", "high"),
-    "claude": ("claude", "claude-fable-5-1", "xhigh"),
+    "sol": ("codex", "gpt-6-sol", "xhigh"),
+    "astra": ("codex", "gpt-6-astra", "xhigh"),
+    "claude": ("claude", "opus", "xhigh"),
     "publish": ("codex", "gpt-5.6-luna", "high"),
     "heal": ("codex", "gpt-6-astra", "xhigh"),
 }
 
+REVIEW_ROLES = ("sol", "claude", "astra")
+REVIEW_TARGETS = {"sol": 3, "claude": 2, "astra": 1}
+REVIEW_PROFILE_VERSION = 2
+
 PROMPTS = {
     "code": "делай следующую стадию. Не запускай ревью, не пушь",
-    "astra": """Claude реализовал следующий этап
+    "sol": """Claude реализовал следующий этап
 
 %%DESCRIPTION%%
 
@@ -20,6 +25,12 @@ PROMPTS = {
 
 не пушь""",
     "claude": """проводи ревью, исправляй, повторяй в цикле пока в последних двух проходах не будет сделано ни одного исправления имплементации""",
+    "astra": """Проводи третье, финальное ревью всей текущей стадии после Sol и Opus.
+Исправляй найденные ошибки и проверяй изменения. Требуется один чистый полный проход
+без исправлений реализации и других существенных дефектов; мелкие правки оформления
+не сбрасывают чистый проход. Выполни только один проход в этом вызове: цикл ведёт runtime.
+Существенные изменения реализации требуют возврата к Sol и повторения всех трёх ревью.
+Не пушь.""",
     "publish": """Prepare the reviewed stage for runtime publication. Inspect the supplied exact
 stage_paths and current Git state read-only. Return done when ready, with summary
 as a concise imperative commit subject suitable for the affected repositories;
@@ -56,7 +67,7 @@ when authorization is missing; do not infer a need for permission from a filenam
 or the presence of another member repository.
 Do not commit, push, reset or discard work, bypass a refusal, approve on behalf of
 the operator, change runtime/account credentials or execution permissions, delete
-locks, or start another provider. Implementation fixes must return through both
+locks, or start another provider. Implementation fixes must return through all three
 reviews. Do not broaden the task to unrelated projects.""",
 }
 
@@ -83,10 +94,10 @@ Only the operator may use `cc-focus reconcile --apply-plan` to accept changed
 shared context or hand over protected files. Never invoke it or edit its plans
 to approve your own changes. A reconciliation correction records an explicit
 operator handover; follow its exact file scope. For an already-started stage,
-repeat coding and both reviews.
+repeat coding and all three reviews.
 If handover happened before coding began, select from the current plan instead of
 reopening the previous published stage. Adopted unpublished work still requires
-coding and both reviews. A handover that only refreshed read-only context can
+coding and all three reviews. A handover that only refreshed read-only context can
 finish an exhausted plan with no unpublished changes; do not invent a stage.
 Handoff input is optional historical transfer context, never a required project file.
 Use imported handoff paths supplied by the runtime; their original source paths may

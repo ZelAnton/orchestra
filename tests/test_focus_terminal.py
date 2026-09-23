@@ -34,7 +34,7 @@ class FocusInputTests(unittest.TestCase):
     setUp = fixtures.CycleTests.setUp
     tearDown = fixtures.CycleTests.tearDown
 
-    def setup_input(self, role="astra"):
+    def setup_input(self, role="sol"):
         self.state.update(phase=role, coordinated=role)
         self.pending = {"id": "a" * 32, "iteration": 1, "role": role,
                         "before": self.repo.snapshot(), "started": time.time()}
@@ -48,7 +48,7 @@ class FocusInputTests(unittest.TestCase):
         return self.input
 
     def run_transport(self, provider, mode=()):
-        role = "astra" if provider == "codex" else "code"
+        role = "sol" if provider == "codex" else "code"
         interaction = self.setup_input(role)
         interaction.submit("Check interrupted recovery as well.")
         transport = Transport(self.root, self.state, self.store.save, lambda: None, interaction=interaction)
@@ -77,7 +77,7 @@ class FocusInputTests(unittest.TestCase):
             interaction.finish()
         interaction.submit("Do not send to another invocation")
         self.assertEqual(len(interaction.messages.records(1)), 1)
-        self.assertEqual(interaction.messages.unresolved(1)[0]["identity"]["role"], "astra")
+        self.assertEqual(interaction.messages.unresolved(1)[0]["identity"]["role"], "sol")
 
     def test_uncertain_delivery_needs_explicit_decision_and_exact_target(self):
         interaction = self.setup_input()
@@ -107,14 +107,18 @@ class FocusInputTests(unittest.TestCase):
         with self.assertRaises(MessagePending):
             interaction.begin(dict(self.pending, id="b" * 32, role="claude"))
 
-    def test_review_instruction_invalidates_credit_and_returns_claude_to_astra(self):
-        interaction = self.setup_input("claude")
-        self.state.update(astra_clean=3, claude_clean=1, reviewed={"head": "old"})
-        interaction.submit("Also check restart")
-        interaction.take()
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
-        self.assertIsNone(self.state["reviewed"])
-        self.assertTrue(self.pending["return_to_astra"])
+    def test_later_review_instruction_invalidates_credit_and_returns_to_sol(self):
+        for role in ('claude', 'astra'):
+            with self.subTest(role=role):
+                interaction = self.setup_input(role)
+                self.state.update(sol_clean=3, claude_clean=1, astra_clean=0, reviewed={"head": "old"})
+                interaction.submit("Also check restart")
+                interaction.take()
+                self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [0, 0, 0])
+                self.assertIsNone(self.state["reviewed"])
+                self.assertTrue(self.pending["return_to_sol"])
+                for record in interaction.messages.unresolved(1):
+                    interaction.messages.update(record, 'discarded')
 
     def test_publication_and_publication_healing_reject_instructions(self):
         interaction = self.setup_input("publish")
@@ -130,26 +134,26 @@ class FocusInputTests(unittest.TestCase):
         interaction.submit("Respect this requirement")
         message = interaction.take()
         interaction.ack(message, True)
-        self.assertIn(message["identity"]["id"], self.cycle.context("astra"))
+        self.assertIn(message["identity"]["id"], self.cycle.context("sol"))
         self.assertIn("focus-message:", message_text(message))
 
     def test_codex_steers_active_turn_and_correlates_acknowledgement(self):
         transport, directory = self.run_transport("codex", ("steer",))
-        result = transport.run("astra", "Review", self.pending, directory)
+        result = transport.run("sol", "Review", self.pending, directory)
         self.assertIn("Steered the active turn", result)
         self.assertEqual(self.input.messages.records(1)[0]["status"], "accepted")
         self.assertIsNone(self.input.target)
 
     def test_codex_waits_for_ack_after_terminal_event(self):
         transport, directory = self.run_transport("codex", ("steer", "late-ack"))
-        result = transport.run("astra", "Review", self.pending, directory)
+        result = transport.run("sol", "Review", self.pending, directory)
         self.assertIn("Steered", result)
         self.assertEqual(self.input.messages.records(1)[0]["status"], "accepted")
 
     def test_rejected_steer_cannot_advance_the_phase(self):
         transport, directory = self.run_transport("codex", ("steer", "error-ack"))
         with self.assertRaises(MessagePending):
-            transport.run("astra", "Review", self.pending, directory)
+            transport.run("sol", "Review", self.pending, directory)
         self.assertEqual(self.input.messages.records(1)[0]["status"], "rejected")
 
     def test_claude_waits_for_the_instruction_response_in_the_same_process(self):
@@ -391,7 +395,7 @@ class FocusInputTests(unittest.TestCase):
             self.assertFalse(runtime_active(self.store))
             with LocalLock(self.store.directory):
                 pass
-            self.assertEqual(self.store.read()["phase"], "astra")
+            self.assertEqual(self.store.read()["phase"], "sol")
             old_nonce = self.control_nonce()
             output.clear()
             os.write(master, b"/resume\r")
@@ -427,11 +431,11 @@ class FocusInputTests(unittest.TestCase):
         self.store.artifact(f"invocations/{self.pending['id']}/result.json", encode({"raw": json.dumps(report()),
                             "before": self.pending["before"], "after": self.repo.snapshot()}))
         interaction.submit("New instruction")
-        self.transport.actions = [("astra", report())]
+        self.transport.actions = [("sol", report())]
         with self.assertRaises(MessagePending):
-            self.cycle.invoke("astra")
+            self.cycle.invoke("sol")
         self.assertEqual(len(self.transport.calls), 1)
-        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual(self.state["phase"], "sol")
 
     def test_uncertain_messages_stop_without_healer(self):
         interaction = self.setup_input()
@@ -445,7 +449,7 @@ class FocusInputTests(unittest.TestCase):
     def test_transport_failure_preserves_the_message_target_without_healing(self):
         interaction = self.setup_input()
         interaction.submit("Preserve the original target")
-        self.transport.actions = [("astra", Blocked("provider-eof", "Disconnected"))]
+        self.transport.actions = [("sol", Blocked("provider-eof", "Disconnected"))]
         with self.assertRaises(MessagePending):
             self.cycle.run()
         self.assertEqual(self.state["pending"]["id"], self.pending["id"])
@@ -455,7 +459,7 @@ class FocusInputTests(unittest.TestCase):
     def test_uncertain_input_does_not_hide_unconfirmed_process_cleanup(self):
         interaction = self.setup_input()
         interaction.submit("Preserve this input")
-        self.transport.actions = [("astra", Blocked("cleanup-incomplete", "Provider may still be running"))]
+        self.transport.actions = [("sol", Blocked("cleanup-incomplete", "Provider may still be running"))]
         with self.assertRaisesRegex(Blocked, "Provider may still"):
             self.cycle.run()
         self.assertEqual(self.state["pending"]["id"], self.pending["id"])

@@ -4,12 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 import time
 
-from cycle_prompts import PROFILES
+from cycle_prompts import PROFILES, REVIEW_ROLES, REVIEW_TARGETS
 from focus_output import terminal_text
 
 
-PHASES = ("code", "astra", "claude", "publish", "ci")
-NAMES = {"code": "Реализация", "astra": "Astra", "claude": "Claude",
+PHASES = ("code", "sol", "claude", "astra", "publish", "ci")
+NAMES = {"code": "Реализация", "sol": "Sol", "claude": "Opus", "astra": "Astra",
          "publish": "Публикация", "ci": "CI", "coordinate": "Координация", "heal": "Восстановление"}
 
 
@@ -50,15 +50,15 @@ def accept_task(state, report, role):
 
 
 def new_reviews():
-    return {role: {"completed": 0, "history_known": True} for role in ("astra", "claude")}
+    return {role: {"completed": 0, "history_known": True} for role in ("sol", "claude", "astra")}
 
 
 def review_info(state, role):
     saved = (state.get("display_reviews") or {}).get(role)
     if saved is not None:
         return dict(saved)
-    # Old state knows the Astra round and clean streaks, not lifetime pass totals.
-    return {"completed": state.get("astra_passes", 0) if role == "astra" else state.get("claude_clean", 0),
+    # Old state knows the Sol round and clean streaks, not lifetime pass totals.
+    return {"completed": state.get("sol_passes", 0) if role == "sol" else state.get(role + "_clean", 0),
             "history_known": False}
 
 
@@ -74,7 +74,7 @@ def review_event(state, role, outcome, reason="", completed=False):
     del history[:-12]
 
 
-def reset_notice(state, reason, roles=("astra", "claude")):
+def reset_notice(state, reason, roles=("sol", "claude", "astra")):
     for role in roles:
         info = review_info(state, role)
         if info["completed"] or state.get(role + "_clean") or (state.get("pending") or {}).get("role") == role:
@@ -107,6 +107,7 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     """Pure, bounded formatting: no disk, Git, provider calls or transcript scans."""
     live = live or {}
     phase = state.get("phase", "code")
+    legacy_publication = state.get("publication_review_profile") == 1 and phase in ("publish", "ci")
     index = PHASES.index(phase) if phase in PHASES else 0
     task = state.get("task") or {}
     if task.get("iteration") != state.get("iteration"):
@@ -134,7 +135,7 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     elif active_role == "heal" or blocker.get("status") == "healing":
         mode, tone = "ВОССТАНОВЛЕНИЕ", "warning"
     role_label = NAMES.get(active_role or phase, phase)
-    if active_role in ("astra", "claude"):
+    if active_role in ("sol", "claude", "astra"):
         role_label = "Ревью " + role_label
     elif active_role == "coordinate":
         role_label += " → " + NAMES.get(phase, phase)
@@ -145,10 +146,11 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     profile = ""
     if active_role in PROFILES:
         _, model, effort = PROFILES[active_role]
-        model = {"claude-fable-5-1": "Fable 5.1", "gpt-6-astra": "Astra", "gpt-5.6-luna": "Luna"}.get(model, model)
-        profile = f" · {effort}" if active_role == "astra" else f" · {model}/{effort}"
+        model = {"claude-fable-5-1": "Fable 5.1", "opus": "Opus", "gpt-6-sol": "Sol",
+                 "gpt-6-astra": "Astra", "gpt-5.6-luna": "Luna"}.get(model, model)
+        profile = f" · {effort}" if active_role in REVIEW_ROLES else f" · {model}/{effort}"
     remaining = len(PHASES) - index - 1
-    position = f"шаг {index + 1}/5 · этапов впереди: {remaining}" if not complete else "незавершённых задач нет"
+    position = f"шаг {index + 1}/{len(PHASES)} · этапов впереди: {remaining}" if not complete else "незавершённых задач нет"
     headline = f"{mode} · {role_label}{profile} · {position}"
     ci = state.get("display_ci") or {}
     if phase != "ci" or ci.get("sha") != (state.get("published") or {}).get("sha"):
@@ -157,6 +159,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     for n, name in enumerate(PHASES):
         marker = "✓" if n < index else ("!" if blocked else "▶") if n == index else "○"
         label = NAMES[name]
+        if legacy_publication and name in REVIEW_ROLES:
+            marker = "—"
         if name == "ci" and ci.get("status") == "not-configured":
             marker, label = "—", "CI не требуется"
         elif name == "ci" and ci.get("status") == "ready":
@@ -164,7 +168,7 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
         timeline.append(f"{marker} {label}")
     timeline = " ─ ".join(timeline) if not complete else "✓ Источник задач исчерпан"
     reviews = []
-    for role, target in (("astra", 3), ("claude", 2)):
+    for role, target in REVIEW_TARGETS.items():
         info = review_info(state, role)
         streak = state.get(role + "_clean", 0)
         total = info["completed"]
@@ -186,6 +190,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
         if not (active_role == role):
             detail += f" · завершено {'≥' if not info['history_known'] else ''}{total}"
         reviews.append(f"{NAMES[role]}: {detail}")
+    if legacy_publication:
+        reviews = ["Публикация по прежнему ревью; новый профиль — со следующей стадии"]
     activity = activity_text(live.get("activity", ""))
     if live.get("operation") == "git":
         activity = "Проверка Git remote · модель не запущена"
@@ -208,7 +214,9 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
         retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
         activity = f"Claude · повтор {retry} · через {duration(quota['retry_at'] - time.time())} · автоматически · модель не запущена"
     lines = tuple(clean(line, 400) for line in (title, headline, timeline, *reviews, activity))
-    compact_progress = (f"{role_label} · {index + 1}/5 · Astra {state.get('astra_clean', 0)}/3"
-                        f" · Claude {state.get('claude_clean', 0)}/2") if not complete else position
+    compact_progress = (f"{role_label} · {index + 1}/{len(PHASES)} · Sol {state.get('sol_clean', 0)}/3"
+                        f" · Opus {state.get('claude_clean', 0)}/2 · Astra {state.get('astra_clean', 0)}/1") if not complete else position
+    if legacy_publication:
+        compact_progress = f"{role_label} · прежний профиль ревью"
     compact = (clean(f"{mode} · {title}", 400), clean(compact_progress, 400), lines[-1])
     return StatusPanel(lines, compact, tone)

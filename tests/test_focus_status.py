@@ -32,7 +32,7 @@ class StatusTests(unittest.TestCase):
     def panel_text(self, **kwargs):
         return "\n".join(build_panel(self.state, **kwargs).lines)
 
-    def run_review(self, role="astra", **kwargs):
+    def run_review(self, role="sol", **kwargs):
         self.transport.actions.append((role, fixtures.report(**kwargs)))
         self.cycle.review(role)
 
@@ -54,7 +54,7 @@ class StatusTests(unittest.TestCase):
         self.cycle.invoke("coordinate")
         self.cycle.complete_invocation()
         self.assertIn("V9f-4", self.panel_text())
-        self.assertIn("Раскрытие поставщика", self.cycle.context("astra"))
+        self.assertIn("Раскрытие поставщика", self.cycle.context("sol"))
         self.assertEqual([role for role, _ in self.transport.calls], ["coordinate"])
         self.assertEqual(self.repo.snapshot(), self.state["baseline"])
         self.assertEqual(self.store.read()["task"]["plan"], "source.txt")
@@ -75,14 +75,14 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn("V9f-4", self.panel_text())
 
     def test_review_progress_counts_completed_passes_and_resets_streak(self):
-        self.state["phase"] = "astra"
+        self.state["phase"] = "sol"
         for _ in range(2):
             self.run_review()
         self.assertIn("серия 2/3", self.panel_text())
         self.run_review(implementation_fixes=1)
         self.assertIn("исправления · серия 0/3", self.panel_text())
         self.assertIn("завершено 3", self.panel_text())
-        active = self.panel_text(live={"role": "astra", "active": True})
+        active = self.panel_text(live={"role": "sol", "active": True})
         self.assertIn("проход 4 выполняется", active)
         self.assertIn("нужно ≥3", active)
         for _ in range(3):
@@ -91,30 +91,34 @@ class StatusTests(unittest.TestCase):
         self.assertIn("✓ зачтено 3/3 · завершено 6", self.panel_text())
         for _ in range(2):
             self.run_review("claude")
+        self.assertEqual(self.state["phase"], "astra")
+        self.assertIsNone(self.state["reviewed"])
+        self.run_review("astra")
         self.assertEqual(self.state["phase"], "publish")
+        self.assertIn("Astra: ✓ зачтено 1/1", self.panel_text())
         self.assertIn("✓ зачтено 2/2", self.panel_text())
         self.assertIn("▶ Публикация", self.panel_text())
 
     def test_claude_return_keeps_totals_and_explains_both_resets(self):
-        self.state["phase"] = "astra"
+        self.state["phase"] = "sol"
         for _ in range(3):
             self.run_review()
         self.run_review("claude")
         self.run_review("claude", implementation_fixes=1, substantial=True)
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertIn("возврат к Astra", self.panel_text())
-        self.assertEqual(self.state["display_reviews"]["astra"]["completed"], 3)
+        self.assertEqual(self.state["phase"], "sol")
+        self.assertIn("возврат к Sol", self.panel_text())
+        self.assertEqual(self.state["display_reviews"]["sol"]["completed"], 3)
         self.assertEqual(self.state["display_reviews"]["claude"]["completed"], 2)
-        self.assertEqual((self.state["astra_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
 
     def test_rejected_pass_never_increments_display_count(self):
-        self.state["phase"] = "astra"
+        self.state["phase"] = "sol"
         self.run_review()
-        self.transport.actions = [("astra", fixtures.report(evidence=[]))]
+        self.transport.actions = [("sol", fixtures.report(evidence=[]))]
         with self.assertRaises(Blocked) as caught:
-            self.cycle.review("astra")
+            self.cycle.review("sol")
         self.cycle.handle_block(caught.exception)
-        self.assertEqual(self.state["display_reviews"]["astra"]["completed"], 1)
+        self.assertEqual(self.state["display_reviews"]["sol"]["completed"], 1)
         self.assertIn("не зачтено · серия 0/3", self.panel_text())
 
     def test_quota_panel_shows_deadline_countdown_and_keeps_stop_priority(self):
@@ -145,14 +149,14 @@ class StatusTests(unittest.TestCase):
 
     def test_legacy_history_is_explicitly_incomplete_and_bounded(self):
         del self.state["display_reviews"]
-        self.state.update(phase="astra", astra_passes=4, astra_clean=1, claude_clean=0)
+        self.state.update(phase="sol", sol_passes=4, sol_clean=1, claude_clean=0)
         self.assertIn("завершено ≥4", self.panel_text())
         self.run_review()
         self.assertIn("завершено ≥5", self.panel_text())
         for _ in range(30):
-            review_event(self.state, "astra", "прервано")
+            review_event(self.state, "sol", "прервано")
         self.assertEqual(len(self.state["display_review_events"]), 12)
-        self.assertEqual(self.state["display_reviews"]["astra"]["completed"], 5)
+        self.assertEqual(self.state["display_reviews"]["sol"]["completed"], 5)
 
     def test_next_stage_archives_labels_and_clears_current_display(self):
         self.remote()
@@ -161,7 +165,7 @@ class StatusTests(unittest.TestCase):
         self.commit_stage()
         self.cycle.reconcile_publish()
         accept_task(self.state, {"task": self.label()}, "code")
-        review_event(self.state, "astra", "чисто", completed=True)
+        review_event(self.state, "sol", "чисто", completed=True)
         self.state["display_ci"] = {"sha": self.state["published"]["sha"], "status": "ready"}
         self.cycle.next_stage()
         archived = json.loads((self.store.directory / "iterations/000001.json").read_text())
@@ -171,10 +175,10 @@ class StatusTests(unittest.TestCase):
         self.assertIn("Задача 2", self.panel_text())
 
     def test_activity_priority_and_provider_lifetime(self):
-        live = {"role": "astra", "active": True, "elapsed_seconds": 125, "event_age_seconds": 8}
+        live = {"role": "sol", "active": True, "elapsed_seconds": 125, "event_age_seconds": 8}
         self.assertIn("02:05", self.panel_text(live=live))
         self.assertIn("8 с назад", self.panel_text(live=live))
-        self.assertIn("Ревью Astra · high", self.panel_text(live=live))
+        self.assertIn("Ревью Sol · xhigh", self.panel_text(live=live))
         self.assertNotIn("high", self.panel_text(live=live, paused=True))
         self.assertNotIn("high", self.panel_text(live=dict(live, active=False)))
         self.assertIn("НУЖНО СОГЛАСИЕ", self.panel_text(live=live, approval=True, notice="Queued"))
@@ -194,6 +198,17 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn("Luna", text)
         self.assertIn("модель не запущена", text)
 
+    def test_legacy_publication_does_not_display_new_reviews_as_completed(self):
+        self.state.update(phase='publish', publication_review_profile=1)
+        panel = self.panel_text()
+        self.assertIn('по прежнему ревью', panel)
+        for name in ('Sol', 'Opus', 'Astra'):
+            self.assertIn('— ' + name, panel)
+            self.assertNotIn('✓ ' + name, panel)
+        self.cycle.reset_reviews()
+        self.assertNotIn('publication_review_profile', self.state)
+        self.assertNotIn('по прежнему ревью', self.panel_text())
+
     def test_ci_display_is_tied_to_publication_sha(self):
         self.state.update(phase="ci", published={"sha": "current"},
                           display_ci={"sha": "old", "status": "ready"})
@@ -206,7 +221,7 @@ class StatusTests(unittest.TestCase):
         self.assertIn("✓ CI", self.panel_text())
         # A returned review must certify the next publication/CI again, even
         # while the preceding publication SHA is still preserved for recovery.
-        self.state["phase"] = "astra"
+        self.state["phase"] = "sol"
         self.assertIn("○ CI", self.panel_text())
         self.assertNotIn("✓ CI", self.panel_text())
 
@@ -245,20 +260,20 @@ class StatusTests(unittest.TestCase):
         control = Control(self.store)
         control.begin()
         progress = {"run_nonce": control.active["nonce"], "updated": time.time() - 60,
-                    "role": "astra", "active": True}
+                    "role": "sol", "active": True}
         self.store.artifact("progress.json", encode(progress))
         with patch("focus_control.runtime_active", return_value=True):
             current = status(self.store, self.state)
         self.assertTrue(current["progress"]["stale"])
-        self.assertNotIn("Ревью Astra", "\n".join(current["dashboard"]))
+        self.assertNotIn("Ревью Sol", "\n".join(current["dashboard"]))
 
 
 class PanelRenderingTests(unittest.TestCase):
     def panel(self, **kwargs):
-        state = {"root": "/tmp/Project", "phase": "astra", "iteration": 1, "astra_clean": 1,
+        state = {"root": "/tmp/Project", "phase": "sol", "iteration": 1, "sol_clean": 1,
                  "claude_clean": 0, "display_reviews": new_reviews()}
         state.update(kwargs)
-        return build_panel(state, {"role": "astra", "active": True})
+        return build_panel(state, {"role": "sol", "active": True})
 
     def test_full_compact_and_resize_preserve_input_and_log_space(self):
         terminal = Terminal(stdout=io.StringIO())
@@ -273,11 +288,11 @@ class PanelRenderingTests(unittest.TestCase):
                 self.assertTrue(all(sum(cell_width(c) for c in line) < columns for line in terminal.frame_rows))
                 self.assertEqual(terminal.render(columns, rows), "")
         terminal.render(110, 24)
-        self.assertIn("Astra:", terminal.frame_rows[3])
-        self.assertEqual(terminal.frame_rows[6], "─" * 109)
+        self.assertIn("Sol:", terminal.frame_rows[3])
+        self.assertEqual(terminal.frame_rows[7], "─" * 109)
         terminal.render(60, 14)
-        self.assertIn("Astra 1/3", terminal.frame_rows[1])
-        self.assertIn("Claude 0/2", terminal.frame_rows[1])
+        self.assertIn("Sol 1/3", terminal.frame_rows[1])
+        self.assertIn("Opus 0/2", terminal.frame_rows[1])
 
     def test_typing_with_full_panel_does_not_revisit_long_scrollback(self):
         terminal = Terminal(stdout=io.StringIO())

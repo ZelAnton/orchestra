@@ -93,7 +93,7 @@ class Terminal:
         panel = None
         if isinstance(text, StatusPanel):
             sanitize = lambda lines: tuple(" ".join(terminal_text(str(line)[:4000]).split()) for line in lines)
-            panel = StatusPanel(sanitize(text.lines[:6]), sanitize(text.compact[:3]), text.tone)
+            panel = StatusPanel(sanitize(text.lines[:7]), sanitize(text.compact[:3]), text.tone)
             label = panel.lines[0] if panel.lines else "cc-focus"
         else:
             label = terminal_text(text).replace("\n", " ")
@@ -209,7 +209,7 @@ class Terminal:
                 return "\x1b[2J\x1b[H\x1b[K" + clip("Resize terminal", width)
             header = [clip(self.label, width)]
             if self.panel:
-                chosen = self.panel.lines if rows >= 14 and columns >= 70 else self.panel.compact
+                chosen = self.panel.lines if rows >= 15 and columns >= 70 else self.panel.compact
                 count = min(len(chosen), max(1, rows - 5))
                 header = [clip(line, width) if sum(cell_width(c) for c in line) <= width
                           else clip(line, max(0, width - 1)) + "…" for line in chosen[:count]]

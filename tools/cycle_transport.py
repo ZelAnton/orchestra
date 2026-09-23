@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import signal
 import shutil
 import subprocess
@@ -393,6 +394,7 @@ class Transport:
                 process.send(prompt.encode("utf-8"))
                 process.proc.stdin.close()
             initialized = False
+            resolved_model = None
             current_message = None
             earlier_reports = []
             active_tasks = set()
@@ -429,9 +431,21 @@ class Transport:
                     elif event.get("status") in ("completed", "failed", "stopped"):
                         active_tasks.discard(task_id)
                 if event.get("type") == "system" and event.get("subtype") == "init":
-                    if (event.get("session_id") != session or event.get("model") != model
+                    actual_model = event.get("model")
+                    valid_model = (isinstance(actual_model, str) and bool(re.fullmatch(r"claude-opus-\d+(?:-\d+)*(?:\[1m\])?", actual_model))
+                                   if model == "opus" else actual_model == model)
+                    if (event.get("session_id") != session or not valid_model
                             or event.get("permissionMode") != "bypassPermissions"):
                         raise Blocked("provider-profile", "Claude session/model does not match the pinned profile.")
+                    resolved = actual_model.removesuffix("[1m]") if model == "opus" else actual_model
+                    if resolved_model is not None and resolved != resolved_model:
+                        raise Blocked("model-rerouted", "Claude changed its resolved model during the invocation.")
+                    resolved_model = resolved
+                    if model == "opus":
+                        if pending.get("resolved_model", resolved) != resolved:
+                            raise Blocked("model-rerouted", "Claude changed the Opus model of an interrupted invocation.")
+                        pending["resolved_model"] = resolved
+                        self.save(self.state)
                     initialized = True
                 if event.get("type") == "assistant":
                     message = event.get("message", {})
@@ -454,7 +468,10 @@ class Transport:
                             raise ProviderQuota(quota_reset, no_work=not work_started)
                         raise Blocked("claude-api-error", f"Claude API error ({str(code)[:120]}): {detail[:2000]} "
                                       "Resolve the provider error, then resume this same phase; no review credit is granted.")
-                    if message.get("model") != model:
+                    answer_model = message.get("model")
+                    if model == "opus" and isinstance(answer_model, str):
+                        answer_model = answer_model.removesuffix("[1m]")
+                    if answer_model != (resolved_model if model == "opus" else model) or answer_model is None:
                         raise Blocked("model-rerouted", "Claude emitted an answer from a different model; refusing the result.")
                     work_started = True
                 if (current_message and event.get("type") == "user" and event.get("session_id") == session

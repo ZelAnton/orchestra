@@ -3,7 +3,7 @@
 import time
 import unicodedata
 
-from cycle_prompts import PROFILES
+from cycle_prompts import PROFILES, REVIEW_TARGETS
 from cycle_state import encode
 from focus_output import LiveOutput
 
@@ -65,10 +65,10 @@ class Progress:
         self.events, self.activity = 0, "starting provider / restoring session"
         provider, model, effort = PROFILES[role]
         review = ""
-        if role in ("astra", "claude"):
-            review = f" clean={self.state[role + '_clean']}/{'3' if role == 'astra' else '2'}"
-            if role == "astra":
-                review += f" pass={self.state['astra_passes'] + 1}"
+        if role in REVIEW_TARGETS:
+            review = f" clean={self.state.get(role + '_clean', 0)}/{REVIEW_TARGETS[role]}"
+            if role == "sol":
+                review += f" pass={self.state.get('sol_passes', 0) + 1}"
         self.line(f"iteration={self.state['iteration']} phase={self.state['phase']} role={role} {provider}/{model} effort={effort}{review}")
         self.line(f"Protocol: {directory / 'protocol.jsonl'}; stop safely: cc-focus stop; emergency: cc-focus stop --now")
         self.pulse(force=True)

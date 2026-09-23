@@ -188,11 +188,11 @@ class Interaction:
             record = records[0]
             role = self.target["role"]
             # Earlier passes cannot certify a scope that changed during this pass.
-            if role in ("astra", "claude"):
+            if role in ("sol", "claude", "astra"):
                 reset_notice(self.state, "Новое указание для ревью")
-                self.state.update(astra_clean=0, claude_clean=0, reviewed=None)
-                if role == "claude":
-                    self.pending["return_to_astra"] = True
+                self.state.update(sol_clean=0, claude_clean=0, astra_clean=0, reviewed=None)
+                if role in ("claude", "astra"):
+                    self.pending["return_to_sol"] = True
             self.pending["operator_intervened"] = True
             self.save(self.state)
             record = self.messages.update(record, "sending")

@@ -37,7 +37,7 @@ def main(argv=None, interaction=None):
     correction.add_argument("--message", help="With correct: save an operator correction for the stopped current stage.")
     correction.add_argument("--file", type=Path, help="With correct: import a UTF-8 correction file, at most 64 KiB.")
     reconciliation = parser.add_mutually_exclusive_group()
-    parser.add_argument("--publication", action="store_true", help="With reconcile: explicitly accept a preserved already-pushed protected scope and restart both reviews.")
+    parser.add_argument("--publication", action="store_true", help="With reconcile: explicitly accept a preserved already-pushed protected scope and restart all three reviews.")
     reconciliation.add_argument("--plan-out", type=Path, help="With reconcile: write a reviewable handover plan to a new file; accept no changes yet.")
     reconciliation.add_argument("--apply-plan", type=Path, help="With reconcile: explicitly accept this exact plan, transfer its protected files to the cycle, and restart coding/reviews.")
     args = parser.parse_args(argv)
@@ -187,7 +187,7 @@ def main(argv=None, interaction=None):
                         exit_code = cycle.run()
             except MessagePending as error:
                 role = (state.get("pending") or {}).get("role")
-                if role in ("astra", "claude"):
+                if role in ("sol", "claude", "astra"):
                     review_event(state, role, "приостановлено", "Нужно уточнить доставку сообщения")
                 state["status"] = "paused"
                 store.save(state)
@@ -195,7 +195,7 @@ def main(argv=None, interaction=None):
                 print(terminal_text(f"cc-focus: paused: {error}"), flush=True)
             except (FocusStop, KeyboardInterrupt):
                 role = (state.get("pending") or {}).get("role")
-                if role in ("astra", "claude"):
+                if role in ("sol", "claude", "astra"):
                     review_event(state, role, "прервано", "Проход не завершён")
                 state["status"] = "interrupted"
                 store.save(state)
