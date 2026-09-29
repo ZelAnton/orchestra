@@ -303,13 +303,14 @@ class FocusInputTests(unittest.TestCase):
                 return self
             def __exit__(self, *_):
                 pass
-        for status in ("healing", "blocked"):
+        for status in ("healing", "blocked", "quota"):
             with self.subTest(status=status), patch("cc_focus.Interaction") as interaction, \
                     patch("cc_focus.Store") as store, patch("cc_focus.main", return_value=0) as run:
                 interaction.return_value.wait_action.side_effect = [("/resume", ""), ("/exit", "")]
-                store.return_value.read.return_value = {"blocker": {"status": status}}
+                store.return_value.read.return_value = ({"pending": {"quota_wait": {"retry_at": time.time() + 3600}}}
+                                                       if status == "quota" else {"blocker": {"status": status}})
                 cc_focus.interactive_main([], Screen(), None)
-                self.assertEqual("--retry" in run.call_args_list[1].args[0], status == "blocked")
+                self.assertEqual("--retry" in run.call_args_list[1].args[0], status in ("blocked", "quota"))
 
     def test_failed_setup_unbinds_the_controller_for_an_operator_retry(self):
         import cc_focus

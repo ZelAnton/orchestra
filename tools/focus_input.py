@@ -13,7 +13,7 @@ from focus_status import build_panel, reset_notice
 HELP = """Text: save an instruction for the active invocation (not a shell command).
 /pause: finish this invocation, then pause; publication includes CI.
 /stop: interrupt now; partial work is preserved. Ctrl+C is equivalent.
-/resume: continue from a stopped boundary; retry a preserved blocker.
+/resume: continue from a stopped boundary; retry a preserved blocker or quota wait.
 /correct TEXT: while stopped, return this same stage to coding and fresh reviews.
 /messages: list delivery states. /retry-message ID: explicitly resend uncertain input
 (may repeat an already received instruction). /discard-message ID: abandon delivery.

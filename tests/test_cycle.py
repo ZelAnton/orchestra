@@ -1938,6 +1938,90 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.repo.snapshot(), original)
         self.assertIsNone(self.state["pending"])
 
+    def quota_cli_fixture(self, no_work=True):
+        self.state.update(phase="claude", coordinated="claude", sol_clean=3, claude_clean=1,
+                          sessions={"claude": "same-review-session"}, pending={
+                              "id": "account-change-" + str(time.time_ns()), "role": "claude", "attempts": 1,
+                              "before": self.repo.snapshot(), "quota_wait": {
+                                  "resets_at": time.time() + 7200, "retry_at": time.time() + 7205,
+                                  "no_work": no_work}})
+        self.store.save(self.state)
+        return json.loads(json.dumps(self.state["pending"]))
+
+    def test_explicit_quota_retry_keeps_invocation_and_verifies_review_credit(self):
+        import cc_focus
+        for no_work, drift in ((True, False), (False, False), (True, True)):
+            with self.subTest(no_work=no_work, drift=drift):
+                pending = self.quota_cli_fixture(no_work)
+                if drift:
+                    self.edit(content="changed while waiting\n")()
+                before = self.repo.snapshot()
+                def run(cycle):
+                    quota = cycle.state["pending"]["quota_wait"]
+                    self.assertLessEqual(quota["retry_at"], time.time())
+                    self.assertEqual(quota["resets_at"], pending["quota_wait"]["resets_at"])
+                    self.assertEqual(quota["no_work"], no_work)
+                    self.assertEqual(cycle.state["pending"]["id"], pending["id"])
+                    self.assertEqual(cycle.state["sessions"], self.state["sessions"])
+                    self.assertFalse(cycle.wait_quota())
+                    cycle.review("claude")
+                    return 0
+                with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
+                        patch("cc_focus.Cycle.run", autospec=True, side_effect=run), \
+                        patch("cycle_transport.Transport.run", return_value=json.dumps(report(other_fixes=int(drift)))) as provider:
+                    lease.return_value.__enter__.return_value.pwsh = "pwsh"
+                    self.assertEqual(cc_focus.main(["--retry", "--ui", "off"]), 0)
+                provider.assert_called_once()
+                saved = self.store.read()
+                self.assertEqual(saved["sessions"], self.state["sessions"])
+                self.assertEqual(saved["claude_clean"], 0 if drift else 2 if no_work else 1)
+                self.assertEqual(saved["phase"], "sol" if drift else "astra" if no_work else "claude")
+                self.assertEqual(self.repo.snapshot(), before)
+
+    def test_plain_restart_keeps_saved_quota_deadline(self):
+        import cc_focus
+        pending = self.quota_cli_fixture()
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
+                patch("cc_focus.Cycle.run", return_value=0), \
+                patch("cycle_transport.Transport.run", side_effect=AssertionError("No provider in admission")):
+            lease.return_value.__enter__.return_value.pwsh = "pwsh"
+            self.assertEqual(cc_focus.main(["--ui", "off"]), 0)
+        self.assertEqual(self.store.read()["pending"], pending)
+
+    def test_explicit_quota_retry_refusal_restores_wait_without_polling(self):
+        import cc_focus
+        pending = self.quota_cli_fixture()
+        reset = time.time() + 3600
+        def refuse(*_):
+            (self.root / ".work" / "PAUSE").touch()
+            raise ProviderQuota(reset, no_work=True)
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
+                patch("cycle_transport.Transport.run", side_effect=refuse) as provider:
+            lease.return_value.__enter__.return_value.pwsh = "pwsh"
+            self.assertEqual(cc_focus.main(["--retry", "--ui", "off"]), 0)
+        provider.assert_called_once()
+        saved = self.store.read()
+        self.assertEqual(saved["pending"]["id"], pending["id"])
+        self.assertEqual(saved["pending"]["quota_wait"]["resets_at"], reset)
+        self.assertGreaterEqual(saved["pending"]["quota_wait"]["retry_at"], reset + 5)
+        self.assertEqual(saved["claude_clean"], 1)
+        self.assertEqual(saved["status"], "paused")
+        self.assertIsNone(saved["blocker"])
+
+    def test_explicit_quota_retry_cannot_override_uncertain_messages(self):
+        import cc_focus
+        pending = self.quota_cli_fixture()
+        record = self.cycle.messages.add({"iteration": 1, "invocation": pending["id"], "role": "claude"}, "Check restart")
+        self.cycle.messages.update(record, "sending")
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
+                patch("cycle_transport.Transport.run", side_effect=AssertionError("No provider before message resolution")):
+            lease.return_value.__enter__.return_value.pwsh = "pwsh"
+            self.assertEqual(cc_focus.main(["--retry", "--ui", "off"]), 0)
+        saved = self.store.read()
+        self.assertEqual(saved["pending"], pending)
+        self.assertEqual(saved["status"], "paused")
+        self.assertEqual(self.cycle.messages.unresolved(1)[0]["status"], "sending")
+
     def test_quota_wait_survives_pause_restart_and_a_repeated_stale_reset(self):
         self.state.update(phase="code", coordinated="code")
         def reject():

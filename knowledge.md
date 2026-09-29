@@ -249,7 +249,13 @@ warnings and model prose do not trigger it. After confirmed provider cleanup,
 normal stop/PAUSE/message/lease boundary until reset plus five seconds, with a
 60-second minimum backoff on every refusal. No healer runs. The same invocation,
 phase and session retry automatically; stopping/restarting preserves the deadline,
-while retiring the invocation retires its wait. Initial no-work refusal plus an
+while retiring the invocation retires its wait. Explicit `--retry` (or `/resume`
+from a stopped quota wait) advances only `retry_at` to the current time, allowing
+one immediate provider attempt with the current login after an operator account
+switch. The refusal's `resets_at`, `no_work`, invocation and session are preserved
+for normal ownership/HEAD checks and interrupted-review handling. Unresolved
+messages prevent this override; a fresh quota refusal schedules another wait.
+Initial no-work refusal plus an
 unchanged full snapshot preserves prior clean passes; partial work or drift uses
 normal interrupted-review resets. Ownership and HEAD are checked again before
 the retry starts a provider. No refusal earns review credit. Progress and

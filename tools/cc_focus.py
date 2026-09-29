@@ -5,6 +5,7 @@ import contextlib
 import json
 from pathlib import Path
 import sys
+import time
 
 from cycle_state import Blocked, Lease, LocalLock, Repository, Store, encode
 from cycle_transport import Transport
@@ -26,7 +27,7 @@ def main(argv=None, interaction=None):
     parser.add_argument("command", nargs="?", choices=("run", "status", "stop", "recover", "correct", "reconcile", "messages", "retry-message", "discard-message"), default="run")
     parser.add_argument("--handoff", type=Path, help="Import a UTF-8 handoff file (no session ID import).")
     parser.add_argument("--new-sessions", action="store_true", help="Start clean conversations, preserving work and phase progress.")
-    parser.add_argument("--retry", action="store_true", help="Retry after resolving an operator-visible blocker.")
+    parser.add_argument("--retry", action="store_true", help="Retry a preserved blocker or immediately recheck a saved Claude quota wait after changing accounts.")
     parser.add_argument("--now", action="store_true", help="With stop: interrupt now instead of waiting for a safe boundary.")
     parser.add_argument("--timeout", type=float, help="With stop: maximum wait in seconds; the stop request survives timeout.")
     parser.add_argument("--review-from", type=Path, help="With recover: validate a saved coding result and pause before mandatory reviews; starts no model.")
@@ -130,12 +131,18 @@ def main(argv=None, interaction=None):
                         state["healed"] = [item for item in state["healed"] if item != signature]
                         state.update(blocker=None, pending=None, status="ready", coordinated=None, recovery_unverified=False)
                         if state.get("published"):
-                            import time
                             retry_at = time.time()
                             state["published"]["at"] = retry_at
                             for name, published in state["published"].get("repositories", {}).items():
                                 published["at"] = retry_at
                                 state["publication_repositories"][name]["published"]["at"] = retry_at
+                    quota = (state.get("pending") or {}).get("quota_wait")
+                    if args.retry and quota and not Messages(store).unresolved(state["iteration"]):
+                        # Keep the refusal evidence: invoke() still verifies the
+                        # entry snapshot and decides whether clean credit survives.
+                        # Only the explicit operator retry advances the deadline.
+                        quota["retry_at"] = time.time()
+                        print("cc-focus: explicit retry of Claude quota with the current login; same invocation and session preserved.", flush=True)
                     store.save(state)
                     def tick():
                         delivery.tick()
@@ -245,7 +252,8 @@ def interactive_main(argv, terminal, output):
                 # Handoffs and session replacement are one-time launch options.
                 resume = ["--output", output or "live"]
                 state = Store(Path.cwd()).read()
-                if state and (state.get("blocker") or {}).get("status") == "blocked":
+                if state and ((state.get("blocker") or {}).get("status") == "blocked"
+                              or (state.get("pending") or {}).get("quota_wait")):
                     resume.append("--retry")
                 result = main(resume, interaction=interaction)
             elif action == "/correct":

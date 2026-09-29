@@ -703,7 +703,14 @@ reset times. A new refusal schedules another wait; the timestamp alone never
 proves that the provider admitted the request.
 
 Stop, emergency stop, PAUSE and uncertain-message checks remain active while
-waiting. Restarting retains the deadline; corrections that replace an invocation
+waiting. A plain restart retains the deadline. After changing the Claude login or
+otherwise restoring quota, exit the waiting process and run `cc-focus --retry` to
+attempt the same invocation immediately with the current login. `/resume` from a
+stopped quota wait has the same effect. This explicit retry advances only the local
+retry deadline; it preserves the refusal evidence, invocation and conversation,
+checks ownership and HEAD normally, and cannot bypass uncertain message delivery.
+A fresh refusal schedules a new wait rather than polling. No credentials, billing
+settings or models are changed. Corrections that replace an invocation
 also retire its wait. Admission refusal before any model work on an unchanged
 checkout preserves earlier clean passes and grants no new credit. Ownership and
 HEAD are checked again before starting the retry. Work already
