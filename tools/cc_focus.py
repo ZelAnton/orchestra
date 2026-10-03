@@ -107,6 +107,7 @@ def main(argv=None, interaction=None):
             progress = Progress(store, state, control.active["nonce"], live=args.output != "compact")
             delivery.progress = progress
             progress.on_update = delivery.tick
+            progress.heartbeat_log = not delivery.interactive
             exit_code = 3
             try:
                 lease_context = (ProjectLease(repo, scripts, state, store.save) if isinstance(repo, Project)

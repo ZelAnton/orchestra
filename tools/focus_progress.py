@@ -30,6 +30,7 @@ class Progress:
         self.operation = None
         self.elapsed = 0
         self.on_update = None
+        self.heartbeat_log = True
 
     def view(self):
         now = time.monotonic()
@@ -91,7 +92,7 @@ class Progress:
         now = time.monotonic()
         if self.on_update:
             self.on_update()
-        if now - self.last_print >= 15:
+        if self.heartbeat_log and now - self.last_print >= 15:
             if self.operation == "quota":
                 self.line(self.activity)
             else:

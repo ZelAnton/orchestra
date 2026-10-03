@@ -203,7 +203,7 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     if blocked:
         activity = clean(blocker.get("resolution") or blocker.get("message") or blocker.get("code"), 180) + " · /resume после устранения"
     elif approval:
-        activity = "Проверьте операцию в логе · /approve или /deny"
+        activity = "/approval — операция · /approve или /deny · /log — журнал"
     elif stop:
         activity = "Ожидаем завершения процессов" if stop == "now" else "Пауза после текущего шага; публикация включает CI"
     elif notice:

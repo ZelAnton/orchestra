@@ -2481,6 +2481,25 @@ class CycleTests(unittest.TestCase):
             self.assertNotIn(secret, (self.store.directory / "progress.json").read_text())
         self.assertNotIn("\x1b", safe_text("\x1b[31mhello\nworld"))
 
+    def test_interactive_progress_updates_timers_without_flooding_the_log(self):
+        progress = Progress(self.store, self.state, "run")
+        progress.heartbeat_log = False
+        updates = []
+        progress.on_update = lambda: updates.append(progress.view())
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            progress.start("publish", self.store.directory)
+            progress.event({"method": "item/commandExecution/requestApproval", "params": {}})
+            before = output.getvalue()
+            with patch("focus_progress.time.monotonic", return_value=progress.started + 3600):
+                progress.pulse()
+            self.assertEqual(output.getvalue(), before)
+            self.assertEqual(updates[-1]["elapsed_seconds"], 3600)
+            saved = json.loads((self.store.directory / "progress.json").read_text())
+            self.assertEqual(saved["elapsed_seconds"], 3600)
+            self.assertIn("waiting for operator", saved["activity"])
+            progress.note("operation answered")
+            self.assertIn("operation answered", output.getvalue())
+
     def test_live_codex_output_streams_messages_commands_and_errors_without_duplicates(self):
         renderer = LiveOutput("sol")
         def item(kind, **values):

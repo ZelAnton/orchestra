@@ -543,6 +543,53 @@ class FocusInputTests(unittest.TestCase):
         interaction.submit("/pause")
         self.assertFalse(interaction.approve({"command": "example"}, lambda: None))
 
+    def test_approval_view_survives_log_eviction_and_clears_after_answer(self):
+        interaction = self.setup_input()
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        interaction.terminal = terminal
+        terminal.callback = interaction.submit
+        params = {"command": "inspect stage files", "cwd": str(self.root), "reason": "Verify scope"}
+        def heartbeat():
+            terminal.write("noise\n" * 3100)
+            terminal.render(100, 24)
+            self.assertIn("inspect stage files", "\n".join(terminal.frame_rows))
+            self.assertIn("НУЖНО СОГЛАСИЕ", "\n".join(terminal.frame_rows))
+            interaction.submit("/log")
+            terminal.render(100, 24)
+            self.assertIn("noise", "\n".join(terminal.frame_rows))
+            self.assertIn("/approval", "\n".join(terminal.frame_rows))
+            for char in "\x1b[5~":
+                terminal.key(char)
+            terminal.render(100, 24)
+            offset = terminal.scroll
+            for char in "/approval\r":
+                terminal.key(char)
+            terminal.render(100, 24)
+            self.assertIn("inspect stage files", "\n".join(terminal.frame_rows))
+            for char in "/log\r":
+                terminal.key(char)
+            terminal.render(100, 24)
+            self.assertEqual(terminal.scroll, offset)
+            interaction.submit("yes")
+            self.assertIsNone(interaction.approval_answer)
+            interaction.submit("/approve")
+        self.assertTrue(interaction.approve(params, heartbeat))
+        self.assertIsNone(terminal.approval_lines)
+        self.assertFalse(terminal.approval_view)
+        terminal.render(100, 24)
+        self.assertNotIn("НУЖНО СОГЛАСИЕ", "\n".join(terminal.frame_rows))
+        interaction.submit("/approve")
+        self.assertIn("no displayed approval", "\n".join(terminal.lines))
+
+    def test_approval_clears_pinned_request_when_wait_is_interrupted(self):
+        interaction = self.setup_input()
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        interaction.terminal = terminal
+        with self.assertRaisesRegex(RuntimeError, "fixture interruption"):
+            interaction.approve({"command": "example"}, lambda: (_ for _ in ()).throw(RuntimeError("fixture interruption")))
+        self.assertIsNone(interaction.approval)
+        self.assertIsNone(terminal.approval_lines)
+
     def test_resume_and_correction_are_stopped_only(self):
         interaction = self.setup_input()
         interaction.submit("/resume")
@@ -595,6 +642,107 @@ class FocusInputTests(unittest.TestCase):
 
 
 class TerminalTests(unittest.TestCase):
+    def keys(self, terminal, text):
+        for char in text:
+            terminal.key(char)
+
+    def test_log_wheel_paging_and_live_output_keep_the_view_anchored(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        terminal.write("".join(f"line {i}\n" for i in range(100)))
+        terminal.render(80, 15)
+        self.keys(terminal, "\x1b[<64;10;10M")
+        terminal.render(80, 15)
+        self.assertEqual(terminal.scroll, 3)
+        old = terminal.frame_rows[1:-2]
+        terminal.write("".join(f"new {i} " + "界" * 100 + "\n" for i in range(10)))
+        terminal.render(80, 15)
+        self.assertEqual(terminal.frame_rows[1:-2], old)
+        self.assertEqual(terminal.text, "")
+        self.keys(terminal, "\x1b[5~")
+        terminal.render(80, 15)
+        self.assertNotEqual(terminal.frame_rows[1:-2], old)
+        self.keys(terminal, "\x1b[1;5H")
+        terminal.render(80, 15)
+        self.assertEqual(terminal.frame_rows[1], "line 0")
+        self.keys(terminal, "\x1b[1;5F")
+        terminal.render(80, 15)
+        self.assertEqual(terminal.scroll, 0)
+        self.assertIn("new 9", "\n".join(terminal.frame_rows))
+
+    def test_scrolled_log_handles_streaming_tail_newline_and_eviction(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        terminal.write("".join(f"line {i}\n" for i in range(3000)) + "tail")
+        terminal.render(30, 12)
+        self.keys(terminal, "\x1b[5~")
+        terminal.render(30, 12)
+        old = terminal.frame_rows[1:-2]
+        for text in ("123", "界" * 80, "\n", "new\n" * 10):
+            terminal.write(text)
+            terminal.render(30, 12)
+            self.assertEqual(terminal.frame_rows[1:-2], old)
+        self.assertEqual(len(terminal.lines), 3000)
+
+    def test_long_approval_can_be_scrolled_without_moving_the_log(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        terminal.write("ordinary log\n")
+        terminal.set_approval({"command": "\n".join(f"command {i}" for i in range(80)),
+                               "reason": "Проверка\x1b[2J", "cwd": "/tmp/repo"})
+        terminal.render(60, 15)
+        self.assertIn("command 0", "\n".join(terminal.frame_rows))
+        self.keys(terminal, "\x1b[6~")
+        terminal.render(60, 15)
+        self.assertGreater(terminal.approval_scroll, 0)
+        offset = terminal.approval_scroll
+        self.keys(terminal, "\x1b[<65;10;10M")
+        terminal.render(60, 15)
+        self.assertEqual(terminal.approval_scroll, offset + 3)
+        self.keys(terminal, "\x1b[<64;10;10M")
+        terminal.render(60, 15)
+        self.assertEqual(terminal.approval_scroll, offset)
+        old = terminal.frame_rows[1:-2]
+        terminal.write("new log\n" * 4000)
+        terminal.render(60, 15)
+        self.assertEqual(terminal.frame_rows[1:-2], old)
+        self.assertNotIn("\x1b", "".join(terminal.frame_rows))
+        self.keys(terminal, "\x1b[1;5F")
+        terminal.render(60, 15)
+        self.assertIn("}", "\n".join(terminal.frame_rows))
+        self.keys(terminal, "\x1b[1;5H")
+        terminal.render(60, 15)
+        self.assertEqual(terminal.approval_scroll, 0)
+        with patch.object(terminal, "wrap_line", side_effect=AssertionError("Typing must reuse the request view")):
+            terminal.key("x")
+            self.assertEqual(terminal.render(60, 15).count("\x1b[K"), 1)
+        for columns, rows in ((80, 24), (30, 9), (10, 4), (120, 32)):
+            terminal.render(columns, rows)
+            self.assertEqual(len(terminal.frame_rows), rows)
+        terminal.show_view("log")
+        terminal.render(60, 15)
+        self.assertIn("new log", "\n".join(terminal.frame_rows))
+
+    def test_mouse_events_and_pasted_wheel_sequences_never_enter_the_composer(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        terminal.write("output\n" * 50)
+        terminal.render(80, 12)
+        self.keys(terminal, "\x1b[M" + chr(64 + 32) + "!!")
+        self.assertEqual(terminal.scroll, 3)
+        for data in ("\x1b[<0;10;10M", "\x1b[<64;10;10m", "\x1b[<" + "1" * 100 + ";1;1M",
+                     "\x1b[200~\x1b[<64;10;10M\x1b[201~"):
+            self.keys(terminal, data)
+        self.assertEqual(terminal.text, "")
+        self.assertEqual(terminal.scroll, 3)
+
+    def test_long_request_bounds_cached_lines_without_dropping_its_contents(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        command = "first " + "x" * 40000 + " last"
+        terminal.set_approval({"command": command})
+        self.assertTrue(all(len(line) <= 4000 for line in terminal.approval_lines))
+        self.assertIn(command, "".join(terminal.approval_lines))
+        terminal.render(80, 24)
+        self.assertTrue(all(len(line) <= 4000 for line in terminal.wrapped_lines))
+        terminal.set_approval(None)
+        self.assertIsNone(terminal.approval_cache)
+
     def test_typing_in_long_scrollback_reuses_output_and_only_repaints_input(self):
         terminal = Terminal(io.StringIO(), io.StringIO())
         terminal.write("\n".join(f"{index}: " + "длинная строка " * 8 for index in range(3000)))
@@ -759,9 +907,21 @@ class TerminalTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "fixture"):
                     with terminal:
                         self.assertNotEqual(termios.tcgetattr(slave), before)
+                        terminal.write("event\n" * 100)
+                        terminal.render(80, 24)
+                        os.write(master, b"\x1b[<64;10;10M")
+                        deadline = time.monotonic() + 2
+                        while terminal.scroll != 3 and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertEqual(terminal.scroll, 3)
+                        self.assertEqual(terminal.text, "")
                         raise RuntimeError("fixture")
                 self.assertEqual(termios.tcgetattr(slave), before)
                 self.assertFalse(terminal.thread.is_alive())
+                output = os.read(master, 65536)
+                self.assertIn(b"\x1b[?1006h", output)
+                self.assertIn(b"\x1b[?1006l", output)
+                self.assertIn(b"\x1b[?1000l", output)
         finally:
             os.close(master)
             os.close(slave)

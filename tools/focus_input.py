@@ -18,8 +18,11 @@ HELP = """Text: save an instruction for the active invocation (not a shell comma
 /messages: list delivery states. /retry-message ID: explicitly resend uncertain input
 (may repeat an already received instruction). /discard-message ID: abandon delivery.
 /status: current state. /approve or /deny: answer the displayed approval only.
+/approval: view the pending operation. /log: return to the live log.
 /exit: request a safe pause and close the terminal after ownership is released.
-/help: this help. PageUp/PageDown: scrollback. Up/Down: input history.
+/help: this help. PageUp/PageDown or mouse wheel: scroll the current view.
+Ctrl+Home/Ctrl+End: first/latest lines. Up/Down: input history.
+In mouse-enabled terminals use Shift to select/copy text.
 Claude instructions wait for its current response before continuing the same role.
 Codex instructions use active-turn steering. Accepted does not mean applied.
 """
@@ -83,6 +86,8 @@ class Interaction:
             self.control = None
             self.paused = True
             self.approval = self.approval_answer = None
+            if hasattr(self.terminal, "set_approval"):
+                self.terminal.set_approval(None)
         self.tick()
 
     def begin(self, pending):
@@ -110,7 +115,7 @@ class Interaction:
         try:
             with self.lock:
                 if not text.startswith("/"):
-                    if self.approval:
+                    if self.approval is not None:
                         raise ValueError("An approval is pending. Use /approve or /deny; ordinary text is not approval.")
                     if not self.target:
                         raise ValueError("No writable active invocation. While stopped use /correct TEXT; publication/CI cannot be steered.")
@@ -123,9 +128,16 @@ class Interaction:
                 if command == "/help":
                     self.note(HELP)
                 elif command in ("/approve", "/deny"):
-                    if not self.approval or argument:
+                    if self.approval is None or argument:
                         raise ValueError("There is no displayed approval to answer, or the command has extra arguments.")
                     self.approval_answer = command == "/approve"
+                elif command in ("/approval", "/log") and not argument:
+                    if command == "/approval" and self.approval is None:
+                        raise ValueError("There is no pending approval to display.")
+                    if hasattr(self.terminal, "show_view"):
+                        self.terminal.show_view(command[1:])
+                    elif command == "/approval":
+                        self.note(json.dumps(self.approval, ensure_ascii=False, indent=2))
                 elif command == "/messages":
                     self.show_messages()
                 elif command in ("/pause", "/stop", "/exit") and not argument:
@@ -170,7 +182,7 @@ class Interaction:
             self.message_notice = ""
         live = self.progress.view() if self.progress else {}
         stop = (self.control.announced if self.control else "") or ("safe" if self.quit and not self.paused else "")
-        return build_panel(self.state, live, paused=self.paused, approval=bool(self.approval),
+        return build_panel(self.state, live, paused=self.paused, approval=self.approval is not None,
                            notice=self.message_notice, stop=stop)
 
     def tick(self):
@@ -209,8 +221,11 @@ class Interaction:
     def approve(self, params, heartbeat):
         with self.lock:
             self.approval, self.approval_answer = params, None
+            if hasattr(self.terminal, "set_approval"):
+                self.terminal.set_approval(params)
             self.note("Codex requests this one operation:\n" + json.dumps(params, ensure_ascii=False, indent=2)
                       + "\nUse /approve or /deny. Text is never treated as consent.")
+            self.tick()
         try:
             while True:
                 heartbeat()
@@ -224,6 +239,9 @@ class Interaction:
         finally:
             with self.lock:
                 self.approval = self.approval_answer = None
+                if hasattr(self.terminal, "set_approval"):
+                    self.terminal.set_approval(None)
+                self.tick()
 
     def wait_action(self):
         from focus_control import read_json, runtime_active

@@ -2,7 +2,9 @@
 
 import codecs
 from collections import OrderedDict, deque
+import json
 import os
+import re
 import select
 import shutil
 import sys
@@ -57,6 +59,11 @@ class Terminal:
         self.view_key, self.visible = None, []
         self.frame_size, self.frame_rows, self.frame_cursor = None, [], None
         self.frame_tone = None
+        self.approval_lines = None
+        self.approval_scroll = 0
+        self.approval_view = False
+        self.approval_cache = None
+        self.log_height = 10
 
     def available(self):
         return (self.stdin.isatty() and self.stdout.isatty()
@@ -75,19 +82,58 @@ class Terminal:
         if not clean:
             return len(text)
         with self.lock:
+            width = self.wrap_width
+            old_rows = len(self.wrap_line(self.tail, width)) if self.scroll and width and self.tail else 0
+            added_rows = 0
             value = self.tail + clean
             parts = value.split("\n")
             for part in parts[:-1]:
                 # Bound both line count and individual physical line storage.
                 for start in range(0, max(1, len(part)), 4000):
-                    self.lines.append(part[start:start + 4000])
+                    chunk = part[start:start + 4000]
+                    self.lines.append(chunk)
+                    if self.scroll and width:
+                        added_rows += len(self.wrap_line(chunk, width))
             self.tail = parts[-1]
             while len(self.tail) > 4000:
                 self.lines.append(self.tail[:4000])
+                if self.scroll and width:
+                    added_rows += len(self.wrap_line(self.tail[:4000], width))
                 self.tail = self.tail[4000:]
+            if self.scroll and width:
+                added_rows += len(self.wrap_line(self.tail, width)) if self.tail else 0
+                self.scroll += max(0, added_rows - old_rows)
             self.output_revision += 1
             self.changed = True
         return len(text)
+
+    def set_approval(self, params):
+        """Keep the request independently of the bounded, continuously growing log."""
+        lines = None
+        if params is not None:
+            parts = ["НУЖНО СОГЛАСИЕ · /approve или /deny"]
+            for field, title in (("cwd", "Каталог"), ("reason", "Причина"), ("command", "Команда")):
+                if params.get(field) is not None:
+                    value = params[field]
+                    parts.append(title + ":\n" + (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)))
+            parts.append("Полные данные запроса:\n" + json.dumps(params, ensure_ascii=False, indent=2))
+            clean = terminal_text("\n\n".join(parts)).replace("\r", "").replace("\t", "    ")
+            lines = tuple(line[start:start + 4000] for line in clean.split("\n")
+                          for start in range(0, max(1, len(line)), 4000))
+        with self.lock:
+            self.approval_lines = lines
+            self.approval_scroll = 0
+            self.approval_cache = None
+            self.approval_view = lines is not None
+            self.changed = True
+
+    def show_view(self, name):
+        with self.lock:
+            if name == "approval" and self.approval_lines is None:
+                return False
+            self.approval_view = name == "approval"
+            self.changed = True
+            return True
 
     def status(self, text):
         panel = None
@@ -133,7 +179,8 @@ class Terminal:
             self.saved_modes = termios.tcgetattr(self.stdin.fileno())
             tty.setraw(self.stdin.fileno())
         try:
-            self.stdout.write("\x1b[?1049h\x1b[?2004h\x1b[2J")
+            self.stdout.write("\x1b[?1049h\x1b[?2004h" +
+                              ("\x1b[?1000h\x1b[?1006h" if os.name != "nt" else "") + "\x1b[2J")
             self.stdout.flush()
             self.thread = threading.Thread(target=self.loop, name="focus-terminal", daemon=True)
             self.thread.start()
@@ -144,7 +191,8 @@ class Terminal:
 
     def restore(self):
         try:
-            self.stdout.write("\x1b[?2004l\x1b[?25h\x1b[?1049l")
+            self.stdout.write(("\x1b[?1006l\x1b[?1000l" if os.name != "nt" else "") +
+                              "\x1b[?2004l\x1b[?25h\x1b[?1049l")
             self.stdout.flush()
         finally:
             if self.saved_modes is not None:
@@ -209,17 +257,30 @@ class Terminal:
                 return "\x1b[2J\x1b[H\x1b[K" + clip("Resize terminal", width)
             header = [clip(self.label, width)]
             if self.panel:
-                chosen = self.panel.lines if rows >= 15 and columns >= 70 else self.panel.compact
+                chosen = self.panel.lines if rows >= 15 and columns >= 70 and not self.approval_view else self.panel.compact
                 count = min(len(chosen), max(1, rows - 5))
                 header = [clip(line, width) if sum(cell_width(c) for c in line) <= width
                           else clip(line, max(0, width - 1)) + "…" for line in chosen[:count]]
                 if rows >= 6:
                     header.append("─" * width)
                 height = rows - len(header) - 2
-            visible = self.log_rows(width, height)
+            self.log_height = height
+            if self.approval_view:
+                if self.approval_cache is None or self.approval_cache[0] != width:
+                    self.approval_cache = (width, [part for line in self.approval_lines for part in self.wrap_line(line, width)])
+                details = self.approval_cache[1]
+                self.approval_scroll = min(self.approval_scroll, max(0, len(details) - height))
+                visible = details[self.approval_scroll:self.approval_scroll + height]
+                visible += [""] * (height - len(visible))
+                footer = f"Запрос {self.approval_scroll + 1}–{min(len(details), self.approval_scroll + height)}/{len(details)} · PgUp/PgDn · колесо · /log"
+            else:
+                visible = self.log_rows(width, height)
+                footer = (f"Лог ↑{self.scroll} · Ctrl+End: к новым" if self.scroll else "Лог: новые события") + " · PgUp/PgDn · колесо"
+                if self.approval_lines is not None:
+                    footer = "/approval: ожидающая операция · " + footer
             # The viewport clamps an oversized PageUp offset. Use that final
             # offset so the next keystroke cannot change the header as well.
-            if self.scroll:
+            if self.scroll and not self.approval_view:
                 if self.panel:
                     row = -2 if rows >= 6 else -1
                     header[row] = clip(f"scrollback +{self.scroll} · " + header[row], width)
@@ -237,12 +298,13 @@ class Terminal:
                 used += size
             left = "".join(reversed(suffix))
             composer = clip("> " + left + self.text[self.cursor:], width)
-            content = [*header, *visible, "─" * width, composer]
+            content = [*header, *visible, clip(footer, width), composer]
             cursor = min(width, 3 + sum(cell_width(c) for c in left))
             resized = self.frame_size != (columns, rows)
             tone = self.panel.tone if self.panel else None
             updates = [(index + 1, line) for index, line in enumerate(content)
-                       if resized or line != self.frame_rows[index] or (tone != self.frame_tone and index < len(header))]
+                       if resized or index >= len(self.frame_rows) or line != self.frame_rows[index]
+                       or (tone != self.frame_tone and index < len(header))]
             frame = ""
             if updates or cursor != self.frame_cursor:
                 # Clear changed rows completely, including when text got shorter.
@@ -265,9 +327,29 @@ class Terminal:
         with self.lock:
             if self.escape or char == "\x1b":
                 self.escape += char
+                if self.escape.startswith("\x1b[M"):
+                    if len(self.escape) == 6:
+                        if not self.paste:
+                            self.mouse_wheel(ord(self.escape[3]) - 32)
+                        self.escape = ""
+                    return
+                if self.escape.startswith("\x1b[<"):
+                    mouse = re.fullmatch(r"\x1b\[<(\d+);(\d+);(\d+)([Mm])", self.escape)
+                    if mouse:
+                        if not self.paste and mouse[4] == "M":
+                            self.mouse_wheel(int(mouse[1]))
+                        self.escape = ""
+                    elif char in "Mm" or char in "\r\n\x1b":
+                        self.escape = ""
+                    elif len(self.escape) > 64:
+                        self.escape = "\x1b[<invalid"
+                    self.changed = True
+                    return
                 sequences = {"\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left",
                              "\x1b[H": "home", "\x1b[F": "end", "\x1b[3~": "delete",
                              "\x1b[5~": "page-up", "\x1b[6~": "page-down",
+                             "\x1b[1;5H": "oldest", "\x1b[1;5F": "latest",
+                             "\x1b[5;5~": "oldest", "\x1b[6;5~": "latest",
                              "\x1b[200~": "paste-start", "\x1b[201~": "paste-end"}
                 action = sequences.get(self.escape)
                 if action:
@@ -286,7 +368,9 @@ class Terminal:
                 return
             if char in ("\r", "\n"):
                 submit = self.text.strip()
-                self.text, self.cursor, self.scroll = "", 0, 0
+                self.text, self.cursor = "", 0
+                if submit not in ("/log", "/approval"):
+                    self.scroll = 0
                 if submit:
                     self.history.append(submit)
                     self.history = self.history[-100:]
@@ -312,6 +396,19 @@ class Terminal:
         if submit and self.callback:
             self.callback(submit)
 
+    def scroll_view(self, amount):
+        if self.approval_view:
+            self.approval_scroll = max(0, self.approval_scroll + amount)
+        else:
+            self.scroll = max(0, self.scroll + amount)
+        self.changed = True
+
+    def mouse_wheel(self, button):
+        button &= ~(4 | 8 | 16)  # Modifiers do not change the wheel direction.
+        if button in (64, 65):
+            amount = 3 if button == 64 else -3
+            self.scroll_view(-amount if self.approval_view else amount)
+
     def edit_key(self, action):
         if action == "left":
             self.cursor = max(0, self.cursor - 1)
@@ -322,7 +419,15 @@ class Terminal:
         elif action == "delete":
             self.text = self.text[:self.cursor] + self.text[self.cursor + 1:]
         elif action in ("page-up", "page-down"):
-            self.scroll = max(0, self.scroll + (10 if action == "page-up" else -10))
+            amount = max(1, self.log_height - 1)
+            if not self.approval_view:
+                amount = -amount
+            self.scroll_view(-amount if action == "page-up" else amount)
+        elif action in ("oldest", "latest"):
+            if self.approval_view:
+                self.approval_scroll = 0 if action == "oldest" else 10**9
+            else:
+                self.scroll = 10**9 if action == "oldest" else 0
         elif action in ("up", "down"):
             self.history_index = min(len(self.history), max(0, self.history_index + (-1 if action == "up" else 1)))
             self.text = self.history[self.history_index] if self.history_index < len(self.history) else ""
@@ -341,7 +446,8 @@ class Terminal:
                         if chars in ("\x00", "\xe0"):
                             code = msvcrt.getwch()
                             chars = {"H": "\x1b[A", "P": "\x1b[B", "K": "\x1b[D", "M": "\x1b[C",
-                                     "G": "\x1b[H", "O": "\x1b[F", "I": "\x1b[5~", "Q": "\x1b[6~", "S": "\x1b[3~"}.get(code, "")
+                                     "G": "\x1b[H", "O": "\x1b[F", "I": "\x1b[5~", "Q": "\x1b[6~", "S": "\x1b[3~",
+                                     "w": "\x1b[1;5H", "u": "\x1b[1;5F"}.get(code, "")
                     else:
                         self.stopping.wait(0.05)
                 elif select.select([self.stdin.fileno()], [], [], 0.05)[0]:

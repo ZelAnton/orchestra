@@ -203,6 +203,22 @@ Long runs keep a bounded cache of wrapped output and reuse the visible log windo
 while typing. New output, scrolling and terminal resizing refresh that window;
 ordinary typing redraws only the input row. Repeated unchanged status updates do
 not repaint the screen. These UI optimizations retain the existing role sessions.
+Periodic activity heartbeats update the panel without appending duplicate lines
+to the interactive log; ordinary `--ui off` output retains its timed heartbeats.
+Reading older log output keeps the visible position when new events arrive, until
+those lines leave the bounded 3000-line history. The footer shows scroll position
+and navigation keys. PageUp/PageDown scroll by a screen; Ctrl+Home/Ctrl+End jump
+to the first/latest retained lines. POSIX terminals with mouse reporting also
+support the wheel; hold Shift for terminal text selection/copy. Mouse reporting
+is disabled again when the interface exits, including after an exception.
+
+A pending Codex approval automatically opens a separate request view, showing
+the command, working directory, reason (when supplied) and complete request data.
+It remains available independently of log output and history eviction until it
+is answered or cancelled. Long requests use the same paging/wheel controls.
+`/log` shows the journal while consent is pending; `/approval` returns to the
+request. Only `/approve` or `/deny` answers that operation; browsing is not consent.
+The request view clears on answer, stop or interrupted waiting.
 `--output compact` still controls whether public provider payloads are displayed.
 
 The panel uses seven lines and a horizontal separator when the terminal has at
@@ -252,10 +268,12 @@ of terminal size. `cc-focus status` also returns the panel as `dashboard` in its
 | `/retry-message ID` | While stopped, explicitly resend unresolved input to its original pending invocation |
 | `/discard-message ID` | While stopped, abandon unresolved delivery without deleting its artifact |
 | `/approve`, `/deny` | Answer only the currently displayed Codex approval |
+| `/approval`, `/log` | Switch between the pending operation and the journal |
 | `/status`, `/help` | Show state or commands |
 | `/exit` or Ctrl+D on empty input | Safely pause, then close the terminal |
 
-PageUp/PageDown browse bounded scrollback; Up/Down recall input history. Arrow keys,
+PageUp/PageDown and the mouse wheel browse the current view; Ctrl+Home/Ctrl+End
+jump to its beginning/end. Up/Down recall input history. Arrow keys,
 Home/End, Delete/Backspace and Ctrl+U edit input. Bracketed multiline paste becomes
 one instruction and cannot execute embedded commands without Enter. Slash commands
 are local workflow controls, not arbitrary shell execution. Ordinary text never

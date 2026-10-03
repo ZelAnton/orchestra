@@ -126,6 +126,17 @@ in old scrollback does not rescan history. Cached lines stay bounded by the reta
 3000 lines plus one tail entry; output/scroll/resize invalidate the visible window.
 Only changed terminal rows are emitted, unchanged status ticks do not redraw, and
 provider-text sanitization runs outside the input lock. Session reuse is unchanged.
+Pending approvals have a separate persistent, scrollable request view, opened by
+`Interaction.approve` and cleared on answer/cancellation. It shows command/cwd/reason
+and the full sanitized payload independently of log eviction. `/approval` and `/log`
+switch views without answering; only explicit `/approve` or `/deny` grants/refuses
+the operation. Page keys navigate the current view; Ctrl+Home/End jump to its ends.
+POSIX SGR/X10 mouse-wheel input never enters the composer; reporting modes are
+restored on exit. Incoming output adjusts the log offset to preserve the visible
+history, subject to the existing bound. Cached approval wrapping keeps typing cheap.
+The footer exposes navigation and log position. Interactive `Progress` disables
+periodic log heartbeats while maintaining panel timers and durable progress; plain
+output keeps its timed activity lines. Actual events continue to enter the log.
 `focus_status.py` projects workflow state into a seven-line panel separated from the
 log, with a three-line compact layout for narrow/short terminals. It shows the
 task, actual role/model, six-phase timeline, review streaks and completed totals,
