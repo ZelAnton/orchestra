@@ -354,6 +354,8 @@ class Terminal:
                     return
                 sequences = {"\x1b[A": "up", "\x1b[B": "down", "\x1b[C": "right", "\x1b[D": "left",
                              "\x1b[H": "home", "\x1b[F": "end", "\x1b[3~": "delete",
+                             "\x1bOA": "up", "\x1bOB": "down", "\x1bOC": "right", "\x1bOD": "left",
+                             "\x1bOH": "home", "\x1bOF": "end",
                              "\x1b[5~": "page-up", "\x1b[6~": "page-down",
                              "\x1b[1;5H": "oldest", "\x1b[1;5F": "latest",
                              "\x1b[5;5~": "oldest", "\x1b[6;5~": "latest",
@@ -365,7 +367,19 @@ class Terminal:
                         self.paste = action == "paste-start"
                     elif not self.paste:
                         self.edit_key(action)
-                elif len(self.escape) > 12 or not any(key.startswith(self.escape) for key in sequences):
+                elif self.escape in ("\x1b", "\x1b[", "\x1bO"):
+                    pass
+                elif self.escape.startswith(("\x1b[", "\x1bO")):
+                    # Consume unknown CSI/SS3 packets through their final byte.
+                    # Dropping an unrecognized prefix early leaks A/B (or other
+                    # suffixes) into the composer, e.g. modified cursor keys.
+                    if "@" <= char <= "~" or not " " <= char <= "?":
+                        self.escape = ""
+                    elif len(self.escape) > 64:
+                        # Keep discarding parameters with bounded storage; this
+                        # prefix cannot match a supported key or mouse packet.
+                        self.escape = "\x1b[?"
+                else:
                     self.escape = ""
                 self.changed = True
                 return

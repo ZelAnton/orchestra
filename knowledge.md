@@ -143,6 +143,11 @@ clears incomplete keyboard/mouse escape input before issuing `/stop`, while past
 control bytes remain non-executing. A fresh escape packet also discards an incomplete
 one, allowing paste-end markers to restore normal input. Terminal regressions cover
 these boundaries.
+Cursor keys accept both normal CSI and application-mode SS3 encodings. Unsupported
+CSI/SS3 packets are consumed through the final byte, with bounded buffering, so
+their suffixes cannot become composer text. Native mouse reports scroll the active
+view without changing the draft or command history; arrow-key encodings still
+select command history because they do not identify a wheel event.
 `focus_status.py` projects workflow state into a seven-line panel separated from the
 log, with a three-line compact layout for narrow/short terminals. It shows the
 task, actual role/model, six-phase timeline, review streaks and completed totals,

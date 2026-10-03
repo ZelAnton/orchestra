@@ -675,8 +675,72 @@ class TerminalTests(unittest.TestCase):
         for char in text:
             terminal.key(char)
 
+    def test_application_cursor_keys_do_not_leak_letters_into_input(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        submitted = []
+        terminal.callback = submitted.append
+        self.keys(terminal, "previous\r\x1bOA")
+        self.assertEqual(terminal.text, "previous")
+        self.keys(terminal, "\x1bOB")
+        self.assertEqual(terminal.text, "")
+        self.keys(terminal, "abc\x1bOD!\x1bOC?\x1bOH^\x1bOF$")
+        self.assertEqual(terminal.text, "^ab!c?$")
+        self.assertEqual(submitted, ["previous"])
+        self.assertEqual(terminal.escape, "")
+
+    def test_unknown_keyboard_packets_are_consumed_in_full(self):
+        packets = ("\x1b[1;2A", "\x1b[1;2B", "\x1b[1;5C", "\x1b[1;5D",
+                   "\x1b[15~", "\x1bOP", "\x1b[?1007;1$y", "\x1b[999;1u",
+                   "\x1b[" + "1;" * 100 + "A")
+        for packet in packets:
+            with self.subTest(packet=packet):
+                terminal = Terminal(io.StringIO(), io.StringIO())
+                terminal.callback = lambda value: self.fail("Unexpected command: " + value)
+                self.keys(terminal, "draft")
+                for char in packet:
+                    terminal.key(char)
+                    self.assertLessEqual(len(terminal.escape), 64)
+                self.assertEqual(terminal.text, "draft")
+                self.assertEqual(terminal.cursor, 5)
+                self.assertEqual(terminal.escape, "")
+                self.keys(terminal, "AB")
+                self.assertEqual(terminal.text, "draftAB")
+
+    def test_pasted_application_and_modified_keys_do_not_edit_or_submit(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        terminal.history = ["/approve"]
+        terminal.history_index = 1
+        terminal.callback = lambda value: self.fail("Pasted input must not submit " + value)
+        self.keys(terminal, "\x1b[200~draft\x1bOA\x1bOB\x1bOH\x1b[1;2A\x1b[201~")
+        self.assertEqual(terminal.text, "draft")
+        self.assertEqual(terminal.history_index, 1)
+        self.assertFalse(terminal.paste)
+
+    def test_wheel_preserves_draft_and_history_in_both_views(self):
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        terminal.history = ["/approve", "/deny"]
+        terminal.history_index = 2
+        terminal.callback = lambda value: self.fail("Scrolling must not submit " + value)
+        self.keys(terminal, "draft")
+        terminal.cursor = 2
+        terminal.write("log\n" * 100)
+        terminal.render(80, 24)
+        self.keys(terminal, "\x1b[<64;1;1M")
+        self.assertEqual(terminal.scroll, 3)
+        terminal.set_approval({"command": "request\n" * 100})
+        self.keys(terminal, "\x1b[<65;1;1M")
+        self.assertEqual(terminal.approval_scroll, 3)
+        for packet in ("\x1b[<64;1;1M", "\x1b[M" + chr(64 + 32) + "!!"):
+            self.keys(terminal, packet)
+        self.assertEqual(terminal.approval_scroll, 0)
+        self.assertEqual(terminal.scroll, 3)
+        self.assertEqual(terminal.text, "draft")
+        self.assertEqual(terminal.cursor, 2)
+        self.assertEqual(terminal.history_index, 2)
+
     def test_ctrl_c_interrupts_incomplete_mouse_and_keyboard_escape_sequences(self):
-        for prefix in ("\x1b", "\x1b[", "\x1b[M", "\x1b[<64;10;", "\x1b[<" + "1" * 100):
+        for prefix in ("\x1b", "\x1b[", "\x1bO", "\x1b[1;2", "\x1b[" + "1;" * 100,
+                       "\x1b[M", "\x1b[<64;10;", "\x1b[<" + "1" * 100):
             with self.subTest(prefix=prefix):
                 terminal = Terminal(io.StringIO(), io.StringIO())
                 submitted = []
@@ -691,7 +755,8 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(terminal.text, "text")
 
     def test_paste_end_recovers_from_incomplete_embedded_escape_packets(self):
-        for prefix in ("\x1b", "\x1b[", "\x1b[M", "\x1b[<64;10;"):
+        for prefix in ("\x1b", "\x1b[", "\x1bO", "\x1b[1;2", "\x1b[" + "1;" * 100,
+                       "\x1b[M", "\x1b[<64;10;"):
             with self.subTest(prefix=prefix):
                 terminal = Terminal(io.StringIO(), io.StringIO())
                 submitted = []
@@ -968,12 +1033,12 @@ class TerminalTests(unittest.TestCase):
                         self.assertNotEqual(termios.tcgetattr(slave), before)
                         terminal.write("event\n" * 100)
                         terminal.render(80, 24)
-                        os.write(master, b"\x1b[<64;10;10M")
+                        os.write(master, b"draft\x1b[1;2A\x1b[1;2B\x1bOD!\x1b[<64;10;10M")
                         deadline = time.monotonic() + 2
                         while terminal.scroll != 3 and time.monotonic() < deadline:
                             time.sleep(0.01)
                         self.assertEqual(terminal.scroll, 3)
-                        self.assertEqual(terminal.text, "")
+                        self.assertEqual(terminal.text, "draf!t")
                         raise RuntimeError("fixture")
                 self.assertEqual(termios.tcgetattr(slave), before)
                 self.assertFalse(terminal.thread.is_alive())

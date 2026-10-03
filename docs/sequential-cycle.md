@@ -211,6 +211,13 @@ and navigation keys. PageUp/PageDown scroll by a screen; Ctrl+Home/Ctrl+End jump
 to the first/latest retained lines. POSIX terminals with mouse reporting also
 support the wheel; hold Shift for terminal text selection/copy. Mouse reporting
 is disabled again when the interface exits, including after an exception.
+Normal and application-mode cursor keys are decoded as keys; unsupported key
+sequences are discarded in full instead of inserting trailing `A`/`B` characters.
+Wheel scrolling requires mouse reports from the terminal. If a terminal or
+multiplexer translates the wheel into arrow keys, those keys select input history;
+use PageUp/PageDown or enable mouse forwarding in that terminal. After updating
+Orchestra, run `cc-sync` from its checkout to refresh installed scripts, then restart the terminal
+interface to load the new input handling; an already running process keeps its old code.
 
 A pending Codex approval automatically opens a separate request view, showing
 the command, working directory, reason (when supplied) and complete request data.
