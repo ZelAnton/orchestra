@@ -897,6 +897,7 @@ class TerminalTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX PTY restoration fixture")
     def test_terminal_restores_raw_mode_on_exception(self):
         import pty
+        import select
         import termios
         master, slave = pty.openpty()
         before = termios.tcgetattr(slave)
@@ -918,7 +919,11 @@ class TerminalTests(unittest.TestCase):
                         raise RuntimeError("fixture")
                 self.assertEqual(termios.tcgetattr(slave), before)
                 self.assertFalse(terminal.thread.is_alive())
-                output = os.read(master, 65536)
+                output = b""
+                deadline = time.monotonic() + 2
+                while b"\x1b[?1049l" not in output and time.monotonic() < deadline:
+                    if select.select([master], [], [], max(0, deadline - time.monotonic()))[0]:
+                        output += os.read(master, 65536)
                 self.assertIn(b"\x1b[?1006h", output)
                 self.assertIn(b"\x1b[?1006l", output)
                 self.assertIn(b"\x1b[?1000l", output)
