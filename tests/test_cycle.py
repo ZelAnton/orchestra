@@ -1072,6 +1072,45 @@ class CycleTests(unittest.TestCase):
             self.cycle.review("sol")
         self.assertEqual(self.state["sol_clean"], 1)
 
+    def test_review_evidence_writes_preserve_clean_credit_for_every_reviewer(self):
+        from cycle_prompts import REVIEW_TARGETS
+        for role, target in REVIEW_TARGETS.items():
+            with self.subTest(role=role):
+                self.state.update(phase=role, pending=None, sol_passes=2)
+                self.state[role + "_clean"] = target - 1
+                name = "review-evidence-" + role + ".json"
+                self.transport.actions = [(role, self.edit(name=name, content='{"checks": "passed"}\n', minor_edits=1))]
+                self.cycle.review(role)
+                self.assertEqual(self.state[role + "_clean"], target)
+                self.assertNotEqual(self.state["phase"], role)
+                self.assertIsNone(self.state["pending"])
+                self.assertEqual((self.root / "source.txt").read_text(), "initial\n")
+                self.assertIn(name, self.state["last_snapshot"]["files"])
+                if self.state["phase"] == "publish":
+                    self.assertEqual(self.state["reviewed"], self.repo.snapshot())
+
+    def test_zero_count_evidence_report_and_cached_replay_still_fail_closed(self):
+        for role in ("sol", "claude", "astra"):
+            with self.subTest(role=role):
+                self.state.update(phase=role, pending=None)
+                self.state[role + "_clean"] = 0
+                name = "review-evidence-" + role + ".json"
+                self.transport.actions = [(role, self.edit(name=name, content='{"checks": "passed"}\n'))]
+                self.transport.calls.clear()
+                for _ in range(2):
+                    with self.assertRaises(Blocked) as caught:
+                        self.cycle.review(role)
+                    self.assertEqual(caught.exception.code, "unreported-fix")
+                    self.assertIn("minor_edits", str(caught.exception))
+                    self.assertEqual(self.state[role + "_clean"], 0)
+                    self.assertEqual(self.state["phase"], role)
+                    self.assertEqual(len(self.transport.calls), 1)
+                result = self.store.directory / "invocations" / self.state["pending"]["id"] / "result.json"
+                saved = json.loads(result.read_text())
+                self.assertEqual(changed(saved["before"], saved["after"]), [name])
+                self.assertEqual(json.loads(saved["raw"])["minor_edits"], 0)
+                self.assertEqual((self.root / name).read_text(), '{"checks": "passed"}\n')
+
     def test_coder_cannot_commit(self):
         def bad_coder():
             self.edit()()

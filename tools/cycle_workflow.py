@@ -352,7 +352,9 @@ class Cycle:
             if report["status"] != "done" or not report["evidence"]:
                 raise Blocked("incomplete-review", "A review requires a completed pass and actual verification evidence.")
             if self.changes(before, after) and not sum(report[k] for k in ("implementation_fixes", "other_fixes", "minor_edits")):
-                raise Blocked("unreported-fix", "Review changed files but reported no changes.")
+                raise Blocked("unreported-fix", "Review changed files but reported no changes. "
+                              "Account for every changed file: record new verification evidence/journal writes in minor_edits; "
+                              "report actual defects as implementation_fixes or other_fixes. Minor edits do not reset clean passes.")
         summary = concise_summary(report["summary"])
         accept_task(state, report, role)
         if role != "coordinate":

@@ -129,6 +129,18 @@ prompts, documentation-as-instructions, configuration and tests is implementatio
 regardless of file extension. Set substantial=true for any implementation change
 that changes a contract, algorithm, workflow, permission boundary or test outcome;
 when uncertain, use true. Describe fixes and validation in evidence.
+In review reports, account for every file change in this invocation: review journals,
+verification logs, evidence JSON, source snapshots and digest indexes. Recording a
+completed check without correcting a defect is a minor edit: include those writes
+in minor_edits (one per changed evidence file) and describe them in evidence.
+For example, a clean review that updates only a journal and an evidence index
+reports implementation_fixes=0, other_fixes=0, minor_edits=2, substantial=false.
+Minor edits do not reset clean-review counters. A filename or evidence directory
+never makes a behavioral change minor: changing executable checks, expectations,
+acceptance rules or instructions still counts as an implementation fix. Correcting
+false or incomplete substantive evidence belongs in other_fixes unless it changes
+behavior, in which case it is an implementation fix. Do not invent a defect count
+just to satisfy the report. A review with file changes cannot leave all three counters zero.
 For review and healing reports, substantial=true requires implementation_fixes>0.
 A coding report may instead describe substantial NEW implementation with zero
 fixes; its classification never earns review credit. Both review loops still run.
@@ -150,7 +162,8 @@ description is your FULL final account of what was done, how, what remains and
 what was deferred; do not shorten it for the coordinator. summary is a concise
 outcome (at most 1200 characters). status is done, blocked, or complete. complete
 means the entire supplied stage source is exhausted, not just this invocation.
-Counts describe actual fixes in THIS invocation only, not historical findings.
+Counts describe actual fixes and minor edits in THIS invocation only, not historical
+findings. minor_edits also includes new review records that do not fix a defect.
 Report unresolved defects as blocked. evidence lists actual checks and findings.
 
 task is display-only metadata, never phase authority. In coordinate/code, copy the
@@ -171,7 +184,8 @@ REPORT_SCHEMA = {
         "description": {"type": "string"},
         "implementation_fixes": {"type": "integer", "minimum": 0},
         "other_fixes": {"type": "integer", "minimum": 0},
-        "minor_edits": {"type": "integer", "minimum": 0},
+        "minor_edits": {"type": "integer", "minimum": 0,
+                        "description": "Minor non-behavioral edits, including one per changed review-evidence file recording checks without correcting a defect; these do not reset clean-review counters."},
         "substantial": {"type": "boolean"},
         "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}},
     },

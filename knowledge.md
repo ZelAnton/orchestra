@@ -290,6 +290,13 @@ presentation budget as a workflow blocker. `concise_summary` bounds only printed
 previews and persisted coordinator/status summaries, including coding recovery;
 saved reports and Claude multi-response aggregation retain the full content.
 Report types, fix-count consistency and mandatory review evidence stay strict.
+Review accounting includes new journals/logs/evidence/snapshots/digest indexes in
+`minor_edits` (one per changed evidence file) when they merely record completed
+checks. This preserves clean credit without inventing substantive defects. Evidence
+corrections are `other_fixes`, or implementation fixes when they change behavior,
+checks, acceptance rules or instructions. Paths never grant a category exemption;
+changed files with all counters zero still raise `unreported-fix`, with an explicit
+accounting hint. Historical rejected reports are not silently accepted.
 `report_object` unwraps one final JSON object after plain prose or a single Markdown
 fence; the raw artifact/handoff stays unchanged. It rejects multiple/nested objects,
 trailing commentary, duplicate keys and malformed JSON without guessing a repair.

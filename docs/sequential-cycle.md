@@ -542,6 +542,18 @@ turn in the persistent reviewer conversation. It owns the counters:
 Incomplete/failed passes cannot count as clean. Reviewers report fix categories
 and actual validation evidence; the runtime also compares repository fingerprints.
 Semantic classification remains a reviewer judgment, not a file-extension heuristic.
+Every review file change must be represented in the report. A clean pass that only
+records completed checks in a journal, logs, evidence JSON, source snapshots or
+hash indexes reports those writes in `minor_edits` (one per changed evidence file).
+These records are not substantive fixes and do not reset any clean-pass streak.
+For example, a journal plus an updated evidence index means `minor_edits=2`, with
+both fix counters zero. Correcting substantive errors in evidence is `other_fixes`;
+changing executable checks, expected results, acceptance rules or instructions is
+an implementation fix, even under an evidence directory. The runtime does not
+infer categories from paths or accept a changed snapshot with all three counters
+zero: that still raises `unreported-fix` and grants no review credit. Rejected
+historical reports are not reclassified automatically; the next review must follow
+this accounting contract.
 New coding work can be substantial without fixing earlier review defects; a coding
 report with `substantial=true` and `implementation_fixes=0` is accepted. Review and
 healing reports still require a positive implementation-fix count when substantial
