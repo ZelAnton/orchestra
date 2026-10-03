@@ -127,11 +127,13 @@ class Terminal:
             self.approval_view = lines is not None
             self.changed = True
 
-    def show_view(self, name):
+    def show_view(self, name, latest=False):
         with self.lock:
             if name == "approval" and self.approval_lines is None:
                 return False
             self.approval_view = name == "approval"
+            if name == "log" and latest:
+                self.scroll = 0
             self.changed = True
             return True
 
@@ -325,6 +327,11 @@ class Terminal:
     def key(self, char):
         submit = None
         with self.lock:
+            # New packets supersede truncated ones, including paste-end markers.
+            # Actual Ctrl+C must also escape a truncated packet; pasted Ctrl+C
+            # remains data and never issues a stop.
+            if char == "\x1b" or (char == "\x03" and not self.paste):
+                self.escape = ""
             if self.escape or char == "\x1b":
                 self.escape += char
                 if self.escape.startswith("\x1b[M"):

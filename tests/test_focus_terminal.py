@@ -590,6 +590,35 @@ class FocusInputTests(unittest.TestCase):
         self.assertIsNone(interaction.approval)
         self.assertIsNone(terminal.approval_lines)
 
+    def test_operator_responses_are_visible_without_losing_pending_approval(self):
+        interaction = self.setup_input()
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        interaction.terminal = terminal
+        terminal.callback = interaction.submit
+        params = {"command": "inspect stage files"}
+        def heartbeat():
+            cases = (("/help", "Text: save an instruction"), ("/messages", "No messages in this stage"),
+                     ("/status", "review_events"), ("/approve extra", "extra arguments"),
+                     ("yes", "ordinary text is not approval"))
+            for command, expected in cases:
+                with self.subTest(command=command):
+                    terminal.write("noise\n" * 100)
+                    terminal.scroll = 30
+                    terminal.show_view("approval")
+                    interaction.submit(command)
+                    terminal.render(130, 45)
+                    self.assertIn(expected, "\n".join(terminal.frame_rows))
+                    self.assertFalse(terminal.approval_view)
+                    self.assertEqual(terminal.scroll, 0)
+                    self.assertIs(interaction.approval, params)
+                    self.assertIsNone(interaction.approval_answer)
+                    interaction.submit("/approval")
+                    terminal.render(130, 45)
+                    self.assertIn("inspect stage files", "\n".join(terminal.frame_rows))
+            interaction.submit("/deny")
+        self.assertFalse(interaction.approve(params, heartbeat))
+        self.assertIsNone(terminal.approval_lines)
+
     def test_resume_and_correction_are_stopped_only(self):
         interaction = self.setup_input()
         interaction.submit("/resume")
@@ -645,6 +674,35 @@ class TerminalTests(unittest.TestCase):
     def keys(self, terminal, text):
         for char in text:
             terminal.key(char)
+
+    def test_ctrl_c_interrupts_incomplete_mouse_and_keyboard_escape_sequences(self):
+        for prefix in ("\x1b", "\x1b[", "\x1b[M", "\x1b[<64;10;", "\x1b[<" + "1" * 100):
+            with self.subTest(prefix=prefix):
+                terminal = Terminal(io.StringIO(), io.StringIO())
+                submitted = []
+                terminal.callback = submitted.append
+                self.keys(terminal, "draft" + prefix + "\x03")
+                self.assertEqual(submitted, ["/stop"])
+                self.assertEqual(terminal.text, "draft")
+                self.assertEqual(terminal.escape, "")
+        terminal = Terminal(io.StringIO(), io.StringIO())
+        terminal.callback = lambda value: self.fail("Pasted Ctrl+C must not submit " + value)
+        self.keys(terminal, "\x1b[200~text\x03\x1b[201~")
+        self.assertEqual(terminal.text, "text")
+
+    def test_paste_end_recovers_from_incomplete_embedded_escape_packets(self):
+        for prefix in ("\x1b", "\x1b[", "\x1b[M", "\x1b[<64;10;"):
+            with self.subTest(prefix=prefix):
+                terminal = Terminal(io.StringIO(), io.StringIO())
+                submitted = []
+                terminal.callback = submitted.append
+                self.keys(terminal, "\x1b[200~text" + prefix + "\x03\x1b[201~")
+                self.assertFalse(submitted)
+                self.assertFalse(terminal.paste)
+                self.assertEqual(terminal.text, "text")
+                self.assertEqual(terminal.escape, "")
+                terminal.key("\x03")
+                self.assertEqual(submitted, ["/stop"])
 
     def test_log_wheel_paging_and_live_output_keep_the_view_anchored(self):
         terminal = Terminal(io.StringIO(), io.StringIO())

@@ -219,6 +219,12 @@ is answered or cancelled. Long requests use the same paging/wheel controls.
 `/log` shows the journal while consent is pending; `/approval` returns to the
 request. Only `/approve` or `/deny` answers that operation; browsing is not consent.
 The request view clears on answer, stop or interrupted waiting.
+Command replies (`/help`, `/status`, `/messages`) and input errors open the latest
+log output so that feedback is visible even while consent is pending. The operation
+remains available through `/approval`; showing feedback never answers it. Ctrl+C
+interrupts even after a truncated keyboard/mouse packet; Ctrl+C inside bracketed
+paste remains text data and does not issue a stop. A new escape sequence supersedes
+an incomplete packet, so an embedded fragment cannot swallow the paste-end marker.
 `--output compact` still controls whether public provider payloads are displayed.
 
 The panel uses seven lines and a horizontal separator when the terminal has at

@@ -137,6 +137,12 @@ history, subject to the existing bound. Cached approval wrapping keeps typing ch
 The footer exposes navigation and log position. Interactive `Progress` disables
 periodic log heartbeats while maintaining panel timers and durable progress; plain
 output keeps its timed activity lines. Actual events continue to enter the log.
+Explicit command replies and input errors use `Interaction.respond` to reveal the
+latest log while preserving the pending request; `/approval` returns to it. Ctrl+C
+clears incomplete keyboard/mouse escape input before issuing `/stop`, while pasted
+control bytes remain non-executing. A fresh escape packet also discards an incomplete
+one, allowing paste-end markers to restore normal input. Terminal regressions cover
+these boundaries.
 `focus_status.py` projects workflow state into a seven-line panel separated from the
 log, with a three-line compact layout for narrow/short terminals. It shows the
 task, actual role/model, six-phase timeline, review streaks and completed totals,

@@ -50,6 +50,12 @@ class Interaction:
     def note(self, text):
         self.terminal.write("\ncc-focus: " + text + "\n")
 
+    def respond(self, text):
+        """Show requested feedback even when an approval view covers the log."""
+        self.note(text)
+        if hasattr(self.terminal, "show_view"):
+            self.terminal.show_view("log", latest=True)
+
     def bind(self, control, state, save):
         with self.lock:
             self.control, self.state, self.save = control, state, save
@@ -126,7 +132,7 @@ class Interaction:
                     return
                 command, _, argument = text.partition(" ")
                 if command == "/help":
-                    self.note(HELP)
+                    self.respond(HELP)
                 elif command in ("/approve", "/deny"):
                     if self.approval is None or argument:
                         raise ValueError("There is no displayed approval to answer, or the command has extra arguments.")
@@ -162,17 +168,17 @@ class Interaction:
                     self.commands.put((command, argument, True))
                 elif command == "/status" and not argument:
                     if self.state:
-                        self.note("\n".join(self.panel().lines))
-                        self.note(json.dumps({"task": self.state.get("task"),
+                        self.respond("\n".join(self.panel().lines))
+                        self.respond(json.dumps({"task": self.state.get("task"),
                                              "review_events": self.state.get("display_review_events", [])}, ensure_ascii=False, indent=2))
                 else:
                     raise ValueError("Unknown command or unexpected arguments. Use /help. Shell commands are not executed here.")
         except (Blocked, OSError, ValueError) as error:
-            self.note(str(error))
+            self.respond(str(error))
 
     def show_messages(self):
         records = self.messages.records(self.state["iteration"]) if self.messages else []
-        self.note("\n".join(f"{item['identity']['id'][:12]} {item['status']} role={item['identity']['role']} "
+        self.respond("\n".join(f"{item['identity']['id'][:12]} {item['status']} role={item['identity']['role']} "
                             f"invocation={item['identity']['invocation']}" for item in records) or "No messages in this stage.")
 
     def panel(self):
