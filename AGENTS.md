@@ -8,6 +8,17 @@ This repository defines a Claude/Codex agent orchestra. Agent definitions (YAML 
 
 Read `knowledge.md` before exploring or changing the repository. Use its map of ownership, control flow, runtime artifacts, and pitfalls to target source checks. Update it alongside changes to locations, responsibilities, phases, configuration, launchers, or invariants. It documents Orchestra itself; generated `.work/knowledge/` describes a consuming project.
 
+## Instruction and Knowledge Style
+
+New instructions and knowledge text follow [the instruction style policy](docs/instruction-style.md).
+Write this text in English unless the user explicitly requests another language.
+Meet at least 80 percent of applicable ASD-STE100 Issue 9 rules.
+Count unchecked applicable rules as unsatisfied.
+Keep all requirements, permissions, exceptions, limits, and machine syntax unchanged.
+Check semantic equivalence separately from style.
+
+Do not claim official certification from the local assessment.
+
 ## Hard Workspace Boundary
 
 When Orchestra is the target of the task, `D:\GitHub\Personal\orchestra` is the only writable repository. Other projects may be inspected read-only to reproduce an Orchestra-generated pitfall or collect evidence, but never edit, format, commit, push, rebase, archive queue tasks, change leases, or mutate `.work/` in those projects. Their source code and task queues are diagnostic inputs, not an implementation backlog. Fix the originating behavior in Orchestra; if the cause cannot be fixed here, report the external requirement without applying it. Do not continue or complete tasks found in another project's queue unless the user starts a separate request that explicitly changes the target repository.
@@ -24,7 +35,11 @@ There is no compiled build. Run `pwsh -NoProfile -File .\tests\launchers\run-all
 
 ## Coding Style & Naming Conventions
 
-Keep Markdown instructions direct, imperative, and consistent with the existing Russian terminology. Preserve YAML frontmatter as the first bytes of agent files; files must be UTF-8 without BOM. Use lowercase snake_case for agent names and files (`knowledge_curator.md`) and the `cc-<action>.cmd` pattern for launchers. Use four-space indentation in PowerShell blocks and uppercase snake case for configuration keys such as `REVIEW_LOOP_MAX`. `.cmd` launchers must use Windows (CRLF) line endings; this is enforced by `.gitattributes` (`*.cmd text eol=crlf`), so a plain checkout is always correct — do not hand-fix line endings per file or per contributor.
+Keep Markdown instructions direct and imperative.
+Use the English style policy for new and changed prose.
+Preserve required Russian identifiers and quoted terms exactly.
+
+Preserve YAML frontmatter as the first bytes of agent files; files must be UTF-8 without BOM. Use lowercase snake_case for agent names and files (`knowledge_curator.md`) and the `cc-<action>.cmd` pattern for launchers. Use four-space indentation in PowerShell blocks and uppercase snake case for configuration keys such as `REVIEW_LOOP_MAX`. `.cmd` launchers must use Windows (CRLF) line endings; this is enforced by `.gitattributes` (`*.cmd text eol=crlf`), so a plain checkout is always correct — do not hand-fix line endings per file or per contributor.
 
 Do not edit generated coder/reviewer variants or `codex/processor.md`/`codex/agents/orchestra_*.toml` independently. Change the canonical `agents/*.md`, its template/variant metadata, or the provider overlay in `generate-codex-agents.ps1`; regenerate and review all outputs.
 

@@ -54,6 +54,27 @@ runtime-контракты.
 
 ## Основной поток
 
+### Instruction and knowledge style
+
+`docs/instruction-style.md` defines the ASD-STE100 Issue 9 writing policy and its internal 80 percent acceptance measure.
+New instructions and knowledge text use English unless the user explicitly requests another language.
+`cycle_prompts.WRITING_CONTRACT` supplies this rule to every Codex role of cc-focus.
+`role_contract` omits it for Claude roles, because Claude coding runs with it ended in `reasoning_extraction` refusals.
+Claude writing roles load the same user policy through `--setting-sources user,project,local`.
+Claude paired inspectors write findings, not instructions or knowledge text.
+The rule preserves requirements, permissions, machine syntax, and the user's conversation language.
+
+`tools/check_focus_instructions.py` checks measurable prose limits without executing runtime code.
+It does not certify the full dictionary or semantic equivalence.
+`tests/test_focus_instructions.py` checks those limits, role coverage, and saved-prompt compatibility.
+`focus_pair_jobs.same_pair_prompt` accepts only a known prose revision at named instruction fields.
+It preserves exact task data and saved prompt bytes.
+Historical compatibility fixtures are evidence, not instructions for new work.
+
+The shared user policy resides in both `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`.
+Keep their text identical.
+It includes language, attribution, instruction style, PAUSE, and task-queue rules.
+
 ### Opt-in sequential main-branch workflow
 
 `launchers/cc-focus.sh` and `cc-focus.cmd` delegate to `tools/focus-runtime.ps1`.
@@ -61,10 +82,79 @@ This is a separate operator-selected profile, not a queue processor variant.
 The wrapper requires Python 3.10+ and a ProcessKit root with inherited stdio.
 `tools/cc_focus.py` owns CLI arguments and lifecycle; `cycle_state.py` owns durable
 state, Git fingerprints and the shared processor lease; `cycle_transport.py`
-owns serial Claude print/Codex app-server sessions and operator approval callbacks;
+owns Claude print/Codex app-server sessions and operator approval callbacks;
 `cycle_workflow.py` owns phase barriers, review counters, recovery and exact-SHA CI.
+It also requests one frozen report-only correction for an unchanged executor that
+wrongly carries cumulative `substantial=true` into a zero-edit invocation.
+`cycle_transport.repairable_executor_accounting` recognizes only that otherwise
+valid report; strict parsing is unchanged and the original is never rewritten.
+`focus_pairs.py` owns paired review phases, agreement, arbitration and publication
+seals. `focus_pair_execution.py` owns Pair A executor closure, retained partial
+reports, exact-result replay and bounded continuation of outstanding assignments.
+`focus_pair_repair.py` owns the B/final inner repair gate,
+risk choice, two static passes and deferred targeted tests. `focus_repair_evidence.py`
+owns exact test-result replay and independently audited historical journal deltas,
+without excluding any files from candidate snapshots. `focus_pair_jobs.py` saves and joins independent reader jobs;
+`focus_pair_view.py` creates frozen source views and exposes bounded read/list/diff
+through a Codex dynamic tool or Claude stdio MCP. `focus_pair_protocol.py` owns strict
+reports and exhaustive dispositions; `focus_pair_profile.py` owns pair identities.
+`focus_snapshot_archive.py` stores frozen bytes in `source.zip` under each view, with
+logical names and hashes in the unchanged inspector interface. Empty source directories
+remain provider working directories; runtime copies no longer enter project/source scans.
+On run/resume, `Cycle.prepare_snapshot_storage` archives legacy loose views under the
+lease after pause/input guards, verifies all bytes and keeps original sealed manifests.
+A per-view receipt precedes retirement of verified duplicates, allowing crash recovery.
+Unknown/changed files, symlinks or unsealed loose copies are preserved and block.
+Read-only status and inspection never compact storage. The module is a shared cc-sync
+asset; `tests/test_focus_snapshot_archive.py` exercises storage and migration boundaries.
+`focus_review.py` retains historical serial-report compatibility. `focus_readonly.py`
+owns the bounded legacy inspector and shared Codex inspection feature overrides:
+the isolated `code_mode_host` must remain enabled for Code Mode-only models, while
+shell/execution, direct image reads, delegation and external tools stay disabled.
+`cycle_transport.py` pins read-only sandboxing at process, thread and turn scope
+and rejects every reader request for command/file-change approval. A native-host
+smoke must exercise list/read/diff and denied writes; a fake dynamic-tool callback
+alone cannot detect a disabled Code Mode host. `focus_pair_jobs.py` archives a
+completed incomplete report before retrying with a new native marker in the same
+session, without invalidating a newer turn or a completed peer.
+All are shared cc-sync assets.
 `cycle_prompts.py` is the canonical fixed profile and prompt source, independent
-of generated agent roles. These runtime files are shared cc-sync assets.
+of generated agent roles. Its `role_contract` always includes the shared
+`COMMAND_EXECUTION_CONTRACT`, including paired executors, for both providers and
+fresh/resumed invocations. Permitted checks run synchronously; shell detachment and
+estimated-duration sleeps are prohibited. Resumed work reuses its completion mechanism,
+or immediate status inspection followed by checks no more than 30 seconds apart while
+running. Role, operation and report-only restrictions still govern whether checks may run.
+These runtime files are shared cc-sync assets.
+
+`CODE_IMPLEMENTATION_CONTRACT` gives the code role its implementation and verification instructions.
+It excludes reviewer-only inspection, discussion, arbitration, and repair schedules.
+The code role retains the common project boundaries, report schema, counter rules, and required later reviews.
+The initial user message and the system prompt addition for Claude use this contract.
+Reviewer roles retain `PAIR_CONTRACT`.
+
+This separation removes conflicting role instructions. It does not prove why a provider refused an earlier request.
+
+Claude writing roles use `--append-system-prompt` to keep the standard Claude Code instructions.
+The named `cycle_worker` has an empty prompt and no memory field, which requires Claude Code 2.1.281 or later.
+This selection still overrides any configured default agent.
+Read-only roles keep their custom prompt and tool restrictions.
+Saved native conversations can retain the earlier system prompt until compaction or an explicit new session.
+
+`focus_diagnostics.ClaudeTrace` records message counts and input sizes from public usage counters.
+The input total includes new tokens, cache creation, and cache reads.
+Repeated frames for a retained message ID do not increase its count.
+The bounded diagnostic keeps first, last, and peak input sizes, plus the refused message's size when available.
+Missing counters remain unknown.
+These measurements do not establish why the provider refused a request.
+
+The diagnostic retains 128 message records and the refusal's response block types.
+Recent tool inputs and results have size and hash metadata, without their contents.
+New transport records include requested model, effort, session reuse, and instruction hashes.
+`cc-focus diagnose --native-log PATH` reads known instruction attachments from a matching native session and project.
+It reports hashes and selected term locations, without exporting instruction text or assistant content.
+Term matches are inspection aids, not evidence of a causal instruction.
+
 `focus_project.py` discovers a project outside its member repositories, either
 from direct Git children or `focus-project.json` (version 1, repositories: relative
 paths). Member roots must be nonoverlapping primary Git main checkouts without
@@ -81,7 +171,7 @@ staging, destination and history drift, and adopts only the exact published
 protected paths. It preserves original baseline HEADs and all Git/source state;
 adopted file baselines use the original commits, not the expanded current HEAD.
 The checksummed correction archives the prior state/plan and pauses the same task
-before Sol with all three review streaks and publication/CI credit cleared. No model
+before Opus with all review streaks and publication/CI credit cleared. No model
 or Git write runs during acceptance. This shared cc-sync asset is covered by
 `tests/test_focus_publication_recovery.py`; normal reconciliation stays unchanged.
 `focus_commit.py` owns publication Git writes after a read-only Luna preparation.
@@ -134,7 +224,9 @@ the operation. Page keys navigate the current view; Ctrl+Home/End jump to its en
 POSIX SGR/X10 mouse-wheel input never enters the composer; reporting modes are
 restored on exit. Incoming output adjusts the log offset to preserve the visible
 history, subject to the existing bound. Cached approval wrapping keeps typing cheap.
-The footer exposes navigation and log position. Interactive `Progress` disables
+The footer exposes navigation and log position. A horizontal rule separates the
+log/request viewport from the footer above the composer; four-row terminals omit
+the rule to retain one visible log row. Interactive `Progress` disables
 periodic log heartbeats while maintaining panel timers and durable progress; plain
 output keeps its timed activity lines. Actual events continue to enter the log.
 Explicit command replies and input errors use `Interaction.respond` to reveal the
@@ -148,9 +240,9 @@ CSI/SS3 packets are consumed through the final byte, with bounded buffering, so
 their suffixes cannot become composer text. Native mouse reports scroll the active
 view without changing the draft or command history; arrow-key encodings still
 select command history because they do not identify a wheel event.
-`focus_status.py` projects workflow state into a seven-line panel separated from the
+`focus_status.py` projects workflow state into an eight-line panel separated from the
 log, with a three-line compact layout for narrow/short terminals. It shows the
-task, actual role/model, six-phase timeline, review streaks and completed totals,
+task, actual role/model, seven-phase timeline, review streaks and completed totals,
 invocation/event timers and priority operator notices. `/status` retains full
 details. Timer ticks run once a second without disk access or history scans;
 message notices use an iteration-scoped cache refreshed on delivery changes.
@@ -168,6 +260,12 @@ as lower bounds. Metadata is archived and reset on the next iteration; CI displa
 is bound to the publication SHA. All display fields are observational and do not
 grant review, publication or CI credit. `focus_status.py` is a shared cc-sync asset;
 `tests/test_focus_status.py` covers projections, workflow transitions and rendering.
+`cc_focus.runtime_fingerprint` records the Python bundle at import. A parked UI
+checks it after an epoch and before resume/correction/message-resolution commands.
+Changed or missing sources set `Interaction.runtime_notice`, visible over blocker
+activity in both layouts, and prevent a stale processing epoch. The operator exits
+and starts a new process; providers are never hot-reloaded or automatically restarted.
+
 `focus_input.py` is the single input owner for slash commands, explicit approvals
 and active-invocation targeting. `/exit` requests a safe pause and closes the terminal
 after ownership is released; empty-input Ctrl+D uses the same command. `/resume`
@@ -219,7 +317,7 @@ asynchronous `turn/steer` replies correlated alongside normal protocol events.
 Claude keeps stream-json stdin open and sends queued input after the current
 response, requiring its replay acknowledgement and its own result; fix counts
 from earlier responses are retained. Accepted stage messages enter later context.
-Review intervention clears earlier clean credit; Opus/final Astra intervention returns to
+Review intervention clears earlier clean credit; Fixing-review intervention returns to
 Sol. Publication/CI cannot be steered. Pending delivery prevents phase advancement
 and cannot be bypassed by a cached result, stopped-stage correction or old-report
 recovery. The terminal may remain parked after releasing runtime ownership; external
@@ -231,38 +329,246 @@ The model-free `messages`, `retry-message --id` and `discard-message --id` comma
 support non-TTY recovery. All three new modules are shared cc-sync runtime assets;
 `tests/test_focus_terminal.py` adds protocol, lifecycle and POSIX PTY fixtures.
 
-The flow is Luna/xhigh coordination, Fable/high coding, Sol/xhigh review to three
-clean passes, Opus/xhigh review to two implementation-clean passes, Astra/xhigh
-final review to one clean pass, Luna/high
-read-only publication preparation, runtime commit/push, and configured CI.
-Substantial Opus or final Astra implementation fixes return to Sol and repeat all three reviews.
-`review_profile=2` identifies the new role/counter layout (`sol`, `claude`, `astra`).
-On normal resume the runtime archives legacy state under `review-profiles/`, retires
-only old reviewer session IDs, and restarts unfinished reviews at Sol with zero credit.
-An already-started publication/CI window retains its old seal and reconciliation;
-new work uses the new profile. Message uncertainty prevents migration. No source or
-Git writes occur. Opus uses the `opus` CLI alias, validates its resolved family at
-initialization and pins that version across the invocation and its retries.
+Profile 8 flows from Luna/xhigh coordination and Opus/xhigh coding to pair A
+(Opus/xhigh + Sol/xhigh), pair B (Astra/xhigh + Opus/max), and the independent final
+pair (Opus/max then Fable/xhigh). A/B initial readers run concurrently on one frozen
+candidate; the final initial reports stay hidden from each other until both finish.
+Two exchanges seek endorsement of the exact proposal hash; a separate Astra/max
+arbiter binds remaining disputes. Reviewers, arbiter and complexity assessor never
+edit, build or test. In pair A, after agreement, Codex `gpt-6-sol/high` assesses every
+accepted assignment and selects Opus/high or xhigh (maximum of the batch).
+The sealed assessment binds the exact candidate and all assignment details; restart
+retains it and its chosen effort. Severity and repair complexity are independent.
+Only the selected Opus executor fixes or verifies assignments with closure evidence.
+Pair A `pair_fix`/`pair_cleanup` (including `_high`) may build and run assigned
+targeted checks now; the B/final inner gate must not leak into its instructions.
+Every source ID has an outcome; `deferred` is representable but never closes work.
+`focus_pair_execution.py` seals partial reports and continues the same pinned
+executor on missing/deferred/incompatible closures without redoing completed work.
+No advance or outer review occurs until all obligations close. Later edits invalidate
+earlier verified outcomes; substantial changes survive a check-only continuation.
+Two stalled continuations route to recovery; disputes preserve unfinished work for
+arbitration. Exact cached originals, including legacy executor prompts, can replay
+after restart/no-op healing; current snapshots, correction/message history and
+assignment/complexity bindings prevent stale adoption. Reports are immutable and
+each execution batch has its own artifact namespace. The panel/status exposes
+closed/remaining counts. `tests/test_focus_pair_execution.py` covers this compatible
+Profile 8 correction; it adds no migration or new review credit.
+Executor counters and `substantial` always describe the current invocation. A
+check-only continuation cannot inherit the batch's flag. Exact rejected results
+can be restored for report-only correction, preserving their checks/resolutions;
+the runtime retains the earlier cumulative impact and late static-review credit.
+The correction has its own durable marker in the same native session, cannot edit
+the candidate or invent counters, and does not repeat builds/tests. An interrupted
+correction resumes that marker even after recovery clears pending. Changed source,
+instructions, correction revision or proof cannot be silently adopted. Invalid
+corrections use normal recovery instead of another automatic correction loop.
+`tests/test_focus_executor_accounting.py` covers fresh and already-blocked results,
+restart/quota, exact proof retention, and both late repair phases.
+Every pair repeats after significant findings (blocking or critical/high/medium);
+low nonblocking findings are fixed then advance without another OUTER review.
+B/final always fix with Opus/xhigh, which selects self-review in its native session
+or independent Opus/xhigh + Astra/xhigh based on actual patch risk. Contracts,
+storage, security, concurrency, interacting components, algorithms or uncertainty
+require a pair; the mode never downgrades within a batch. Both forms use immutable
+repair diffs and inspection-only tools, no builds/tests. Two clean passes on the
+exact cumulative repair are required before a separate targeted test invocation.
+Any repair resets credit. Test defects restart repair/review/test and force pair
+mode; infrastructure-only failure preserves unchanged static credit. A required
+diagnostic cannot be skipped. Only then may significant repairs return to the
+expensive outer pair, or minor repairs advance. Shared `focus_pair_repair.py` owns
+this state machine and its seals; `tests/test_focus_repair.py` covers it.
+Infrastructure reports can retain verification obstacles but never candidate defects;
+they do not close the test gate. Exact saved results that predate a runtime archive
+migration get at most one automatic retry with preserved static credit. The next test
+prompt includes retained successful checks and unresolved obstacles; only outstanding
+checks and prerequisites need rerunning. New/repeated failures use normal recovery.
+Test invocations put evidence in their JSON reports, without editing journals.
+For older completed tests, `focus_repair_evidence.py` can preserve the two original
+static passes only through a separate read-only Opus/xhigh audit of every changed
+documentation hunk. Full before/after hashes, the original test receipt and the
+audit are sealed; behavioral docs, expected results, uncertainty, added/deleted or
+nonregular files and VCS changes do not qualify. Publication retains actual journal
+bytes, and later changes invalidate the exception. Tests may report `verified` for
+a fix only by citing an earlier sealed `fixed` resolution; original reports remain
+intact. Retry authenticates and reuses the exact completed result, including legacy
+test prompts, never healer credit; consumed failures cannot replay as fresh checks.
+No-op healing preserves pending classification. `tests/test_focus_repair_evidence.py`
+covers these boundaries and restart/recovery. This does not change Profile 8.
+Unexpected substantial repairs require renewed inspection of the same pair.
+No fixed OUTER clean streak or B→A return remains. With no accepted assignments, skip
+assessment/execution. `pair_completed` retains conclusions, including post-cleanup
+snapshots. Profile 1–7 migration restarts unpublished reviews at A, carries open
+findings and preserves already-started publication/CI seals and all working files.
+
+`pair_review`, per-job sessions/reports and `pair-reviews/` artifacts make a completed
+peer reusable while only its interrupted partner resumes. Both ProcessKit leaf
+addresses live in `active.json.provider_runs`; cleanup joins both before any writer.
+Group input is a durable instruction to both, invalidates endorsements and restarts A.
+Malformed/incomplete reports get two author corrections without rerunning the peer;
+rejected versions remain sealed. A partial disputed fix goes to the arbiter on a new
+frozen view, then requires fresh independent inspection before any clean credit.
+`--retry` resets participant wait deadlines without discarding completed peer reports.
+Early context is compact public decisions/checks with original evidence references;
+final initial inputs omit prior runtime judgments and use fresh sessions. Inspection
+tools can read only the frozen manifest, not hidden state/logs or arbitrary paths.
+Source documents are not semantically redacted. Full suites are optional assignments
+only in pair B; the executor otherwise builds/tests only affected behavior. Late
+fix invocations cannot test until the inner static gate completes. Panel and JSON
+status expose the inner mode/reason/clean count and active nested reader jobs;
+retry/new-session handling includes those jobs. Native self-review uses the original
+cwd with the frozen tool manifest, independent reviewers use frozen-view cwd.
+
+Profiles 1–7 migrate under ownership, archive former state and discard old review
+credit. Unpublished reviews restart at A; already-started publication/CI retains its
+original seal. Coding, coordinator, publisher and healer sessions are preserved.
+`tests/test_focus_pairs.py` covers concurrency, interrupted peers, independent final
+inputs, consensus/arbitration, closure and returns; native fixtures verify model,
+effort and bounded tool profiles. Legacy final tests retain artifact compatibility.
+Opus uses the `opus` CLI alias, validates its family at initialization and pins the
+resolved version throughout each invocation and retries.
 Recoverable blockers receive one Astra/xhigh recovery attempt before an operator-visible stop.
-The `heal` role has its own persisted conversation, separate from coding and all three
+The `heal` role has its own persisted conversation, separate from coding and all required
 review roles. Technical failures, including remote Git queries, generic provider
-API errors and model-reported requests for human intervention, go to that role.
+API errors and model-reported requests for human intervention go to that role.
 The healer verifies the diagnosis and existing authorization, performs necessary
 engineering repairs within the task/member scope and tests them before escalating.
 Product authentication code is not the agent's own runtime/account permissions;
 protected existing work and actual permission boundaries remain enforced.
-Only explicit account-access/approval barriers bypass model recovery, as do
-`cleanup-incomplete`/`turn-active`, where another provider cannot safely start.
+Explicit account-access and approval barriers bypass model recovery.
+Structured Claude safeguard refusals also bypass this recovery.
+`cleanup-incomplete` and `turn-active` prevent another provider from starting safely.
 The blocker records `escalation_reason`: manual action, unsafe provider state,
-failed healer, failed post-repair verification or an already-attempted blocker.
+provider refusal, an unavailable provider, failed healer, failed post-repair verification or an already-attempted blocker.
 Terminal output explains whether recovery is starting or why human action remains.
+
 Claude-generated API errors (`assistant`, `<synthetic>`, `is_api_error_message=true`
 and a matching session) are classified before model pin validation.
-`oauth_org_not_allowed` becomes `claude-access-denied`; except for the structured
-quota refusals below, other such errors become
-`claude-api-error` with their provider detail. Access refusals also preserve the
-provider detail and direct the operator to the active login and subscription/payment
-status; an organization-labelled error alone does not identify managed billing.
+`oauth_org_not_allowed` becomes `claude-access-denied`.
+Structured safeguard refusals, quota refusals, and transient server failures have separate paths, described below.
+Other marked synthetic errors become `claude-api-error` with their provider detail.
+Access refusals retain the provider detail and identify the active login and subscription/payment status as checks for the operator.
+The word "organization" in an error does not establish managed billing.
+
+`cycle_transport.claude_refusal` describes `stop_reason=refusal` after the transport validates the response source and session.
+It uses public explanation text, categories, and supplied request and message identifiers.
+It does not copy thinking blocks or infer a refusal from quoted error text.
+`Cycle.handle_block` records `claude-refusal` with `escalation_reason=provider-refusal`.
+It preserves partial work without starting a healer, automatic retry, or another model or session.
+The operator guidance distinguishes request inspection from optional support contact for a suspected false positive.
+
+`focus_diagnostics.ClaudeTrace` also joins streamed refusals with their message and request identifiers.
+The transport stops on a matching streamed refusal before accepting a later native continuation.
+Each Claude invocation saves bounded metadata in `claude-diagnostics.json`.
+`cc-focus diagnose --invocation ID` reads this metadata from existing protocol events without a lease or state writes.
+It reports loaded tool names, recent tool completion, model identity, and public refusal details.
+It excludes prompt text, tool arguments, message bodies, settings values, stderr, and private content blocks.
+
+The optional `--public-output` view uses `focus_output.LiveOutput` to display public messages and command results.
+Recovery instructions prefer this view to raw provider transcripts.
+Public command output can contain project data and is not a secret-scrubbing export.
+The diagnostic command does not start providers, clear blockers, or grant review credit.
+The module is a shared cc-sync asset, tested by `tests/test_focus_diagnostics.py`.
+
+`ClaudeTrace.cli_events` keeps compaction boundaries, refusal notices and refusals without a fallback model.
+The launch record adds `instruction_files`: path, size and hash of each loadable `CLAUDE.md` candidate.
+`Transport.instruction_snapshot` hashes them before the process starts and again in the `completion` record.
+`instruction_files_captured: before-start` marks new records. Older records have completion-time hashes and show unknown timing.
+`focus_diagnostics.refusal_history` backs `cc-focus diagnose --refusals`.
+It compares the first refusal with `last_completed_before` and reports instruction-paragraph first lines only.
+That reference needs a terminal `success` result with `is_error=false` and no refusal. It is not runtime acceptance.
+`ClaudeTrace` marks a result `deferred` while native tasks or queued turns remain, like the transport.
+`Transport.mark_attempt` writes a `runtime` attempt record into `protocol.jsonl` before each Claude process.
+The attempt and launch records keep the process directory, which names the native log of paired readers.
+The launch record sets `instruction_files_enabled: false` for paired inspectors. The history then compares no files.
+The launch record names the same attempt ID.
+`claude_attempts` splits the log at these records. Older logs split at an event with a new session.
+Only the attempt that owns the launch record gets the launch metadata. The prompt file belongs to the last attempt.
+A launch record without an attempt ID can own only an attempt before the first attempt record.
+`runtime_instruction_blocks` limits named prompt paragraphs to the current runtime instructions.
+It also tells if a plain retry would resend the refused native conversation.
+`tests/test_focus_refusals.py` covers this report, and `tests/test_cycle.py` covers the retry check.
+
+A refused native conversation keeps its history. Each resumed request sends that history again.
+
+`focus_diagnostics.selected_refusals` finds refused conversations that a plain retry would resume.
+`saved_claude_call` takes the last attempt from `claude_attempts` on the protocol log.
+It uses `claude-diagnostics.json` only when `launch.attempt` names that attempt, or when the log cannot decide.
+It checks role sessions and unfinished pair reader jobs, because a pair blocker names only its group.
+`cc_focus.main` rejects such a `--retry` for a `claude-refusal` blocker.
+It also rejects `correct`, `recover` and `reconcile --apply-plan` when the refused conversation is a role session that they keep.
+The check runs before the shared lease and starts no model.
+`--new-sessions --retry` starts new conversations and passes the check.
+
+`cycle_prompts.EXECUTOR_ACCOUNTING_CONTRACT` gives pair writers the counter rules that `parse_report` enforces.
+`PAIR_CONTRACT` stays unchanged, so saved reader prompts remain valid.
+`repairable_substantial_accounting` and executor `changed-file-accounting` start one report-only correction.
+Both apply only to `PAIR_WRITERS`. Other roles keep the blocker and their own guards.
+`validate_executor_correction` then permits changes only to counters, substantial, summary and description.
+For an original without changed files, it requires all three counters at 0 and substantial=false.
+`Cycle.with_correction_source` marks the corrected original as consumed, so discovery after a heal cannot adopt it again.
+`executor_candidate_report` rejects a failed correction when the original changed files. The heal then resets the stale pair.
+`read_saved_repair_test` also skips a changed test run whose valid report claims fixes or substantial impact.
+It also skips any changed test run that fails `evidence_eligible`, the prefilter of `queue_repair_evidence`.
+The test step cannot accept it. Unchanged work replays, so `invoke` can correct its counters.
+`invoke` starts an `unchanged-accounting` correction for an executor without changed files but with counters.
+`retry_after_storage_repair` dates a corrected test run by its original invocation.
+`Cycle.pair_step` clears `recovery_unverified` after accepted pair work, so a later new blocker gets a healer.
+`tests/test_focus_report_accounting.py` covers these paths.
+
+`cycle_prompts.DISCUSSION_CONSENSUS_CONTRACT` gives discussion roles the exact `consensus` format.
+Both Claude and Codex discussion readers put prose around the hash. The old rule said "name the hash".
+The parser does not check the format of `consensus`. `pair_inspection_step` rejects a wrong value after both readers finish.
+An endorsement with assessments or new findings still fails the parser. Its error says to set `consensus` to null to disagree.
+A parse failure on the third attempt would stop the running peer and discard its report.
+The `pair-consensus` error names the exact expected hash and impact for the correction prompt.
+Without a proposal, it tells the reader to set `consensus` to null. The arbiter keeps its own null rule.
+`cc-focus --retry` clears `report_repairs` of unfinished pair jobs.
+`run_jobs` replaces a saved `LEGACY_CONSENSUS_ERROR` with `consensus_error` in the correction prompt.
+
+`ProviderTransient` classifies only matching-session synthetic `server_error` /
+`overloaded_error`, or initialized error results with `terminal_reason=api_error`
+and integer HTTP status 500/502/503/504/529. Quoted text and unknown failures keep
+ordinary recovery.
+
+After confirmed cleanup, `Cycle.defer_transient` stores
+`pending.transient_retries` and `transient_wait`; the same invocation/session gets
+at most three outer-runtime retries after 15/30/60 seconds. Exhaustion goes to
+`handle_block`. It stops the run with `provider-unavailable` for both provider
+codes in `PROVIDER_UNAVAILABLE_BLOCKERS`. Neither the healer nor a provider
+launches a retry. The budget and deadline survive
+pause/restart, including `--retry`; retiring an invocation retires its budget.
+
+`wait_transient` yields through normal stop, PAUSE, message and lease checks.
+Unresolved message delivery prevents automatic retry. Protected files, HEAD and
+staging are checked before scheduling and launching; report-only corrections
+retain their frozen snapshot checks.
+
+Work is preserved, but an interrupted review loses its current streak and file
+edits latch substantial changes. Only a no-work failure on an unchanged snapshot
+preserves prior clean credit. No failed attempt earns a pass. Panel/progress/status
+expose the retry count and countdown with no active model. Existing escalated
+blockers still need operator continuation; installing this change does not resume them.
+
+For Codex, `codex_transient` finds a failed turn with a server error. Its
+`codexErrorInfo` is `serverOverloaded` or `internalServerError`. An HTTP
+connection or stream error with status 500/502/503/504/529 is also a server error.
+The code is `codex-transient`. Model items, tool calls and approval requests in the
+failed turn count as started work. `Rpc.server_requests` counts the tool calls and
+approval requests.
+
+`Cycle.run` checks a saved quota or server-error wait before it starts the healer.
+A Codex healer with a server error therefore also waits. If the healer uses all its
+retries, the run stops with `healer-failed`. `--retry` retires a waiting healer
+with its blocker, and it resets `transient_retries` and `retry_at` of unfinished
+pair jobs. Inside the publication window, Stop and PAUSE wait until the window ends.
+
+After exhausted retries, every sequential role and pair participant gets the same
+closing sentences from `transient_exhausted`. They tell the operator to wait for
+the provider and then run `--retry`. For a pair participant, the text names the
+participant role, because the blocker names the pair group invocation. A server
+error of the healer keeps `healer-failed`, with the same text as its resolution.
+
 Claude quota refusals are a separate transport/runtime path: `ProviderQuota` requires
 a matching-session rejected `rate_limit_event` with a finite positive `resetsAt`
 and a synthetic `rate_limit` refusal or HTTP 429 API-error result. Telemetry alone,
@@ -293,8 +599,9 @@ successful reports, even if the CLI has not emitted initialization yet.
 Claude also receives `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` in its process and
 inline settings, with Bash timeouts of 30 minutes by default and six hours maximum.
 Monitor, cron creation, wakeups, remote triggers and Workflow are disabled alongside
-native delegation. The six-hour outer deadline remains in force. This enforces the
-serial contract without changing user/project settings or conversation identity.
+native delegation. The six-hour outer deadline remains in force. Automatic backgrounding
+is disabled without changing user/project settings or conversation identity; explicit
+shell `nohup`/`&` is constrained by the common prompt rather than that CLI setting.
 For native continuation from older sessions/CLI versions, task start/completion
 events and queued turns keep a result provisional. The runtime stores it under
 `deferred-*.txt`, keeps consuming events and requires a later final report; it does
@@ -317,8 +624,19 @@ Review accounting includes new journals/logs/evidence/snapshots/digest indexes i
 checks. This preserves clean credit without inventing substantive defects. Evidence
 corrections are `other_fixes`, or implementation fixes when they change behavior,
 checks, acceptance rules or instructions. Paths never grant a category exemption;
-changed files with all counters zero still raise `unreported-fix`, with an explicit
-accounting hint. Historical rejected reports are not silently accepted.
+changed files with all counters zero trigger one report-only correction before
+`unreported-fix` escalation. `Cycle.begin_report_repair` creates a fresh durable
+invocation marker in the same role/session, links the immutable rejected result
+and pins its post-review snapshot. `report_repair_context` verifies the source
+hash and unchanged files/HEAD/index on every entry and before accepting a result.
+The author corrects classification without new review, tests or evidence writes;
+runtime never infers minor edits from paths or invents counts. The corrected result
+retains the original before/after scope and provenance, earning at most one pass.
+Interrupted correction and quota refusal preserve completed-pass credit until
+validation; implementation fixes in the corrected report use normal review gates.
+Input targeting is disabled during correction; existing operator restart markers
+are carried forward. A second invalid report or mutation uses ordinary recovery.
+Historical escalated reports are not silently accepted or rewritten.
 `report_object` unwraps one final JSON object after plain prose or a single Markdown
 fence; the raw artifact/handoff stays unchanged. It rejects multiple/nested objects,
 trailing commentary, duplicate keys and malformed JSON without guessing a repair.
@@ -333,7 +651,7 @@ credential helpers and operator settings. `Cycle.remote_head` labels progress as
 a runtime Git check instead of an active coordinator. Exhausted timeouts and other
 remote access failures become `remote-query-timeout`/`remote-query-failed` and go
 through Astra/xhigh recovery; unchanged review seals, phase and sessions survive.
-Any repair changing reviewed files must pass all three reviews. After restoring access,
+Any repair changing reviewed files must pass all required reviews. After restoring access,
 `--retry` also resumes legacy `command-unavailable` Git timeouts. Publication and CI
 still require live remote evidence; successful pushes reconcile before model replay.
 Check authentication as the launcher OS user: root's missing login says nothing
@@ -363,7 +681,7 @@ transition under the local lock and shared lease. It copies/hashes operator text
 and the previous stage context under `.work/cycle/corrections/`, retains the current
 iteration and sessions, replaces pending intent with a new correction revision,
 and returns the same stage to coding with zero review credit. Context validates
-the immutable artifacts and carries corrections through all three reviews; old coding
+the immutable artifacts and carries corrections through all required reviews; old coding
 results cannot acknowledge a newer revision. Publication/CI, changed HEAD/protected
 work and unstarted stages fail closed. After coding, `correction_pending` clears;
 after publication/CI, the archived iteration retains corrections and the new stage
@@ -386,7 +704,7 @@ An iteration blocked before its first coding invocation can also be reconciled.
 Its correction records `before_code=true`, preserves `code_started=false`, clears
 the provisional task label, and guides selection from the current plan instead of reopening the prior published
 stage. It has no mandatory correction acknowledgement for a nonexistent stage;
-the usual unpublished-diff barrier still requires coding and all three reviews for
+the usual unpublished-diff barrier still requires coding and all required reviews for
 adopted work. A loose-context-only handover may finish an exhausted plan without
 inventing implementation. Fresh coding prompts no longer describe an initial
 invocation as report recovery; resumed/previously attempted invocations still do.

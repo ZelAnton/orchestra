@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 
+from cycle_prompts import REVIEW_ROLES, FINAL_ROLES
 from cycle_state import Blocked, digest, encode
 from focus_control import FocusStop
 
@@ -63,7 +64,7 @@ class Messages:
         if not text.strip() or len(text.encode("utf-8")) > 65536 or "\0" in text:
             raise ValueError("Use nonempty text without NUL, at most 64 KiB.")
         with self.lock:
-            if target["role"] not in ("code", "sol", "claude", "astra", "coordinate", "heal"):
+            if target["role"] not in ("code", *REVIEW_ROLES, *FINAL_ROLES, "pair_group", "coordinate", "heal"):
                 raise ValueError("This role cannot receive operator instructions.")
             records = self.records(target["iteration"])
             if len(records) >= 128:

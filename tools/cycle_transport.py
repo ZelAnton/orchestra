@@ -14,9 +14,40 @@ import threading
 import time
 import uuid
 
-from cycle_prompts import CONTRACT, PROFILES, REPORT_SCHEMA
-from cycle_state import Blocked, ProviderQuota, atomic_write, encode
+from cycle_prompts import CONTRACT, PAIR_CONTRACT, PROFILES, REPORT_SCHEMA, READONLY_REVIEW_ROLES, role_contract
+from focus_pair_profile import PAIR_ROLES, PAIR_READONLY, PAIR_WRITERS
+from focus_pair_view import ViewInspector
+from focus_review import report_schema, validate_findings
+from focus_readonly import Inspector, READ_TOOL, READONLY_FEATURE_OVERRIDES
+from cycle_state import Blocked, ProviderQuota, ProviderTransient, atomic_write, digest, encode
 from focus_messages import MessagePending, message_text
+from focus_diagnostics import ClaudeTrace, instruction_files
+
+
+def claude_refusal(event):
+    """Describe a structured refusal after the caller validates its source."""
+    message = event["message"]
+    details = message.get("stop_details")
+    details = details if isinstance(details, dict) else {}
+    category = details.get("category")
+    category = category[:120] if isinstance(category, str) and category else "unspecified"
+    explanation = details.get("explanation")
+    explanation = explanation[:2000] if isinstance(explanation, str) else ""
+    text = " ".join(block["text"] for block in (message.get("content") or [])
+                    if isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str))[:2000]
+    identifiers = []
+    for label, value in (("Request ID", event.get("request_id")), ("Response message ID", message.get("id"))):
+        if isinstance(value, str) and value:
+            identifiers.append(f"{label}: {value[:200]}")
+    guidance = ("Check the request, instructions, and tool schemas for requests to disclose private reasoning. "
+                "Use short explanations and observable evidence instead. "
+                if category == "reasoning_extraction" else "Inspect the request and the provider's refusal guidance. ")
+    return Blocked("claude-refusal", f"Claude refused the request ({category}). {explanation}\n{text}\n" +
+                   "\n".join(identifiers) + "\n" + guidance +
+                   "Contact provider support if a permitted request still appears to be misclassified. "
+                   "The runtime will not retry automatically or change the model or session. "
+                   "Existing work is preserved. This invocation is incomplete; no review credit is granted.")
 
 
 class WindowsJob:
@@ -264,8 +295,9 @@ def report_object(raw):
 def parse_report(raw, role=None):
     try:
         report = report_object(raw)
-        required = set(REPORT_SCHEMA["required"]) - {"task"}
-        if not required <= set(report) or set(report) - set(REPORT_SCHEMA["properties"]):
+        schema = report_schema(role)
+        required = set(schema["required"]) - {"task"}
+        if not required <= set(report) or set(report) - set(schema["properties"]):
             raise ValueError("missing or unknown report fields")
         if report["status"] not in ("done", "blocked", "complete"):
             raise ValueError("invalid status")
@@ -283,9 +315,45 @@ def parse_report(raw, role=None):
         # review defects. Keep the consistency check for all other role reports.
         if role != "code" and report["substantial"] and not report["implementation_fixes"]:
             raise ValueError("substantial requires implementation fixes")
+        validate_findings(report, role)
         return report
     except (ValueError, TypeError, KeyError) as error:
         raise Blocked("invalid-report", f"Provider final report is invalid: {error}") from error
+
+
+def repairable_executor_accounting(raw, role, before, after):
+    """Recognize, never accept, an unchanged executor's cumulative-impact mistake."""
+    if role not in PAIR_WRITERS or before != after:
+        return None
+    try:
+        original = report_object(raw)
+        if (original.get("status") != "done" or original.get("substantial") is not True
+                or any(type(original.get(k)) is not int or original[k] != 0
+                       for k in ("implementation_fixes", "other_fixes", "minor_edits"))):
+            return None
+        # The strict parser must accept every other field. This in-memory probe
+        # grants no closure; the original session must issue a corrected report.
+        parse_report(json.dumps(dict(original, substantial=False)), role)
+        return original
+    except (ValueError, TypeError, KeyError, Blocked):
+        return None
+
+
+def repairable_substantial_accounting(raw, role):
+    """Recognize, never accept, an executor's substantial=true without implementation fixes."""
+    if role not in PAIR_WRITERS:
+        return None  # Other roles keep the blocker, the healer and their own guards.
+    try:
+        original = report_object(raw)
+        # A blocked report stops the cycle anyway; a counter correction would only delay it.
+        if (original.get("status") != "done" or original.get("substantial") is not True
+                or type(original.get("implementation_fixes")) is not int or original["implementation_fixes"] != 0):
+            return None
+        # Every other field must already be valid; only the classification is inconsistent.
+        parse_report(json.dumps(dict(original, substantial=False)), role)
+        return original
+    except (ValueError, TypeError, KeyError, Blocked):
+        return None
 
 
 def concise_summary(summary):
@@ -306,6 +374,12 @@ class Transport:
         self.interaction = interaction
         self.commands = {"codex": [codex], "claude": [claude]}
 
+    def fork(self, root, state, save, heartbeat, control=None, progress=None):
+        child = Transport(root, state, save, heartbeat, self.lock_fd,
+                          progress=progress, control=control)
+        child.commands = dict(self.commands)
+        return child
+
     def run(self, role, prompt, pending, directory):
         if self.interaction:
             self.interaction.begin(pending)
@@ -323,15 +397,20 @@ class Transport:
     def _run(self, role, prompt, pending, directory):
         provider, model, effort = PROFILES[role]
         session = self.state["sessions"].get(role)
-        prompt += "\n\n" + CONTRACT + "\nReport schema: " + json.dumps(REPORT_SCHEMA)
+        prompt += "\n\n" + role_contract(role) + "\nReport schema: " + json.dumps(report_schema(role))
         # Keep the durable marker compatible with conversations started as cc-cycle.
         prompt += "\nInvocation marker: cc-cycle/" + pending["id"]
-        if pending.get("attempts", 0):
-            prompt += ("\nRECOVERY: the previous attempt of THIS SAME invocation was interrupted. "
-                       "Do not choose the next stage or repeat a completed commit/push. Inspect the "
-                       "preserved files and this invocation's protocol log, reconstruct the prior "
-                       "stage/result where possible, and finish ONLY that same work. An incomplete "
-                       "review must be performed again as one complete pass.")
+        if pending.get("report_repair"):
+            prompt += ("\nThis invocation is REPORT-ONLY CORRECTION. Keep all working files and staging unchanged. Do not repeat review, builds, or tests, including after an interruption. Correct only the original review's final JSON with existing evidence.")
+        elif pending.get("attempts", 0):
+            prompt += ("\nRECOVERY: the previous attempt of THIS SAME invocation was interrupted. Do not select the next stage or repeat a completed commit/push. Inspect retained files and public command results. If possible, reconstruct the prior stage and result. Finish ONLY that same work. Repeat an incomplete review as one complete pass.")
+        prompt += ("\nUse saved reports and public command results for recovery. "
+                   "Do not read raw provider transcripts or private content blocks. "
+                   "For provider metadata, run `cc-focus diagnose --invocation INVOCATION_ID`. "
+                   "Add `--public-output` to read public messages, tool calls, and results. "
+                   "Replace INVOCATION_ID with the interrupted invocation ID. "
+                   "These commands do not start a provider or change cycle state. "
+                   "\n\nRead-only inspectors must use only their assigned inspection tools.")
         pending["attempts"] = pending.get("attempts", 0) + 1
         self.save(self.state)
         atomic_write(Path(directory) / "prompt.txt", prompt.encode("utf-8"))
@@ -341,23 +420,51 @@ class Transport:
                     return self._claude(role, model, effort, session, prompt, pending, directory)
                 except Blocked as error:
                     if error.code != "claude-session-missing":
+                        if error.code == "claude-refusal":
+                            raise Blocked(error.code, f"{error}\nInspect public metadata: cc-focus diagnose --invocation {Path(directory).name}") from error
                         raise
                     self.state.setdefault("session_recoveries", []).append({"role": role, "missing": session,
                                                                            "invocation": pending["id"]})
                     self.state["sessions"].pop(role, None)
                     self.save(self.state)
                     print(f"cc-focus: {role} native history is missing; continuing the same phase from durable context.", flush=True)
-                    prompt += ("\nThe prior native conversation is unavailable. This is a clean continuation "
-                               "of the SAME runtime phase. Reconstruct context from the handoffs and "
-                               "invocation artifacts; preserve WIP and do not advance to another stage.")
+                    prompt += ('\nThe prior native conversation is unavailable. This is a new conversation for the SAME runtime phase. Reconstruct context from handoffs and invocation artifacts. Keep existing work. Do not discard it. Do not advance to another stage.')
                     atomic_write(Path(directory) / "prompt.txt", prompt.encode("utf-8"))
                     return self._claude(role, model, effort, None, prompt, pending, directory)
             return self._codex(role, model, effort, session, prompt, pending, directory)
         except (OSError, ValueError, KeyError, TypeError, StopIteration) as error:
             raise Blocked("provider-protocol", f"{provider}: {error}") from error
 
+    def mark_attempt(self, directory, role, session, resumed):
+        """Mark where a Claude process starts in the shared protocol log.
+
+        A retry can reuse the invocation directory and append another
+        conversation. Diagnostics split the log at these records.
+        """
+        attempt = uuid.uuid4().hex
+        record = {"type": "attempt", "attempt": attempt, "provider": "claude", "role": role,
+                  "session_id": session, "resumed": resumed, "started": time.time(), "cwd": str(self.root)}
+        try:
+            descriptor = os.open(Path(directory) / "protocol.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(descriptor, "ab") as log:
+                log.write(encode({"stream": "runtime", "line": json.dumps(record)}) + b"\n")
+        except OSError:
+            return None  # The process log reports its own I/O failure.
+        return attempt
+
+    def instruction_snapshot(self, role):
+        """Fingerprint candidate instruction files; a diagnostic failure never stops or masks a run."""
+        try:
+            return instruction_files(self.root, role not in PAIR_READONLY)
+        except Exception:  # Diagnostics stay optional; the provider or containment result decides the run.
+            return None
+
     def _claude(self, role, model, effort, session, prompt, pending, directory):
         resumed = bool(session)
+        # A nonempty --agent prompt replaces Claude Code's standard instructions.
+        # Writers need its coding/tool guidance plus the cycle's stricter contract.
+        # An empty prompt without memory keeps the default (Claude Code 2.1.281+).
+        preserve_default = role not in READONLY_REVIEW_ROLES
         # Enforce the serial profile in the CLI as well as the prompt. Its
         # default Bash timeout otherwise moves long tests to the background.
         command_env = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
@@ -369,7 +476,19 @@ class Transport:
                 "--settings", json.dumps({"effortLevel": effort, "disableAllHooks": True, "ultracode": False,
                                            "env": command_env}),
                 "--agent", "cycle_worker", "--agents", json.dumps({"cycle_worker": {
-                    "description": "Execute the current sequential cycle invocation only.", "prompt": CONTRACT, "model": model}})]
+                    "description": "Execute the current cycle invocation only.",
+                    "prompt": "" if preserve_default else role_contract(role), "model": model}})]
+        if preserve_default:
+            argv += ["--append-system-prompt", role_contract(role)]
+        if role in PAIR_READONLY:
+            argv[argv.index("user,project,local")] = ""
+            server = {"mcpServers": {"focus": {"command": sys.executable,
+                "args": [str(Path(__file__).with_name("focus_pair_view.py")), self.state["inspection_path"]]}}}
+            argv += ["--tools", "", "--strict-mcp-config", "--mcp-config", json.dumps(server),
+                     "--allowedTools", "mcp__focus__inspect", "--disable-slash-commands"]
+        elif role in READONLY_REVIEW_ROLES:
+            argv += ["--tools", "Read,Glob,Grep", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                     "--disable-slash-commands"]
         if self.interaction:
             argv += ["--input-format", "stream-json", "--replay-user-messages"]
         if session:
@@ -383,6 +502,16 @@ class Transport:
         env.update(command_env)
         env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
         env["CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"] = "0"
+        # Hash the candidate files before Claude starts: an operator or the run itself can change them.
+        # Paired inspectors start without user/project settings.
+        launch_files = self.instruction_snapshot(role)
+        diagnostic = ClaudeTrace()
+        try:
+            transport_digest = digest(Path(__file__).read_bytes())
+        except OSError:
+            transport_digest = None
+        attempt = self.mark_attempt(directory, role, session, resumed)
+        # No work may run between process creation and the try block that closes it.
         process = Process(argv, self.root, Path(directory) / "protocol.jsonl", self.heartbeat, self.lock_fd, env, progress=self.progress, control=self.control)
         try:
             def send_message(text, message_id):
@@ -408,6 +537,21 @@ class Transport:
             process.on_poll = await_ack
             while True:
                 event = process.receive()
+                refusal = diagnostic.feed(event)
+                if refusal and refusal["source"] == "message_delta":
+                    if (not initialized or refusal["session_id"] != session
+                            or refusal["message_session_id"] != session
+                            or refusal["message_parent_tool_use_id"] is not None
+                            or event.get("parent_tool_use_id") is not None):
+                        raise Blocked("provider-profile", "Claude streamed refusal lacks the matching main session.")
+                    answer_model = refusal["model"]
+                    if model == "opus" and isinstance(answer_model, str):
+                        answer_model = answer_model.removesuffix("[1m]")
+                    if answer_model != resolved_model:
+                        raise Blocked("model-rerouted", "Claude streamed refusal belongs to a different model.")
+                    raise claude_refusal({"request_id": refusal["request_id"], "message": {
+                        "id": refusal["message_id"], "stop_details": {
+                            "category": refusal["category"], "explanation": refusal["explanation"]}}})
                 if event.get("type") == "rate_limit_event":
                     if event.get("session_id") != session:
                         raise Blocked("provider-profile", "Claude quota event belongs to a different session.")
@@ -431,6 +575,10 @@ class Transport:
                     elif event.get("status") in ("completed", "failed", "stopped"):
                         active_tasks.discard(task_id)
                 if event.get("type") == "system" and event.get("subtype") == "init":
+                    if role in READONLY_REVIEW_ROLES and (
+                            not isinstance(event.get("tools"), list)
+                            or any(name not in (("mcp__focus__inspect",) if role in PAIR_READONLY else ("Read", "Glob", "Grep")) for name in event["tools"])):
+                        raise Blocked("provider-profile", "Claude inspection exposed a tool outside the pinned read-only set.")
                     actual_model = event.get("model")
                     valid_model = (isinstance(actual_model, str) and bool(re.fullmatch(r"claude-opus-\d+(?:-\d+)*(?:\[1m\])?", actual_model))
                                    if model == "opus" else actual_model == model)
@@ -454,6 +602,8 @@ class Transport:
                         # substituted model. Preserve the actual operator error.
                         if event.get("session_id") != session:
                             raise Blocked("provider-profile", "Claude API error belongs to a different session.")
+                        if message.get("stop_reason") == "refusal":
+                            raise claude_refusal(event)
                         code = event.get("error")
                         detail = " ".join(block["text"] for block in (message.get("content") or [])
                                           if isinstance(block, dict) and block.get("type") == "text"
@@ -466,6 +616,8 @@ class Transport:
                                           "This invocation did not complete; no review credit is granted.")
                         if code == "rate_limit" and quota_reset is not None:
                             raise ProviderQuota(quota_reset, no_work=not work_started)
+                        if code in ("server_error", "overloaded_error"):
+                            raise ProviderTransient(code, detail, no_work=not work_started)
                         raise Blocked("claude-api-error", f"Claude API error ({str(code)[:120]}): {detail[:2000]} "
                                       "Resolve the provider error, then resume this same phase; no review credit is granted.")
                     answer_model = message.get("model")
@@ -473,6 +625,10 @@ class Transport:
                         answer_model = answer_model.removesuffix("[1m]")
                     if answer_model != (resolved_model if model == "opus" else model) or answer_model is None:
                         raise Blocked("model-rerouted", "Claude emitted an answer from a different model; refusing the result.")
+                    if message.get("stop_reason") == "refusal":
+                        if event.get("session_id") != session:
+                            raise Blocked("provider-profile", "Claude refusal belongs to a different session.")
+                        raise claude_refusal(event)
                     work_started = True
                 if (current_message and event.get("type") == "user" and event.get("session_id") == session
                         and event.get("uuid") == str(uuid.UUID(current_message["identity"]["id"]))):
@@ -489,6 +645,11 @@ class Transport:
                     if (event.get("is_error") is True and event.get("terminal_reason") == "api_error"
                             and event.get("api_error_status") == 429 and quota_reset is not None):
                         raise ProviderQuota(quota_reset, no_work=not work_started)
+                    if (event.get("is_error") is True and event.get("terminal_reason") == "api_error"
+                            and type(event.get("api_error_status")) is int
+                            and event["api_error_status"] in (500, 502, 503, 504, 529)):
+                        raise ProviderTransient(event["api_error_status"], str(event.get("errors") or event.get("result") or "Server failure"),
+                                                no_work=not work_started)
                     if event.get("is_error") or event.get("subtype") != "success":
                         raise Blocked("claude-failed", str(event.get("errors") or event.get("result") or event)[-4000:])
                     raw = event.get("result", "")
@@ -563,16 +724,44 @@ class Transport:
                         raise Blocked("claude-exit", f"Claude exited with code {code} after its result.")
                     return raw
         finally:
-            process.close()
+            try:
+                process.close()
+            finally:
+                try:
+                    metadata = diagnostic.report()
+                    metadata["launch"] = {
+                        "role": role, "requested_model": model, "effort": effort, "resumed": resumed, "attempt": attempt,
+                        "session_id": session, "cwd": str(self.root),
+                        "standard_system_prompt": preserve_default,
+                        "role_contract_sha256": digest(role_contract(role).encode("utf-8")),
+                        "prompt_sha256": digest(prompt.encode("utf-8")),
+                        "transport_sha256": transport_digest,
+                        "instruction_files": launch_files,
+                        "instruction_files_captured": "before-start",
+                        # Paired inspectors start without user/project settings and load none of these files.
+                        "instruction_files_enabled": role not in PAIR_READONLY,
+                    }
+                    metadata["completion"] = {"instruction_files": self.instruction_snapshot(role)}
+                    atomic_write(Path(directory) / "claude-diagnostics.json", encode(metadata))
+                except Exception:
+                    # Diagnostics must not turn a result or refusal into a recoverable
+                    # error, or hide a containment failure. The raw log remains.
+                    print("cc-focus: Could not save Claude diagnostic metadata; use cc-focus diagnose on the invocation.", file=sys.stderr)
 
     def _codex(self, role, model, effort, session, prompt, pending, directory):
-        argv = self.commands["codex"] + ["-s", "danger-full-access", "-a", "on-request", "app-server",
-            "--listen", "stdio://", "-c", 'sandbox_mode="danger-full-access"',
+        readonly = role in READONLY_REVIEW_ROLES
+        sandbox = "read-only" if readonly else "danger-full-access"
+        argv = self.commands["codex"] + ["-s", sandbox, "-a", "on-request", "app-server",
+            "--listen", "stdio://", "-c", f'sandbox_mode="{sandbox}"',
             "-c", 'approval_policy="on-request"', "-c", 'approvals_reviewer="user"',
             "-c", "features.multi_agent=false", "-c", "features.memories=false",
             "-c", f'model_reasoning_effort="{effort}"']
+        if readonly:
+            for feature, enabled in READONLY_FEATURE_OVERRIDES.items():
+                argv += ["-c", "features." + feature + "=" + str(enabled).lower()]
+            argv += ["-c", 'web_search="disabled"', "-c", "mcp_servers={}"]
         process = Process(argv, self.root, Path(directory) / "protocol.jsonl", self.heartbeat, self.lock_fd, progress=self.progress, control=self.control)
-        rpc = Rpc(process, self.interaction)
+        rpc = Rpc(process, self.interaction, (ViewInspector(self.state["inspection"]) if role in PAIR_READONLY else Inspector(self.root, self.state)) if readonly else None)
         try:
             rpc.request("initialize", {"clientInfo": {"name": "orchestra_cycle", "version": "1.0.0"},
                                        "capabilities": {"experimentalApi": True}})
@@ -591,13 +780,20 @@ class Transport:
                     for e in m.get("supportedReasoningEfforts", [])) for m in models):
                 raise Blocked("model-unavailable", f"Codex does not advertise {model}/{effort}; no fallback is allowed.")
             params = {"model": model, "cwd": str(self.root), "approvalPolicy": "on-request",
-                      "approvalsReviewer": "user", "sandbox": "danger-full-access",
+                      "approvalsReviewer": "user", "sandbox": sandbox,
                       # Memory consolidation can start an independent tool-using
                       # agent even when ordinary delegation is disabled. Pin the
                       # feature at process startup AND for resumed/new threads.
                       "config": {"features.multi_agent": False, "features.memories": False,
                                  "model_reasoning_effort": effort},
-                      "developerInstructions": CONTRACT}
+                      "developerInstructions": role_contract(role)}
+            if readonly:
+                params["config"].update({"features." + key: enabled for key, enabled in READONLY_FEATURE_OVERRIDES.items()})
+                params["config"]["web_search"] = "disabled"
+                params["config"]["mcp_servers"] = {}
+                # Replace the inherited map at process and thread scope. Do not
+                # request/copy operator configuration (which may contain tokens)
+                # into the protocol log just to disable these servers.
             created = not session
             if session:
                 params["threadId"] = session
@@ -616,11 +812,11 @@ class Transport:
                     params.pop("threadId")
                     params.pop("excludeTurns")
                     created = True
-                    prompt += ("\nThe prior native conversation is unavailable. This is a clean continuation "
-                               "of the SAME runtime phase. Reconstruct context from the handoffs and "
-                               "invocation artifacts; preserve WIP and do not advance to another stage.")
+                    prompt += ('\nThe prior native conversation is unavailable. This is a new conversation for the SAME runtime phase. Reconstruct context from handoffs and invocation artifacts. Keep existing work. Do not discard it. Do not advance to another stage.')
             if created:
                 params.update(ephemeral=False, allowProviderModelFallback=False)
+                if readonly:
+                    params["dynamicTools"] = [READ_TOOL]
                 reply = rpc.request("thread/start", params)
                 session = reply["thread"]["id"]
                 self.state["sessions"][role] = session
@@ -628,7 +824,7 @@ class Transport:
             if (reply["model"] != model or reply["approvalPolicy"] != "on-request"
                     or reply.get("approvalsReviewer") != "user"
                     or reply.get("reasoningEffort") != effort
-                    or reply["sandbox"].get("type") != "dangerFullAccess"
+                    or reply["sandbox"].get("type") != ("readOnly" if readonly else "dangerFullAccess")
                     or Path(reply["cwd"]).resolve() != self.root
                     or reply["thread"]["id"] != session):
                 raise Blocked("provider-profile", "Codex effective model, root or permission policy differs from the requested profile.")
@@ -655,7 +851,7 @@ class Transport:
             request = {"threadId": session, "input": [{"type": "text", "text": prompt}],
                        "model": model, "effort": effort, "cwd": str(self.root),
                        "approvalPolicy": "on-request", "approvalsReviewer": "user",
-                       "sandboxPolicy": {"type": "dangerFullAccess"}, "outputSchema": REPORT_SCHEMA}
+                       "sandboxPolicy": {"type": "readOnly"} if readonly else {"type": "dangerFullAccess"}, "outputSchema": report_schema(role)}
             turn = rpc.request("turn/start", request)["turn"]
             pending["turn_id"] = turn["id"]
             self.save(self.state)
@@ -681,16 +877,28 @@ class Transport:
                         "input": [{"type": "text", "text": message_text(record)}]}, acknowledge)
 
             process.on_poll = steer
+            work_started, requests_before = False, rpc.server_requests
             while True:
                 event = rpc.event()
                 if event.get("method") == "model/rerouted":
                     raise Blocked("model-rerouted", "Codex rerouted the pinned model; refusing a substituted result.")
+                if event.get("method") in ("item/started", "item/completed"):
+                    item = (event.get("params") or {}).get("item")
+                    if isinstance(item, dict) and item.get("type") != "userMessage":
+                        work_started = True  # Model output or a tool call: a retry is not a clean repeat.
+                work_started = work_started or rpc.server_requests > requests_before
                 if event.get("method") == "turn/completed":
                     data = event["params"]
                     if data["threadId"] != session or data["turn"]["id"] != turn["id"]:
                         continue
                     if data["turn"]["status"] != "completed":
-                        raise Blocked("codex-failed", str(data["turn"].get("error") or data["turn"]["status"])[-4000:])
+                        error = data["turn"].get("error")
+                        reason = codex_transient(error)
+                        if reason:
+                            # Like a Claude server error: bounded retries of the same invocation and thread.
+                            raise ProviderTransient(reason, str(error.get("message") or reason),
+                                                    no_work=not work_started, provider="codex")
+                        raise Blocked("codex-failed", str(error or data["turn"]["status"])[-4000:])
                     completed = data["turn"]
                     if self.interaction:
                         self.interaction.close_target()
@@ -704,6 +912,26 @@ class Transport:
             process.close()
 
 
+# Codex app-server error kinds (codexErrorInfo) for a server failure that a later retry can fix.
+CODEX_SERVER_ERRORS = ("serverOverloaded", "internalServerError")
+CODEX_HTTP_ERRORS = ("httpConnectionFailed", "responseStreamConnectionFailed",
+                     "responseStreamDisconnected", "responseTooManyFailedAttempts")
+SERVER_STATUSES = (500, 502, 503, 504, 529)
+
+
+def codex_transient(error):
+    """Name a Codex server failure that a later retry can fix, or return None."""
+    info = error.get("codexErrorInfo") if isinstance(error, dict) else None
+    if isinstance(info, str) and info in CODEX_SERVER_ERRORS:
+        return info
+    if isinstance(info, dict) and len(info) == 1:
+        kind, value = next(iter(info.items()))
+        status = value.get("httpStatusCode") if isinstance(value, dict) else None
+        if kind in CODEX_HTTP_ERRORS and type(status) is int and status in SERVER_STATUSES:
+            return f"{kind} {status}"
+    return None
+
+
 def final_text(turn):
     messages = [item for item in turn.get("items", []) if item.get("type") == "agentMessage"]
     finals = [item for item in messages if item.get("phase") == "final_answer"]
@@ -713,12 +941,14 @@ def final_text(turn):
 
 
 class Rpc:
-    def __init__(self, process, interaction=None):
+    def __init__(self, process, interaction=None, inspector=None):
+        self.inspector = inspector
         self.process = process
         self.sequence = 0
         self.notifications = deque()
         self.callbacks = {}
         self.interaction = interaction
+        self.server_requests = 0  # Tool calls and approval requests that the turn loop does not see.
 
     def notify(self, method, params):
         self.process.send(encode({"method": method, "params": params}) + b"\n")
@@ -753,6 +983,13 @@ class Rpc:
             if "id" not in message or "method" not in message:
                 return message
             method, params = message["method"], message.get("params", {})
+            self.server_requests += 1
+            if self.inspector:
+                if method != "item/tool/call":
+                    raise Blocked("readonly-tool", "Final review cannot execute commands, change files or request execution approval.")
+                result = self.inspector.call(params)
+                self.process.send(encode({"id": message["id"], "result": result}) + b"\n")
+                continue
             if method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
                 if self.interaction and self.interaction.interactive:
                     answer = "y" if self.interaction.approve(params, self.process.heartbeat) else "n"

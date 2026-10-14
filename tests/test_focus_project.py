@@ -14,7 +14,7 @@ import unittest
 from unittest.mock import patch
 
 import test_cycle as fixtures
-from cycle_state import Blocked, LocalLock, Repository, Store, changed, encode
+from cycle_state import Blocked, ProviderTransient, LocalLock, Repository, Store, changed, encode
 from cycle_workflow import fresh_state
 from focus_control import Control, runtime_active
 from focus_control import FocusStop
@@ -59,6 +59,19 @@ class ProjectTests(unittest.TestCase):
         self.policy.start()
         self.quiet = contextlib.redirect_stdout(io.StringIO())
         self.quiet.__enter__()
+
+    def test_transient_retry_preserves_member_work_and_guards_other_member_index(self):
+        self.state.update(coordinated="code", pending={"id": "server-retry", "role": "code", "attempts": 1,
+                          "before": self.project.snapshot()})
+        (self.root / "Core/source.txt").write_text("partial implementation\n")
+        self.assertTrue(self.cycle.defer_transient(ProviderTransient("server_error", "interrupted")))
+        (self.root / "Specification/source.txt").write_text("operator staging\n")
+        self.members["Specification"].git("add", "source.txt")
+        with self.assertRaises(Blocked) as guard:
+            self.cycle.invoke("code")
+        self.assertEqual(guard.exception.code, "unauthorized-staging")
+        self.assertEqual((self.root / "Core/source.txt").read_text(), "partial implementation\n")
+        self.assertEqual(self.transport.calls, [])
 
     def tearDown(self):
         self.quiet.__exit__(None, None, None)
@@ -571,6 +584,40 @@ class ProjectTests(unittest.TestCase):
         self.assertNotIn("publication_repositories", saved)
         self.assertNotIn("remote", saved)
 
+    def test_final_cleanup_publishes_its_fixes_in_each_affected_member_without_review(self):
+        from test_focus_review import assessment, finding, resolution
+        from cycle_prompts import FINAL_SCANNERS
+        self.edit("Core")
+        self.state.update(phase="final", last_snapshot=self.project.snapshot())
+        issue = dict(finding(), locations=[{"path": "Specification/source.txt", "line": 1}])
+        self.transport.actions = [(role, fixtures.report(findings=[issue] if i == 0 else []))
+                                  for i, role in enumerate(FINAL_SCANNERS)]
+        self.transport.actions.append(("final_triage", fixtures.report(assessments=[dict(
+            assessment("r1:final_opus:a", False), locations=issue["locations"])])))
+        for _ in range(4):
+            self.cycle.final_review_step()
+        original = self.project.snapshot()
+        def cleanup():
+            self.edit("Core", text="stage with final fix\n")
+            self.edit("Specification", text="corrected contract\n")
+            return fixtures.report(implementation_fixes=1, resolutions=[resolution()])
+        self.transport.actions = [("final_cleanup", cleanup)]
+        self.cycle.final_review_step()
+        self.assertEqual(self.state["reviewed"], self.project.snapshot())
+        self.assertNotEqual(self.state["reviewed"], original)
+        self.assertEqual(self.state["phase"], "publish")
+        self.transport.actions = [("publish", fixtures.report())]
+        self.cycle.publish()
+        self.assertEqual(self.state["phase"], "ci")
+        self.assertEqual([role for role, _ in self.transport.calls],
+                         [*FINAL_SCANNERS, "final_triage", "final_cleanup", "publish"])
+        self.assertEqual(set(self.state["published"]["repositories"]), {"Core", "Specification"})
+        for member in ("Core", "Specification"):
+            self.assertEqual(self.members[member].text("rev-parse", "HEAD"),
+                             self.members[member].text("ls-remote", "--refs", str(self.remotes[member]), "refs/heads/main").split()[0])
+            self.assertEqual(self.members[member].dirty_paths(), [])
+        self.assertEqual(self.members["Root"].text("rev-parse", "HEAD"), self.state["baseline"]["head"]["Root"])
+
     @unittest.skipIf(os.name == "nt", "POSIX Git hook fixture")
     def test_every_member_commit_is_checked_before_any_project_push(self):
         self.seal()
@@ -622,20 +669,36 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(self.members["Core"].text("rev-parse", "HEAD"), first_head)
         self.assertEqual(saved["phase"], "ci")
 
+    def test_report_correction_preserves_combined_member_scope(self):
+        self.state.update(phase='sol', sol_clean=1)
+        before = self.project.snapshot()
+        def review():
+            self.edit('Core', 'review.log', 'verified Core')
+            self.edit('Specification', 'review.log', 'verified Specification')
+            return fixtures.report()
+        self.transport.actions = [('sol', review), ('sol', fixtures.report(minor_edits=2))]
+        self.cycle.review('sol')
+        result = json.loads(Path(self.state['last']['report']).read_text())
+        self.assertEqual(result['report_repair']['changed_paths'], ['Core/review.log', 'Specification/review.log'])
+        self.assertEqual(result['before'], before)
+        self.assertEqual(result['after'], self.project.snapshot())
+        self.assertEqual(result['after']['head'], before['head'])
+        self.assertEqual(result['after']['index'], before['index'])
+        self.assertEqual(self.state['sol_clean'], 2)
+        self.assertEqual(self.state['display_reviews']['sol']['completed'], 1)
+        self.assertEqual(self.state['phase'], 'astra')
+
     def test_full_project_cycle_reviews_combined_scope_before_publishing(self):
         def code():
             self.edit("Core")
             self.edit("Specification")
             return fixtures.report(description="One project stage changes Core and Specification.")
         def publish():
-            self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (3, 2))
+            self.assertEqual(self.state["pair_clean"], {"pair_a": 1, "pair_b": 1})
             return fixtures.report()
         done = fixtures.report()
-        self.transport.actions = [("coordinate", done), ("code", code), ("coordinate", done),
-            ("sol", done), ("sol", done), ("sol", done), ("coordinate", done),
-            ("claude", done), ("claude", done), ("coordinate", done), ("astra", done),
-            ("coordinate", done), ("publish", publish),
-            ("coordinate", fixtures.report(status="complete"))]
+        self.transport.actions = [("coordinate", done), ("code", code), *fixtures.pair_actions(),
+            ("coordinate", done), ("publish", publish), ("coordinate", fixtures.report(status="complete"))]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual(self.state["iteration"], 2)
         archived = json.loads((self.store.directory / "iterations/000001.json").read_text())
@@ -660,6 +723,50 @@ class ProjectTests(unittest.TestCase):
         for name in ("Root", "Specification"):
             self.assertEqual(self.members[name].text("rev-parse", "HEAD"), first[name])
         self.assertEqual(self.state["phase"], "ci")
+
+    def test_substantial_pair_b_fix_repeats_b_and_publishes_only_changed_members(self):
+        from test_focus_pairs import PairTransport, finding, repair_metadata
+        self.edit('Core')
+        self.cycle.reset_reviews()
+        self.state.update(phase='pair_b', last_snapshot=self.project.snapshot())
+        transport = PairTransport(self.root)
+        transport.cycle = self.cycle
+        self.cycle.transport = transport
+        first = [True]
+        def inspect(context, heartbeat):
+            found = first[0]
+            first[0] = False
+            row = finding()
+            row['locations'][0]['path'] = 'Specification/source.txt'
+            return fixtures.report(findings=[row] if found else [])
+        def fix(context, heartbeat):
+            testing = context['operation'] == 'test'
+            if not testing:
+                self.edit('Specification')
+            return fixtures.report(implementation_fixes=0 if testing else 1, substantial=not testing,
+                repair=repair_metadata(context, 'pair'),
+                resolutions=[{'source_id': t['source_id'], 'outcome': 'fixed', 'resolution': 'Fixed contract',
+                              'evidence': ['Contract regression checked']} for t in context['assignments']],
+                handoff={'decisions': ['Updated contract'], 'assumptions': [], 'checks': ['Contract checked']})
+        transport.handlers.update(pair_opus_max=inspect, repair_execute=fix)
+        for _ in range(60):
+            if self.state['phase'] == 'publish':
+                break
+            self.cycle.paired_review_step()
+        self.assertEqual(self.state['phase'], 'publish')
+        self.assertEqual([r for r, _ in transport.calls].count('pair_opus'), 0)
+        self.assertEqual([r for r, _ in transport.calls].count('pair_astra'), 2)
+        self.assertEqual([r for r, _ in transport.calls].count('repair_opus'), 2)
+        self.assertEqual([r for r, _ in transport.calls].count('repair_astra'), 2)
+        self.assertEqual([c['operation'] for r, c in transport.calls if r == 'repair_execute'], ['fix', 'test'])
+        self.cycle.transport = self.transport
+        self.transport.actions = [('coordinate', fixtures.report()), ('publish', fixtures.report()),
+                                  ('coordinate', fixtures.report(status='complete'))]
+        self.assertEqual(self.cycle.run(), 0)
+        archived = json.loads((self.store.directory / 'iterations/000001.json').read_text())
+        self.assertEqual(set(archived['published']['repositories']), {'Core', 'Specification'})
+        for name in ('Core', 'Specification'):
+            self.assertEqual(self.members[name].remote_head('origin'), self.members[name].text('rev-parse', 'HEAD'))
 
     def test_member_ci_failure_cannot_advance_the_project(self):
         self.seal()

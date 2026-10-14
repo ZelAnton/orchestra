@@ -30,6 +30,21 @@ class ProviderQuota(Blocked):
         super().__init__("claude-quota", f"Claude quota rejected; advertised reset: {reset}.")
 
 
+def transient_exhausted(holder="The retained invocation"):
+    """Closing text after the last server-error retry. The operator reads it."""
+    # No invocation ID: the blocker signature must stay the same for a repeated failure.
+    return (f"{holder} holds the server failure. "
+            "Operator: wait until the provider is available. Then run cc-focus --retry.")
+
+
+class ProviderTransient(Blocked):
+    """A structured provider server failure eligible for bounded outer retries."""
+    def __init__(self, reason, detail, no_work=False, provider="claude"):
+        self.no_work, self.provider = no_work, provider
+        super().__init__(f"{provider}-transient",
+                         f"{provider.capitalize()} server error ({reason}): {detail[:2000].rstrip('.')}. No review credit earned.")
+
+
 def digest(value):
     return hashlib.sha256(value).hexdigest()
 

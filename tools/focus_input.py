@@ -5,9 +5,10 @@ import queue
 import threading
 import time
 
+from cycle_prompts import REVIEW_ROLES, FINAL_ROLES, READONLY_REVIEW_ROLES
 from cycle_state import Blocked
 from focus_messages import MessagePending, Messages
-from focus_status import build_panel, reset_notice
+from focus_status import StatusPanel, build_panel, reset_notice
 
 
 HELP = """Text: save an instruction for the active invocation (not a shell command).
@@ -43,6 +44,7 @@ class Interaction:
         self.progress = None
         self.message_states = {}
         self.message_notice = ""
+        self.runtime_notice = ""
         self.message_iteration = None
         terminal.callback = self.submit
         terminal.status_tick = self.tick
@@ -101,7 +103,7 @@ class Interaction:
             records = self.messages.unresolved(self.state["iteration"])
             if any(item["identity"]["invocation"] != pending["id"] or item["status"] != "queued" for item in records):
                 raise MessagePending("Unresolved message delivery. Use /messages, then /retry-message ID or /discard-message ID; no automatic resend.")
-            if self.state.get("publication_started") or self.state.get("published") or pending["role"] == "publish":
+            if self.state.get("publication_started") or self.state.get("published") or pending["role"] == "publish" or pending.get("report_repair") or pending["role"] in READONLY_REVIEW_ROLES:
                 self.target = None
             else:
                 self.target = {"iteration": self.state["iteration"], "invocation": pending["id"], "role": pending["role"]}
@@ -188,8 +190,12 @@ class Interaction:
             self.message_notice = ""
         live = self.progress.view() if self.progress else {}
         stop = (self.control.announced if self.control else "") or ("safe" if self.quit and not self.paused else "")
-        return build_panel(self.state, live, paused=self.paused, approval=self.approval is not None,
-                           notice=self.message_notice, stop=stop)
+        panel = build_panel(self.state, live, paused=self.paused, approval=self.approval is not None,
+                            notice=self.message_notice, stop=stop)
+        if self.runtime_notice:
+            panel = StatusPanel((*panel.lines[:-1], self.runtime_notice),
+                                (*panel.compact[:-1], self.runtime_notice), panel.tone)
+        return panel
 
     def tick(self):
         if self.state:
@@ -206,11 +212,10 @@ class Interaction:
             record = records[0]
             role = self.target["role"]
             # Earlier passes cannot certify a scope that changed during this pass.
-            if role in ("sol", "claude", "astra"):
+            if role in (*REVIEW_ROLES, *FINAL_ROLES):
                 reset_notice(self.state, "Новое указание для ревью")
-                self.state.update(sol_clean=0, claude_clean=0, astra_clean=0, reviewed=None)
-                if role in ("claude", "astra"):
-                    self.pending["return_to_sol"] = True
+                self.state.update(**{name + "_clean": 0 for name in REVIEW_ROLES}, claude_clean=0, reviewed=None)
+                self.pending["restart_reviews"] = True
             self.pending["operator_intervened"] = True
             self.save(self.state)
             record = self.messages.update(record, "sending")

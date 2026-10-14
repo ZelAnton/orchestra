@@ -1,6 +1,7 @@
 """Hermetic workflow/protocol tests; never invoke a paid provider."""
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -19,14 +20,16 @@ REPO = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.path.insert(0, str(REPO / "tools"))
-from cycle_state import Blocked, ProviderQuota, Lease, LocalLock, Repository, Store, atomic_write, changed, command, encode
-from cycle_prompts import PROFILES
+from cycle_state import Blocked, ProviderQuota, ProviderTransient, Lease, LocalLock, Repository, Store, atomic_write, changed, command, encode
+from cycle_prompts import CODE_IMPLEMENTATION_CONTRACT, COMMAND_EXECUTION_CONTRACT, PAIR_CONTRACT, PROFILES, REVIEW_PROFILE_VERSION, REVIEW_ROLES, REVIEW_TARGETS, WRITING_CONTRACT
+from focus_pair_profile import PAIRS, PAIR_ROLES, PAIR_READONLY, PAIR_WRITERS
 from cycle_transport import Process, Rpc, Transport, concise_summary, parse_report
 from cycle_workflow import Cycle, fresh_state
 from focus_control import Control, FocusStop, request_stop, runtime_active, status
 from focus_progress import Progress, safe_text
 from focus_output import LiveOutput
 from focus_messages import MessagePending
+from focus_snapshot_archive import read_source
 
 
 def report(**kwargs):
@@ -36,9 +39,40 @@ def report(**kwargs):
     return value
 
 
+def final_round_actions(done=None):
+    return [("final_opus", report(findings=[])), ("final_astra", report(findings=[])),
+            ("claude", report(findings=[])),
+            ("final_triage", (lambda: dict(done(), assessments=[])) if done else report(assessments=[]))]
+
+
+def pair_actions(done=None):
+    roles = [*PAIRS["pair_a"], *PAIRS["pair_b"], *PAIRS["final"]]
+    actions = [(role, report(findings=[])) for role in roles]
+    if done:
+        actions[-1] = (roles[-1], lambda: dict(done(), findings=[]))
+    return actions
+
+
 class FixtureTransport:
     def __init__(self, root, actions=()):
         self.root, self.actions, self.calls = root, list(actions), []
+        self.lock = threading.Lock()
+
+    def fork(self, root, state, save, heartbeat, control=None, progress=None):
+        parent = self
+        class Child:
+            def run(self, role, prompt, pending, directory):
+                # Deterministic fixture order; the separate concurrency test uses a barrier.
+                deadline = time.monotonic() + 5
+                while True:
+                    with parent.lock:
+                        if not parent.actions or parent.actions[0][0] == role:
+                            return parent.run(role, prompt, pending, directory)
+                    heartbeat()
+                    if time.monotonic() > deadline:
+                        raise AssertionError("Unexpected pair role " + role)
+                    time.sleep(.01)
+        return Child()
 
     def run(self, role, prompt, pending, directory):
         self.calls.append((role, prompt))
@@ -83,6 +117,15 @@ class CycleTests(unittest.TestCase):
             (self.root / name).write_text(content, encoding="utf-8")
             return report(**kwargs)
         return action
+
+    def review_pass(self, role, **kwargs):
+        self.assertEqual(self.state["phase"], role)
+        self.transport.actions = [(role, report(**kwargs))]
+        self.cycle.review(role)
+
+    def finish_loop(self, role):
+        self.review_pass(role)
+        self.review_pass(role)
 
     def remote(self):
         remote = Path(self.temp.name) / "bare.git"
@@ -216,7 +259,7 @@ class CycleTests(unittest.TestCase):
         with patch.object(self.transport, "run", side_effect=finish_code) as provider:
             self.assertEqual(self.cycle.run(), 0)
         provider.assert_called_once()
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
         self.assertEqual(self.state["code_report"], raw)
         self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertEqual(json.loads(Path(self.state["last"]["report"]).read_bytes())["raw"], raw)
@@ -235,7 +278,7 @@ class CycleTests(unittest.TestCase):
             with self.subTest(length=length):
                 value = report(summary="\u0416" * length, implementation_fixes=2,
                                other_fixes=1, minor_edits=3, substantial=True)
-                self.assertEqual(parse_report(json.dumps(value), "claude"), value)
+                self.assertEqual(parse_report(json.dumps(value), "opus_final"), value)
                 preview = concise_summary(value["summary"])
                 self.assertLessEqual(len(preview), 1200)
                 if length <= 1200:
@@ -251,7 +294,7 @@ class CycleTests(unittest.TestCase):
 
     def test_long_summary_bounds_projections_but_keeps_raw_and_cached_results(self):
         value = report(summary="Result " * 400 + "unique ending")
-        for role in ("coordinate", "code", "sol", "claude", "heal"):
+        for role in ("coordinate", "code", "sol", "opus_final", "heal"):
             with self.subTest(role=role):
                 self.transport.actions = [(role, value)]
                 parsed, before, after, raw = self.cycle.invoke(role)
@@ -270,36 +313,36 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(len(self.transport.calls), 5)
 
     def test_long_review_summary_preserves_clean_pass_and_fix_gates(self):
-        cases = [(0, False, "astra", 2), (1, False, "claude", 0), (1, True, "sol", 0)]
+        cases = [(0, False, "opus_final", 2), (1, False, "astra", 0), (1, True, "astra", 0)]
         for fixes, substantial, phase, clean in cases:
             with self.subTest(fixes=fixes, substantial=substantial):
-                self.state.update(phase="claude", sol_passes=3, sol_clean=3, claude_clean=1)
-                self.transport.actions = [("claude", report(summary="x" * 1201,
+                self.state.update(review_plan=[], review_substantial=False, phase="astra", sol_passes=3, sol_clean=3, astra_clean=1)
+                self.transport.actions = [("astra", report(summary="x" * 1201,
                     implementation_fixes=fixes, substantial=substantial))]
-                self.cycle.review("claude")
+                self.cycle.review("astra")
                 self.assertEqual(self.state["phase"], phase)
-                self.assertEqual(self.state["claude_clean"], clean)
+                self.assertEqual(self.state["astra_clean"], clean)
 
     def test_long_summary_cannot_certify_an_incomplete_or_blocked_review(self):
         for overrides, error in ((dict(evidence=[]), "completed pass"),
                                  (dict(status="complete"), "completed pass"),
                                  (dict(status="blocked"), "Provider blocker detail")):
             with self.subTest(overrides=overrides):
-                self.state.update(phase="claude", pending=None, claude_clean=1)
-                self.transport.actions = [("claude", report(summary="x" * 1201,
+                self.state.update(phase="opus_final", pending=None, opus_final_clean=1)
+                self.transport.actions = [("opus_final", report(summary="x" * 1201,
                     description="Provider blocker detail", **overrides))]
                 with self.assertRaisesRegex(Blocked, error):
-                    self.cycle.review("claude")
-                self.assertEqual(self.state["phase"], "claude")
-                self.assertEqual(self.state["claude_clean"], 1)
+                    self.cycle.review("opus_final")
+                self.assertEqual(self.state["phase"], "opus_final")
+                self.assertEqual(self.state["opus_final_clean"], 1)
 
     def test_retry_legacy_summary_blocker_preserves_review_phase_and_sessions(self):
         import cc_focus
-        self.state.update(phase="claude", coordinated="claude", sol_clean=3,
-                          claude_clean=1, recovery_unverified=True,
-                          sessions={"claude": "preserved-review-session"})
-        self.transport.actions = [("claude", report(summary="x" * 1201))]
-        self.cycle.invoke("claude")
+        self.state.update(phase="opus_final", coordinated="opus_final", sol_clean=3,
+                          opus_final_clean=1, recovery_unverified=True,
+                          sessions={"opus_final": "preserved-review-session"})
+        self.transport.actions = [("opus_final", report(summary="x" * 1201))]
+        self.cycle.invoke("opus_final")
         result_path = Path(self.state["last"]["report"])
         saved = result_path.read_bytes()
         self.cycle.handle_block(Blocked("invalid-report", "Provider final report is invalid: summary exceeds 1200 characters"))
@@ -310,16 +353,16 @@ class CycleTests(unittest.TestCase):
             self.assertEqual(cc_focus.main(["--retry", "--ui", "off"]), 0)
         current = self.store.read()
         self.assertIsNone(current["blocker"])
-        self.assertEqual(current["phase"], "claude")
+        self.assertEqual(current["phase"], "opus_final")
         self.assertEqual(current["sessions"], self.state["sessions"])
         self.assertEqual(current["sol_clean"], 3)
-        self.assertEqual(current["claude_clean"], 0)
+        self.assertEqual(current["opus_final_clean"], 0)
         self.assertEqual(result_path.read_bytes(), saved)
 
     def test_new_coding_work_does_not_require_review_fix_counts(self):
         raw = json.dumps(report(substantial=True))
         self.assertTrue(parse_report(raw, "code")["substantial"])
-        for role in (None, "sol", "claude", "heal", "coordinate"):
+        for role in (None, "sol", "opus_final", "heal", "coordinate"):
             with self.subTest(role=role), self.assertRaises(Blocked):
                 parse_report(raw, role)
 
@@ -345,7 +388,7 @@ class CycleTests(unittest.TestCase):
         raw_bytes = path.read_bytes()
         self.state.update(sol_clean=2, claude_clean=1)
         self.cycle.recover_review(path)
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
         self.assertEqual(self.state["status"], "paused")
         self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertEqual(self.state["sessions"]["code"], "preserved-code-session")
@@ -357,7 +400,7 @@ class CycleTests(unittest.TestCase):
         backups = list((self.store.directory / "recoveries").glob("*.json"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(json.loads(backups[0].read_text())["previous_state"]["phase"], "code")
-        self.assertEqual(self.store.read()["phase"], "sol")
+        self.assertEqual(self.store.read()["phase"], "pair_a")
 
     def test_coding_recovery_bounds_summary_without_shortening_sol_context(self):
         path = self.rejected_coding_fixture()
@@ -393,7 +436,7 @@ class CycleTests(unittest.TestCase):
         path.write_bytes(encode(result))
         saved, snapshot = path.read_bytes(), self.repo.snapshot()
         self.cycle.recover_review(path)
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
         self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
         self.assertEqual(self.state["code_report"], result["raw"])
         self.assertEqual(path.read_bytes(), saved)
@@ -405,10 +448,11 @@ class CycleTests(unittest.TestCase):
         def finish_review():
             self.stop_request(control)
             return report()
-        self.transport.actions += [("coordinate", report()), ("sol", finish_review)]
+        self.transport.actions += [("pair_opus", lambda: dict(finish_review(), findings=[])), ("pair_sol", report(findings=[]))]
         self.assertEqual(self.cycle.run(), 0)
-        self.assertEqual([role for role, _ in self.transport.calls], ["coordinate", "code", "coordinate", "sol"])
-        self.assertEqual(self.state["sol_clean"], 1)
+        self.assertEqual([role for role, _ in self.transport.calls], ["coordinate", "code", "pair_opus", "pair_sol"])
+        self.assertEqual(self.state["pair_review"]["step"], "decide")
+        self.assertEqual(self.state["pair_clean"]["pair_a"], 0)
 
     def test_recovered_code_still_requires_all_review_passes(self):
         path = self.rejected_coding_fixture()
@@ -418,14 +462,11 @@ class CycleTests(unittest.TestCase):
             self.stop_request(control)
             return report()
         self.transport.calls.clear()
-        self.transport.actions = [("coordinate", report()), *[("sol", report())] * 3,
-                                  ("coordinate", report()), ("claude", report()), ("claude", report()),
-                                  ("coordinate", report()), ("astra", finish_reviews)]
+        self.transport.actions = pair_actions(finish_reviews)
         self.assertEqual(self.cycle.run(), 0)
+        self.cycle.paired_review_step()  # Safe pause was before the final seal.
         self.assertEqual(self.state["phase"], "publish")
-        self.assertEqual([role for role, _ in self.transport.calls],
-                         ["coordinate", "sol", "sol", "sol", "coordinate", "claude", "claude", "coordinate", "astra"])
-
+        self.assertEqual([role for role, _ in self.transport.calls], [r for r, _ in pair_actions()])
     def test_review_recovery_rejects_working_tree_and_index_drift(self):
         path = self.rejected_coding_fixture()
         self.repo.git("add", "source.txt")
@@ -465,8 +506,8 @@ class CycleTests(unittest.TestCase):
     def test_recovery_coordinator_context_allows_report_finalization(self):
         self.rejected_coding_fixture()
         prompt = self.cycle.context("coordinate")
-        self.assertIn("reconstructing its lost/rejected final report", prompt)
-        self.assertIn("Confirm that report-finalization route", prompt)
+        self.assertIn("recovery of its lost or rejected final report", prompt)
+        self.assertIn("Confirm this report recovery route", prompt)
 
     def test_review_recovery_preserves_protected_work_guard(self):
         path = self.rejected_coding_fixture()
@@ -516,7 +557,7 @@ class CycleTests(unittest.TestCase):
             lease.return_value.__enter__.return_value.pwsh = "pwsh"
             self.assertEqual(cc_focus.main(["recover", "--review-from", str(path)]), 0)
         self.assertEqual(self.store.read()["status"], "paused")
-        self.assertEqual(self.store.read()["phase"], "sol")
+        self.assertEqual(self.store.read()["phase"], "pair_a")
 
     def test_recover_command_rejects_ambiguous_arguments(self):
         import cc_focus
@@ -529,7 +570,7 @@ class CycleTests(unittest.TestCase):
 
     def test_correction_preserves_stage_sessions_work_and_restarts_reviews(self):
         old_result = self.rejected_coding_fixture()
-        self.state.update(phase="claude", sol_passes=3, sol_clean=3, claude_clean=1,
+        self.state.update(phase="opus_final", sol_passes=3, sol_clean=3, opus_final_clean=1,
                           reviewed=self.repo.snapshot())
         before = self.repo.snapshot()
         self.cycle.correct("Keep the existing stage; handle empty input explicitly.")
@@ -538,14 +579,14 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.state["iteration"], 1)
         self.assertEqual(self.repo.snapshot(), before)
         self.assertEqual(self.state["sessions"]["code"], "preserved-code-session")
-        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual((self.state["sol_clean"], self.state["opus_final_clean"]), (0, 0))
         self.assertIsNone(self.state["pending"])
         self.assertIsNone(self.state["blocker"])
         self.assertIsNone(self.state["reviewed"])
         correction = self.store.read()["corrections"][0]
         self.assertIn("empty input", Path(correction["path"]).read_text())
-        self.assertEqual(json.loads(Path(correction["archive"]).read_text())["previous_state"]["phase"], "claude")
-        for role in ("coordinate", "code", "sol", "claude", "heal"):
+        self.assertEqual(json.loads(Path(correction["archive"]).read_text())["previous_state"]["phase"], "opus_final")
+        for role in ("coordinate", "code", "sol", "opus_final", "heal"):
             self.assertIn(correction["id"], self.cycle.context(role))
             self.assertIn("Do not select the next unfinished", self.cycle.context(role))
         with self.assertRaisesRegex(Blocked, "not a coding result"):
@@ -588,7 +629,7 @@ class CycleTests(unittest.TestCase):
         self.cycle.check_protected(before)
         context = self.cycle.context("coordinate")
         self.assertIn("BEFORE coding began", context)
-        self.assertIn("do not reopen it", context)
+        self.assertIn("Do not reopen it", context)
         self.assertNotIn("If the original stage cannot be identified", context)
 
     def test_precode_reconciliation_requires_coding_and_both_reviews(self):
@@ -598,15 +639,13 @@ class CycleTests(unittest.TestCase):
         focus_reconcile.apply(self.cycle, path)
         self.transport.actions = [
             ("coordinate", report()), ("code", self.edit(content="next stage implementation\n")),
-            ("coordinate", report()), *[("sol", report())] * 3,
-            ("coordinate", report()), *[("claude", report())] * 2,
-            ("coordinate", report()), ("astra", report()),
+            *pair_actions(),
             ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual([role for role, _ in self.transport.calls if role != "coordinate"],
-                         ["code", "sol", "sol", "sol", "claude", "claude", "astra", "publish"])
+                         ["code", *[r for r, _ in pair_actions()], "publish"])
         coding_context = next(prompt for role, prompt in self.transport.calls if role == "code")
         self.assertNotIn('"coding_recovery"', coding_context)
         self.assertIn("next unfinished stage", coding_context)
@@ -638,16 +677,14 @@ class CycleTests(unittest.TestCase):
         correction_id = self.state["correction_revision"]
         self.transport.actions = [
             ("coordinate", report()), ("code", self.edit(content="corrected\n")),
-            ("coordinate", report()), *[("sol", report())] * 3,
-            ("coordinate", report()), *[("claude", report())] * 2,
-            ("coordinate", report()), ("astra", report()),
+            *pair_actions(),
             ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
         self.transport.calls.clear()
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual([role for role, _ in self.transport.calls if role != "coordinate"],
-                         ["code", "sol", "sol", "sol", "claude", "claude", "astra", "publish"])
+                         ["code", *[r for r, _ in pair_actions()], "publish"])
         archived = json.loads((self.store.directory / "iterations/000001.json").read_text())
         self.assertEqual(archived["correction_revision"], correction_id)
         self.assertIsNone(archived["correction_pending"])
@@ -799,7 +836,7 @@ class CycleTests(unittest.TestCase):
         source = self.store.directory / "invocations" / self.state["pending"]["id"] / "result.json"
         self.cycle.recover_review(source)
         self.assertIsNone(self.state["correction_pending"])
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
         self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
 
     @unittest.skipIf(os.name == "nt", "POSIX directory symlink fixture")
@@ -836,7 +873,7 @@ class CycleTests(unittest.TestCase):
         self.assertFalse(forbidden.exists())
         self.assertFalse(runtime_active(self.store))
         self.assertFalse((self.root / ".work/orchestrator.lock/lease.json").exists())
-        self.assertEqual(self.store.read()["phase"], "sol")
+        self.assertEqual(self.store.read()["phase"], "pair_a")  # Profile 8 restarts reviews at pair A.
         self.assertEqual(self.store.read()["status"], "paused")
 
         correction = subprocess.run(["pwsh", "-NoProfile", "-File", str(REPO / "tools/focus-runtime.ps1"),
@@ -849,13 +886,11 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.store.read()["phase"], "code")
         self.assertIsNotNone(self.store.read()["correction_pending"])
 
-    def test_full_cycle_is_serial_with_full_coding_description(self):
+    def test_full_cycle_uses_pairs_and_preserves_coding_account(self):
         self.remote()
         self.transport.actions = [
             ("coordinate", report()), ("code", self.edit(description="Full unabridged implementation description")),
-            ("coordinate", report()), *[("sol", report())] * 3,
-            ("coordinate", report()), *[("claude", report())] * 2,
-            ("coordinate", report()), ("astra", report()),
+            *pair_actions(),
             ("coordinate", report()), ("publish", report(summary="Update reviewed source")),
             ("coordinate", report(status="complete")),
         ]
@@ -864,72 +899,325 @@ class CycleTests(unittest.TestCase):
             wait.assert_called_once()
         self.assertEqual(self.state["iteration"], 2)
         self.assertEqual(self.state["status"], "complete")
+        copies = [view for path in self.store.directory.glob("pair-reviews/**/view.json")
+                  if "__review__/coding-full.json" in (view := json.loads(path.read_text()))["files"]]
+        self.assertTrue(copies)
+        self.assertIn("Full unabridged implementation description",
+                      read_source(copies[0], "__review__/coding-full.json").decode())
         for role, prompt in self.transport.calls:
-            if role == "sol":
-                self.assertIn("Full unabridged implementation description", prompt)
+            if role == "pair_sol":
+                self.assertIn("__review__/coding.json", prompt)
             if role == "coordinate":
                 self.assertNotIn("Full unabridged implementation description", prompt)
 
-    def test_three_reviewer_profiles_are_fixed(self):
-        self.assertEqual(PROFILES['sol'], ('codex', 'gpt-6-sol', 'xhigh'))
-        self.assertEqual(PROFILES['claude'], ('claude', 'opus', 'xhigh'))
+    def test_four_reviewer_profiles_are_fixed(self):
+        self.assertEqual(PROFILES['sol'], ('codex', 'gpt-6.1-sol', 'xhigh'))
+        self.assertEqual(PROFILES['claude'], ('claude', 'claude-fable-5-1', 'xhigh'))
         self.assertEqual(PROFILES['astra'], ('codex', 'gpt-6-astra', 'xhigh'))
-        self.assertEqual(PROFILES['code'], ('claude', 'claude-fable-5-1', 'high'))
+        self.assertEqual(PROFILES['opus'], ('claude', 'opus', 'xhigh'))
+        self.assertEqual(PROFILES['code'], ('claude', 'opus', 'xhigh'))
         self.assertEqual(PROFILES['heal'], ('codex', 'gpt-6-astra', 'xhigh'))
+        self.assertEqual(PROFILES['publish'], ('codex', 'gpt-5.6-luna', 'xhigh'))
+        self.assertEqual(PROFILES['coordinate'], ('codex', 'gpt-5.6-luna', 'xhigh'))
+        self.assertEqual(REVIEW_ROLES, ('opus', 'sol', 'astra', 'opus_final'))
+        self.assertEqual(REVIEW_TARGETS, {'opus': 2, 'sol': 2, 'astra': 2, 'opus_final': 2})
 
-    def test_final_review_repeats_until_clean_and_seals_latest_work(self):
-        self.state.update(phase='astra', sol_clean=3, claude_clean=2)
-        self.transport.actions = [('astra', self.edit(other_fixes=1)),
-                                  ('astra', self.edit(content='small fix\n', implementation_fixes=1)),
-                                  ('astra', report())]
-        for _ in range(2):
+    def test_current_profiles_deliver_execution_rules_and_effort_on_start_and_resume(self):
+        for role, (provider, model, effort) in PROFILES.items():
+            with self.subTest(role=role):
+                self.state['inspection'] = {'root': str(self.root), 'files': {'source.txt': __import__('hashlib').sha256((self.root / 'source.txt').read_bytes()).hexdigest()}, 'stage_paths': ['source.txt'], 'diffs': {}}
+                self.state['inspection_path'] = str(self.root / 'manifest.json')
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands[provider] = [sys.executable, str(Path(__file__).resolve()), 'fixture', provider]
+                for attempt in ('start', 'resume'):
+                    directory = self.store.directory / ('profile-' + role + '-' + attempt)
+                    directory.mkdir(parents=True)
+                    session = self.state['sessions'].get(role)
+                    with patch.dict(os.environ, ORCHESTRA_FIXTURE_MODEL=model, ORCHESTRA_FIXTURE_EFFORT=effort,
+                                    ORCHESTRA_FIXTURE_ROLE=role):
+                        result = transport.run(role, 'Verify selected profile', {'id': role + '-' + attempt}, directory)
+                    self.assertEqual(parse_report(result, role)['status'], 'done')
+                    prompt = (directory / 'prompt.txt').read_text(encoding='utf-8')
+                    self.assertIn(COMMAND_EXECUTION_CONTRACT, prompt)
+                    if role == 'code':
+                        self.assertIn(CODE_IMPLEMENTATION_CONTRACT, prompt)
+                        self.assertNotIn(PAIR_CONTRACT, prompt)
+                    if role in PAIR_READONLY:
+                        self.assertIn('Use only focus_inspect', prompt)
+                    if provider == 'claude':
+                        saved = json.loads((directory / 'claude-diagnostics.json').read_text(encoding='utf-8'))
+                        if role in PAIR_READONLY:  # Paired inspectors start without user/project settings.
+                            self.assertEqual((saved['launch']['instruction_files'],
+                                              saved['completion']['instruction_files']), ([], []))
+                        self.assertEqual(saved['launch']['instruction_files_captured'], 'before-start')
+                        self.assertEqual(saved['launch']['instruction_files_enabled'], role not in PAIR_READONLY)
+                        self.assertEqual(saved['launch']['cwd'], str(self.root))
+                    if role == 'repair_execute':
+                        self.assertIn('ONLY B/FINAL repair_execute with operation=fix must not build or test', prompt)
+                    if attempt == 'resume':
+                        self.assertEqual(self.state['sessions'][role], session)
+
+    def test_executor_report_only_restriction_follows_common_execution_rules(self):
+        for role in PAIR_WRITERS:
+            with self.subTest(role=role):
+                self.state['sessions'][role] = 'saved-executor-session'
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                directory = self.store.directory / role
+                directory.mkdir(parents=True)
+                pending = {'id': role, 'attempts': 1, 'report_repair': {'reason': 'invocation-accounting'}}
+                with patch.object(transport, '_claude', return_value=json.dumps(report())) as provider:
+                    transport.run(role, 'Correct only the saved JSON report.', pending, directory)
+                self.assertEqual(provider.call_args.args[3], 'saved-executor-session')
+                prompt = provider.call_args.args[4]
+                self.assertIn(COMMAND_EXECUTION_CONTRACT, prompt)
+                self.assertIn('They do not permit tools, builds, or tests that the role or current operation forbids.', prompt)
+                self.assertLess(prompt.index(COMMAND_EXECUTION_CONTRACT),
+                                prompt.index('This invocation is REPORT-ONLY CORRECTION'))
+                self.assertIn('Do not repeat review, builds, or tests', prompt)
+
+    def test_sol_defers_opus_until_two_clean_then_skips_sol(self):
+        self.cycle.reset_reviews()
+        self.state.update(phase="opus", review_plan=[])
+        self.review_pass("opus", implementation_fixes=1, substantial=True)
+        self.finish_loop("opus")
+        self.review_pass("sol", implementation_fixes=1, substantial=True)
+        self.assertEqual(self.state["phase"], "sol")
+        self.review_pass("sol")
+        self.assertEqual(self.state["phase"], "sol")
+        self.state = self.store.read()
+        self.cycle.state = self.state
+        self.review_pass("sol", implementation_fixes=1, substantial=False)
+        self.assertTrue(self.state["review_substantial"])
+        self.finish_loop("sol")
+        self.assertEqual(self.state["phase"], "opus")
+        self.assertEqual([v["role"] for v in self.state["review_plan"]], ["opus", "astra", "opus_final"])
+        self.finish_loop("opus")
+        self.assertEqual(self.state["phase"], "astra")
+        self.finish_loop("astra")
+        self.finish_loop("opus_final")
+        self.assertEqual(self.state["phase"], "final")
+        self.assertIsNone(self.state["reviewed"])
+
+    def test_every_reviewer_small_fix_stays_in_current_loop(self):
+        for role in REVIEW_ROLES:
+            with self.subTest(role=role):
+                self.state.update(phase=role, review_plan=[], review_substantial=False, reviewed=None)
+                self.state[role + "_clean"] = 1
+                self.review_pass(role, implementation_fixes=1)
+                self.assertEqual(self.state["phase"], role)
+                self.assertEqual(self.state[role + "_clean"], 0)
+                self.assertFalse(self.state["review_substantial"])
+                self.finish_loop(role)
+                expected = {"opus": "sol", "sol": "astra", "astra": "opus_final", "opus_final": "final"}[role]
+                self.assertEqual(self.state["phase"], expected)
+
+    def test_full_test_eligibility_tracks_current_visit_and_retry(self):
+        def context(role):
+            return json.loads(self.cycle.context(role).split("Runtime context:\n", 1)[1])
+        for role in PROFILES:
+            if role in (*PAIR_ROLES, "publish", "final_fix", "final_cleanup"):
+                continue  # Requires a publication/triage seal, and never permits broad testing.
+            for clean in (0, 1):
+                self.state[role + "_clean"] = clean
+                self.assertEqual(context(role)["verification"]["full_run_allowed"],
+                                 role == "opus_final" or (role == "astra" and clean == 1))
+        self.state.update(phase="opus_final", review_plan=[], review_substantial=False, opus_final_clean=1)
+        self.review_pass("opus_final", implementation_fixes=1, substantial=True)
+        self.assertTrue(context("opus_final")["verification"]["full_run_allowed"])
+        self.finish_loop("opus_final")
+        self.assertFalse(context("astra")["verification"]["full_run_allowed"])
+        self.review_pass("astra")
+        self.assertTrue(context("astra")["verification"]["full_run_allowed"])
+        # An interrupted pass invalidates the preceding streak before building its prompt.
+        self.state["pending"] = {"id": "retry-eligibility", "role": "astra", "attempts": 1,
+                                 "before": self.repo.snapshot()}
+        self.review_pass("astra")
+        sent = json.loads(self.transport.calls[-1][1].split("Runtime context:\n", 1)[1])
+        self.assertFalse(sent["verification"]["full_run_allowed"])
+        self.assertEqual(sent["astra_clean"], 0)
+
+    def test_opus_review_session_is_distinct_and_resumes_its_own_conversation(self):
+        self.state["sessions"]["code"] = "implementation-session"
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude"]
+        for index in range(2):
+            directory = self.store.directory / ("opus-session-" + str(index))
+            directory.mkdir(parents=True)
+            with patch.dict(os.environ, ORCHESTRA_FIXTURE_MODEL="opus", ORCHESTRA_FIXTURE_EFFORT="xhigh"):
+                parse_report(transport.run("opus", "Review only", {"id": str(index)}, directory), "opus")
+            if index == 0:
+                review_session = self.state["sessions"]["opus"]
+                self.assertNotEqual(review_session, "implementation-session")
+            self.assertEqual(self.state["sessions"]["opus"], review_session)
+            self.assertEqual(self.state["sessions"]["code"], "implementation-session")
+
+    def test_profile_three_and_four_migration_and_publishing_preserve_work(self):
+        for old_profile, phase, started in [(v, p, started) for v in (3, 4)
+                for p, started in [("sol", False), ("astra", False), ("claude", False),
+                                   ("publish", False), ("publish", True), ("ci", True)]]:
+            with self.subTest(version=old_profile, phase=phase, started=started):
+                self.state.update(review_profile=old_profile, phase=phase, publication_started=started,
+                                  reviewed=self.repo.snapshot(), pending=None,
+                                  sessions={"code": "coding", "sol": "old-review"})
+                self.state.pop("publication_review_profile", None)
+                before = self.repo.snapshot()
+                self.cycle.upgrade_review_profile()
+                self.assertEqual(self.state["review_profile"], REVIEW_PROFILE_VERSION)
+                self.assertEqual(self.state["phase"], phase if started else "pair_a")
+                self.assertEqual(self.state["sessions"], {"code": "coding"})
+                if started:
+                    self.assertEqual(self.state["publication_review_profile"], old_profile)
+                    self.assertEqual(self.state["reviewed"], before)
+                else:
+                    self.assertEqual(self.state["review_plan"], [])
+                    self.assertEqual(self.state["pair_clean"], {"pair_a": 0, "pair_b": 0})
+                self.assertEqual(self.repo.snapshot(), before)
+
+    def test_sol_does_not_fall_back_to_the_previous_model(self):
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands['codex'] = [sys.executable, str(Path(__file__).resolve()), 'fixture', 'codex', 'old-sol-only']
+        directory = self.store.directory / 'unavailable-sol'
+        directory.mkdir(parents=True)
+        with self.assertRaises(Blocked) as caught:
+            transport.run('sol', 'Review', {'id': 'unavailable-sol'}, directory)
+        self.assertEqual(caught.exception.code, 'model-unavailable')
+        self.assertNotIn('sol', self.state['sessions'])
+
+    def test_astra_review_needs_two_clean_passes(self):
+        self.state.update(phase='astra', sol_clean=3)
+        for fixes, other, clean, phase in ((0, 0, 1, 'astra'), (1, 0, 0, 'astra'),
+                                           (0, 1, 0, 'astra'), (0, 0, 1, 'astra'), (0, 0, 2, 'opus_final')):
+            self.transport.actions = [('astra', report(implementation_fixes=fixes, other_fixes=other))]
             self.cycle.review('astra')
-            self.assertEqual(self.state['phase'], 'astra')
-            self.assertEqual(self.state['astra_clean'], 0)
+            self.assertEqual((self.state['astra_clean'], self.state['phase']), (clean, phase))
             self.assertIsNone(self.state['reviewed'])
-        self.cycle.review('astra')
-        self.assertEqual(self.state['phase'], 'publish')
-        self.assertEqual(self.state['astra_clean'], 1)
-        self.assertEqual(self.state['reviewed'], self.repo.snapshot())
-        self.assertEqual(self.state['display_reviews']['astra']['completed'], 3)
 
-    def test_final_substantial_fix_invalidates_all_review_credit(self):
-        self.state.update(phase='astra', sol_clean=3, claude_clean=2)
-        self.transport.actions = [('astra', self.edit(implementation_fixes=1, substantial=True))]
-        self.cycle.review('astra')
-        self.assertEqual(self.state['phase'], 'sol')
-        self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [0, 0, 0])
+    def test_second_astra_substantial_fix_returns_to_first_review(self):
+        self.state.update(phase="astra", opus_clean=2, sol_clean=2, astra_clean=1)
+        self.review_pass("astra", implementation_fixes=1, substantial=True)
+        self.assertEqual(self.state["phase"], "astra")
+        self.assertTrue(self.state["review_substantial"])
+        self.finish_loop("astra")
+        self.assertEqual(self.state["phase"], "opus")
+        self.review_pass("opus", implementation_fixes=1, substantial=True)
+        self.finish_loop("opus")
+        self.assertEqual(self.state["phase"], "opus_final")
+        self.assertEqual(self.state["sol_clean"], 2)
+    def test_final_review_repeats_until_clean_and_seals_latest_work(self):
+        self.state.update(phase='opus_final', sol_clean=3, astra_clean=2)
+        self.transport.actions = [('opus_final', self.edit(other_fixes=1)),
+                                  ('opus_final', self.edit(content='small fix\n', implementation_fixes=1)),
+                                  ('opus_final', report()), ('opus_final', report())]
+        for _ in range(2):
+            self.cycle.review('opus_final')
+            self.assertEqual(self.state['phase'], 'opus_final')
+            self.assertEqual(self.state['opus_final_clean'], 0)
+            self.assertIsNone(self.state['reviewed'])
+        self.cycle.review('opus_final')
+        self.cycle.review('opus_final')
+        self.assertEqual(self.state['phase'], 'final')
+        self.assertEqual(self.state['opus_final_clean'], 2)
         self.assertIsNone(self.state['reviewed'])
+        self.assertEqual(self.state['display_reviews']['opus_final']['completed'], 4)
+
+    def test_late_opus_substantial_fix_finishes_two_clean_then_repeats_only_astra(self):
+        self.state.update(phase="opus_final", opus_clean=2, sol_clean=2, astra_clean=2)
+        self.review_pass("opus_final", implementation_fixes=1, substantial=True)
+        self.review_pass("opus_final")
+        self.state = self.store.read()
+        self.cycle.state = self.state
+        self.assertTrue(self.state["review_substantial"])
+        self.review_pass("opus_final")
+        self.assertEqual(self.state["phase"], "astra")
+        self.assertEqual([v["role"] for v in self.state["review_plan"]], ["astra"])
+        self.finish_loop("astra")
+        self.assertEqual(self.state["phase"], "final")
+        self.assertIsNone(self.state["reviewed"])
+        self.assertEqual((self.state["opus_clean"], self.state["sol_clean"]), (2, 2))
+
+    def test_final_small_fixes_and_minor_edits_never_return_to_an_earlier_review(self):
+        for field, expected in (('implementation_fixes', 'opus_final'), ('other_fixes', 'opus_final'),
+                                ('minor_edits', 'final')):
+            with self.subTest(field=field):
+                self.state.update(phase='opus_final', sol_passes=5, sol_clean=3, astra_clean=2,
+                                  opus_final_clean=1, reviewed=None, review_plan=[], review_substantial=False)
+                self.transport.actions = [('opus_final', self.edit(content=field, **{field: 1}))]
+                self.cycle.review('opus_final')
+                self.assertEqual(self.state['phase'], expected)
+                self.assertEqual((self.state['sol_passes'], self.state['sol_clean'], self.state['astra_clean']), (5, 3, 2))
+                if expected == 'opus_final':
+                    self.assertEqual(self.state['opus_final_clean'], 0)
+                    self.assertIsNone(self.state['reviewed'])
+                else:
+                    self.assertIsNone(self.state['reviewed'])
+
+    def test_cached_fable_fix_after_restart_still_returns_to_astra(self):
+        self.state.update(phase='opus_final', sol_passes=5, sol_clean=3, astra_clean=2)
+        self.transport.actions = [('opus_final', self.edit(implementation_fixes=1, substantial=True))]
+        self.cycle.invoke('opus_final')  # Provider completed; phase transition did not persist.
+        self.state = self.store.read()
+        self.cycle.state = self.state
+        self.cycle.review('opus_final')
+        self.assertEqual(self.state['phase'], 'opus_final')
+        self.assertTrue(self.state['review_substantial'])
+        self.assertEqual((self.state['sol_passes'], self.state['sol_clean']), (5, 3))
+        self.assertEqual((self.state['astra_clean'], self.state['opus_final_clean']), (2, 0))
+        self.assertEqual(len(self.transport.calls), 1)
+        self.assertIsNone(self.state['reviewed'])
+
+    def test_explicit_full_review_restart_takes_precedence_over_final_fix(self):
+        self.state.update(phase='opus_final', sol_clean=0, astra_clean=0, pending={
+            'id': 'intervened-final', 'role': 'opus_final', 'before': self.repo.snapshot(),
+            'restart_reviews': True, 'operator_intervened': True})
+        self.transport.actions = [('opus_final', self.edit(implementation_fixes=1, substantial=True))]
+        self.cycle.review('opus_final')
+        self.assertEqual(self.state['phase'], 'pair_a')
+        self.assertEqual([self.state[k + '_clean'] for k in REVIEW_ROLES], [0, 0, 0, 0])
+        self.assertIsNone(self.state['reviewed'])
+
+    def test_astra_substantial_fix_after_late_opus_adds_initial_opus_then_final_round(self):
+        self.state.update(phase="opus_final", opus_clean=2, sol_clean=2, astra_clean=2)
+        self.review_pass("opus_final", implementation_fixes=1, substantial=True)
+        self.finish_loop("opus_final")
+        self.review_pass("astra", implementation_fixes=1, substantial=True)
+        self.finish_loop("astra")
+        self.assertEqual(self.state["phase"], "opus")
+        self.finish_loop("opus")
+        self.assertEqual(self.state["phase"], "final")
+        self.assertEqual(self.state["sol_clean"], 2)
 
     def test_final_incomplete_or_unreported_change_cannot_publish(self):
         for response in (report(evidence=[]), report(status='complete'), self.edit()):
             with self.subTest(response=response):
-                self.state.update(phase='astra', pending=None, sol_clean=3, claude_clean=2)
-                self.transport.actions = [('astra', response)]
+                self.state.update(phase='opus_final', pending=None, sol_clean=3, astra_clean=2)
+                self.transport.actions = [('opus_final', response), ('opus_final', report())]
                 with self.assertRaises(Blocked):
-                    self.cycle.review('astra')
+                    self.cycle.review('opus_final')
                 self.assertIsNone(self.state['reviewed'])
-                self.assertEqual(self.state['astra_clean'], 0)
+                self.assertEqual(self.state['opus_final_clean'], 0)
 
-    def test_interrupted_final_review_with_changes_returns_to_sol(self):
-        self.state.update(phase='astra', sol_clean=3, claude_clean=2,
-                          pending={'id': 'interrupted-final', 'role': 'astra', 'before': self.repo.snapshot(), 'attempts': 1})
+    def test_interrupted_final_review_with_changes_returns_to_astra(self):
+        self.state.update(phase='opus_final', sol_clean=3, astra_clean=2,
+                          pending={'id': 'interrupted-final', 'role': 'opus_final', 'before': self.repo.snapshot(), 'attempts': 1})
         self.edit()()
-        self.transport.actions = [('astra', report(other_fixes=1))]
-        self.cycle.review('astra')
-        self.assertEqual(self.state['phase'], 'sol')
-        self.assertEqual(self.state['sol_clean'], 0)
+        self.transport.actions = [('opus_final', report(other_fixes=1))]
+        self.cycle.review('opus_final')
+        self.assertEqual(self.state['phase'], 'opus_final')
+        self.assertTrue(self.state['review_substantial'])
+        self.assertEqual(self.state['sol_clean'], 3)
+        self.assertEqual(self.state['astra_clean'], 2)
 
     def test_final_review_failure_after_edits_cannot_reuse_prior_credit(self):
-        self.state.update(phase='astra', sol_clean=3, claude_clean=2)
-        self.transport.actions = [('astra', self.edit(status='blocked', implementation_fixes=1))]
+        self.state.update(phase='opus_final', sol_clean=3, astra_clean=2)
+        self.transport.actions = [('opus_final', self.edit(status='blocked', implementation_fixes=1))]
         with self.assertRaises(Blocked) as caught:
-            self.cycle.review('astra')
+            self.cycle.review('opus_final')
         self.cycle.handle_block(caught.exception)
-        self.assertEqual(self.state['blocker']['phase'], 'sol')
-        self.assertEqual(self.state['sol_clean'], 0)
-        self.assertEqual(self.state['claude_clean'], 0)
+        self.assertEqual(self.state['blocker']['phase'], 'opus_final')
+        self.assertEqual(self.state['sol_clean'], 3)
+        self.assertEqual(self.state['astra_clean'], 2)
 
+        self.assertTrue(self.state["review_substantial"])
     def test_legacy_review_profile_archives_credit_and_keeps_work(self):
         self.edit()()
         self.state.pop('review_profile')
@@ -942,14 +1230,14 @@ class CycleTests(unittest.TestCase):
         work = self.repo.snapshot()
         self.cycle.upgrade_review_profile()
         self.assertEqual(json.loads(Path(self.state['review_profile_archive']).read_text()), previous)
-        self.assertEqual(self.state['phase'], 'sol')
+        self.assertEqual(self.state['phase'], 'pair_a')
         self.assertEqual(self.state['sessions'], {'code': 'coder', 'heal': 'healer'})
         self.assertEqual(self.state['publication_paths'], ['source.txt'])
         self.assertFalse(self.state['publication_started'])
         self.assertIsNone(self.state['pending'])
         self.assertIsNone(self.state['reviewed'])
         self.assertNotIn('publication_prepared', self.state)
-        self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [0, 0, 0])
+        self.assertEqual([self.state[k + '_clean'] for k in ('opus', 'claude', 'astra')], [0, 0, 0])
         self.assertEqual(self.repo.snapshot(), work)
         after = json.loads(json.dumps(self.state))
         self.cycle.upgrade_review_profile()
@@ -969,18 +1257,14 @@ class CycleTests(unittest.TestCase):
         def final_pass():
             self.stop_request(control)
             return report()
-        self.transport.actions = [('coordinate', report()), *[('sol', report())] * 3,
-                                  ('coordinate', report()), *[('claude', report())] * 2,
-                                  ('coordinate', report()), ('astra', final_pass)]
+        self.transport.actions = pair_actions(final_pass)
         self.assertEqual(self.cycle.run(), 0)
-        self.assertEqual([role for role, _ in self.transport.calls if role != 'coordinate'],
-                         ['sol', 'sol', 'sol', 'claude', 'claude', 'astra'])
+        self.cycle.paired_review_step()
+        self.assertEqual([role for role, _ in self.transport.calls], [r for r, _ in pair_actions()])
         self.assertEqual((self.state['phase'], self.state['status']), ('publish', 'paused'))
-        self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [3, 2, 1])
+        self.assertEqual(self.state['pair_clean'], {'pair_a': 1, 'pair_b': 1})
         self.assertEqual(self.state['code_report'], 'Original completed implementation')
-        self.assertNotIn('astra', self.state['sessions'])  # The fake transport creates no sessions.
         self.assertEqual(self.state['reviewed'], self.repo.snapshot())
-
     def test_profile_upgrade_keeps_coding_and_completed_publication_continuation(self):
         for phase in ('code', 'publish', 'ci'):
             with self.subTest(phase=phase):
@@ -1005,6 +1289,84 @@ class CycleTests(unittest.TestCase):
             self.cycle.upgrade_review_profile()
         self.assertEqual(self.state['review_profile'], 999)
 
+    def test_profile_two_migration_restarts_each_unpublished_review_phase(self):
+        for phase in ('opus', 'claude', 'astra', 'publish'):
+            with self.subTest(phase=phase):
+                self.state.update(review_profile=2, phase=phase, sol_clean=3, claude_clean=2, astra_clean=1,
+                                  publication_started=False, reviewed=self.repo.snapshot(),
+                                  pending={'id': 'previous-' + phase, 'role': phase, 'turn_id': 'old-turn'},
+                                  sessions={role: 'old-' + role for role in PROFILES})
+                work = self.repo.snapshot()
+                previous = json.loads(json.dumps(self.state))
+                self.cycle.upgrade_review_profile()
+                self.assertEqual(self.state['review_profile'], REVIEW_PROFILE_VERSION)
+                self.assertEqual(self.state['phase'], 'pair_a')
+                self.assertIsNone(self.state['pending'])
+                self.assertIsNone(self.state['reviewed'])
+                self.assertEqual(self.state['sessions'], {'code': 'old-code', 'publish': 'old-publish',
+                                                        'coordinate': 'old-coordinate', 'heal': 'old-heal'})
+                self.assertEqual([self.state[role + '_clean'] for role in REVIEW_ROLES], [0, 0, 0, 0])
+                self.assertEqual(json.loads(Path(self.state['review_profile_archive']).read_bytes()), previous)
+                self.assertEqual(self.repo.snapshot(), work)
+                saved = json.loads(json.dumps(self.state))
+                self.cycle.upgrade_review_profile()
+                self.assertEqual(self.state, saved)
+
+    def test_profile_two_coding_recovery_preserves_session_and_intent_with_new_model(self):
+        self.edit()()
+        self.state.update(review_profile=2, phase='code', code_started=True,
+                          sessions={'code': 'old-fable', 'coordinate': 'coordinator', 'heal': 'healer'},
+                          pending={'id': 'same-stage', 'role': 'code', 'before': self.state['baseline'],
+                                   'attempts': 1, 'resolved_model': 'old-model'})
+        before = self.repo.snapshot()
+        self.cycle.upgrade_review_profile()
+        self.assertEqual((self.state['phase'], self.state['pending']['id']), ('code', 'same-stage'))
+        self.assertEqual(self.state['sessions']['code'], 'old-fable')
+        self.assertNotIn('resolved_model', self.state['pending'])
+        self.assertEqual(self.state['pending']['before'], self.state['baseline'])
+        self.assertIn('coding_recovery', self.cycle.context('code'))
+        self.assertEqual(self.repo.snapshot(), before)
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands['claude'] = [sys.executable, str(Path(__file__).resolve()), 'fixture', 'claude']
+        directory = self.store.directory / 'migrated-coder'
+        directory.mkdir(parents=True)
+        transport.run('code', self.cycle.context('code'), self.state['pending'], directory)
+        self.assertEqual(self.state['sessions']['code'], 'old-fable')
+        self.assertEqual(self.state['pending']['resolved_model'], 'claude-opus-5-5')
+
+    def test_profile_two_publication_keeps_its_seal_and_same_pending_turn(self):
+        for phase in ('publish', 'ci'):
+            with self.subTest(phase=phase):
+                seal = self.repo.snapshot()
+                self.state.update(review_profile=2, phase=phase, publication_started=True,
+                                  reviewed=seal, published={'sha': 'already-pushed'},
+                                  publication_prepared={'subject': 'Prepared earlier'},
+                                  sessions={'publish': 'old-publisher', 'heal': 'healer'},
+                                  pending={'id': 'same-publication', 'role': 'publish', 'turn_id': 'old-turn'})
+                self.cycle.upgrade_review_profile()
+                self.assertEqual(self.state['phase'], phase)
+                self.assertEqual(self.state['publication_review_profile'], 2)
+                self.assertEqual(self.state['reviewed'], seal)
+                self.assertEqual(self.state['published'], {'sha': 'already-pushed'})
+                self.assertEqual(self.state['publication_prepared'], {'subject': 'Prepared earlier'})
+                self.assertEqual(self.state['pending']['id'], 'same-publication')
+                self.assertEqual(self.state['pending']['turn_id'], 'old-turn')
+                self.assertEqual(self.state['sessions']['publish'], 'old-publisher')
+                self.assertIn('previous review profile', self.cycle.context('coordinate'))
+
+    def test_profile_two_migration_preserves_pending_healing_and_old_publication_seal(self):
+        self.state.update(review_profile=2, phase='astra',
+                          blocker={'phase': 'astra', 'status': 'healing'},
+                          pending={'id': 'same-healer', 'role': 'heal', 'turn_id': 'healer-turn'},
+                          sessions={'heal': 'healer', 'astra': 'old-review'})
+        self.cycle.upgrade_review_profile()
+        self.assertEqual((self.state['phase'], self.state['blocker']['phase']), ('pair_a', 'pair_a'))
+        self.assertEqual(self.state['pending']['turn_id'], 'healer-turn')
+        self.assertEqual(self.state['sessions'], {'heal': 'healer'})
+        self.state.update(review_profile=2, phase='ci', publication_review_profile=1)
+        self.cycle.upgrade_review_profile()
+        self.assertEqual(self.state['publication_review_profile'], 1)
+
     def test_profile_upgrade_preserves_unresolved_delivery_without_mutating(self):
         self.state.pop('review_profile')
         self.state.update(phase='astra', pending={'id': 'old-pass', 'role': 'astra'})
@@ -1025,7 +1387,7 @@ class CycleTests(unittest.TestCase):
                 directory = self.store.directory / variant
                 directory.mkdir(parents=True)
                 with self.assertRaises(Blocked) as caught:
-                    transport.run('claude', 'Review with Opus', {'id': variant}, directory)
+                    transport.run('code', 'Implement with Opus', {'id': variant}, directory)
                 self.assertEqual(caught.exception.code, code)
 
     def test_opus_alias_records_resolved_version_and_rejects_resume_drift(self):
@@ -1034,40 +1396,42 @@ class CycleTests(unittest.TestCase):
         directory = self.store.directory / 'opus-version'
         directory.mkdir(parents=True)
         pending = {'id': 'opus-version'}
-        transport.run('claude', 'Review with Opus', pending, directory)
+        transport.run('code', 'Implement with Opus', pending, directory)
         self.assertEqual(pending['resolved_model'], 'claude-opus-5-5')
         pending['resolved_model'] = 'claude-opus-5'
         with self.assertRaisesRegex(Blocked, 'interrupted invocation'):
-            transport.run('claude', 'Continue same review', pending, directory)
+            transport.run('code', 'Continue same implementation', pending, directory)
 
-    def test_sol_counter_changes_after_third_pass(self):
-        self.state.update(phase="sol", coordinated="sol")
-        for index, other in enumerate((0, 0, 1, 1, 1, 1), start=1):
-            self.transport.actions.append(("sol", report(other_fixes=other)))
-            self.cycle.review("sol")
-            if index == 3:
-                self.assertEqual(self.state["sol_clean"], 0)
-        self.assertEqual(self.state["sol_clean"], 3)
-        self.assertEqual(self.state["phase"], "claude")
-
+    def test_sol_other_fixes_always_reset_the_clean_streak(self):
+        self.state.update(phase="sol")
+        for fixes, expected in [(0, 1), (1, 0), (0, 1), (1, 0), (0, 1), (0, 2)]:
+            self.review_pass("sol", other_fixes=fixes)
+            self.assertEqual(self.state["sol_clean"], expected)
+        self.assertEqual(self.state["phase"], "astra")
     def test_minor_edits_do_not_reset_clean_passes(self):
         self.state.update(phase="sol", coordinated="sol")
-        self.transport.actions = [("sol", self.edit(content=str(i), minor_edits=1)) for i in range(3)]
-        for _ in range(3):
+        self.transport.actions = [("sol", self.edit(content=str(i), minor_edits=1)) for i in range(2)]
+        for _ in range(2):
             self.cycle.review("sol")
-        self.assertEqual(self.state["phase"], "claude")
+        self.assertEqual(self.state["phase"], "astra")
 
-    def test_substantial_claude_fixes_return_to_sol(self):
-        self.state.update(phase="claude", sol_passes=3, sol_clean=3, claude_clean=1)
-        self.transport.actions = [("claude", self.edit(implementation_fixes=1, substantial=True))]
-        self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "sol")
-        self.assertEqual(self.state["sol_clean"], 0)
-        self.assertEqual(self.state["claude_clean"], 0)
+    def test_repeated_substantial_late_opus_fixes_do_not_start_astra_early(self):
+        self.state.update(phase="opus_final", sol_clean=2)
+        self.review_pass("opus_final", implementation_fixes=1, substantial=True)
+        self.review_pass("opus_final")
+        self.review_pass("opus_final", implementation_fixes=1, substantial=True)
+        self.assertEqual(self.state["phase"], "opus_final")
+        self.review_pass("opus_final")
+        self.assertEqual(self.state["phase"], "opus_final")
+        self.review_pass("opus_final")
+        self.assertEqual(self.state["phase"], "astra")
+        self.finish_loop("astra")
+        self.assertEqual(self.state["phase"], "final")
+        self.assertEqual(self.state["sol_clean"], 2)
 
     def test_failed_or_unreported_review_does_not_count(self):
         self.state.update(phase="sol", sol_clean=1)
-        self.transport.actions = [("sol", self.edit())]
+        self.transport.actions = [("sol", self.edit()), ("sol", report())]
         with self.assertRaisesRegex(Blocked, "reported no changes"):
             self.cycle.review("sol")
         self.assertEqual(self.state["sol_clean"], 1)
@@ -1076,7 +1440,7 @@ class CycleTests(unittest.TestCase):
         from cycle_prompts import REVIEW_TARGETS
         for role, target in REVIEW_TARGETS.items():
             with self.subTest(role=role):
-                self.state.update(phase=role, pending=None, sol_passes=2)
+                self.state.update(review_plan=[], review_substantial=False, phase=role, pending=None, sol_passes=2)
                 self.state[role + "_clean"] = target - 1
                 name = "review-evidence-" + role + ".json"
                 self.transport.actions = [(role, self.edit(name=name, content='{"checks": "passed"}\n', minor_edits=1))]
@@ -1090,12 +1454,12 @@ class CycleTests(unittest.TestCase):
                     self.assertEqual(self.state["reviewed"], self.repo.snapshot())
 
     def test_zero_count_evidence_report_and_cached_replay_still_fail_closed(self):
-        for role in ("sol", "claude", "astra"):
+        for role in REVIEW_ROLES:
             with self.subTest(role=role):
-                self.state.update(phase=role, pending=None)
+                self.state.update(review_plan=[], review_substantial=False, phase=role, pending=None)
                 self.state[role + "_clean"] = 0
                 name = "review-evidence-" + role + ".json"
-                self.transport.actions = [(role, self.edit(name=name, content='{"checks": "passed"}\n'))]
+                self.transport.actions = [(role, self.edit(name=name, content='{"checks": "passed"}\n')), (role, report())]
                 self.transport.calls.clear()
                 for _ in range(2):
                     with self.assertRaises(Blocked) as caught:
@@ -1104,12 +1468,156 @@ class CycleTests(unittest.TestCase):
                     self.assertIn("minor_edits", str(caught.exception))
                     self.assertEqual(self.state[role + "_clean"], 0)
                     self.assertEqual(self.state["phase"], role)
-                    self.assertEqual(len(self.transport.calls), 1)
+                    self.assertEqual(len(self.transport.calls), 2)
                 result = self.store.directory / "invocations" / self.state["pending"]["id"] / "result.json"
                 saved = json.loads(result.read_text())
                 self.assertEqual(changed(saved["before"], saved["after"]), [name])
                 self.assertEqual(json.loads(saved["raw"])["minor_edits"], 0)
                 self.assertEqual((self.root / name).read_text(), '{"checks": "passed"}\n')
+
+    def test_report_only_correction_counts_the_original_review_once(self):
+        for role in REVIEW_ROLES:
+            with self.subTest(role=role):
+                self.state.update(phase=role, pending=None, review_plan=[], review_substantial=False)
+                self.state[role + '_clean'] = 1
+                self.state['sessions'][role] = 'review-conversation'
+                self.transport.calls.clear()
+                self.transport.actions = [(role, self.edit(name='journal-' + role, minor_edits=0)),
+                                          (role, report(minor_edits=1))]
+                self.cycle.review(role)
+                self.assertEqual(self.state[role + '_clean'], 2)
+                self.assertEqual(self.state['display_reviews'][role]['completed'], 1)
+                self.assertEqual([r for r, _ in self.transport.calls], [role, role])
+                self.assertEqual(self.state['sessions'][role], 'review-conversation')
+                corrected = json.loads(Path(self.state['last']['report']).read_text())
+                original = json.loads(Path(corrected['report_repair']['source']).read_text())
+                self.assertEqual(json.loads(original['raw'])['minor_edits'], 0)
+                self.assertEqual(json.loads(corrected['raw'])['minor_edits'], 1)
+                self.assertEqual(original['before'], corrected['before'])
+                self.assertEqual(original['after'], corrected['after'])
+                self.assertIn('REPORT-ONLY CORRECTION', self.transport.calls[1][1])
+                self.assertIn('journal-' + role, self.transport.calls[1][1])
+
+    def test_report_correction_can_discover_a_substantial_fix(self):
+        self.state.update(phase='sol', sol_clean=1)
+        self.transport.actions = [('sol', self.edit()), ('sol', report(implementation_fixes=1, substantial=True))]
+        self.cycle.review('sol')
+        self.assertEqual(self.state['phase'], 'sol')
+        self.assertEqual(self.state['sol_clean'], 0)
+        self.assertTrue(self.state['review_substantial'])
+        self.assertEqual(self.state['display_reviews']['sol']['completed'], 1)
+        self.finish_loop('sol')
+        self.assertEqual(self.state['phase'], 'opus')
+
+    def interrupted_report_correction(self, error=KeyboardInterrupt):
+        self.state.update(phase='sol', sol_clean=1)
+        def interrupt():
+            self.state['pending']['attempts'] = 1
+            self.cycle.save()
+            raise error()
+        self.transport.actions = [('sol', self.edit(name='journal.md')), ('sol', interrupt)]
+        with self.assertRaises(error):
+            self.cycle.review('sol')
+        return json.loads(json.dumps(self.state['pending']))
+
+    def test_report_correction_survives_restart_and_cache_without_extra_credit(self):
+        pending = self.interrupted_report_correction()
+        self.assertEqual(self.state['sol_clean'], 1)
+        self.state = self.store.read()
+        self.cycle.state = self.state
+        self.transport.actions = [('sol', report(minor_edits=1))]
+        self.cycle.invoke('sol')  # Crash after result persistence, before credit.
+        self.state = self.store.read()
+        self.cycle.state = self.state
+        self.assertEqual(self.state['pending']['id'], pending['id'])
+        self.cycle.review('sol')
+        self.assertEqual(len(self.transport.calls), 3)
+        self.assertEqual(self.state['sol_clean'], 2)
+        self.assertEqual(self.state['display_reviews']['sol']['completed'], 1)
+        self.assertEqual(self.state['phase'], 'astra')
+
+    def test_report_correction_rejects_file_index_or_original_report_drift(self):
+        for kind in ('file', 'index', 'report'):
+            with self.subTest(kind=kind):
+                self.state.update(phase='sol', sol_clean=1, pending=None, review_plan=[])
+                self.transport.actions = [('sol', self.edit(name=kind + '.txt')), ('sol', KeyboardInterrupt())]
+                with self.assertRaises(KeyboardInterrupt):
+                    self.cycle.review('sol')
+                if kind == 'file':
+                    self.edit(content='external edit')()
+                elif kind == 'index':
+                    self.repo.git('add', 'source.txt')
+                else:
+                    Path(self.state['pending']['report_repair']['source']).write_text('{}')
+                with self.assertRaisesRegex(Blocked, 'report changed|Working files'):
+                    self.cycle.review('sol')
+                self.assertEqual(self.state['sol_clean'], 1)
+                self.assertFalse(self.transport.actions)
+
+    def test_report_correction_keeps_immutable_handoff_guards(self):
+        handoff = self.root / 'transfer.md'
+        handoff.write_text('Historical context')
+        self.state['handoffs'] = [self.store.handoff(handoff)]
+        self.interrupted_report_correction()
+        Path(self.state['handoffs'][0]['path']).write_text('Changed archived context')
+        self.transport.actions = []
+        with self.assertRaisesRegex(Blocked, 'imported handoff snapshot changed'):
+            self.cycle.review('sol')
+        self.assertEqual(self.state['sol_clean'], 1)
+
+    def test_report_correction_cannot_write_even_minor_evidence(self):
+        self.state.update(phase='sol', sol_clean=1)
+        self.transport.actions = [('sol', self.edit(name='journal.md')),
+                                  ('sol', self.edit(name='new-evidence.json', minor_edits=2))]
+        with self.assertRaisesRegex(Blocked, 'report-only correction'):
+            self.cycle.review('sol')
+        self.assertEqual(self.state['sol_clean'], 1)
+        self.assertEqual(self.state['display_reviews']['sol']['completed'], 0)
+        self.assertTrue((self.root / 'new-evidence.json').exists())  # Preserve, never discard.
+        self.assertIsNone(self.state['reviewed'])
+
+    def test_report_correction_quota_preserves_completed_pass_and_accounting(self):
+        pending = self.interrupted_report_correction()
+        self.cycle.defer_quota(ProviderQuota(1, no_work=True))
+        self.assertTrue(self.state['pending']['quota_wait']['no_work'])
+        self.assertEqual(self.state['sol_clean'], 1)
+        self.assertFalse(self.state['review_substantial'])
+        self.transport.actions = [('sol', report(minor_edits=1))]
+        self.cycle.review('sol')
+        self.assertEqual(self.state['sol_clean'], 2)
+        self.assertEqual(self.state['display_reviews']['sol']['completed'], 1)
+        self.assertEqual(json.loads(Path(self.state['last']['report']).read_text())['report_repair'], pending['report_repair'])
+
+    def test_failed_report_correction_uses_existing_healer_route(self):
+        self.state.update(phase='sol', sol_clean=1)
+        self.transport.actions = [('sol', self.edit()), ('sol', report())]
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.review('sol')
+        self.assertEqual(caught.exception.code, 'unreported-fix')
+        self.assertEqual(len(self.transport.calls), 2)
+        self.cycle.handle_block(caught.exception)
+        self.assertEqual(self.state['status'], 'healing')
+        self.assertEqual(self.state['sol_clean'], 0)
+        self.assertEqual(self.state['display_reviews']['sol']['completed'], 0)
+
+    def test_report_correction_carries_operator_restart_requirement(self):
+        self.state.update(phase='opus_final', pending={'id': 'instructed', 'role': 'opus_final',
+                          'before': self.repo.snapshot(), 'restart_reviews': True})
+        self.transport.actions = [('opus_final', self.edit()), ('opus_final', report(minor_edits=1))]
+        self.cycle.review('opus_final')
+        self.assertEqual(self.state['phase'], 'pair_a')
+        self.assertEqual([self.state[r + '_clean'] for r in REVIEW_ROLES], [0, 0, 0, 0])
+
+    def test_report_correction_native_prompt_does_not_repeat_the_review(self):
+        pending = self.interrupted_report_correction()
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        directory = self.store.directory / 'repair-prompt'
+        directory.mkdir(parents=True)
+        with patch.object(transport, '_codex', return_value=json.dumps(report(minor_edits=1))) as provider:
+            transport.run('sol', self.cycle.report_repair_context(pending), pending, directory)
+        prompt = provider.call_args.args[4]
+        self.assertIn('REPORT-ONLY CORRECTION', prompt)
+        self.assertNotIn('RECOVERY:', prompt)
 
     def test_coder_cannot_commit(self):
         def bad_coder():
@@ -1161,7 +1669,7 @@ class CycleTests(unittest.TestCase):
         self.state.update(phase="publish", reviewed=self.repo.snapshot(), blocker={"phase": "publish", "status": "healing"})
         self.transport.actions = [("heal", self.edit(implementation_fixes=1, substantial=True))]
         self.cycle.heal()
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
         self.assertIsNone(self.state["reviewed"])
 
     def test_changing_error_details_cannot_spin_recovery(self):
@@ -1351,7 +1859,7 @@ class CycleTests(unittest.TestCase):
         self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin")
         self.edit(content="unreviewed hook output")()
         self.assertFalse(self.cycle.prepare_publish())
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
 
     def test_wrong_sha_and_pending_ci_cannot_pass(self):
         self.remote()
@@ -1384,12 +1892,14 @@ class CycleTests(unittest.TestCase):
                 directory = self.store.directory / invocation["id"]
                 directory.mkdir()
                 raw = transport.run(role, "fixture prompt", invocation, directory)
-                self.assertEqual(parse_report(raw)["status"], "done")
+                self.assertEqual(parse_report(raw, role)["status"], "done")
                 prompt = (directory / "prompt.txt").read_text(encoding="utf-8")
-                self.assertIn("The current project plan is the source of stages.", prompt)
+                self.assertIn("Use the current project plan as the source of stages.", prompt)
                 self.assertIn("Do not require or recreate HANDOFF.md", prompt)
-                self.assertIn("Read the current project plan before selecting the next unfinished stage", prompt)
-                self.assertIn("report blocked; do not invent work", prompt)
+                self.assertIn("Before you select the next unfinished stage, read the current plan.", prompt)
+                self.assertIn("Do not invent work.", prompt)
+                self.assertIn("If the plan is missing or unreadable, report blocked.", prompt)
+                self.assertIn("If unfinished stages remain without a clear next stage, report blocked.", prompt)
         self.assertEqual(len(set(self.state["sessions"].values())), 7)
 
     def test_failed_ci_never_starts_next_stage(self):
@@ -1451,17 +1961,18 @@ class CycleTests(unittest.TestCase):
         self.assertFalse(changed(reviewed, self.repo.snapshot()))
 
     def test_failed_pass_resets_existing_clean_streak(self):
-        self.state.update(phase="sol", sol_clean=2, pending={"id": "interrupted", "role": "sol"})
+        self.state.update(phase="sol", sol_clean=2, pending={"id": "interrupted", "role": "sol", "before": self.repo.snapshot()})
         self.cycle.handle_block(Blocked("failed-test", "Verification failed"))
         self.assertEqual(self.state["sol_clean"], 0)
 
-    def test_external_edit_invalidates_claude_clean_streak(self):
-        self.state.update(phase="claude", sol_clean=3, claude_clean=1)
+    def test_external_edit_invalidates_opus_final_clean_streak(self):
+        self.state.update(phase="opus_final", sol_clean=3, opus_final_clean=1)
         self.edit(content="external change")()
-        self.transport.actions = [("coordinate", report(status="blocked")), ("heal", report(status="blocked"))]
+        # The blocked reader answers last: it stops its peer, which must not lose its turn first.
+        self.transport.actions = [("pair_sol", report(findings=[])), ("pair_opus", report(status="blocked", findings=[])), ("heal", report(status="blocked"))]
         self.assertEqual(self.cycle.run(), 3)
-        self.assertEqual(self.state["phase"], "sol")
-        self.assertEqual(self.state["sol_clean"], 0)
+        self.assertEqual(self.state["phase"], "pair_a")
+        self.assertEqual((self.state["sol_clean"], self.state["opus_final_clean"]), (0, 0))
 
     def test_lost_acquire_reply_uses_persisted_owner_intent(self):
         self.state["lease_owners"] = ["old-intended-owner"]
@@ -1762,6 +2273,7 @@ class CycleTests(unittest.TestCase):
     def test_stdio_server_exits_gracefully_before_cleanup(self):
         argv = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex",
                 "-s", "danger-full-access", "-a", "on-request", "app-server",
+                "-c", 'sandbox_mode="danger-full-access"',
                 "features.multi_agent=false", "features.memories=false"]
         process = Process(argv, self.root, self.root / "protocol.jsonl", lambda: None)
         Rpc(process).request("initialize", {})
@@ -1791,14 +2303,15 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.state["sol_clean"], 1)
         self.assertEqual(self.state["phase"], "sol")
 
-    def test_uncertain_interrupted_claude_changes_return_to_sol(self):
-        self.state.update(phase="claude", claude_clean=1, sol_clean=3, pending={
-            "id": "interrupted-claude", "role": "claude", "before": self.repo.snapshot(), "attempts": 1})
+    def test_uncertain_interrupted_claude_changes_return_to_astra(self):
+        self.state.update(phase="opus_final", opus_final_clean=1, sol_clean=3, pending={
+            "id": "interrupted-claude", "role": "opus_final", "before": self.repo.snapshot(), "attempts": 1})
         self.edit(content="changed before response was lost")()
-        self.transport.actions = [("claude", report(minor_edits=1))]
-        self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "sol")
-        self.assertEqual(self.state["sol_clean"], 0)
+        self.transport.actions = [("opus_final", report(minor_edits=1))]
+        self.cycle.review("opus_final")
+        self.assertEqual(self.state["phase"], "opus_final")
+        self.assertTrue(self.state["review_substantial"])
+        self.assertEqual(self.state["sol_clean"], 3)
 
     def test_unmaterialized_codex_session_recovers_same_phase(self):
         self.state["sessions"]["sol"] = "unmaterialized-session"
@@ -1831,7 +2344,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(parse_report(transport.run("code", "same phase", pending, directory))["status"], "done")
         self.assertNotEqual(self.state["sessions"]["code"], "unmaterialized-session")
         self.assertEqual(self.state["session_recoveries"][0]["missing"], "unmaterialized-session")
-        self.assertIn("clean continuation", (directory / "prompt.txt").read_text())
+        self.assertIn("new conversation for the SAME runtime phase", (directory / "prompt.txt").read_text())
 
     def test_claude_auth_failure_does_not_replace_conversation(self):
         self.state["sessions"]["code"] = "known-session"
@@ -1847,20 +2360,22 @@ class CycleTests(unittest.TestCase):
     def test_claude_native_wait_is_not_the_final_report(self):
         for variant in ("native-wait", "native-fixes", "queued-turn", "foreground-task"):
             with self.subTest(variant=variant):
-                self.state["sessions"]["claude"] = "saved-review-session"
+                self.state["sessions"]["opus_final"] = "saved-review-session"
                 transport = Transport(self.root, self.state, self.store.save, lambda: None)
                 transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
                 directory = self.store.directory / variant
                 directory.mkdir(parents=True)
                 with patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "0", "BASH_MAX_TIMEOUT_MS": "600000"}):
-                    result = parse_report(transport.run("claude", "same review", {"id": variant}, directory), "claude")
+                    result = parse_report(transport.run("opus_final", "same review", {"id": variant}, directory), "opus_final")
                     self.assertEqual(os.environ["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"], "0")
                 self.assertEqual(result["status"], "done")
                 self.assertEqual(result["implementation_fixes"], 2 if variant == "native-fixes" else 0)
                 self.assertEqual(result["substantial"], variant == "native-fixes")
                 deferred = list(directory.glob("deferred-*.txt"))
                 self.assertEqual(len(deferred), 0 if variant == "foreground-task" else 2)
-                self.assertEqual(self.state["sessions"]["claude"], "saved-review-session")
+                self.assertEqual(self.state["sessions"]["opus_final"], "saved-review-session")
+                summary = json.loads((directory / "claude-diagnostics.json").read_text(encoding="utf-8"))
+                self.assertFalse(summary["result"]["deferred"])  # Diagnostics agree on the final result.
 
     def test_claude_native_wait_cannot_earn_a_review_without_final_completion(self):
         for variant, expected in (("native-eof", "provider-eof"), ("native-wrong-session", "provider-profile")):
@@ -1870,19 +2385,23 @@ class CycleTests(unittest.TestCase):
                 directory = self.store.directory / variant
                 directory.mkdir(parents=True)
                 with self.assertRaises(Blocked) as caught:
-                    transport.run("claude", "same review", {"id": variant}, directory)
+                    transport.run("opus_final", "same review", {"id": variant}, directory)
                 self.assertEqual(caught.exception.code, expected)
                 self.assertFalse((directory / "result.json").exists())
+                if variant == "native-eof":  # Diagnostics do not count the waiting result as completion.
+                    summary = json.loads((directory / "claude-diagnostics.json").read_text(encoding="utf-8"))
+                    self.assertTrue(summary["result"]["deferred"])
 
     def test_claude_native_fix_cannot_count_as_a_clean_review(self):
-        self.state.update(phase="claude", coordinated="claude", sol_passes=4, sol_clean=3, claude_clean=1)
+        self.state.update(phase="opus_final", coordinated="opus_final", sol_passes=4, sol_clean=3, opus_final_clean=1)
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "native-fixes"]
         self.cycle.transport = transport
-        self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "sol")
-        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
-        self.assertEqual(self.state["display_reviews"]["claude"]["completed"], 1)
+        self.cycle.review("opus_final")
+        self.assertEqual(self.state["phase"], "opus_final")
+        self.assertTrue(self.state["review_substantial"])
+        self.assertEqual((self.state["sol_clean"], self.state["opus_final_clean"]), (3, 0))
+        self.assertEqual(self.state["display_reviews"]["opus_final"]["completed"], 1)
         self.assertIsNone(self.state["published"])
 
     def test_claude_native_wait_still_honors_operator_stop(self):
@@ -1894,7 +2413,7 @@ class CycleTests(unittest.TestCase):
         transport = Transport(self.root, self.state, self.store.save, heartbeat)
         transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "native-wait"]
         with self.assertRaises(FocusStop):
-            transport.run("claude", "same review", {"id": "native-stop"}, directory)
+            transport.run("opus_final", "same review", {"id": "native-stop"}, directory)
         self.assertFalse((directory / "result.json").exists())
 
     def test_claude_quota_requires_matching_structured_refusal_and_valid_reset(self):
@@ -1910,21 +2429,21 @@ class CycleTests(unittest.TestCase):
                                   ("quota-allowed-error", "claude-api-error"),
                                   ("quota-access", "claude-access-denied")):
             with self.subTest(variant=variant):
-                self.state["sessions"]["claude"] = "saved-review-session"
+                self.state["sessions"]["opus_final"] = "saved-review-session"
                 transport = Transport(self.root, self.state, self.store.save, lambda: None)
                 transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
                 directory = self.store.directory / variant
                 directory.mkdir(parents=True)
                 if expected:
                     with self.assertRaises(Blocked) as caught:
-                        transport.run("claude", "same review", {"id": variant}, directory)
+                        transport.run("opus_final", "same review", {"id": variant}, directory)
                     self.assertEqual(caught.exception.code, expected)
                     if expected == "claude-quota":
                         self.assertEqual(caught.exception.resets_at, 1789482000)
                         self.assertEqual(caught.exception.no_work, variant != "quota-work")
                 else:
-                    self.assertEqual(parse_report(transport.run("claude", "same review", {"id": variant}, directory))["status"], "done")
-                self.assertEqual(self.state["sessions"]["claude"], "saved-review-session")
+                    self.assertEqual(parse_report(transport.run("opus_final", "same review", {"id": variant}, directory))["status"], "done")
+                self.assertEqual(self.state["sessions"]["opus_final"], "saved-review-session")
 
     def test_quota_cleanup_failure_still_prevents_automatic_retry(self):
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
@@ -1936,12 +2455,12 @@ class CycleTests(unittest.TestCase):
             close(process)
             raise Blocked("cleanup-incomplete", "Fixture containment failure")
         with patch.object(Process, "close", unsafe_close), self.assertRaises(Blocked) as caught:
-            transport.run("claude", "same review", {"id": "quota-cleanup"}, directory)
+            transport.run("opus_final", "same review", {"id": "quota-cleanup"}, directory)
         self.assertEqual(caught.exception.code, "cleanup-incomplete")
 
     def test_quota_wait_retries_same_invocation_without_healing_or_resetting_clean_passes(self):
-        self.state.update(phase="claude", coordinated="claude", sol_clean=3, claude_clean=1,
-                          sessions={"claude": "same-native-session"})
+        self.state.update(phase="opus_final", coordinated="opus_final", sol_clean=3, astra_clean=2, opus_final_clean=1,
+                          sessions={"opus_final": "same-native-session"})
         original = self.repo.snapshot()
         clock, waited, ids = [1000.0], [], []
         def reject():
@@ -1951,36 +2470,37 @@ class CycleTests(unittest.TestCase):
             raise ProviderQuota(1100, no_work=True)
         def retry():
             ids.append(self.state["pending"]["id"])
-            self.assertEqual(self.state["claude_clean"], 1)
+            self.assertEqual(self.state["opus_final_clean"], 1)
+            self.assertEqual(self.state["astra_clean"], 2)
             self.assertGreaterEqual(clock[0], 1105)
             return report()
         def tick(delay):
             self.assertLessEqual(delay, 0.25)
             saved = self.store.read()
             waited.append(saved["pending"]["quota_wait"])
-            self.assertEqual((saved["phase"], saved["claude_clean"]), ("claude", 1))
+            self.assertEqual((saved["phase"], saved["opus_final_clean"]), ("opus_final", 1))
             self.assertIsNone(saved["blocker"])
-            self.assertEqual(saved["display_reviews"]["claude"]["completed"], 0)
+            self.assertEqual(saved["display_reviews"]["opus_final"]["completed"], 0)
             clock[0] += 60
-        control = type("ControlFixture", (), {"boundary": lambda _, window: self.state["phase"] == "astra"})()
+        control = type("ControlFixture", (), {"boundary": lambda _, window: self.state["phase"] == "final"})()
         self.cycle.control = control
-        self.transport.actions = [("claude", reject), ("claude", retry)]
+        self.transport.actions = [("opus_final", reject), ("opus_final", retry)]
         with patch("cycle_workflow.time", wraps=time) as timer:
             timer.time.side_effect = lambda: clock[0]
             timer.sleep.side_effect = tick
             self.assertEqual(self.cycle.run(), 0)
         self.assertTrue(waited)
         self.assertEqual(ids, [ids[0], ids[0]])
-        self.assertEqual([role for role, _ in self.transport.calls], ["claude", "claude"])
-        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (3, 2))
-        self.assertEqual(self.state["sessions"], {"claude": "same-native-session"})
+        self.assertEqual([role for role, _ in self.transport.calls], ["opus_final", "opus_final"])
+        self.assertEqual((self.state["sol_clean"], self.state["astra_clean"], self.state["opus_final_clean"]), (3, 2, 2))
+        self.assertEqual(self.state["sessions"], {"opus_final": "same-native-session"})
         self.assertEqual(self.repo.snapshot(), original)
         self.assertIsNone(self.state["pending"])
 
     def quota_cli_fixture(self, no_work=True):
-        self.state.update(phase="claude", coordinated="claude", sol_clean=3, claude_clean=1,
-                          sessions={"claude": "same-review-session"}, pending={
-                              "id": "account-change-" + str(time.time_ns()), "role": "claude", "attempts": 1,
+        self.state.update(phase="opus_final", coordinated="opus_final", sol_clean=3, astra_clean=2, opus_final_clean=0,
+                          sessions={"opus_final": "same-review-session"}, pending={
+                              "id": "account-change-" + str(time.time_ns()), "role": "opus_final", "attempts": 1,
                               "before": self.repo.snapshot(), "quota_wait": {
                                   "resets_at": time.time() + 7200, "retry_at": time.time() + 7205,
                                   "no_work": no_work}})
@@ -2003,7 +2523,7 @@ class CycleTests(unittest.TestCase):
                     self.assertEqual(cycle.state["pending"]["id"], pending["id"])
                     self.assertEqual(cycle.state["sessions"], self.state["sessions"])
                     self.assertFalse(cycle.wait_quota())
-                    cycle.review("claude")
+                    cycle.review("opus_final")
                     return 0
                 with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
                         patch("cc_focus.Cycle.run", autospec=True, side_effect=run), \
@@ -2013,8 +2533,9 @@ class CycleTests(unittest.TestCase):
                 provider.assert_called_once()
                 saved = self.store.read()
                 self.assertEqual(saved["sessions"], self.state["sessions"])
-                self.assertEqual(saved["claude_clean"], 0 if drift else 2 if no_work else 1)
-                self.assertEqual(saved["phase"], "sol" if drift else "astra" if no_work else "claude")
+                self.assertEqual(saved["opus_final_clean"], 0 if drift else 1)
+                self.assertEqual(saved["astra_clean"], 2)
+                self.assertEqual(saved["phase"], "opus_final")
                 self.assertEqual(self.repo.snapshot(), before)
 
     def test_plain_restart_keeps_saved_quota_deadline(self):
@@ -2043,7 +2564,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(saved["pending"]["id"], pending["id"])
         self.assertEqual(saved["pending"]["quota_wait"]["resets_at"], reset)
         self.assertGreaterEqual(saved["pending"]["quota_wait"]["retry_at"], reset + 5)
-        self.assertEqual(saved["claude_clean"], 1)
+        self.assertEqual(saved["claude_clean"], 0)
         self.assertEqual(saved["status"], "paused")
         self.assertIsNone(saved["blocker"])
 
@@ -2095,19 +2616,37 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.state["status"], "complete")
 
     def test_quota_retry_after_started_work_or_checkout_drift_cannot_keep_review_credit(self):
-        self.state.update(phase="claude", coordinated="claude", sol_clean=3, claude_clean=1)
+        self.state.update(phase="opus_final", coordinated="opus_final", sol_clean=3, opus_final_clean=1)
         for started, drift in ((True, False), (False, True)):
             with self.subTest(started=started, drift=drift):
                 before = self.repo.snapshot()
-                self.state.update(phase="claude", claude_clean=1, sol_clean=3,
-                                  pending={"id": str(started), "role": "claude", "attempts": 1, "before": before})
+                self.state.update(phase="opus_final", opus_final_clean=1, sol_clean=3,
+                                  pending={"id": str(started), "role": "opus_final", "attempts": 1, "before": before})
                 self.cycle.defer_quota(ProviderQuota(1, no_work=not started))
                 if drift:
                     self.edit()()
-                self.transport.actions = [("claude", report(other_fixes=int(drift)))]
-                self.cycle.review("claude")
-                self.assertEqual(self.state["claude_clean"], 0 if drift else 1)
-                self.assertEqual(self.state["phase"], "sol" if drift else "claude")
+                self.transport.actions = [("opus_final", report(other_fixes=int(drift)))]
+                self.cycle.review("opus_final")
+                self.assertEqual(self.state["opus_final_clean"], 0 if drift else 1)
+                self.assertEqual(self.state["phase"], "opus_final")
+
+    def test_final_quota_after_edits_persists_return_to_astra(self):
+        self.state.update(phase='opus_final', sol_passes=5, sol_clean=3, astra_clean=2,
+                          pending={'id': 'final-quota', 'role': 'opus_final', 'attempts': 1,
+                                   'before': self.repo.snapshot()})
+        self.edit(content='fix made before quota refusal')()
+        self.cycle.defer_quota(ProviderQuota(1, no_work=False))
+        self.assertTrue(self.store.read()['review_substantial'])
+        self.assertNotIn('return_to_sol', self.state['pending'])
+        self.state = self.store.read()
+        self.cycle.state = self.state
+        self.transport.actions = [('opus_final', report(implementation_fixes=1))]
+        self.cycle.review('opus_final')
+        self.assertEqual(self.state['phase'], 'opus_final')
+        self.assertTrue(self.state['review_substantial'])
+        self.assertEqual((self.state['sol_passes'], self.state['sol_clean']), (5, 3))
+        self.assertEqual((self.state['astra_clean'], self.state['opus_final_clean']), (2, 0))
+        self.assertIsNone(self.state['reviewed'])
 
     def test_quota_refusal_cannot_hide_protected_file_changes(self):
         self.edit(name="operator.txt", content="owned by operator")()
@@ -2164,18 +2703,18 @@ class CycleTests(unittest.TestCase):
         self.edit(name="operator.txt", content="operator work")()
         self.state = fresh_state(self.repo)
         self.cycle.state = self.state
-        self.state.update(phase="claude", pending={"id": "quota-guard", "role": "claude", "attempts": 1,
+        self.state.update(phase="opus_final", pending={"id": "quota-guard", "role": "opus_final", "attempts": 1,
                           "before": self.repo.snapshot(), "quota_wait": {"no_work": True}})
         self.edit(name="operator.txt", content="changed during wait")()
         with self.assertRaises(Blocked) as caught:
-            self.cycle.invoke("claude")
+            self.cycle.invoke("opus_final")
         self.assertEqual(caught.exception.code, "protected-work")
         self.edit(name="operator.txt", content="operator work")()
         self.edit()()
         self.repo.git("add", "source.txt")
         self.repo.git("commit", "-m", "External update during wait")
         with self.assertRaises(Blocked) as caught:
-            self.cycle.invoke("claude")
+            self.cycle.invoke("opus_final")
         self.assertEqual(caught.exception.code, "unauthorized-commit")
         self.assertEqual(self.transport.calls, [])
 
@@ -2187,14 +2726,14 @@ class CycleTests(unittest.TestCase):
                                   ("synthetic-wrong-session", "provider-profile"),
                                   ("wrong-model", "model-rerouted")):
             with self.subTest(variant=variant):
-                self.state["sessions"]["claude"] = "known-review-session"
+                self.state["sessions"]["opus_final"] = "known-review-session"
                 transport = Transport(self.root, self.state, self.store.save, lambda: None)
                 transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
                 directory = self.store.directory / variant
                 directory.mkdir(parents=True)
                 before = self.repo.snapshot()
                 with self.assertRaises(Blocked) as raised:
-                    transport.run("claude", "same review", {"id": variant}, directory)
+                    transport.run("opus_final", "same review", {"id": variant}, directory)
                 self.assertEqual(raised.exception.code, expected)
                 if expected == "claude-access-denied":
                     self.assertIn("oauth_org_not_allowed", str(raised.exception))
@@ -2204,7 +2743,7 @@ class CycleTests(unittest.TestCase):
                 if expected == "claude-api-error":
                     self.assertIn("Provider temporarily unavailable", str(raised.exception))
                 self.assertEqual(self.repo.snapshot(), before)
-                self.assertEqual(self.state["sessions"]["claude"], "known-review-session")
+                self.assertEqual(self.state["sessions"]["opus_final"], "known-review-session")
                 self.assertNotIn("session_recoveries", self.state)
                 self.assertTrue((directory / "protocol.jsonl").exists())
 
@@ -2213,11 +2752,11 @@ class CycleTests(unittest.TestCase):
         transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "quoted-api-error"]
         directory = self.store.directory / "quoted-api-error"
         directory.mkdir(parents=True)
-        self.assertEqual(parse_report(transport.run("claude", "same review", {"id": "quoted"}, directory))["status"], "done")
+        self.assertEqual(parse_report(transport.run("opus_final", "same review", {"id": "quoted"}, directory))["status"], "done")
 
     def test_provider_api_refusal_stops_review_without_healing_and_can_resume(self):
-        self.state.update(phase="claude", coordinated="claude", sol_passes=4, sol_clean=3, claude_clean=1,
-                          sessions={"claude": "saved-review-session"})
+        self.state.update(phase="opus_final", coordinated="opus_final", sol_passes=4, sol_clean=3, opus_final_clean=1,
+                          sessions={"opus_final": "saved-review-session"})
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
         fixture = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude"]
         transport.commands["claude"] = fixture + ["synthetic-org"]
@@ -2228,21 +2767,21 @@ class CycleTests(unittest.TestCase):
         saved = self.store.read()
         self.assertEqual(saved["blocker"]["code"], "claude-access-denied")
         self.assertEqual(saved["blocker"]["status"], "blocked")
-        self.assertEqual(saved["phase"], "claude")
-        self.assertEqual((saved["sol_clean"], saved["claude_clean"]), (3, 0))
+        self.assertEqual(saved["phase"], "opus_final")
+        self.assertEqual((saved["sol_clean"], saved["opus_final_clean"]), (3, 0))
         self.assertEqual(saved["healed"], [])
-        self.assertEqual(saved["display_reviews"]["claude"]["completed"], 0)
+        self.assertEqual(saved["display_reviews"]["opus_final"]["completed"], 0)
         self.assertEqual(self.repo.snapshot(), before)
         self.assertFalse(list(self.store.directory.glob("invocations/*/result.json")))
         # Operator continuation after access is restored uses the saved role
-        # conversation and must still complete both required review passes.
+        # conversation and must still complete the required final review pass.
         self.state.update(blocker=None, pending=None, status="ready")
         transport.commands["claude"] = fixture
-        self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "claude")
-        self.cycle.review("claude")
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertEqual(self.state["sessions"], {"claude": "saved-review-session"})
+        self.cycle.review("opus_final")
+        self.assertEqual(self.state["phase"], "opus_final")
+        self.cycle.review("opus_final")
+        self.assertEqual(self.state["phase"], "final")
+        self.assertEqual(self.state["sessions"], {"opus_final": "saved-review-session"})
 
     def test_unknown_structured_api_failure_tries_healing_before_stopping(self):
         self.state.update(phase="code", coordinated="code")
@@ -2253,6 +2792,639 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.state["blocker"]["status"], "blocked")
         self.assertEqual(self.state["blocker"]["escalation_reason"], "healer-failed")
 
+    def test_claude_structured_refusals_preserve_details_and_validate_origin(self):
+        cases = [("refusal-synthetic", "claude-refusal"), ("refusal-preinit", "claude-refusal"),
+                 ("refusal-native", "claude-refusal"), ("refusal-null", "claude-refusal"),
+                 ("refusal-foreign", "provider-profile"), ("refusal-native-foreign", "provider-profile"),
+                 ("refusal-unmarked", "model-rerouted"), ("refusal-wrong-model", "model-rerouted"),
+                 ("refusal-text-only", "claude-api-error"), ("refusal-quoted", None)]
+        for variant, expected in cases:
+            with self.subTest(variant=variant):
+                self.state["sessions"]["code"] = "saved-coding-session"
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
+                directory = self.store.directory / variant
+                directory.mkdir(parents=True)
+                before = self.repo.snapshot()
+                if expected:
+                    with self.assertRaises(Blocked) as caught:
+                        transport.run("code", "same implementation", {"id": variant}, directory)
+                    self.assertEqual(caught.exception.code, expected)
+                    if expected == "claude-refusal":
+                        detail = str(caught.exception)
+                        self.assertIn("unspecified" if variant == "refusal-null" else "reasoning_extraction", detail)
+                        self.assertIn("Request ID: req_fixture", detail)
+                        self.assertIn("Response message ID: msg_fixture", detail)
+                        if variant != "refusal-null":
+                            self.assertIn("public provider explanation", detail)
+                        self.assertNotIn("PRIVATE REFUSAL CONTENT", detail)
+                else:
+                    self.assertEqual(parse_report(transport.run("code", "same implementation", {"id": variant}, directory))["status"], "done")
+                self.assertEqual(self.repo.snapshot(), before)
+                self.assertEqual(self.state["sessions"]["code"], "saved-coding-session")
+                self.assertNotIn("session_recoveries", self.state)
+
+    def test_claude_streamed_refusal_stops_before_native_continuation(self):
+        cases = {"stream-refusal": "claude-refusal", "stream-refusal-null": "claude-refusal",
+                 "stream-refusal-foreign": "provider-profile", "stream-refusal-wrong-model": "model-rerouted",
+                 "stream-refusal-no-start": "provider-profile", "stream-refusal-child": "provider-profile",
+                 "stream-refusal-foreign-start": "provider-profile", "stream-refusal-child-start": "provider-profile"}
+        for variant, expected in cases.items():
+            with self.subTest(variant=variant):
+                self.state["sessions"] = {"code": "saved-coding-session"}
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
+                directory = self.store.directory / "invocations" / variant
+                directory.mkdir(parents=True)
+                with self.assertRaises(Blocked) as caught:
+                    transport.run("code", "same implementation", {"id": variant}, directory)
+                self.assertEqual(caught.exception.code, expected)
+                summary = json.loads((directory / "claude-diagnostics.json").read_text())
+                self.assertEqual(summary["refusals"][0]["source"], "message_delta")
+                self.assertFalse(summary["result"])
+                self.assertNotIn("PRIVATE", json.dumps(summary))
+                self.assertEqual((summary["launch"]["requested_model"], summary["launch"]["effort"]), ("opus", "xhigh"))
+                self.assertTrue(summary["launch"]["resumed"])
+                self.assertTrue(summary["launch"]["standard_system_prompt"])
+                self.assertEqual(summary["launch"]["prompt_sha256"], hashlib.sha256((directory / "prompt.txt").read_bytes()).hexdigest())
+                if expected == "claude-refusal":
+                    self.assertIn("Response message ID: msg_stream", str(caught.exception))
+                    self.assertIn("Request ID: req_stream", str(caught.exception))
+                    self.assertEqual(summary["refusals"][0]["last_action"]["tool"], "Write")
+
+    def test_diagnostic_write_failure_cannot_hide_refusal(self):
+        self.state["sessions"] = {"code": "saved-coding-session"}
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "stream-refusal"]
+        directory = self.store.directory / "invocations" / ("d" * 32)
+        directory.mkdir(parents=True)
+        def write(path, data):
+            if Path(path).name == "claude-diagnostics.json":
+                raise OSError("disk full")
+            atomic_write(path, data)
+        with patch("cycle_transport.atomic_write", side_effect=write), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(Blocked) as caught:
+            transport.run("code", "same implementation", {"id": "d" * 32}, directory)
+        self.assertEqual(caught.exception.code, "claude-refusal")
+        self.assertIn("cc-focus diagnose --invocation " + "d" * 32, str(caught.exception))
+
+    def test_claude_refusal_preserves_partial_work_without_retry_or_healer(self):
+        self.state.update(phase="code", coordinated="code", sessions={"code": "saved-coding-session"})
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "refusal-work"]
+        self.cycle.transport = transport
+        before = self.repo.snapshot()
+        with patch.object(self.cycle, "heal", side_effect=AssertionError("Refusal must not launch a healer")), \
+                patch.object(self.cycle, "defer_transient", side_effect=AssertionError("Refusal is not transient")), \
+                patch.object(self.cycle, "defer_quota", side_effect=AssertionError("Refusal is not quota")):
+            self.assertEqual(self.cycle.run(), 3)
+            self.assertEqual(self.cycle.run(), 3)
+        saved = self.store.read()
+        self.assertEqual(saved["blocker"]["code"], "claude-refusal")
+        self.assertEqual(saved["blocker"]["escalation_reason"], "provider-refusal")
+        self.assertEqual(saved["phase"], "code")
+        self.assertEqual(saved["status"], "blocked")
+        self.assertEqual(saved["sessions"], {"code": "saved-coding-session"})
+        self.assertEqual(saved["healed"], [])
+        self.assertFalse(saved.get("recovery_unverified", False))
+        self.assertIsNone(saved["reviewed"])
+        self.assertIsNone(saved["published"])
+        self.assertEqual(saved["code_report"], "")
+        after = self.repo.snapshot()
+        self.assertEqual((after["head"], after["index"]), (before["head"], before["index"]))
+        self.assertEqual((self.root / "source.txt").read_text(), "partial implementation\n")
+        intents = list(self.store.directory.glob("invocations/*/intent.json"))
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(json.loads(intents[0].read_text())["id"], saved["blocker"]["interrupted"]["id"])
+        self.assertFalse(list(self.store.directory.glob("invocations/*/result.json")))
+
+    def test_claude_diagnostics_keep_instruction_hashes_from_before_the_start(self):
+        config = Path(self.temp.name) / "claude-config"
+        config.mkdir()
+        user_file = config / "CLAUDE.md"
+        version_a, version_b = (hashlib.sha256(text).hexdigest() for text in (b"Version A", b"Version B"))
+        cases = {(): [version_a], ("instruction-change",): [version_b], ("instruction-delete",): [],
+                 ("refusal-work", "instruction-change"): [version_b]}
+        for index, (variant, final) in enumerate(cases.items()):
+            with self.subTest(variant=variant):
+                user_file.write_text("Version A", encoding="utf-8")
+                self.state["sessions"] = {"code": "saved-coding-session"}
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", *variant]
+                directory = self.store.directory / "invocations" / format(index, "032x")
+                directory.mkdir(parents=True)
+                with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(config)):
+                    if "refusal-work" in variant:
+                        with self.assertRaises(Blocked) as caught:
+                            transport.run("code", "same implementation", {"id": directory.name}, directory)
+                        self.assertEqual(caught.exception.code, "claude-refusal")
+                    else:
+                        transport.run("code", "same implementation", {"id": directory.name}, directory)
+                saved = json.loads((directory / "claude-diagnostics.json").read_text(encoding="utf-8"))
+                user = lambda files: [f["sha256"] for f in files if f["scope"] == "user"]
+                self.assertEqual(saved["launch"]["instruction_files_captured"], "before-start")
+                self.assertEqual(user(saved["launch"]["instruction_files"]), [version_a])
+                self.assertEqual(user(saved["completion"]["instruction_files"]), final)
+                self.assertNotIn("Version", json.dumps(saved))
+
+    def test_instruction_hashes_are_taken_before_the_process_exists(self):
+        config = Path(self.temp.name) / "claude-config"
+        config.mkdir()
+        user_file = config / "CLAUDE.md"
+        user_file.write_text("Version A", encoding="utf-8")
+        import cycle_transport
+        real = cycle_transport.Process
+        def start(*args, **kwargs):
+            user_file.write_text("Version B", encoding="utf-8")  # Changed at process creation.
+            return real(*args, **kwargs)
+        self.state["sessions"] = {"code": "saved-coding-session"}
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude"]
+        directory = self.store.directory / "invocations" / ("f" * 32)
+        directory.mkdir(parents=True)
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(config)), patch("cycle_transport.Process", side_effect=start):
+            transport.run("code", "same implementation", {"id": "f" * 32}, directory)
+        saved = json.loads((directory / "claude-diagnostics.json").read_text(encoding="utf-8"))
+        user = [f["sha256"] for f in saved["launch"]["instruction_files"] if f["scope"] == "user"]
+        self.assertEqual(user, [hashlib.sha256(b"Version A").hexdigest()])
+
+    def test_diagnostic_metadata_errors_cannot_replace_a_claude_outcome(self):
+        for variant, expected in (("stream-refusal", "claude-refusal"), ("", None)):
+            with self.subTest(variant=variant):
+                self.state["sessions"] = {"code": "saved-coding-session"}
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude",
+                                                *([variant] if variant else [])]
+                directory = self.store.directory / "invocations" / (("a" if variant else "b") * 32)
+                directory.mkdir(parents=True)
+                with patch("cycle_transport.ClaudeTrace.report", side_effect=UnicodeEncodeError(
+                        "utf-8", "\ud83d", 0, 1, "surrogates not allowed")), contextlib.redirect_stderr(io.StringIO()):
+                    if expected:
+                        with self.assertRaises(Blocked) as caught:
+                            transport.run("code", "same implementation", {"id": directory.name}, directory)
+                        self.assertEqual(caught.exception.code, expected)
+                    else:
+                        self.assertEqual(parse_report(transport.run("code", "same implementation",
+                                                                    {"id": directory.name}, directory))["status"], "done")
+
+    def test_a_retry_in_the_same_directory_keeps_each_attempt_separate(self):
+        from focus_diagnostics import refusal_history
+        directory = self.store.directory / "invocations" / ("c" * 32)
+        directory.mkdir(parents=True)
+        self.state["sessions"] = {"code": "saved-coding-session"}
+        for variant, expected in (("stream-refusal", "claude-refusal"), ("synthetic-org-preinit", "claude-access-denied")):
+            transport = Transport(self.root, self.state, self.store.save, lambda: None)
+            transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
+            with self.assertRaises(Blocked) as caught:
+                transport.run("code", "same implementation", {"id": "c" * 32}, directory)
+            self.assertEqual(caught.exception.code, expected)
+            self.state["sessions"] = {}  # The second attempt starts a new conversation.
+        rows = refusal_history(self.store.directory)
+        first = rows["onset"]["first_refusal"]
+        self.assertEqual((first["session_id"], first["attempt"], first["attempts"]), ("saved-coding-session", 1, 2))
+        self.assertTrue(first["resumed"])
+        self.assertIsNone(first["role_contract_sha256"])  # The saved launch record belongs to attempt 2.
+        self.assertFalse(first["prompt_known"])
+
+    def test_a_failed_diagnostic_write_cannot_hide_a_refused_pair_reader(self):
+        import cc_focus
+        from focus_diagnostics import selected_refusals
+        identity = "c" * 32
+        directory = self.store.directory / "invocations" / identity
+        directory.mkdir(parents=True)
+        self.state["sessions"] = {"code": "saved-coding-session"}
+        for variant in ((), ("stream-refusal",)):  # The reader completes, then a correction attempt is refused.
+            transport = Transport(self.root, self.state, self.store.save, lambda: None)
+            transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", *variant]
+            def write(path, data, fail=bool(variant)):
+                if fail and Path(path).name == "claude-diagnostics.json":
+                    raise OSError("disk full")
+                atomic_write(path, data)
+            with patch("cycle_transport.atomic_write", side_effect=write), contextlib.redirect_stderr(io.StringIO()):
+                if variant:
+                    with self.assertRaises(Blocked) as caught:
+                        transport.run("code", "same review", {"id": identity}, directory)
+                    self.assertEqual(caught.exception.code, "claude-refusal")
+                else:
+                    transport.run("code", "same review", {"id": identity}, directory)
+        self.assertFalse(json.loads((directory / "claude-diagnostics.json").read_text())["refusals"])  # Stale file.
+        # A pair blocker names only its group. The unfinished reader still holds the refused session.
+        self.state.update(sessions={}, pair_review={"jobs": {"scan/pair_opus": {
+            "id": identity, "role": "pair_opus", "sessions": {"pair_opus": "saved-coding-session"}}}},
+            blocker={"code": "claude-refusal", "interrupted": {"id": "d" * 32, "role": "pair_group"},
+                     "signature": "fixture", "status": "blocked", "message": "Claude refused."})
+        self.store.save(self.state)
+        self.assertEqual([r["invocation"] for r in selected_refusals(self.store.directory, self.state)], [identity])
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease", side_effect=AssertionError("lease")), \
+                patch("cc_focus.Cycle.run", side_effect=AssertionError("provider")), \
+                contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(cc_focus.main(["--retry", "--ui", "off"]), 3)
+        self.assertIn("cc-focus --new-sessions --retry", error.getvalue())
+
+    def test_failed_instruction_hashing_cannot_stop_or_hide_a_claude_result(self):
+        self.state["sessions"] = {"code": "saved-coding-session"}
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "stream-refusal"]
+        directory = self.store.directory / "invocations" / ("e" * 32)
+        directory.mkdir(parents=True)
+        with patch("cycle_transport.instruction_files", side_effect=TypeError("diagnostic defect")), \
+                self.assertRaises(Blocked) as caught:
+            transport.run("code", "same implementation", {"id": "e" * 32}, directory)
+        self.assertEqual(caught.exception.code, "claude-refusal")
+        saved = json.loads((directory / "claude-diagnostics.json").read_text(encoding="utf-8"))
+        self.assertIsNone(saved["launch"]["instruction_files"])
+        self.assertIsNone(saved["completion"]["instruction_files"])
+
+    def test_claude_refusal_retry_requires_a_new_conversation(self):
+        import cc_focus
+        config = Path(self.temp.name) / "claude-config"
+        config.mkdir()
+        (config / "CLAUDE.md").write_text("User writing policy", encoding="utf-8")
+        self.state.update(phase="code", coordinated="code", sessions={"code": "saved-coding-session"})
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "refusal-work"]
+        self.cycle.transport = transport
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(config)):
+            self.assertEqual(self.cycle.run(), 3)
+        invocation = self.store.directory / "invocations" / self.store.read()["blocker"]["interrupted"]["id"]
+        launch = json.loads((invocation / "claude-diagnostics.json").read_text(encoding="utf-8"))["launch"]
+        user = [f for f in launch["instruction_files"] if f["scope"] == "user"]
+        self.assertEqual([f["path"] for f in user], [str(config / "CLAUDE.md")])
+        self.assertTrue(all(set(f) == {"scope", "path", "bytes", "sha256"} for f in launch["instruction_files"]))
+        self.assertNotIn("User writing policy", json.dumps(launch))
+        saved = (self.store.directory / "state.json").read_bytes()
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease", side_effect=AssertionError("lease")), \
+                patch("cc_focus.Cycle.run", side_effect=AssertionError("provider")), \
+                contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(cc_focus.main(["--retry", "--ui", "off"]), 3)
+        self.assertIn("cc-focus --new-sessions --retry", error.getvalue())
+        self.assertEqual((self.store.directory / "state.json").read_bytes(), saved)
+        # A correction keeps the refused conversation too, so it needs new sessions first.
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease", side_effect=AssertionError("lease")), \
+                contextlib.redirect_stderr(io.StringIO()) as error:
+            self.assertEqual(cc_focus.main(["correct", "--message", "Remove the refused instruction"]), 3)
+            self.assertEqual(cc_focus.main(["recover", "--review-from", str(invocation / "result.json")]), 3)
+            # An applied reconcile plan records the same correction and keeps role sessions.
+            self.assertEqual(cc_focus.main(["reconcile", "--apply-plan", str(self.root / "plan.json")]), 3)
+        self.assertEqual(error.getvalue().count("Run cc-focus --new-sessions first"), 3)
+        self.assertEqual((self.store.directory / "state.json").read_bytes(), saved)
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
+                patch("cc_focus.Cycle.run", return_value=0):
+            lease.return_value.__enter__.return_value.pwsh = "pwsh"
+            self.assertEqual(cc_focus.main(["--new-sessions", "--retry", "--ui", "off"]), 0)
+        current = self.store.read()
+        self.assertIsNone(current["blocker"])
+        self.assertEqual((current["sessions"], current["phase"]), ({}, "code"))
+
+    def test_claude_refusal_does_not_credit_an_interrupted_review(self):
+        self.state.update(phase="opus_final", coordinated="opus_final", sol_clean=2, opus_final_clean=1)
+        self.transport.actions = [("opus_final", Blocked("claude-refusal", "Refused by provider"))]
+        self.assertEqual(self.cycle.run(), 3)
+        self.assertEqual([role for role, _ in self.transport.calls], ["opus_final"])
+        self.assertEqual((self.state["sol_clean"], self.state["opus_final_clean"]), (2, 0))
+        self.assertEqual(self.state["display_reviews"]["opus_final"]["completed"], 0)
+        self.assertEqual(self.state["healed"], [])
+
+    def test_transient_protocol_only_retries_structured_server_errors(self):
+        cases = [("transient-server", "claude-transient"), ("transient-overloaded", "claude-transient"),
+                 ("transient-work", "claude-transient"), ("transient-foreign", "provider-profile"),
+                 ("transient-unmarked", "model-rerouted"), ("transient-quoted", None),
+                 ("transient-http-string", "claude-failed"), ("transient-http-401", "claude-failed"),
+                 ("transient-http-429", "claude-failed"), ("transient-http-501", "claude-failed"),
+                 ("transient-result-text", "claude-failed")]
+        cases += [("transient-http-" + str(code), "claude-transient") for code in (500, 502, 503, 504, 529)]
+        for variant, expected in cases:
+            with self.subTest(variant=variant):
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
+                directory = self.store.directory / variant
+                directory.mkdir(parents=True)
+                if expected:
+                    with self.assertRaises(Blocked) as caught:
+                        transport.run("code", "same implementation", {"id": variant}, directory)
+                    self.assertEqual(caught.exception.code, expected)
+                    if expected == "claude-transient":
+                        self.assertIsInstance(caught.exception, ProviderTransient)
+                        self.assertEqual(caught.exception.no_work, variant != "transient-work")
+                else:
+                    self.assertEqual(parse_report(transport.run("code", "same implementation", {"id": variant}, directory))["status"], "done")
+
+    def test_codex_server_overload_is_a_transient_error(self):
+        cases = {"serverOverloaded": "codex-transient", "internalServerError": "codex-transient",
+                 "http503": "codex-transient", "http529": "codex-transient", "http400": "codex-failed",
+                 "badRequest": "codex-failed", "usageLimitExceeded": "codex-failed", "contextWindowExceeded": "codex-failed"}
+        for kind, expected in cases.items():
+            for work in (False, True):
+                with self.subTest(kind=kind, work=work):
+                    transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                    transport.commands["codex"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex",
+                                                   "codex-error=" + kind, *(["codex-work"] if work else [])]
+                    directory = self.store.directory / f"{kind}-{work}"
+                    directory.mkdir(parents=True)
+                    with self.assertRaises(Blocked) as caught:
+                        transport.run("sol", "Same review", {"id": directory.name}, directory)
+                    self.assertEqual(caught.exception.code, expected)
+                    if expected == "codex-transient":
+                        self.assertIsInstance(caught.exception, ProviderTransient)
+                        self.assertEqual(caught.exception.no_work, not work)
+                        self.assertIn("Codex server error", str(caught.exception))
+                        self.assertIn("different model. No review credit earned.", str(caught.exception))
+        # A read-only reviewer answers inspection tool calls inside the RPC layer; they are work too.
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["codex"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex",
+                                       "codex-error=serverOverloaded"]
+        directory = self.store.directory / "readonly-overload"
+        directory.mkdir(parents=True)
+        with self.assertRaises(ProviderTransient) as caught:
+            transport.run("final_astra", "Same final review", {"id": directory.name}, directory)
+        self.assertFalse(caught.exception.no_work)
+
+    def test_codex_overload_retries_the_same_invocation_without_a_healer(self):
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["codex"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex",
+                                       "codex-error=serverOverloaded-once"]
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude"]
+        self.cycle.transport = transport
+        self.cycle.control = type("StopAfterCode", (), {"boundary": lambda _, window: self.state["phase"] == "pair_a",
+                                                         "request": lambda _: False})()
+        with patch("cycle_workflow.PROVIDER_RETRY_DELAYS", (0, 0, 0)), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.cycle.run(), 0)
+        self.assertIn("Codex server error; automatic retry 1/3", out.getvalue())
+        self.assertEqual(self.state["healed"], [])
+        self.assertIsNone(self.state["blocker"])
+        self.assertEqual(self.state["phase"], "pair_a")
+        coordinate = [d for d in (self.store.directory / "invocations").iterdir()
+                      if json.loads((d / "intent.json").read_text())["role"] == "coordinate"]
+        self.assertEqual(len(coordinate), 1)  # The same invocation was retried.
+
+    def test_transient_native_retry_resumes_same_opus_session_and_invocation(self):
+        self.state.update(coordinated="code")
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "transient-once"]
+        self.cycle.transport = transport
+        self.cycle.control = type("StopAfterCode", (), {"boundary": lambda _, window: self.state["phase"] == "pair_a"})()
+        original = self.repo.snapshot()
+        with patch("cycle_workflow.PROVIDER_RETRY_DELAYS", (0, 0, 0)):
+            self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual(self.state["healed"], [])
+        self.assertEqual(self.state["phase"], "pair_a")
+        self.assertEqual(self.repo.snapshot(), original)
+        invocations = list((self.store.directory / "invocations").iterdir())
+        self.assertEqual(len(invocations), 1)
+        prompt = (invocations[0] / "prompt.txt").read_text()
+        self.assertIn("THIS SAME invocation was interrupted", prompt)
+        events = [json.loads(json.loads(row)["line"]) for row in (invocations[0] / "protocol.jsonl").read_text().splitlines()
+                  if json.loads(row).get("stream") == "stdout"]
+        inits = [event for event in events if event.get("subtype") == "init"]
+        self.assertEqual(len(inits), 2)
+        self.assertEqual({event["session_id"] for event in inits}, {self.state["sessions"]["code"]})
+        self.assertEqual({event["model"] for event in inits}, {"claude-opus-5-5"})
+        self.assertTrue((invocations[0] / "result.json").exists())
+
+    def exhaust_server_retries(self, error, code):
+        self.state.update(coordinated="code")
+        clock, deadlines, ids = [1000.0], [], []
+        def fail():
+            ids.append(self.state["pending"]["id"])
+            self.state["pending"]["attempts"] = len(ids)
+            raise error()
+        # The healer has an action. The run must not use it.
+        self.transport.actions = [("code", fail)] * 4 + [("heal", report())]
+        def tick(delay):
+            self.assertLessEqual(delay, 0.25)
+            wait = self.store.read()["pending"]["transient_wait"]
+            deadlines.append(wait["retry_at"])
+            self.assertEqual(wait["attempt"], len(deadlines))
+            clock[0] = wait["retry_at"]
+        with patch("cycle_workflow.time", wraps=time) as timer, contextlib.redirect_stdout(io.StringIO()) as out:
+            timer.time.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = tick
+            self.assertEqual(self.cycle.run(), 3)
+            self.assertEqual(self.cycle.run(), 3)  # A plain rerun starts no provider.
+        self.assertEqual(deadlines, [1015, 1045, 1105])
+        self.assertEqual(ids, [ids[0]] * 4)
+        self.assertEqual([r for r, _ in self.transport.calls], ["code"] * 4)
+        blocker = self.state["blocker"]
+        self.assertEqual((blocker["code"], blocker["status"], blocker["escalation_reason"]),
+                         (code, "blocked", "provider-unavailable"))
+        self.assertEqual(blocker["interrupted"]["id"], ids[0])
+        self.assertIn("The retained invocation holds the server failure. "
+                      "Operator: wait until the provider is available. Then run cc-focus --retry.", blocker["message"])
+        self.assertEqual(self.state["healed"], [])
+        self.assertIn("Recovery cannot retry a provider.", out.getvalue())
+        self.assertNotIn("routing blocker to the separate", out.getvalue())
+
+    def test_claude_transient_retries_are_bounded_and_then_stop_for_the_operator(self):
+        self.exhaust_server_retries(lambda: ProviderTransient("server_error", "mid-response", no_work=True), "claude-transient")
+
+    def test_codex_transient_retries_are_bounded_and_then_stop_for_the_operator(self):
+        self.exhaust_server_retries(lambda: ProviderTransient(
+            "serverOverloaded", "Selected model is at capacity.", no_work=True, provider="codex"), "codex-transient")
+
+    def test_an_exhausted_pair_participant_stops_for_the_operator_without_a_healer(self):
+        # run_jobs raises a plain blocker with the provider code after the participant retries.
+        self.state.update(phase="pair_a", pending={"id": "group", "role": "pair_group", "before": self.repo.snapshot()})
+        self.cycle.handle_block(Blocked("codex-transient", "Codex server error (serverOverloaded): at capacity."))
+        blocker = self.state["blocker"]
+        self.assertEqual((blocker["status"], blocker["escalation_reason"]), ("blocked", "provider-unavailable"))
+        self.assertEqual(blocker["interrupted"]["role"], "pair_group")
+        self.assertEqual(self.cycle.run(), 3)
+        self.assertEqual(self.transport.calls, [])
+
+    def test_a_codex_healer_server_error_waits_before_each_retry(self):
+        self.state.update(coordinated="code")
+        clock, deadlines, starts = [1000.0], [], []
+        def overloaded():
+            starts.append(clock[0])
+            raise ProviderTransient("serverOverloaded", "Selected model is at capacity.", no_work=True, provider="codex")
+        self.transport.actions = [("code", Blocked("codex-failed", "Turn failed"))] + [("heal", overloaded)] * 4
+        def tick(delay):
+            wait = self.store.read()["pending"]["transient_wait"]
+            deadlines.append(wait["retry_at"])
+            self.assertEqual((wait["attempt"], wait["provider"]), (len(deadlines), "Codex"))
+            clock[0] = wait["retry_at"]
+        with patch("cycle_workflow.time", wraps=time) as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = tick
+            self.assertEqual(self.cycle.run(), 3)
+        self.assertEqual(deadlines, [1015, 1045, 1105])
+        self.assertEqual(starts, [1000, 1015, 1045, 1105])
+        self.assertEqual([r for r, _ in self.transport.calls], ["code"] + ["heal"] * 4)
+        self.assertEqual(self.state["blocker"]["escalation_reason"], "healer-failed")
+        self.assertIn("Operator: wait until the provider is available. Then run cc-focus --retry.", self.state["blocker"]["resolution"])
+
+    def test_transient_retry_budget_and_deadline_survive_restart(self):
+        self.state.update(coordinated="code")
+        def fail():
+            self.state["pending"]["attempts"] = 1
+            raise ProviderTransient("server_error", "mid-response")
+        self.transport.actions = [("code", fail)]
+        with patch("cycle_workflow.time", wraps=time) as timer:
+            timer.time.return_value = 1000
+            timer.sleep.side_effect = lambda _: (self.root / ".work/PAUSE").touch()
+            self.assertEqual(self.cycle.run(), 0)
+        saved = self.store.read()
+        self.assertEqual(saved["pending"]["transient_wait"]["retry_at"], 1015)
+        self.assertEqual(saved["pending"]["transient_retries"], 1)
+        self.assertEqual(saved["status"], "paused")
+        original_id = saved["pending"]["id"]
+        (self.root / ".work/PAUSE").unlink()
+        self.state = saved
+        self.cycle = Cycle(self.repo, self.store, saved, self.transport, lambda: None, REPO / "tools", "pwsh")
+        self.transport.actions = [("code", fail), ("code", report(status="complete"))]
+        clock, deadlines = [1010.0], []
+        def tick(delay):
+            pending = self.store.read()["pending"]
+            self.assertEqual(pending["id"], original_id)
+            deadlines.append(pending["transient_wait"]["retry_at"])
+            clock[0] = deadlines[-1]
+        with patch("cycle_workflow.time", wraps=time) as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = tick
+            self.assertEqual(self.cycle.run(), 0)
+        self.assertEqual(deadlines, [1015, 1045])
+        self.assertIsNone(self.state["pending"])
+
+    def test_transient_retry_retains_wip_but_invalidates_interrupted_review_credit(self):
+        for started, mutated in ((False, False), (True, False), (True, True)):
+            with self.subTest(started=started, mutated=mutated):
+                self.state.update(phase="opus_final", coordinated="opus_final", opus_final_clean=1, astra_clean=2,
+                                  pending={"id": f"transient-review-{started}-{mutated}", "role": "opus_final", "attempts": 1,
+                                           "before": self.repo.snapshot()})
+                if mutated:
+                    self.edit(content="partial implementation")()
+                current = self.repo.snapshot()
+                self.assertTrue(self.cycle.defer_transient(ProviderTransient("server_error", "failure", no_work=not started)))
+                self.assertEqual(self.state["opus_final_clean"], 0 if started else 1)
+                self.transport.actions = [("opus_final", report(implementation_fixes=int(mutated)))]
+                self.cycle.review("opus_final")
+                self.assertEqual(self.repo.snapshot(), current)
+                self.assertEqual(self.state["opus_final_clean"], 0 if mutated else 1 if started else 2)
+                self.assertEqual(self.state["astra_clean"], 2)
+                if mutated:
+                    self.assertTrue(self.state["review_substantial"])
+
+    def test_transient_retry_rechecks_head_index_and_protected_files(self):
+        self.edit(name="operator.txt", content="operator work")()
+        self.state = fresh_state(self.repo)
+        self.cycle.state = self.state
+        self.state.update(phase="code", pending={"id": "transient-guard", "role": "code", "attempts": 1,
+                          "before": self.repo.snapshot()})
+        self.cycle.defer_transient(ProviderTransient("server_error", "failure", no_work=True))
+        self.edit(name="operator.txt", content="operator changed while waiting")()
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.invoke("code")
+        self.assertEqual(caught.exception.code, "protected-work")
+        self.edit(name="operator.txt", content="operator work")()
+        self.edit()()
+        self.repo.git("add", "source.txt")
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.invoke("code")
+        self.assertEqual(caught.exception.code, "unauthorized-staging")
+        self.repo.git("commit", "-m", "External commit")
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.invoke("code")
+        self.assertEqual(caught.exception.code, "unauthorized-commit")
+        self.assertEqual(self.transport.calls, [])
+
+    def test_transient_wait_never_resends_unresolved_messages(self):
+        self.state.update(coordinated="code")
+        for delivery in ("queued", "sending"):
+            with self.subTest(delivery=delivery):
+                def fail():
+                    pending = self.state["pending"]
+                    record = self.cycle.messages.add({"iteration": 1, "invocation": pending["id"], "role": "code"}, "Operator instruction")
+                    if delivery == "sending":
+                        self.cycle.messages.update(record, "sending")
+                    raise ProviderTransient("server_error", "failure")
+                self.transport.actions = [("code", fail)]
+                with self.assertRaises(MessagePending):
+                    self.cycle.run()
+                self.assertNotIn("transient_wait", self.state["pending"])
+                self.assertIsNone(self.state["blocker"])
+                record = self.cycle.messages.unresolved(1)[0]
+                self.assertEqual(record["status"], delivery)
+                self.cycle.messages.resolve(1, record["identity"]["id"], False, self.state["pending"]["id"])
+
+    def test_transient_explicit_retry_keeps_budget_and_wait_deadline(self):
+        import cc_focus
+        self.state.update(coordinated="code", sessions={"code": "same-session"}, pending={
+            "id": "saved-server-retry", "role": "code", "attempts": 2, "before": self.repo.snapshot(),
+            "transient_retries": 2, "transient_wait": {"retry_at": time.time() + 60, "no_work": False, "attempt": 2, "limit": 3}})
+        self.store.save(self.state)
+        pending = json.loads(json.dumps(self.state["pending"]))
+        with patch("cc_focus.Path.cwd", return_value=self.root), patch("cc_focus.Lease") as lease, \
+                patch("cc_focus.Cycle.run", return_value=0), \
+                patch("cycle_transport.Transport.run", side_effect=AssertionError("No provider during admission")):
+            lease.return_value.__enter__.return_value.pwsh = "pwsh"
+            self.assertEqual(cc_focus.main(["--retry", "--ui", "off"]), 0)
+        saved = self.store.read()
+        self.assertEqual(saved["pending"], pending)
+        self.assertEqual(saved["sessions"], {"code": "same-session"})
+
+    def test_transient_wait_detects_source_drift_after_a_no_work_failure(self):
+        self.state.update(phase="opus", opus_clean=1, pending={"id": "wait-drift", "role": "opus", "attempts": 1,
+                          "before": self.repo.snapshot()})
+        self.cycle.defer_transient(ProviderTransient("server_error", "failure", no_work=True))
+        self.edit()()
+        self.transport.actions = [("opus", report(implementation_fixes=1))]
+        self.cycle.review("opus")
+        self.assertEqual(self.state["opus_clean"], 0)
+        self.assertTrue(self.state["review_substantial"])
+        self.assertEqual(self.state["phase"], "opus")
+
+    def test_transient_report_correction_preserves_one_pass_and_freezes_files(self):
+        self.state.update(phase="opus_final", opus_final_clean=1)
+        self.transport.actions = [("opus_final", self.edit(name="journal.md")),
+                                  ("opus_final", ProviderTransient("server_error", "failure"))]
+        with self.assertRaises(ProviderTransient) as caught:
+            self.cycle.review("opus_final")
+        pending = self.state["pending"]
+        original = Path(pending["report_repair"]["source"]).read_bytes()
+        self.cycle.defer_transient(caught.exception)
+        self.assertEqual(self.state["opus_final_clean"], 1)
+        self.edit(name="unwanted-evidence.md")()
+        with self.assertRaises(Blocked) as guard:
+            self.cycle.defer_transient(caught.exception)
+        self.assertEqual(guard.exception.code, "report-repair-drift")
+        (self.root / "unwanted-evidence.md").unlink()  # Fixture-owned scratch file.
+        self.transport.actions = [("opus_final", report(minor_edits=1))]
+        self.cycle.review("opus_final")
+        self.assertEqual(self.state["opus_final_clean"], 2)
+        self.assertEqual(self.state["display_reviews"]["opus_final"]["completed"], 1)
+        self.assertEqual(Path(pending["report_repair"]["source"]).read_bytes(), original)
+
+    def test_transient_wait_honors_safe_and_emergency_stop(self):
+        for emergency in (False, True):
+            control = Control(self.store)
+            control.begin()
+            self.cycle.control = control
+            self.state.update(status="ready", pending={"id": "transient-stopped", "role": "code", "transient_wait": {
+                "retry_at": time.time() + 60, "attempt": 1, "limit": 3}})
+            with patch("cycle_workflow.time.sleep", side_effect=lambda _: control.submit_stop(now=emergency)):
+                if emergency:
+                    with self.assertRaises(FocusStop):
+                        self.cycle.run()
+                else:
+                    self.assertEqual(self.cycle.run(), 0)
+                    self.assertEqual(self.store.read()["status"], "paused")
+            self.assertEqual(self.transport.calls, [])
+            control.finish(self.state, 0)
+
+    def test_transient_cleanup_failure_prevents_retry_and_healing(self):
+        self.state.update(coordinated="code")
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "transient-server"]
+        self.cycle.transport = transport
+        close = Process.close
+        def unsafe_close(process):
+            close(process)
+            raise Blocked("cleanup-incomplete", "Containment failure")
+        with patch.object(Process, "close", unsafe_close):
+            self.assertEqual(self.cycle.run(), 3)
+        self.assertEqual(self.state["blocker"]["code"], "cleanup-incomplete")
+        self.assertEqual(self.state["healed"], [])
+
     def test_reported_human_request_is_checked_by_the_recovery_agent(self):
         self.state.update(phase="code", coordinated="code")
         self.transport.actions = [("code", report(status="blocked", summary="Ask the operator to authorize a necessary dependency")),
@@ -2261,7 +3433,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual([role for role, _ in self.transport.calls], ["code", "heal", "coordinate", "code"])
         healing_prompt = self.transport.calls[1][1]
-        self.assertIn("a claim to investigate", healing_prompt)
+        self.assertIn("a claim to check", healing_prompt)
         self.assertIn("Use existing operator authorization", healing_prompt)
         self.assertEqual(PROFILES["heal"], ("codex", "gpt-6-astra", "xhigh"))
         self.assertEqual(self.state["status"], "complete")
@@ -2461,7 +3633,7 @@ class CycleTests(unittest.TestCase):
                 progress.pulse()
             self.assertIn("active 16s", output.getvalue())
             self.assertIn("last event 16s ago", output.getvalue())
-            self.assertIn("claude-fable-5-1", output.getvalue())
+            self.assertIn("claude/opus effort=xhigh", output.getvalue())
             self.assertEqual(json.loads((self.store.directory / "progress.json").read_text())["events"], 0)
 
     def test_progress_does_not_print_reasoning_secrets_or_command_arguments(self):
@@ -2692,7 +3864,7 @@ class CycleTests(unittest.TestCase):
         self.state.update(phase="publish", reviewed=self.repo.snapshot(), pending={"id": "old-publish", "role": "publish"})
         self.edit()()
         self.assertFalse(self.cycle.prepare_publish())
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
         self.assertIsNone(self.state["pending"])
 
     def start_focus_fixture(self, mode="normal", native=False):
@@ -2833,11 +4005,19 @@ def fixture(provider):
                 control.finish(state, 0)
         return
     recovery = "recover" in args
+    old_sol_only = "old-sol-only" in args
+    paired_report_once = "paired-report-once" in args
+    paired_blocked_once = "paired-blocked-once" in args
+    paired_active = "paired-active" in args
     missing_session = "missing-session" in args
     live = "live" in args
     steer = "steer" in args
     late_ack, error_ack = "late-ack" in args, "error-ack" in args
-    args = [arg for arg in args if arg not in ("recover", "missing-session", "live", "steer", "late-ack", "error-ack")]
+    # A Codex turn fails with this codexErrorInfo; a "-once" suffix fails only the first turn.
+    codex_error = next((arg.split("=", 1)[1] for arg in args if arg.startswith("codex-error=")), None)
+    codex_work = "codex-work" in args
+    args = [arg for arg in args if arg not in ("recover", "missing-session", "live", "steer", "late-ack", "error-ack", "old-sol-only", "paired-report-once", "paired-blocked-once", "paired-active", "codex-work")
+            and not arg.startswith("codex-error=")]
     def emit(value):
         print(json.dumps(value), flush=True)
     if provider == "claude":
@@ -2846,6 +4026,9 @@ def fixture(provider):
         assert requested_model in ("claude-fable-5-1", "opus")
         effective_model = "claude-opus-5-5" if requested_model == "opus" else requested_model
         assert args[args.index("--effort") + 1] == os.environ["CLAUDE_CODE_EFFORT_LEVEL"]
+        if 'ORCHESTRA_FIXTURE_MODEL' in os.environ:
+            assert requested_model == os.environ['ORCHESTRA_FIXTURE_MODEL']
+            assert args[args.index('--effort') + 1] == os.environ['ORCHESTRA_FIXTURE_EFFORT']
         settings = json.loads(args[args.index("--settings") + 1])
         for key, value in {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_DEFAULT_TIMEOUT_MS": "1800000",
                            "BASH_MAX_TIMEOUT_MS": "21600000"}.items():
@@ -2856,19 +4039,53 @@ def fixture(provider):
         streaming_input = "--input-format" in args
         initial = json.loads(sys.stdin.readline()) if streaming_input else None
         prompt = initial["message"]["content"] if initial else sys.stdin.read()
+        agent = json.loads(args[args.index('--agents') + 1])['cycle_worker']
+        assert args[args.index('--agent') + 1] == 'cycle_worker'
+        assert agent['model'] == requested_model
+        if '--tools' in args:
+            assert '--append-system-prompt' not in args
+            agent_prompt = agent['prompt']
+        else:
+            assert agent['prompt'] == '' and 'memory' not in agent
+            assert '--system-prompt' not in args and '--system-prompt-file' not in args
+            agent_prompt = args[args.index('--append-system-prompt') + 1]
+        assert COMMAND_EXECUTION_CONTRACT in agent_prompt
+        assert COMMAND_EXECUTION_CONTRACT in prompt
+        assert WRITING_CONTRACT not in agent_prompt and WRITING_CONTRACT not in prompt
+        if os.environ.get('ORCHESTRA_FIXTURE_ROLE') == 'code':
+            for instructions in (agent_prompt, prompt):
+                assert CODE_IMPLEMENTATION_CONTRACT in instructions
+                assert PAIR_CONTRACT not in instructions
+        readonly = "--tools" in args
+        paired = os.environ.get("ORCHESTRA_FIXTURE_ROLE", "") in PAIR_ROLES
+        if readonly:
+            assert args[args.index("--tools") + 1] == ("" if paired else "Read,Glob,Grep")
+            assert "--strict-mcp-config" in args and "--disable-slash-commands" in args
+            servers = json.loads(args[args.index("--mcp-config") + 1])["mcpServers"]
+            assert set(servers) == ({"focus"} if paired else set())
+            if paired:
+                assert args[args.index("--setting-sources") + 1] == ""
+        if not (readonly and paired):
+            # The user writing policy reaches Claude writers through these settings.
+            assert args[args.index("--setting-sources") + 1] == "user,project,local"
         if "--resume" in args and (missing_session or "auth-error" in args):
             error = f"No conversation found with session ID: {sid}" if missing_session else "Authentication failed"
             emit({"type": "result", "subtype": "error_during_execution", "is_error": True,
                   "num_turns": 0, "session_id": sid, "errors": [error]})
             return
         if missing_session:
-            assert "clean continuation" in prompt
+            assert "new conversation for the SAME runtime phase" in prompt
         if 'opus-wrong-family' in args:
             effective_model = 'claude-fable-5-1'
         if 'opus-before-init' in args:
             emit({'type': 'assistant', 'message': {'model': effective_model}})
-        if "synthetic-org-preinit" not in args and "quota-preinit" not in args:
-            emit({"type": "system", "subtype": "init", "model": effective_model, "session_id": sid, "permissionMode": "bypassPermissions"})
+        if "synthetic-org-preinit" not in args and "quota-preinit" not in args and "refusal-preinit" not in args:
+            emit({"type": "system", "subtype": "init", "model": effective_model, "session_id": sid, "permissionMode": "bypassPermissions",
+                  "tools": (["mcp__focus__inspect"] if paired else ["Read", "Glob", "Grep"]) if readonly else ["Bash", "Read"]})
+        if "instruction-change" in args or "instruction-delete" in args:
+            # An operator changes the user instruction file while Claude runs.
+            user_file = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "CLAUDE.md"
+            user_file.unlink() if "instruction-delete" in args else user_file.write_text("Version B", encoding="utf-8")
         if 'opus-switch' in args:
             emit({'type': 'assistant', 'message': {'model': 'claude-opus-5'}})
         quota_variant = next((arg for arg in args if arg.startswith("quota")), None)
@@ -2896,6 +4113,74 @@ def fixture(provider):
                 emit({"type": "assistant", "session_id": "foreign" if quota_variant == "quota-error-wrong-session" else sid,
                       "is_api_error_message": True, "error": "oauth_org_not_allowed" if quota_variant == "quota-access" else "rate_limit",
                       "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Session quota rejected"}]}})
+                return
+        transient = next((arg for arg in args if arg.startswith("transient-")), None)
+        if transient == "transient-once":
+            marker = Path.cwd() / ".work/cycle/transient-once"
+            if marker.exists():
+                transient = None
+            else:
+                marker.touch()
+        if transient:
+            if transient.startswith("transient-http-") or transient == "transient-result-text":
+                code = transient.removeprefix("transient-http-")
+                status_code = "500" if code == "string" else 500 if transient == "transient-result-text" else int(code)
+                emit({"type": "result", "session_id": sid, "is_error": True, "subtype": "error_during_execution",
+                      "terminal_reason": "unclassified" if transient == "transient-result-text" else "api_error",
+                      "api_error_status": status_code, "errors": ["server_error in provider result"]})
+                return
+            if transient in ("transient-work", "transient-once"):
+                emit({"type": "assistant", "session_id": sid, "message": {"model": effective_model,
+                      "content": [{"type": "tool_use", "id": "read", "name": "Bash", "input": {"command": "read-only fixture"}}]}})
+            emit({"type": "assistant", "session_id": "foreign" if transient == "transient-foreign" else sid,
+                  "is_api_error_message": transient not in ("transient-unmarked", "transient-quoted"),
+                  "error": "overloaded_error" if transient == "transient-overloaded" else "server_error",
+                  "message": {"model": effective_model if transient == "transient-quoted" else "<synthetic>",
+                              "content": [{"type": "text", "text": "Server error mid-response"}]}})
+            if transient != "transient-quoted":
+                return
+        stream_refusal = next((arg for arg in args if arg.startswith("stream-refusal")), None)
+        if stream_refusal:
+            model = "other-model" if stream_refusal.endswith("wrong-model") else effective_model
+            if stream_refusal != "stream-refusal-no-start":
+                emit({"type": "stream_event", "session_id": "foreign" if stream_refusal.endswith("foreign-start") else sid,
+                      "parent_tool_use_id": "child" if stream_refusal.endswith("child-start") else None, "event": {
+                    "type": "message_start", "message": {"id": "msg_stream", "model": model}}})
+                # Real CLI emits the assistant frame before the terminal delta;
+                # the assistant stop_reason is null and request_id is here only.
+                if model == effective_model:
+                    emit({"type": "assistant", "session_id": sid, "request_id": "req_stream", "message": {
+                        "id": "msg_stream", "model": model, "stop_reason": None, "content": [
+                            {"type": "thinking", "thinking": "PRIVATE THOUGHT", "signature": "PRIVATE SIGNATURE"},
+                            {"type": "tool_use", "id": "write-1", "name": "Write", "input": {"file_path": "private.cs"}}]}})
+            emit({"type": "stream_event", "session_id": "foreign" if stream_refusal.endswith("foreign") else sid,
+                  "parent_tool_use_id": "child" if stream_refusal.endswith("child") else None,
+                  "event": {"type": "message_delta", "delta": {"stop_reason": "refusal", "stop_details":
+                      None if stream_refusal.endswith("null") else {
+                          "type": "refusal", "category": "reasoning_extraction", "explanation": "public refusal"}}}})
+            # A successful native continuation must never erase a streamed refusal.
+            emit({"type": "result", "subtype": "success", "is_error": False, "session_id": sid,
+                  "result": json.dumps(report())})
+            return
+        refusal = next((arg for arg in args if arg.startswith("refusal-")), None)
+        if refusal:
+            if refusal == "refusal-work":
+                (Path.cwd() / "source.txt").write_text("partial implementation\n")
+            native = refusal in ("refusal-native", "refusal-native-foreign", "refusal-quoted", "refusal-wrong-model")
+            message = {"type": "assistant", "session_id": "foreign" if refusal.endswith("foreign") else sid,
+                       "request_id": "req_fixture", "message": {
+                           "model": effective_model if native else "<synthetic>", "id": "msg_fixture",
+                           "stop_reason": "end_turn" if refusal in ("refusal-text-only", "refusal-quoted") else "refusal",
+                           "stop_details": None if refusal == "refusal-null" else {
+                               "type": "refusal", "category": "reasoning_extraction", "explanation": "public provider explanation"},
+                           "content": [{"type": "text", "text": "API Error: safeguards flagged this request [reasoning_extraction]"},
+                                       {"type": "thinking", "thinking": "PRIVATE REFUSAL CONTENT"}]}}
+            if refusal == "refusal-wrong-model":
+                message["message"]["model"] = "unexpected-model"
+            if not native and refusal != "refusal-unmarked":
+                message.update(is_api_error_message=True, error="invalid_request")
+            emit(message)
+            if refusal != "refusal-quoted":
                 return
         api_variant = next((arg for arg in args if arg.startswith("synthetic-") or arg in ("wrong-model", "quoted-api-error")), None)
         if api_variant:
@@ -2950,6 +4235,24 @@ def fixture(provider):
             emit({"type": "assistant", "message": {"model": effective_model, "content": [
                 {"type": "text", "text": "Native tasks finished; completing verification"}]}})
         first = report(implementation_fixes=1, substantial=True) if "prior-fix" in args else report()
+        if os.environ.get("ORCHESTRA_FIXTURE_ROLE") == "final_cleanup":
+            first["resolutions"] = []
+        if readonly:
+            first["findings"] = []
+        role = os.environ.get("ORCHESTRA_FIXTURE_ROLE", "")
+        if role in PAIR_ROLES:
+            if role == "repair_evidence":
+                first.pop("findings", None)
+                first["evidence_delta"] = {"before": "before", "after": "after", "files": [{
+                    "path": "plan.md", "verdict": "evidence_only", "reason": "Historical check record",
+                    "evidence": ["Exact fixture diff"]}]}
+            elif role.endswith("_discuss") or role == "pair_arbiter":
+                first.pop("findings", None)
+                first.update(assessments=[], new_findings=[], consensus=None, impact="minor")
+            elif role in PAIR_WRITERS:
+                first.update(resolutions=[], handoff={"decisions": [], "assumptions": [], "checks": []})
+            if os.environ.get("ORCHESTRA_FIXTURE_ROLE") == "repair_execute":
+                first["repair"] = {"mode": "self", "reason": "Local fix", "risks": [], "tests": {"status": "deferred", "reason": "Await reviews", "evidence": [], "failures": []}}
         if "long-summary" in args:
             first["summary"] = "First summary " * 100 + "first summary ending"
         emit({"type": "result", "subtype": "success", "is_error": False, "session_id": sid, "result": json.dumps(first)})
@@ -2968,7 +4271,14 @@ def fixture(provider):
         if live:
             print("Trailing fixture stderr", file=sys.stderr, flush=True)
         return
-    assert args[:5] == ["-s", "danger-full-access", "-a", "on-request", "app-server"]
+    readonly = args[1] == "read-only"
+    assert args[:5] == ["-s", "read-only" if readonly else "danger-full-access", "-a", "on-request", "app-server"]
+    assert ('sandbox_mode="read-only"' if readonly else 'sandbox_mode="danger-full-access"') in args
+    if readonly:
+        from focus_readonly import READONLY_FEATURES
+        assert all("features." + key + "=false" in args for key in READONLY_FEATURES)
+        assert "features.code_mode_host=true" in args
+        assert "features.code_mode_host=false" not in args
     assert "features.multi_agent=false" in args
     assert "features.memories=false" in args, "Memory consolidation must not run beside the selected role"
     sid = ""
@@ -2981,34 +4291,79 @@ def fixture(provider):
         if method == "initialize":
             result = {"userAgent": "fixture"}
         elif method == "model/list":
-            result = {"data": [{"model": model, "supportedReasoningEfforts": [{"reasoningEffort": "high"}, {"reasoningEffort": "xhigh"}]}
-                               for model in ("gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna")], "nextCursor": None}
+            result = {"data": [{"model": model, "supportedReasoningEfforts": [{"reasoningEffort": "high"}, {"reasoningEffort": "xhigh"}, {"reasoningEffort": "max"}]}
+                               for model in ((() if old_sol_only else ("gpt-6.1-sol",)) + ("gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna"))], "nextCursor": None}
         elif method in ("thread/start", "thread/resume"):
+            assert COMMAND_EXECUTION_CONTRACT in params['developerInstructions']
+            assert WRITING_CONTRACT in params['developerInstructions']
             assert params["config"]["features.memories"] is False
+            if 'ORCHESTRA_FIXTURE_MODEL' in os.environ:
+                assert params['model'] == os.environ['ORCHESTRA_FIXTURE_MODEL']
+                assert params['config']['model_reasoning_effort'] == os.environ['ORCHESTRA_FIXTURE_EFFORT']
             if method == "thread/resume" and missing_session:
                 emit({"id": request["id"], "error": {"code": -32600, "message": "no rollout found for thread id"}})
                 continue
             sid = params.get("threadId", str(uuid.uuid4()))
             assert params["approvalPolicy"] == "on-request"
-            assert params["sandbox"] == "danger-full-access"
+            assert params["sandbox"] == ("read-only" if readonly else "danger-full-access")
+            if readonly:
+                assert params["config"]["mcp_servers"] == {}
+                assert params["config"]["features.code_mode_host"] is True
+                assert all(params["config"]["features." + key] is False for key in READONLY_FEATURES)
+                assert "mcp_servers={}" in args
+                if method == "thread/start":
+                    assert params["dynamicTools"][0]["name"] == "focus_inspect"
             if method == "thread/resume":
                 assert params["excludeTurns"] is True, "Do not return unbounded conversation history"
             result = {"thread": {"id": sid, "turns": []}, "model": params["model"], "cwd": params["cwd"],
                       "reasoningEffort": params["config"]["model_reasoning_effort"],
-                      "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": {"type": "dangerFullAccess"}}
+                      "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": {"type": "readOnly" if readonly else "dangerFullAccess"}}
+        elif method == "thread/turns/list" and codex_error and (Path.cwd() / ".work/cycle/codex-failed-turn.json").exists():
+            # Like the app-server: the latest turn is the failed one, with the original input.
+            result = {"data": [json.loads((Path.cwd() / ".work/cycle/codex-failed-turn.json").read_text())]}
         elif method == "thread/turns/list":
+            assert not paired_report_once, "A corrected report needs a fresh marker"
             assert not missing_session, "An unmaterialized replacement has no historical turns to fetch"
             assert params["limit"] == 1 and params["itemsView"] == "full"
-            result = {"data": [{"id": "finished-turn", "status": "completed", "items": [
-                {"id": "final", "type": "agentMessage", "phase": "final_answer", "text": json.dumps(report())}]}]}
+            recovered_report = report(status="blocked", findings=[]) if paired_blocked_once else report()
+            result = {"data": [{"id": "finished-turn", "status": "inProgress" if paired_active else "completed", "items": [
+                {"id": "final", "type": "agentMessage", "phase": "final_answer", "text": json.dumps(recovered_report)}]}]}
         elif method == "turn/start":
+            assert COMMAND_EXECUTION_CONTRACT in params['input'][0]['text']
+            assert WRITING_CONTRACT in params['input'][0]['text']
             assert not recovery, "A completed turn must not be repeated"
             assert params["threadId"] == sid
-            assert params["sandboxPolicy"] == {"type": "dangerFullAccess"}
+            assert params["sandboxPolicy"] == {"type": "readOnly" if readonly else "dangerFullAccess"}
             if missing_session:
-                assert "clean continuation" in params["input"][0]["text"]
+                assert "new conversation for the SAME runtime phase" in params["input"][0]["text"]
+            final = report()
+            for field in ("findings", "assessments", "new_findings", "resolutions"):
+                if field in params["outputSchema"]["properties"]:
+                    final[field] = []
+            if "complexity" in params["outputSchema"]["properties"]:
+                final["complexity"] = {"assignment_sha256": "fixture", "effort": "high", "reason": "Local fix",
+                                       "assignments": [{"source_id": "fixture", "effort": "high", "reason": "Local fix"}]}
+            if paired_report_once and not Path(".paired-report-once").exists():
+                Path(".paired-report-once").touch()
+                final.pop("findings", None)
+            if paired_blocked_once and not Path(".paired-blocked-once").exists():
+                Path(".paired-blocked-once").touch()
+                final.update(status="blocked", summary="Inspection host unavailable")
+            if "consensus" in params["outputSchema"]["properties"]:
+                final.update(consensus=None, impact="minor")
             turn = {"id": str(uuid.uuid4()), "status": "completed", "items": [
-                {"id": "final", "type": "agentMessage", "phase": "final_answer", "text": json.dumps(report())}]}
+                {"id": "final", "type": "agentMessage", "phase": "final_answer", "text": json.dumps(final)}]}
+            once = Path.cwd() / ".work/cycle/codex-error-once"
+            if codex_error and not (codex_error.endswith("-once") and once.exists()):
+                if codex_error.endswith("-once"):
+                    once.touch()
+                kind = codex_error.removesuffix("-once")
+                info = {"httpConnectionFailed": {"httpStatusCode": int(kind[4:])}} if kind.startswith("http") else kind
+                turn.update(status="failed", items=[], error={
+                    "message": "Selected model is at capacity. Please try a different model.",
+                    "codexErrorInfo": info, "additionalDetails": None})
+                (Path.cwd() / ".work/cycle/codex-failed-turn.json").write_text(json.dumps({**turn, "items": [
+                    {"id": "input", "type": "userMessage", "content": params["input"]}]}))
             result = {"turn": turn}
         elif method == "turn/steer":
             assert steer
@@ -3027,12 +4382,30 @@ def fixture(provider):
         else:
             raise AssertionError(method)
         emit({"id": request["id"], "result": result})
+        if method == "turn/start" and codex_error:
+            # The app-server reports the input message as the first item; it is not model work.
+            emit({"method": "item/started", "params": {"threadId": sid, "turnId": turn["id"],
+                  "item": {"id": "input", "type": "userMessage", "content": params["input"]}}})
         if method == "turn/start":
+            if readonly:
+                for operation in ("list", "read", "diff", "run"):
+                    emit({"id": "inspect-" + operation, "method": "item/tool/call", "params": {
+                        "threadId": sid, "turnId": turn["id"], "callId": operation, "tool": "focus_inspect",
+                        "arguments": {"operation": operation, "path": "source.txt", "offset": 0, "limit": 20}}})
+                    answer = json.loads(sys.stdin.readline())
+                    assert answer["id"] == "inspect-" + operation
+                    assert answer["result"]["success"] == (operation != "run")
+                    if operation == "read":
+                        assert "initial" in answer["result"]["contentItems"][0]["text"]
+                    if operation == "list":
+                        assert "source.txt" in answer["result"]["contentItems"][0]["text"]
             if live:
                 emit({"method": "item/agentMessage/delta", "params": {"itemId": "m", "delta": "Public fixture message"}})
                 emit({"method": "item/reasoning/textDelta", "params": {"delta": "PRIVATE REASONING"}})
                 emit({"method": "item/started", "params": {"item": {"id": "cmd", "type": "commandExecution", "command": "fixture-command"}}})
                 emit({"method": "item/commandExecution/outputDelta", "params": {"itemId": "cmd", "delta": "Fixture output"}})
+            if codex_work:
+                emit({"method": "item/started", "params": {"item": {"id": "cmd", "type": "commandExecution", "command": "fixture-command"}}})
             if not steer:
                 emit({"method": "turn/completed", "params": {"threadId": sid, "turn": turn}})
             if live:

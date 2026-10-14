@@ -49,6 +49,20 @@ class StatusTests(unittest.TestCase):
         with self.assertRaises(Blocked):
             parse_report(json.dumps(fixtures.report(task=self.label(), implementation_fixes=-1)), "code")
 
+    def test_final_cleanup_displays_work_remaining_then_closed_count(self):
+        final = {"round": 2, "step": "final_cleanup", "scans": [{"findings": 2}, {}, {}],
+                 "confirmed": [{"blocking": False}, {"blocking": False}]}
+        self.state.update(phase="final", final_review=final)
+        panel = self.panel_text(live={"role": "final_cleanup", "active": True})
+        self.assertIn("Закрытие неблокирующих Opus · xhigh", panel)
+        self.assertIn("закрыть: 2", panel)
+        self.assertIn("публикация без повторного ревью", panel)
+        final.update(step="done", cleanup={"path": "sealed-record"})
+        self.state["phase"] = "publish"
+        panel = self.panel_text()
+        self.assertIn("закрыто Opus: 2", panel)
+        self.assertNotIn("в бэклоге 2", panel)
+
     def test_coordinator_supplies_title_without_extra_calls(self):
         self.transport.actions = [("coordinate", fixtures.report(task=self.label()))]
         self.cycle.invoke("coordinate")
@@ -75,41 +89,49 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn("V9f-4", self.panel_text())
 
     def test_review_progress_counts_completed_passes_and_resets_streak(self):
+        self.state["review_profile"] = 5  # Historical serial-counter rendering.
         self.state["phase"] = "sol"
-        for _ in range(2):
+        for _ in range(1):
             self.run_review()
-        self.assertIn("серия 2/3", self.panel_text())
+        self.assertIn("серия 1/2", self.panel_text())
         self.run_review(implementation_fixes=1)
-        self.assertIn("исправления · серия 0/3", self.panel_text())
-        self.assertIn("завершено 3", self.panel_text())
+        self.assertIn("исправления · серия 0/2", self.panel_text())
+        self.assertIn("завершено 2", self.panel_text())
         active = self.panel_text(live={"role": "sol", "active": True})
-        self.assertIn("проход 4 выполняется", active)
-        self.assertIn("нужно ≥3", active)
-        for _ in range(3):
-            self.run_review()
-        self.assertEqual(self.state["phase"], "claude")
-        self.assertIn("✓ зачтено 3/3 · завершено 6", self.panel_text())
+        self.assertIn("проход 3 выполняется", active)
+        self.assertIn("нужно ≥2", active)
         for _ in range(2):
-            self.run_review("claude")
-        self.assertEqual(self.state["phase"], "astra")
-        self.assertIsNone(self.state["reviewed"])
-        self.run_review("astra")
-        self.assertEqual(self.state["phase"], "publish")
-        self.assertIn("Astra: ✓ зачтено 1/1", self.panel_text())
-        self.assertIn("✓ зачтено 2/2", self.panel_text())
-        self.assertIn("▶ Публикация", self.panel_text())
-
-    def test_claude_return_keeps_totals_and_explains_both_resets(self):
-        self.state["phase"] = "sol"
-        for _ in range(3):
             self.run_review()
-        self.run_review("claude")
-        self.run_review("claude", implementation_fixes=1, substantial=True)
-        self.assertEqual(self.state["phase"], "sol")
-        self.assertIn("возврат к Sol", self.panel_text())
-        self.assertEqual(self.state["display_reviews"]["sol"]["completed"], 3)
-        self.assertEqual(self.state["display_reviews"]["claude"]["completed"], 2)
-        self.assertEqual((self.state["sol_clean"], self.state["claude_clean"]), (0, 0))
+        self.assertEqual(self.state["phase"], "astra")
+        self.assertIn("✓ зачтено 2/2 · завершено 4", self.panel_text())
+        for _ in range(2):
+            self.run_review("astra")
+        self.assertEqual(self.state["phase"], "opus_final")
+        self.assertIsNone(self.state["reviewed"])
+        self.run_review("opus_final")
+        self.run_review("opus_final")
+        self.assertEqual(self.state["phase"], "final")
+        self.assertIn("Поздний Opus: ✓ зачтено 2/2", self.panel_text())
+        self.assertIn("✓ зачтено 2/2", self.panel_text())
+        self.assertIn("▶ Финальный раунд", self.panel_text())
+
+    def test_astra_return_keeps_totals_and_explains_repeat(self):
+        self.state["phase"] = "sol"
+        for _ in range(2):
+            self.run_review()
+        self.run_review("astra", implementation_fixes=1, substantial=True)
+        self.assertEqual(self.state["phase"], "astra")
+        self.assertIn("далее: Opus → Поздний Opus", self.panel_text())
+        self.assertIn("этапов впереди: 5", self.panel_text())
+        self.run_review("astra")
+        self.run_review("astra")
+        self.assertEqual(self.state["phase"], "opus")
+        self.assertIn("повтор после Astra", self.panel_text())
+        self.assertIn("этапов впереди: 4", self.panel_text())
+        self.assertIn("✓ Sol", self.panel_text())
+        self.assertEqual(self.state["display_reviews"]["sol"]["completed"], 2)
+        self.assertEqual(self.state["display_reviews"]["astra"]["completed"], 3)
+        self.assertEqual((self.state["sol_clean"], self.state["astra_clean"]), (2, 2))
 
     def test_rejected_pass_never_increments_display_count(self):
         self.state["phase"] = "sol"
@@ -119,13 +141,32 @@ class StatusTests(unittest.TestCase):
             self.cycle.review("sol")
         self.cycle.handle_block(caught.exception)
         self.assertEqual(self.state["display_reviews"]["sol"]["completed"], 1)
-        self.assertIn("не зачтено · серия 0/3", self.panel_text())
+        self.assertIn("не зачтено · серия 0/2", self.panel_text())
+
+    def test_late_opus_return_preserves_sol_display_and_resets_only_astra(self):
+        self.state['phase'] = 'sol'
+        for role in ('sol', 'sol', 'astra', 'astra'):
+            self.run_review(role)
+        sol_display = dict(self.state['display_reviews']['sol'])
+        self.run_review('opus_final', implementation_fixes=1, substantial=True)
+        self.run_review('opus_final')
+        self.run_review('opus_final')
+        self.assertEqual(self.state['phase'], 'astra')
+        self.assertEqual(self.state['display_reviews']['sol'], sol_display)
+        self.assertIn('Sol: ✓ зачтено 2/2', self.panel_text())
+        self.assertIn('▶ Astra', self.panel_text())
+        self.assertIn('повтор после Поздний Opus', self.panel_text())
+        self.assertIn('этапов впереди: 3', self.panel_text())
+        self.assertEqual(self.state['display_reviews']['astra']['completed'], 2)
+        self.assertEqual(self.state['display_reviews']['opus_final']['completed'], 3)
+        self.assertEqual([e['role'] for e in self.state['display_review_events']
+                          if e['outcome'] == 'сброс серии'], ['astra'])
 
     def test_quota_panel_shows_deadline_countdown_and_keeps_stop_priority(self):
-        self.state.update(phase="claude", claude_clean=1, pending={"role": "claude", "quota_wait": {
+        self.state.update(phase="opus_final", opus_final_clean=1, pending={"role": "opus_final", "quota_wait": {
             "resets_at": 1789482000, "retry_at": 1789482005, "no_work": True}})
         with patch("focus_status.time.time", return_value=1789481945):
-            panel = self.panel_text(live={"role": "claude", "active": True})
+            panel = self.panel_text(live={"role": "opus_final", "active": True})
             self.assertIn("ОЖИДАНИЕ КВОТЫ", panel)
             self.assertIn("2026-09-15 14:20:05 UTC", panel)
             self.assertIn("через 01:00", panel)
@@ -147,9 +188,35 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(progress.view()["operation"], "quota")
         self.assertIn("no model is running", progress.view()["activity"])
 
+    def test_transient_wait_panel_and_progress_have_no_active_model(self):
+        self.state.update(phase="opus", pending={"role": "opus", "transient_wait": {
+            "retry_at": 1030, "attempt": 2, "limit": 3, "no_work": False}})
+        progress = Progress(self.store, self.state)
+        self.cycle.progress = progress
+        with patch("focus_status.time.time", return_value=1000), patch("cycle_workflow.time.sleep"):
+            panel = self.panel_text(live={"role": "opus", "active": True})
+            self.assertIn("ОЖИДАНИЕ ПОВТОРА", panel)
+            self.assertIn("повтор 2/3 через 00:30", panel)
+            self.assertIn("модель не запущена", panel)
+            self.assertNotIn("проход 1 выполняется", panel)
+            self.assertIn("ПАУЗА", self.panel_text(paused=True))
+            self.assertIn("ОСТАНОВКА", self.panel_text(stop="now"))
+            self.assertTrue(self.cycle.wait_transient())
+        self.assertFalse(progress.view()["active"])
+        self.assertIsNone(progress.view()["role"])
+        self.assertEqual(progress.view()["operation"], "provider-retry")
+        self.assertIn("no model is running", progress.view()["activity"])
+        self.assertEqual(status(self.store, self.state)["transient_wait"], self.state["pending"]["transient_wait"])
+        self.assertIn("Claude · серверная ошибка", self.panel_text(live={"role": "opus", "active": True}))
+        self.state["pending"]["transient_wait"]["provider"] = "Codex"
+        with patch("focus_status.time.time", return_value=1000), patch("cycle_workflow.time.sleep"):
+            self.assertIn("Codex · серверная ошибка", self.panel_text(live={"role": "opus", "active": True}))
+            self.assertTrue(self.cycle.wait_transient())
+        self.assertIn("Waiting to retry Codex after server error", progress.view()["activity"])
+
     def test_legacy_history_is_explicitly_incomplete_and_bounded(self):
         del self.state["display_reviews"]
-        self.state.update(phase="sol", sol_passes=4, sol_clean=1, claude_clean=0)
+        self.state.update(phase="sol", sol_passes=4, sol_clean=1, opus_final_clean=0)
         self.assertIn("завершено ≥4", self.panel_text())
         self.run_review()
         self.assertIn("завершено ≥5", self.panel_text())
@@ -199,15 +266,30 @@ class StatusTests(unittest.TestCase):
         self.assertIn("модель не запущена", text)
 
     def test_legacy_publication_does_not_display_new_reviews_as_completed(self):
-        self.state.update(phase='publish', publication_review_profile=1)
-        panel = self.panel_text()
-        self.assertIn('по прежнему ревью', panel)
-        for name in ('Sol', 'Opus', 'Astra'):
-            self.assertIn('— ' + name, panel)
-            self.assertNotIn('✓ ' + name, panel)
+        for version in (1, 2, 3, 4, 5, 6):
+            self.state.update(phase='publish', publication_review_profile=version)
+            panel = self.panel_text()
+            self.assertIn('по прежнему ревью', panel)
+            for name in ('Opus', 'Sol', 'Astra', 'Поздний Opus'):
+                self.assertIn('— ' + name, panel)
+                self.assertNotIn('✓ ' + name, panel)
         self.cycle.reset_reviews()
         self.assertNotIn('publication_review_profile', self.state)
         self.assertNotIn('по прежнему ревью', self.panel_text())
+
+    def test_new_review_order_and_thresholds_match_wide_and_compact_panels(self):
+        self.state.update(phase='astra', sol_clean=3, astra_clean=1, opus_final_clean=0)
+        panel = build_panel(self.state, {'role': 'astra', 'active': True})
+        text = '\n'.join(panel.lines)
+        self.assertIn('✓ Sol ─ ▶ Astra ─ ○ Поздний Opus', text)
+        self.assertIn('Ревью Astra · xhigh', text)
+        self.assertIn('серия 1/2', text)
+        self.assertIn('Astra 1/2 · Поздний Opus 0/2', panel.compact[1])
+        self.state['phase'] = 'opus_final'
+        text = self.panel_text(live={'role': 'opus_final', 'active': True})
+        self.assertIn('Ревью Поздний Opus · xhigh', text)
+        self.assertIn('серия 0/2', text)
+        self.assertIn('Luna/xhigh', self.panel_text(live={'role': 'publish', 'active': True}))
 
     def test_ci_display_is_tied_to_publication_sha(self):
         self.state.update(phase="ci", published={"sha": "current"},
@@ -241,7 +323,7 @@ class StatusTests(unittest.TestCase):
         progress = Progress(self.store, self.state)
         interaction.progress, progress.on_update = progress, interaction.tick
         progress.start("code", self.store.directory)
-        self.assertIn("Fable 5.1/high", terminal.panel.lines[1])
+        self.assertIn("Opus/xhigh", terminal.panel.lines[1])
         interaction.message_states = {"queued-id": "queued"}
         interaction.update_message_notice()
         with patch.object(Messages, "records", side_effect=AssertionError("No I/O in status tick")):
@@ -252,7 +334,7 @@ class StatusTests(unittest.TestCase):
             interaction.tick()
             self.assertNotIn("Сообщений в очереди", terminal.panel.lines[-1])
             progress.finish()
-            self.assertNotIn("Fable", terminal.panel.lines[1])
+            self.assertNotIn("Opus", terminal.panel.lines[1])
             interaction.unbind()
             self.assertIn("ПАУЗА", terminal.panel.lines[1])
 
@@ -271,7 +353,7 @@ class StatusTests(unittest.TestCase):
 class PanelRenderingTests(unittest.TestCase):
     def panel(self, **kwargs):
         state = {"root": "/tmp/Project", "phase": "sol", "iteration": 1, "sol_clean": 1,
-                 "claude_clean": 0, "display_reviews": new_reviews()}
+                 "opus_final_clean": 0, "display_reviews": new_reviews()}
         state.update(kwargs)
         return build_panel(state, {"role": "sol", "active": True})
 
@@ -288,11 +370,11 @@ class PanelRenderingTests(unittest.TestCase):
                 self.assertTrue(all(sum(cell_width(c) for c in line) < columns for line in terminal.frame_rows))
                 self.assertEqual(terminal.render(columns, rows), "")
         terminal.render(110, 24)
-        self.assertIn("Sol:", terminal.frame_rows[3])
-        self.assertEqual(terminal.frame_rows[7], "─" * 109)
+        self.assertIn("Sol:", terminal.frame_rows[4])
+        self.assertEqual(terminal.frame_rows[8], "─" * 109)
         terminal.render(60, 14)
-        self.assertIn("Sol 1/3", terminal.frame_rows[1])
-        self.assertIn("Opus 0/2", terminal.frame_rows[1])
+        self.assertIn("Sol 1/2", terminal.frame_rows[1])
+        self.assertIn("Astra 0/2", terminal.frame_rows[1])
 
     def test_typing_with_full_panel_does_not_revisit_long_scrollback(self):
         terminal = Terminal(stdout=io.StringIO())

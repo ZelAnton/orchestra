@@ -141,7 +141,7 @@ class Terminal:
         panel = None
         if isinstance(text, StatusPanel):
             sanitize = lambda lines: tuple(" ".join(terminal_text(str(line)[:4000]).split()) for line in lines)
-            panel = StatusPanel(sanitize(text.lines[:7]), sanitize(text.compact[:3]), text.tone)
+            panel = StatusPanel(sanitize(text.lines[:8]), sanitize(text.compact[:3]), text.tone)
             label = panel.lines[0] if panel.lines else "cc-focus"
         else:
             label = terminal_text(text).replace("\n", " ")
@@ -252,20 +252,21 @@ class Terminal:
 
     def render(self, columns, rows):
         with self.lock:
-            width, height = max(1, columns - 1), max(1, rows - 3)
+            width = max(1, columns - 1)
             if rows < 4 or columns < 8:
                 self.frame_size = None
                 self.changed = False
                 return "\x1b[2J\x1b[H\x1b[K" + clip("Resize terminal", width)
+            separator = ["─" * width] if rows >= 5 else []
             header = [clip(self.label, width)]
             if self.panel:
-                chosen = self.panel.lines if rows >= 15 and columns >= 70 and not self.approval_view else self.panel.compact
-                count = min(len(chosen), max(1, rows - 5))
+                chosen = self.panel.lines if rows >= 16 and columns >= 70 and not self.approval_view else self.panel.compact
+                count = min(len(chosen), max(1, rows - 5 - len(separator)))
                 header = [clip(line, width) if sum(cell_width(c) for c in line) <= width
                           else clip(line, max(0, width - 1)) + "…" for line in chosen[:count]]
                 if rows >= 6:
                     header.append("─" * width)
-                height = rows - len(header) - 2
+            height = rows - len(header) - len(separator) - 2
             self.log_height = height
             if self.approval_view:
                 if self.approval_cache is None or self.approval_cache[0] != width:
@@ -300,7 +301,7 @@ class Terminal:
                 used += size
             left = "".join(reversed(suffix))
             composer = clip("> " + left + self.text[self.cursor:], width)
-            content = [*header, *visible, clip(footer, width), composer]
+            content = [*header, *visible, *separator, clip(footer, width), composer]
             cursor = min(width, 3 + sum(cell_width(c) for c in left))
             resized = self.frame_size != (columns, rows)
             tone = self.panel.tone if self.panel else None

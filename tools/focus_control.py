@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import time
+import threading
 import uuid
 
 from cycle_state import Blocked, LocalLock, command, encode
@@ -98,11 +99,11 @@ def owner_alive(active):
 def check_parked_provider(store):
     """A live parked UI must prove leaf exit before another epoch takes ownership."""
     active = read_json(store.directory / "active.json") or {}
-    if active.get("interactive") and active.get("provider_run") and owner_alive(active):
-        if not container_identity(active["provider_run"]):
+    for provider in provider_records(active) if active.get("interactive") and owner_alive(active) else []:
+        if not container_identity(provider):
             raise Blocked("cleanup-incomplete", "The parked UI has an unaddressable provider; no new processing may start.")
         try:
-            wait_container(store, active["provider_run"], timeout=1)
+            wait_container(store, provider, timeout=1)
         except Blocked as error:
             raise Blocked("cleanup-incomplete", "The previous UI provider has not confirmed exit. Use cc-focus stop --now from another terminal before resuming.") from error
 
@@ -112,6 +113,7 @@ class Control:
         self.store = store
         self.active = None
         self.announced = None
+        self.provider_lock = threading.RLock()
 
     def begin(self):
         with LocalLock(self.store.directory, "control.lock"):
@@ -136,20 +138,44 @@ class Control:
             mode = "now" if now or (previous and previous.get("mode") == "now") else "safe"
             self.store.artifact("stop.json", encode({"nonce": self.active["nonce"], "mode": mode, "requested": time.time()}))
 
-    def prepare_provider(self, log):
-        identity = container_identity(self.active)
-        if not identity:
-            return None
-        cli, _ = identity
-        run_id = "orchestra-focus-provider-" + uuid.uuid4().hex
-        self.active["provider_run"] = {"processkit_cli": cli, "processkit_run_id": run_id}
-        self.store.artifact("active.json", encode(self.active))
-        return [cli, "run", "--run-id", run_id, "--cwd", str(self.store.root),
-                "--jsonl", str(Path(log).with_suffix(".processkit.jsonl")), "--inherit-stdio", "--"]
+    def child(self, slot, cwd=None):
+        parent = self
+        class Leaf:
+            store = parent.store
+            @property
+            def active(self):
+                with parent.provider_lock:
+                    record = parent.active.get("provider_runs", {}).get(slot)
+                    return {"provider_run": dict(record)} if record else {}
+            def prepare_provider(self, log):
+                return parent.prepare_provider(log, slot, cwd)
+            def clear_provider(self):
+                parent.clear_provider(slot)
+        return Leaf()
 
-    def clear_provider(self):
-        self.active["provider_run"] = None
-        self.store.artifact("active.json", encode(self.active))
+    def prepare_provider(self, log, slot=None, cwd=None):
+        with self.provider_lock:
+            identity = container_identity(self.active)
+            if not identity:
+                return None
+            cli, _ = identity
+            run_id = "orchestra-focus-provider-" + uuid.uuid4().hex
+            record = {"processkit_cli": cli, "processkit_run_id": run_id}
+            if slot is None:
+                self.active["provider_run"] = record
+            else:
+                self.active.setdefault("provider_runs", {})[slot] = record
+            self.store.artifact("active.json", encode(self.active))
+            return [cli, "run", "--run-id", run_id, "--cwd", str(cwd or self.store.root),
+                    "--jsonl", str(Path(log).with_suffix(".processkit.jsonl")), "--inherit-stdio", "--"]
+
+    def clear_provider(self, slot=None):
+        with self.provider_lock:
+            if slot is None:
+                self.active["provider_run"] = None
+            else:
+                self.active.setdefault("provider_runs", {}).pop(slot, None)
+            self.store.artifact("active.json", encode(self.active))
 
     def poll(self):
         request = self.request()
@@ -171,13 +197,35 @@ class Control:
             return
         self.active.update(finished=time.time(), exit_code=exit_code,
                            phase=state.get("phase"), status=state.get("status"),
-                           ui_parked=bool(self.active.get("interactive") and not self.active.get("provider_run")))
+                           ui_parked=bool(self.active.get("interactive") and not provider_records(self.active)))
         self.store.artifact(f"runs/{self.active['nonce']}.json", encode(self.active))
         self.store.artifact("active.json", encode(self.active))
 
 
 def status(store, state):
     brief = {key: state.get(key) for key in ("phase", "iteration", "status", "last", "blocker", "published", "corrections", "correction_pending")}
+    pair = state.get("pair_review")
+    if pair:
+        repair = pair.get("repair") or {}
+        readers = repair.get("evidence_reader") or repair.get("reader") or pair
+        brief["pair_review"] = {k: pair[k] for k in ("phase", "round", "step", "discussion")}
+        brief["pair_review"].update(executor_role=pair.get("executor_role"), findings=len(pair.get("issues", [])),
+            participants=[{k: job.get(k) for k in ("role", "status", "retry_at", "live")}
+                          for job in sorted(readers.get("jobs", {}).values(), key=lambda j: j.get("created", 0))][-5:])
+        if repair:
+            brief["pair_review"]["repair"] = {k: repair[k] for k in ("step", "mode", "reason", "clean", "round", "repeat_outer")}
+        if pair.get("execution"):
+            brief["pair_review"]["execution"] = {"remaining": pair["execution"]["remaining"],
+                "completed": len(pair["execution"]["resolutions"]), "reports": len(pair["execution"]["reports"])}
+    brief["pair_clean"] = state.get("pair_clean")
+    brief["pair_completed"] = list(state.get("pair_completed", {}))
+    final = state.get("final_review")
+    if final:
+        brief["final_review"] = {"round": final["round"], "step": final["step"],
+                                 "completed_inspections": len(final.get("scans", [])),
+                                 "confirmed_blockers": sum(bool(row.get("blocking")) for row in final.get("confirmed", [])),
+                                 "cleanup_closed": len(final.get("confirmed", [])) if final.get("cleanup") else 0,
+                                 "backlog": str(store.directory / "backlog.json")}
     active = read_json(store.directory / "active.json")
     live = runtime_active(store)
     progress = read_json(store.directory / "progress.json")
@@ -193,6 +241,7 @@ def status(store, state):
     from focus_status import build_panel
     brief.update(task=state.get("task"), review_events=state.get("display_review_events", []),
                  quota_wait=(state.get("pending") or {}).get("quota_wait"),
+                 transient_wait=(state.get("pending") or {}).get("transient_wait"),
                  dashboard=list(build_panel(state, progress if progress and progress["live"] else None,
                                             paused=not live).lines))
     if state.get("baseline", {}).get("repositories"):
@@ -210,22 +259,27 @@ def container_identity(active):
     return None
 
 
+def provider_records(active):
+    return ([active["provider_run"]] if active.get("provider_run") else []) + list(active.get("provider_runs", {}).values())
+
+
 def kill_provider(store, active, timeout=30):
-    provider = active.get("provider_run")
-    identity = container_identity(provider) if provider else None
-    if identity:
+    started = time.monotonic()
+    stopped = True
+    for provider in provider_records(active):
+        identity = container_identity(provider)
+        if not identity:
+            stopped = False
+            continue
         cli, run_id = identity
-        # An acknowledged intent can precede registration. Retry while the lock
-        # remains held; never substitute PID targeting for an unavailable endpoint.
-        started = time.monotonic()
-        limit = min(5, timeout) if timeout is not None else 5
-        command([cli, "kill", "--run-id", run_id], store.root, timeout=max(0.01, limit), check=False)
+        remaining = None if timeout is None else max(.01, timeout - (time.monotonic() - started))
+        command([cli, "kill", "--run-id", run_id], store.root,
+                timeout=min(5, remaining) if remaining is not None else 5, check=False)
         try:
-            wait_container(store, provider, None if timeout is None else timeout - (time.monotonic() - started))
-            return True
+            wait_container(store, provider, None if timeout is None else max(.01, timeout - (time.monotonic() - started)))
         except Blocked:
-            return False
-    return True
+            stopped = False
+    return stopped
 
 
 def wait_container(store, active, timeout=30):
@@ -242,7 +296,7 @@ def request_stop(store, now=False, timeout=None):
     """Wait for the addressed run, never redirect a stop to a newer invocation."""
     if not runtime_active(store):
         previous = read_json(store.directory / "active.json") or {}
-        if previous.get("interactive") and previous.get("provider_run"):
+        if previous.get("interactive") and provider_records(previous):
             if not now:
                 raise Blocked("cleanup-incomplete", "A previous UI provider has unconfirmed cleanup. Use cc-focus stop --now; this is not a safe-stop acknowledgement.")
         else:
@@ -263,7 +317,7 @@ def request_stop(store, now=False, timeout=None):
         done = read_json(store.directory / "runs" / (active["nonce"] + ".json"))
         held = runtime_active(store)
         remaining = None if timeout is None else timeout - (time.monotonic() - started)
-        cleanup_pending = bool(done and done.get("interactive") and done.get("provider_run"))
+        cleanup_pending = bool(done and done.get("interactive") and provider_records(done))
         if done and not cleanup_pending and (not held or (current and current.get("nonce") != active["nonce"])):
             # An idle terminal can outlive a processing epoch. The runtime lock
             # and lease are released; no provider remains in the parked UI.
@@ -295,7 +349,7 @@ def request_stop(store, now=False, timeout=None):
                 latest = read_json(store.directory / "active.json") or {}
                 if latest.get("nonce") != active["nonce"]:
                     raise Blocked("stop-target-changed", "A newer processing epoch was left untouched.")
-                if not latest.get("finished") or latest.get("provider_run"):
+                if not latest.get("finished") or provider_records(latest):
                     command([cli, "kill", "--run-id", run_id], store.root, timeout=min(15, remaining) if remaining is not None else 15, check=False)
                     wait_container(store, active, None if timeout is None else timeout - (time.monotonic() - started))
                     killed = True

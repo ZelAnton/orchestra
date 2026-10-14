@@ -47,7 +47,7 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.store.save(self.state)
         return self.root / ".work/publication-recovery.json"
 
-    def test_acceptance_preserves_work_history_sessions_and_restarts_both_reviews(self):
+    def test_acceptance_preserves_work_history_sessions_and_restarts_all_reviews(self):
         path = self.publication()
         before = self.project.snapshot()
         old = copy.deepcopy(self.state)
@@ -63,7 +63,7 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.assertNotIn("Core/operator.txt", self.state["baseline"]["files"])
         self.assertEqual(self.state["sessions"], old["sessions"])
         self.assertEqual(self.state["task"], old["task"])
-        self.assertEqual((self.state["phase"], self.state["status"]), ("sol", "paused"))
+        self.assertEqual((self.state["phase"], self.state["status"]), ("pair_a", "paused"))
         self.assertEqual((self.state["sol_passes"], self.state["sol_clean"], self.state["claude_clean"]), (0, 0, 0))
         self.assertIsNone(self.state["reviewed"])
         self.assertIsNone(self.state["published"])
@@ -79,10 +79,7 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.assertEqual(archive["publication_reconciliation"], plan)
         self.assertIn('"publication_recovery"', self.cycle.context("sol"))
         done = fixtures.report()
-        self.transport.actions = [("coordinate", done), ("sol", done), ("sol", done), ("sol", done),
-            ("coordinate", done), ("claude", done), ("claude", done), ("coordinate", done), ("astra", done),
-            ("coordinate", done), ("publish", done),
-            ("coordinate", fixtures.report(status="complete"))]
+        self.transport.actions = [*fixtures.pair_actions(), ("coordinate", done), ("publish", done), ("coordinate", fixtures.report(status="complete"))]
         self.assertEqual(self.cycle.run(), 0)
         self.assertEqual(self.members["Core"].text("rev-parse", "HEAD"), before["head"]["Core"])
         self.assertEqual(self.members["Root"].text("rev-parse", "HEAD"), before["head"]["Root"])
@@ -227,7 +224,7 @@ class PublicationRecoveryTests(unittest.TestCase):
             lease.return_value.__enter__.return_value.pwsh = "pwsh"
             self.assertEqual(cc_focus.main(["reconcile", "--publication", "--plan-out", str(path)]), 0)
             self.assertEqual(cc_focus.main(["reconcile", "--publication", "--apply-plan", str(path)]), 0)
-        self.assertEqual((self.store.read()["phase"], self.store.read()["status"]), ("sol", "paused"))
+        self.assertEqual((self.store.read()["phase"], self.store.read()["status"]), ("pair_a", "paused"))
 
     def test_publication_flag_requires_reconciliation(self):
         import cc_focus
@@ -262,7 +259,7 @@ class SinglePublicationRecoveryTests(unittest.TestCase):
         recovery.apply(self.cycle, path)
         self.assertEqual(self.repo.snapshot(), before)
         self.assertEqual(self.state["baseline"]["head"], baseline)
-        self.assertEqual(self.state["phase"], "sol")
+        self.assertEqual(self.state["phase"], "pair_a")
         self.cycle.check_protected(before)
         self.assertEqual(self.repo.text("diff", "--cached", "--name-only"), "staged.txt")
 

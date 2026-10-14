@@ -147,9 +147,9 @@ are extensionless on every supported platform: Windows resolves the `.cmd` launc
 while macOS/Linux uses the managed executable copies installed beside the canonical
 `.sh` launchers. The explicit `.sh` names remain available too.
 
-For the separate serial Claude/Codex workflow directly on `main`, use
+For the separate Claude/Codex workflow directly on `main`, use
 [`cc-focus`](docs/sequential-cycle.md). It supports file-based handoff, persistent
-role sessions, cross-provider review loops, blocker recovery and a publication CI
+role sessions, parallel read-only review pairs with autonomous arbitration, blocker recovery and a publication CI
 barrier. It does not use the queue processor's model or concurrency defaults.
 It also accepts a project directory containing independent Git repositories on
 `main`: list them in `focus-project.json` or use direct Git child directories.

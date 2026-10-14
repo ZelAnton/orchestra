@@ -3,7 +3,7 @@
 import time
 import unicodedata
 
-from cycle_prompts import PROFILES, REVIEW_TARGETS
+from cycle_prompts import PROFILES, REVIEW_TARGETS, review_target
 from cycle_state import encode
 from focus_output import LiveOutput
 
@@ -67,7 +67,7 @@ class Progress:
         provider, model, effort = PROFILES[role]
         review = ""
         if role in REVIEW_TARGETS:
-            review = f" clean={self.state.get(role + '_clean', 0)}/{REVIEW_TARGETS[role]}"
+            review = f" clean={self.state.get(role + '_clean', 0)}/{review_target(self.state, role)}"
             if role == "sol":
                 review += f" pass={self.state.get('sol_passes', 0) + 1}"
         self.line(f"iteration={self.state['iteration']} phase={self.state['phase']} role={role} {provider}/{model} effort={effort}{review}")
@@ -93,7 +93,7 @@ class Progress:
         if self.on_update:
             self.on_update()
         if self.heartbeat_log and now - self.last_print >= 15:
-            if self.operation == "quota":
+            if self.operation in ("quota", "provider-retry", "pair"):
                 self.line(self.activity)
             else:
                 self.line(f"{self.role or self.state['phase']} active {int(now-self.started)}s; {self.activity}; last event {int(now-self.last_event)}s ago; events={self.events}")

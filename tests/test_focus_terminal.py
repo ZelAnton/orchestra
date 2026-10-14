@@ -107,18 +107,75 @@ class FocusInputTests(unittest.TestCase):
         with self.assertRaises(MessagePending):
             interaction.begin(dict(self.pending, id="b" * 32, role="claude"))
 
-    def test_later_review_instruction_invalidates_credit_and_returns_to_sol(self):
-        for role in ('claude', 'astra'):
+    def test_review_instruction_invalidates_credit_and_restarts_opus(self):
+        for role in ('opus', 'sol', 'astra', 'opus_final'):
             with self.subTest(role=role):
                 interaction = self.setup_input(role)
-                self.state.update(sol_clean=3, claude_clean=1, astra_clean=0, reviewed={"head": "old"})
+                self.state.update(sol_clean=3, opus_final_clean=1, astra_clean=0, reviewed={"head": "old"})
                 interaction.submit("Also check restart")
                 interaction.take()
-                self.assertEqual([self.state[k + '_clean'] for k in ('sol', 'claude', 'astra')], [0, 0, 0])
+                self.assertEqual([self.state[k + '_clean'] for k in ('opus', 'sol', 'opus_final', 'astra')], [0, 0, 0, 0])
                 self.assertIsNone(self.state["reviewed"])
-                self.assertTrue(self.pending["return_to_sol"])
+                self.assertTrue(self.pending["restart_reviews"])
                 for record in interaction.messages.unresolved(1):
                     interaction.messages.update(record, 'discarded')
+
+    def test_report_only_correction_rejects_new_work_instructions(self):
+        interaction = self.setup_input('sol')
+        self.pending['report_repair'] = {'source': 'original-result.json'}
+        interaction.begin(self.pending)
+        interaction.submit('Also change implementation')
+        self.assertFalse(interaction.messages.records(1))
+        self.assertIsNone(interaction.target)
+        self.assertIn('No writable active invocation', interaction.terminal.getvalue())
+
+    def test_updated_runtime_warning_survives_blocker_in_both_panels(self):
+        interaction = self.setup_input('sol')
+        self.state['blocker'] = {'status': 'blocked', 'message': 'unreported changes'}
+        interaction.unbind()
+        interaction.runtime_notice = 'Runtime updated: /exit and restart'
+        panel = interaction.panel()
+        self.assertIn('БЛОКИРОВКА', panel.lines[1])
+        self.assertEqual(panel.lines[-1], interaction.runtime_notice)
+        self.assertEqual(panel.compact[-1], interaction.runtime_notice)
+
+    def test_updated_runtime_prevents_stale_interactive_commands(self):
+        import cc_focus
+        class Screen(Display):
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+        for action in ('/resume', '/correct', '/retry-message', '/discard-message'):
+            with self.subTest(action=action), patch('cc_focus.Interaction') as interaction, \
+                    patch('cc_focus.runtime_changed', return_value=True), \
+                    patch('cc_focus.main', return_value=3) as run:
+                interaction.return_value.wait_action.side_effect = [(action, 'text'), ('/exit', '')]
+                cc_focus.interactive_main([], Screen(), None)
+                run.assert_called_once()
+                self.assertEqual(interaction.return_value.runtime_notice, cc_focus.RUNTIME_UPDATED)
+                self.assertTrue(interaction.return_value.respond.called)
+
+    def test_runtime_fingerprint_detects_replaced_added_and_removed_sources(self):
+        import cc_focus
+        root = self.root / 'runtime'
+        root.mkdir()
+        entry = root / 'cc_focus.py'
+        entry.write_text('entry')
+        part = root / 'cycle_prompts.py'
+        part.write_text('before')
+        with patch('cc_focus.__file__', str(entry)):
+            original = cc_focus.runtime_fingerprint()
+            with patch('cc_focus.LOADED_RUNTIME', original):
+                self.assertFalse(cc_focus.runtime_changed())
+                part.write_text('after')  # Same byte length; mtime/size alone is insufficient.
+                self.assertTrue(cc_focus.runtime_changed())
+                part.write_text('before')
+                self.assertFalse(cc_focus.runtime_changed())
+                added = root / 'focus_extra.py'
+                added.write_text('added')
+                self.assertTrue(cc_focus.runtime_changed())
+                added.unlink()
+                part.unlink()
+                self.assertTrue(cc_focus.runtime_changed())
 
     def test_publication_and_publication_healing_reject_instructions(self):
         interaction = self.setup_input("publish")
@@ -396,7 +453,7 @@ class FocusInputTests(unittest.TestCase):
             self.assertFalse(runtime_active(self.store))
             with LocalLock(self.store.directory):
                 pass
-            self.assertEqual(self.store.read()["phase"], "sol")
+            self.assertEqual(self.store.read()["phase"], "pair_a")
             old_nonce = self.control_nonce()
             output.clear()
             os.write(master, b"/resume\r")
@@ -900,14 +957,14 @@ class TerminalTests(unittest.TestCase):
         terminal = Terminal(io.StringIO(), io.StringIO())
         terminal.write("123456789\ne\u0301界abcd")
         terminal.render(8, 7)
-        self.assertEqual(terminal.frame_rows[1:5], ["", "1234567", "89", "e\u0301界abcd"])
+        self.assertEqual(terminal.frame_rows[1:-3], ["1234567", "89", "e\u0301界abcd"])
         terminal.write("Z")
         frame = terminal.render(8, 7)
-        self.assertEqual(terminal.frame_rows[1:5], ["1234567", "89", "e\u0301界abcd", "Z"])
-        self.assertIn("\x1b[5;1HZ\x1b[K", frame)
+        self.assertEqual(terminal.frame_rows[1:-3], ["89", "e\u0301界abcd", "Z"])
+        self.assertIn("\x1b[4;1HZ\x1b[K", frame)
         frame = terminal.render(12, 8)
         self.assertIn("\x1b[2J", frame)
-        self.assertEqual(terminal.frame_rows[1:6], ["", "", "", "123456789", "e\u0301界abcdZ"])
+        self.assertEqual(terminal.frame_rows[1:-3], ["", "", "123456789", "e\u0301界abcdZ"])
         self.assertEqual(terminal.wrap_line("e\u0301界abcdZ", 11), ("e\u0301界abcdZ",))
         terminal.render(7, 3)
         self.assertIn("\x1b[2J", terminal.render(12, 8))
@@ -935,14 +992,14 @@ class TerminalTests(unittest.TestCase):
         self.assertLessEqual(len(terminal.wrapped_lines), 3001)
         terminal.scroll = 1000000
         terminal.render(50, 6)
-        self.assertEqual(terminal.frame_rows[1:4], ["line 500", "line 501", "line 502"])
+        self.assertEqual(terminal.frame_rows[1:-3], ["line 500", "line 501"])
         for _ in range(20):
             terminal.write("x")
             terminal.render(50, 6)
         self.assertLessEqual(len(terminal.wrapped_lines), 3001)
         terminal.scroll = 0
         terminal.render(50, 6)
-        self.assertEqual(terminal.frame_rows[3], "x" * 20)
+        self.assertEqual(terminal.frame_rows[-4], "x" * 20)
 
     def test_provider_text_sanitization_does_not_hold_the_input_lock(self):
         terminal = Terminal(io.StringIO(), io.StringIO())

@@ -386,8 +386,8 @@ $script:ProviderRuntimes = @(
     'codex-preflight.ps1', 'codex-processor-runtime.ps1', 'codex-role-runtime.ps1', 'codex-runtime.ps1'
 )
 $script:SharedRuntimes = @(
-    'focus-runtime.ps1', 'cc_focus.py', 'cycle_prompts.py', 'cycle_state.py', 'cycle_transport.py', 'cycle_workflow.py',
-    'focus_control.py', 'focus_progress.py', 'focus_output.py', 'focus_messages.py', 'focus_input.py', 'focus_terminal.py', 'focus_status.py',
+    'focus-runtime.ps1', 'cc_focus.py', 'cycle_prompts.py', 'focus_review.py', 'focus_readonly.py', 'focus_pair_profile.py', 'focus_pair_protocol.py', 'focus_pair_view.py', 'focus_snapshot_archive.py', 'focus_pair_jobs.py', 'focus_pair_execution.py', 'focus_pair_repair.py', 'focus_repair_evidence.py', 'focus_pairs.py', 'cycle_state.py', 'cycle_transport.py', 'cycle_workflow.py',
+    'focus_control.py', 'focus_progress.py', 'focus_diagnostics.py', 'focus_output.py', 'focus_messages.py', 'focus_input.py', 'focus_terminal.py', 'focus_status.py',
     'focus_project.py', 'focus_publication.py', 'focus_reconcile.py', 'focus_commit.py', 'focus_publication_recovery.py',
     'common.ps1', 'config-runtime.ps1', 'doctor-runtime.ps1', 'events-common.ps1', 'harness.ps1', 'inbox.ps1',
     'linearize.ps1', 'metrics.ps1', 'notify.ps1', 'outbox.ps1', 'policy-schema.ps1',

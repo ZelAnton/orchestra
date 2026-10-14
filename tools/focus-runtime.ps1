@@ -29,7 +29,7 @@ try {
     $env:PYTHONUTF8 = '1'
     $env:PYTHONIOENCODING = 'utf-8'
     $target = @($python) + $pythonPrefix + @($runtime) + @($args)
-    if (($args.Count -gt 0 -and [string]$args[0] -in @('status', 'stop', 'messages')) -or $args -contains '--help' -or $args -contains '-h') {
+    if (($args.Count -gt 0 -and [string]$args[0] -in @('status', 'diagnose', 'stop', 'messages')) -or $args -contains '--help' -or $args -contains '-h') {
         exit (Invoke-ProcessKitInherited -FilePath $python -ArgumentList ($pythonPrefix + @($runtime) + @($args)))
     }
     $backend = Resolve-OrchestraProcessKitBackend

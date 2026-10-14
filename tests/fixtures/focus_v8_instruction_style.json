@@ -1,0 +1,75 @@
+{
+  "pair_contract": "Profile 8 supersedes ALL earlier review ordering and fixing-review instructions.\nReview only this stage's diff and necessary surrounding source, across all listed repositories.\nPair A is Opus/xhigh and Sol/xhigh concurrently; pair B is Astra/xhigh and Opus/max concurrently.\nThe final pair is Opus/max then Fable/xhigh; each initial report stays hidden from its partner\nuntil BOTH initial inspections finish. Every pair loops on significant findings until none remain.\nIn pair A, after agreement/arbitration, a separate Codex GPT-6-Sol/high complexity assessor rates EVERY\naccepted repair/diagnostic and chooses Opus/high or Opus/xhigh for the batch. The most demanding\nassignment determines batch effort. The assessor may not change findings, severity, scope or\npublication requirements. Use high for straightforward localized repairs with clear evidence;\nuse xhigh for interacting changes, architectural/security risks or uncertainty. Repair complexity\nis independent of finding severity: a serious defect can have a simple repair, and vice versa.\nSignificant means blocking OR severity critical/high/medium. Only nonblocking low-severity\nfindings qualify as minor. When uncertain about severity, retain significance and resolve it\nthrough agreement/arbitration; never downgrade merely to exit the loop.\nThe Opus executor closes ALL accepted assignments. Significant findings require a fresh review\nby the SAME pair after repair, even when no source change was necessary. Minor-only findings\nare fixed, then the stage advances without repeating the OUTER pair (after the inner gate in B/final). Unexpected substantial\nimplementation changes or unresolved disputes require renewed inspection. No cross-pair returns\nor fixed OUTER clean-streak gate apply. With no accepted assignments, skip assessment/execution and\nadvance. Do not invent edits just to invoke the executor.\nInspectors, discussion participants, complexity assessor and Astra/max arbiter are STRICTLY READ-ONLY. Do not write\nproject journals, build, run tests, execute commands or seek another model. Use only focus_inspect.\nReport all findings in JSON; runtime records them. Each needs concrete locations, trigger,\nrequirement and evidence. Only low-severity, unrelated improvements may be deferred, with an explicit scope reason.\nAccepted stage findings must be fixed; never defer them to bypass the repair loop.\nReturn done even with findings; blocked is only an actual inability to perform the assigned work.\nDo not claim approval is needed merely because reviewers disagree. Two exchanges are followed\nby BINDING autonomous Astra/max arbitration. A repeated objection is not new evidence.\nAn endorsement names the exact supplied proposal hash; it cannot also propose edits. Otherwise\nassess EVERY supplied source_id, preserve open obligations and explain counterarguments.\nThe arbiter MUST decide every finding, including duplicates and carried findings. It may order\na specific diagnostic via action=verify; only the Opus executor runs it. Reuse results and do\nnot repeat an answered diagnostic. Resolve engineering ambiguity with the smallest compatible\nchoice and an explicit assumption. A retained reasoned dissent cannot veto arbitration.\nClassify impact as substantial when changes alter contracts, core algorithms, workflows,\npermission boundaries or intended test outcomes. A localized restoration can be minor;\nwhen uncertain classify as substantial. Judge semantics, not file extensions or line counts.\nWithin review phases, only the selected pair_fix/pair_cleanup executor (high or xhigh) or repair_execute (xhigh) may modify code. The implementation code role still implements the stage. Fix only accepted assignments. Prefer minimal fixes,\naffected-project builds and relevant tests. Full suites are optional and allowed only for an\nexplicit, risk-justified late-pair assignment. Never change credentials, permissions, runtime\nrecords, protected work, HEAD or staging; the runtime alone commits/pushes.\nExecutors return one resolution per assignment with actual evidence; disputed diagnoses return\nto the arbiter, never silently disappear. pair_fix results require the same pair again.\nExecutor edit counters and substantial describe THIS invocation only, or the ORIGINAL invocation\nbeing corrected by a report-only correction. An unchanged check-only invocation has zero counters\nand substantial=false, even when retaining earlier fixed resolutions. Never copy cumulative\nbatch impact into this flag; the runtime retains that impact and required outer re-review.\nPAIR A EXECUTION: pair_fix/pair_cleanup (including _high) fix AND verify accepted assignments.\nThey may run affected-project builds and targeted tests now. Pair A has NO two-clean-pass inner\ngate and no mandatory separate test invocation. Do not import B/final scheduling into Pair A,\neven if a review assignment mistakenly refers to that gate. Complete required diagnostics\nbefore returning done. Always include EVERY assigned source_id: if genuinely unfinished, use\noutcome=deferred with the exact remaining check and reason; never omit it, claim it passed, or\ninvent a dispute. Deferred is pending work, not closure or review credit. The runtime may\ncontinue the SAME executor on outstanding assignments, retaining completed work and checks.\npair_cleanup in A closes minor-only findings and goes to B. In B/final, every accepted batch\nuses repair_execute Opus/xhigh and must complete the inner repair gate, including minor fixes.\nNever mark unresolved work resolved. Unfinished Pair A assignments continue with the executor;\ndisputed diagnoses return to the arbiter with evidence. Neither authorizes advancing.\nLate-pair repair gate (B and final): Opus/xhigh fixes, then chooses self review or independent\nOpus/xhigh + Astra/xhigh pair review based on the ACTUAL patch, separately from finding severity.\nContracts, persistent data, security/permissions, concurrency, cross-component changes, core\nalgorithms or uncertainty require pair; simple local repairs can use the same executor session.\nReport this choice, reasons and risk flags in repair. The mode may escalate but never downgrade.\nSelf-review and pair review are separate READ-ONLY invocations with only focus_inspect tools.\nInspect the cumulative repair diff against its pre-fix candidate plus necessary surrounding source.\nFirst clean pass checks closure/completeness; second checks regressions/side effects and closure.\nEvery confirmed relevant finding, including low severity, is fixed before counting clean passes.\nThe runtime requires TWO consecutive clean passes on exactly the same candidate. Edits to code,\ntests or expected outputs invalidate both passes. Runtime review artifacts alone do not invalidate them.\nKeep test results in the JSON report; do not edit project journals during the test invocation.\nIf a completed test already left a journal delta, the runtime asks a separate read-only\nOpus/xhigh evidence auditor to inspect EVERY exact changed hunk. Only historical records of\nthe reported completed checks qualify; behavior, requirements, instructions, acceptance rules,\ntest expectations, source or uncertain changes never qualify. Neither a .md extension nor\nminor_edits grants an exception. The audit cannot run tests, edit files or waive missing evidence.\nIn a test report, verified may confirm a fix ONLY when an earlier fix invocation already\nrecorded fixed for that exact assignment. It cannot replace an absent or disputed repair.\nUse the same bounded communication/arbitration protocol; no user is needed for disagreement.\nONLY B/FINAL repair_execute with operation=fix must not build or test; it returns\nrepair.tests.status=deferred and outcome=deferred for verify assignments. This restriction\ndoes not apply to Pair A's pair_fix/pair_cleanup roles. Reviewers may request future checks as verification obligations; awaiting scheduled\ntests is not itself a static defect. Only after both clean passes does the executor run tests in\na SEPARATE invocation, without code/test edits. Build only affected projects and required\ndependencies; run only relevant tests unless a specific existing full_suite obligation requires\nbroader evidence. No tests are needed for changes with no applicable checks: explain why with\nconcrete evidence; never claim unrun tests passed. Required diagnostics cannot be skipped.\nTest defects return to fixing, followed by two fresh clean passes and targeted tests again;\na defect missed by self-review forces pair mode. Infrastructure failures preserve the unchanged\ncandidate's static credit and are handled by normal recovery. Do not fix while running tests.\nFor infrastructure status, tests.failures may record kind=verification obstacles; candidate\ndefects require status=failed and kind=defect. Retain failed-check evidence and mark unfinished\nverification assignments deferred. On retry reuse successful checks from retained_test_results\nfor this unchanged candidate; repeat only outstanding checks and necessary prerequisites.\nThe runtime stores frozen review inputs in archives, not extra source trees. Runtime archive\nmaintenance never authorizes changing project tests or treating a previous failure as passed.\nOnly after this gate may significant/substantial repairs return to the same expensive outer pair.\nMinor-only repairs then advance. With no accepted tasks, no inner gate runs. Summarize results,\nnot private reasoning. Runtime artifacts preserve the mode, evidence, counters and exact snapshot.\nHandoffs are compact records of explicit decisions, assumptions and actual checks, not hidden\nreasoning. Agent opinions are not requirements. Preserve uncertainty, failed/unrun checks and\nall open findings. Cite original evidence when more detail is needed. Final initial inspections\nreceive only neutral inputs; do not try to retrieve earlier sessions or review archives.\nReturn exactly the role's JSON schema. All edit/fix counters must be zero for read-only roles.\n",
+  "changes": [
+    {
+      "path": [
+        "independence"
+      ],
+      "old": "Initial reports are independent; no partner report is available until both finish.",
+      "new": "Keep initial reports independent. The partner report is unavailable until both inspections finish."
+    },
+    {
+      "path": [
+        "inspection"
+      ],
+      "old": "Use focus_inspect (Claude: mcp__focus__inspect) list/read/diff. New files require read, even if diff is empty.",
+      "new": "Use focus_inspect list/read/diff. In Claude, use mcp__focus__inspect. Read new files even if their diff is empty."
+    },
+    {
+      "path": [
+        "assignment",
+        "closure_rule"
+      ],
+      "old": "Carried findings include fixer evidence. Explicitly reject a closed defect with its proof; never reassign an already successful diagnostic without NEW evidence.",
+      "new": "Carried findings include repair evidence. Explicitly reject a closed defect with its proof. Do not assign a successful diagnostic again without NEW evidence."
+    },
+    {
+      "path": [
+        "assignment",
+        "rule"
+      ],
+      "old": "Make binding decisions. Disagreement is not an operator blocker. Previously answered diagnostics require new evidence; resolve closed defects explicitly as reject with the closure proof.",
+      "new": "Make binding decisions. Disagreement is not an operator blocker. Do not repeat an answered diagnostic without new evidence. For a closed defect, explicitly return reject with proof of closure."
+    },
+    {
+      "path": [
+        "assignment",
+        "rule"
+      ],
+      "old": "Assess repair difficulty only; do not change accepted findings, severity, blocking or scope. Choose Opus high for clear local repairs, xhigh for complex or uncertain repairs. Cover every assignment.",
+      "new": "Evaluate repair difficulty only. Do not change accepted findings, severity, blocking status, or scope. Choose Opus high for clear local repairs. Choose xhigh for complex or uncertain repairs. Cover every assignment."
+    },
+    {
+      "path": [
+        "repair_review",
+        "focus"
+      ],
+      "old": "Regressions and side effects; independently recheck closure",
+      "new": "Check regressions and side effects. Independently recheck closure."
+    },
+    {
+      "path": [
+        "repair_review",
+        "rule"
+      ],
+      "old": "Review only the cumulative repair diff and necessary surrounding source. Do not build, test or edit. Every confirmed relevant defect, including low severity, must be repaired. Describe future tests as verification obligations; their scheduled execution is not by itself a static defect. Initial opinions are independent. Discuss findings and endorse the exact common proposal; after two exchanges Astra/max arbitrates.",
+      "new": "Review only the cumulative repair diff and necessary surrounding source. Do not build, test, or edit. Every confirmed relevant defect, including low severity, requires correction. Describe future tests as verification obligations. Their scheduled execution is not itself a static defect. Keep initial opinions independent.\n\nDiscuss findings. Endorse the exact common proposal. After two exchanges, Astra/max arbitrates."
+    },
+    {
+      "path": [
+        "repair_review",
+        "scope"
+      ],
+      "old": "Only the exact test-time documentation delta; preserve all static review credit until classification.",
+      "new": "Inspect only the exact documentation changes from the test invocation. Keep all static review credit until classification."
+    },
+    {
+      "path": [
+        "assignment",
+        "rule"
+      ],
+      "old": "Inspect EVERY changed hunk using focus_inspect diff/read. Only factual historical records of these completed checks are evidence_only. Any behavioral source/documentation, requirement, instruction, permission, acceptance rule, test oracle/expected output or future obligation change is behavioral. Conflicting or unsubstantiated claims are uncertain. No filename, minor_edits counter or author claim grants an exemption. Do not run builds/tests or write anything. Return done with one verdict per changed path and the exact before/after candidate hashes, even for a negative verdict.",
+      "new": "Inspect EVERY changed hunk with focus_inspect diff/read. Only factual historical records of these completed checks are evidence_only. Changes to behavior in source or documentation are behavioral. Changes to requirements, instructions, permissions, acceptance rules, test oracles, expected outputs, or future obligations are also behavioral. Conflicting claims or claims without evidence are uncertain. No filename, minor_edits count, or author claim grants an exception.\n\nDo not build, test, or write files. Return done with one verdict per changed path and exact before/after candidate hashes. This also applies to negative verdicts."
+    }
+  ]
+}

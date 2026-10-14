@@ -8,8 +8,30 @@ $env:PYTHONDONTWRITEBYTECODE = '1'
 # Match focus-runtime.ps1 rather than the host's legacy Windows code page.
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
+& $python.Source (Join-Path $repo 'tests/test_focus_instructions.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus instruction style tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_cycle.py')
 if ($LASTEXITCODE -ne 0) { throw "Cycle regression tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_diagnostics.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus diagnostic tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_refusals.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus refusal history tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_report_accounting.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus report accounting tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_pairs.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus paired review tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_snapshot_archive.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus snapshot archive tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_pair_execution.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus pair executor closure tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_executor_accounting.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus executor accounting tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_repair.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus repair gate tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_repair_evidence.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus repair evidence tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_review.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus final review tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_focus_terminal.py')
 if ($LASTEXITCODE -ne 0) { throw "Focus terminal regression tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_focus_status.py')

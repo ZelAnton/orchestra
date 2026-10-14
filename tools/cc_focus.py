@@ -2,11 +2,13 @@
 
 import argparse
 import contextlib
+import hashlib
 import json
 from pathlib import Path
 import sys
 import time
 
+from cycle_prompts import REVIEW_ROLES, FINAL_ROLES
 from cycle_state import Blocked, Lease, LocalLock, Repository, Store, encode
 from cycle_transport import Transport
 from cycle_workflow import Cycle, fresh_state
@@ -21,10 +23,31 @@ from focus_project import Project, ProjectLease, check_project_owner, lock_membe
 from focus_publication import ProjectCycle
 
 
+def runtime_fingerprint():
+    root = Path(__file__).resolve().parent
+    paths = sorted({root / "cc_focus.py", *root.glob("cycle_*.py"), *root.glob("focus_*.py")})
+    try:
+        return tuple((p.name, hashlib.sha256(p.read_bytes()).hexdigest()) for p in paths)
+    except OSError:
+        return None  # Missing/partially installed files also require a fresh process.
+
+
+LOADED_RUNTIME = runtime_fingerprint()
+RUNTIME_UPDATED = "Runtime обновлён на диске: /exit, затем новый запуск cc-focus --retry."
+
+
+def runtime_changed():
+    return LOADED_RUNTIME is None or runtime_fingerprint() != LOADED_RUNTIME
+
+
 def main(argv=None, interaction=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog="cc-focus", description="Sequential main-branch Claude/Codex cycle with durable local sessions.")
-    parser.add_argument("command", nargs="?", choices=("run", "status", "stop", "recover", "correct", "reconcile", "messages", "retry-message", "discard-message"), default="run")
+    parser.add_argument("command", nargs="?", choices=("run", "status", "diagnose", "stop", "recover", "correct", "reconcile", "messages", "retry-message", "discard-message"), default="run")
+    parser.add_argument("--invocation", help="With diagnose: read public metadata for this invocation ID; no state or provider changes.")
+    parser.add_argument("--public-output", action="store_true", help="With diagnose: display public messages and tool results instead of metadata.")
+    parser.add_argument("--native-log", type=Path, help="With diagnose: inspect instruction and tool-schema metadata in this matching native Claude session log.")
+    parser.add_argument("--refusals", action="store_true", help="With diagnose: correlate saved Claude refusals with sessions and instruction changes; no state or provider changes.")
     parser.add_argument("--handoff", type=Path, help="Import a UTF-8 handoff file (no session ID import).")
     parser.add_argument("--new-sessions", action="store_true", help="Start clean conversations, preserving work and phase progress.")
     parser.add_argument("--retry", action="store_true", help="Retry a preserved blocker or immediately recheck a saved Claude quota wait after changing accounts.")
@@ -38,10 +61,16 @@ def main(argv=None, interaction=None):
     correction.add_argument("--message", help="With correct: save an operator correction for the stopped current stage.")
     correction.add_argument("--file", type=Path, help="With correct: import a UTF-8 correction file, at most 64 KiB.")
     reconciliation = parser.add_mutually_exclusive_group()
-    parser.add_argument("--publication", action="store_true", help="With reconcile: explicitly accept a preserved already-pushed protected scope and restart all three reviews.")
+    parser.add_argument("--publication", action="store_true", help="With reconcile: explicitly accept a preserved already-pushed protected scope and restart all required reviews.")
     reconciliation.add_argument("--plan-out", type=Path, help="With reconcile: write a reviewable handover plan to a new file; accept no changes yet.")
     reconciliation.add_argument("--apply-plan", type=Path, help="With reconcile: explicitly accept this exact plan, transfer its protected files to the cycle, and restart coding/reviews.")
     args = parser.parse_args(argv)
+    if (args.command == "diagnose") != bool(args.invocation or args.refusals) or args.public_output and args.command != "diagnose":
+        parser.error("diagnose requires --invocation or --refusals; these options and --public-output are only valid with diagnose")
+    if args.refusals and (args.invocation or args.public_output or args.native_log is not None):
+        parser.error("--refusals cannot combine with --invocation, --public-output or --native-log")
+    if args.native_log is not None and (args.command != "diagnose" or args.public_output):
+        parser.error("--native-log requires diagnose and cannot combine with --public-output")
     if args.command != "stop" and (args.now or args.timeout is not None):
         parser.error("--now and --timeout require stop")
     if args.timeout is not None and (not 0 < args.timeout < float("inf")):
@@ -59,6 +88,19 @@ def main(argv=None, interaction=None):
     repo = Repository(Path.cwd())
     try:
         store = Store(repo.root)
+        if args.command == "diagnose":
+            from focus_diagnostics import diagnose, refusal_history
+            if args.refusals:
+                try:
+                    saved = store.read()
+                except Blocked:
+                    saved = None  # Damaged state does not prevent read-only log analysis.
+                result = refusal_history(store.directory, saved, repo.root)
+            else:
+                result = diagnose(store.directory, args.invocation, args.public_output, args.native_log)
+            if result is not None:
+                print(terminal_text(json.dumps(result, ensure_ascii=False, indent=2)))
+            return 0
         if args.command == "status":
             state = store.read()
             brief = project_owner_status(store) or (status(store, state) if state else {"status": "not-started"})
@@ -91,6 +133,25 @@ def main(argv=None, interaction=None):
                 repo.validate_state(state)
             elif state and state.get("baseline", {}).get("repositories"):
                 raise Blocked("project-layout-changed", "A saved multi-repository cycle cannot resume as a single repository.")
+            blocker = (state or {}).get("blocker") or {}
+            keeps_sessions = args.command in ("correct", "recover") or args.command == "reconcile" and args.apply_plan
+            if blocker.get("code") == "claude-refusal" and (keeps_sessions or args.retry and not args.new_sessions):
+                # The provider sees the whole saved history again. Do not bill a known refusal.
+                from focus_diagnostics import selected_refusals
+                if keeps_sessions:
+                    # These commands record an operator correction: they reset reviews and pairs but keep role sessions.
+                    if selected_refusals(store.directory, state, correction=True):
+                        raise Blocked("refusal-retry", (
+                            "Claude refused the saved conversation of a role. This command keeps role sessions, "
+                            "and the next run of that role sends the refused history again. Run cc-focus "
+                            "--new-sessions first. It starts new conversations and keeps work, phase and blocker. "
+                            "Then repeat this command."))
+                elif selected_refusals(store.directory, state):
+                    raise Blocked("refusal-retry", (
+                        "Claude refused this saved conversation. A plain --retry sends the same history again, "
+                        "and the provider bills each repeated refusal. Remove the cause from the instructions. "
+                        "Then run cc-focus --new-sessions --retry. To compare sessions and instructions, run "
+                        "cc-focus diagnose --refusals. Work, phase and blocker are preserved."))
             if args.command in ("recover", "correct", "reconcile", "retry-message", "discard-message") and not state:
                 raise Blocked("recovery-state", "No saved focus state exists; there is no coding result to recover.")
             state = state or fresh_state(repo)
@@ -144,6 +205,23 @@ def main(argv=None, interaction=None):
                         # Only the explicit operator retry advances the deadline.
                         quota["retry_at"] = time.time()
                         print("cc-focus: explicit retry of Claude quota with the current login; same invocation and session preserved.", flush=True)
+                    from focus_pair_profile import pair_nodes
+                    if args.new_sessions and (state.get("pair_review") or {}).get("repair"):
+                        # The operator explicitly discarded native history. Keep
+                        # source/review evidence but allow the same-role continuation
+                        # to reconstruct context, just like native session loss.
+                        state["pair_review"]["repair"]["new_session_requested"] = True
+                        for node in pair_nodes(state):
+                            node["allow_new_self_session"] = True
+                    for job in (j for node in pair_nodes(state) for j in node.get("jobs", {}).values()):
+                        if args.new_sessions and not job.get("result"):
+                            job["sessions"] = {}
+                            job.pop("turn_id", None)
+                        if args.retry and not job.get("result"):
+                            job["retry_at"] = time.time()
+                            job["transient_retries"] = 0
+                            # The operator retries after a repeated invalid report: give it a new correction budget.
+                            job.pop("report_repairs", None)
                     store.save(state)
                     def tick():
                         delivery.tick()
@@ -195,7 +273,7 @@ def main(argv=None, interaction=None):
                         exit_code = cycle.run()
             except MessagePending as error:
                 role = (state.get("pending") or {}).get("role")
-                if role in ("sol", "claude", "astra"):
+                if role in (*REVIEW_ROLES, *FINAL_ROLES):
                     review_event(state, role, "приостановлено", "Нужно уточнить доставку сообщения")
                 state["status"] = "paused"
                 store.save(state)
@@ -203,7 +281,7 @@ def main(argv=None, interaction=None):
                 print(terminal_text(f"cc-focus: paused: {error}"), flush=True)
             except (FocusStop, KeyboardInterrupt):
                 role = (state.get("pending") or {}).get("role")
-                if role in ("sol", "claude", "astra"):
+                if role in (*REVIEW_ROLES, *FINAL_ROLES):
                     review_event(state, role, "прервано", "Проход не завершён")
                 state["status"] = "interrupted"
                 store.save(state)
@@ -246,9 +324,18 @@ def interactive_main(argv, terminal, output):
         interaction.note("Interactive terminal ready. /help lists commands; text addresses the current invocation.")
         result = main(argv, interaction=interaction)
         while True:
+            if runtime_changed():
+                interaction.runtime_notice = RUNTIME_UPDATED
+                interaction.respond(RUNTIME_UPDATED)
+                interaction.tick()
             action, argument = interaction.wait_action()
             if action == "/exit":
                 break
+            if runtime_changed():
+                interaction.runtime_notice = RUNTIME_UPDATED
+                interaction.respond(RUNTIME_UPDATED)
+                interaction.tick()
+                continue
             if action == "/resume":
                 # Handoffs and session replacement are one-time launch options.
                 resume = ["--output", output or "live"]
