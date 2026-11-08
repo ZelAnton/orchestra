@@ -80,6 +80,8 @@ Exact identifiers retain their runtime definitions.
 | inner gate | Required static review and tests before a late repair returns to its outer pair. |
 | publication | Runtime-controlled staging, commit, push, and subsequent CI handling. |
 | schema | The exact structure and constraints of a machine-readable object. |
+| project brief | Operator text about the purpose, direction, users, priorities, limits, and milestone goal of a project. It adds no requirement, task, or stage. |
+| milestone goal | The intended result of the current milestone and its reason, without status or dates. |
 | fingerprint, hash, digest | Exact algorithm-specific content identifiers. Preserve existing protocol names. |
 | diff, commit, push, rebase, staging, worktree | Git concepts or operations with their existing Git meanings. |
 | build, test, runtime, provider, executor, arbiter | Software operations and roles with their existing runtime meanings. |
@@ -100,7 +102,9 @@ Run affected workflow and transport tests.
 Check models, efforts, schemas, markers, permission boundaries, and saved-session behavior.
 A wording-only change must not erase review credit or restart a completed operation.
 
-The compatibility map in `focus_pair_jobs.py` accepts only this known prose revision at named instruction fields.
+The compatibility map in `focus_pair_jobs.py` accepts only known earlier pair contracts.
+The style revision can also change named instruction fields.
+The test scope revision adds only the `full_run` and `final_gate` assignment fields.
 All task data, operator messages, corrections, role identities, and numeric types must still match.
 The runtime keeps the saved prompt unchanged.
 New jobs use the current text.

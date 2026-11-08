@@ -18,6 +18,11 @@ Run `cc-config` once from every repository root. In addition to seeding `.work`,
 creates `.inbox/messages/` plus `.inbox/releases/` and registers the canonical root in the
 user-global `~/.orchestra/projects.json`. Re-running it is safe and refreshes the same
 stable repo id.
+When `.work/config.md` is absent, the command creates it with every project setting
+commented out. Each setting shows its possible values, effect, documented default, and
+the current root-config value. The command then opens the file synchronously in `VISUAL`,
+`EDITOR`, or a discovered console text editor; uncomment only deliberate project
+overrides. An existing file is never regenerated, but it is still opened for editing.
 Use the operator/test-only `ORCHESTRA_REGISTRY_PATH` override only for an intentionally
 separate registry; agents must never set it.
 

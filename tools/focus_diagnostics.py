@@ -40,6 +40,12 @@ class ClaudeTrace:
         self.usage = {"messages_observed": 0, "first_input_tokens": None,
                       "last_input_tokens": None, "peak_input_tokens": None}
         self.active_blocks = {}
+        # Totals of the attempt for its usage record. One API message appears as several events with the same id,
+        # so each id counts once, and its output is the largest count that an event of this id gave.
+        self.totals = {"turns": 0, "input_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                       "cache_write_5m": 0, "cache_write_1h": 0, "output_tokens": 0, "peak_context": 0,
+                       "compaction_count": 0, "compactions": []}
+        self.counted = {}
 
     def message(self, message, event):
         identity = short(message.get("id"))
@@ -78,6 +84,32 @@ class ClaudeTrace:
         self.usage["peak_input_tokens"] = max(self.usage["peak_input_tokens"] or 0, tokens)
         item["input_tokens"] = tokens
         item["input_counters"] = dict(zip(fields, values))
+
+    def count(self, identity, model, usage):
+        """Add one API message to the totals. CLI notes with the model <synthetic> are not model turns."""
+        if not identity or not isinstance(usage, dict) or model == "<synthetic>":
+            return
+        entry = self.counted.get(identity)
+        if entry is None:
+            fields = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+            values = [usage.get(key) for key in fields]
+            if any(type(value) is not int or value < 0 for value in values):
+                return  # A later event of this message gives the input counters.
+            entry = self.counted[identity] = {"output": 0}
+            totals = self.totals
+            totals["turns"] += 1
+            for key, value in zip(fields, values):
+                totals[key] += value
+            split = usage.get("cache_creation")
+            if isinstance(split, dict):
+                for key, name in (("ephemeral_5m_input_tokens", "cache_write_5m"), ("ephemeral_1h_input_tokens", "cache_write_1h")):
+                    if type(split.get(key)) is int and split[key] >= 0:
+                        totals[name] += split[key]
+            totals["peak_context"] = max(totals["peak_context"], sum(values))
+        output = usage.get("output_tokens")
+        if type(output) is int and output > entry["output"]:
+            self.totals["output_tokens"] += output - entry["output"]
+            entry["output"] = output
 
     def record_blocks(self, item, content):
         if not item:
@@ -122,6 +154,7 @@ class ClaudeTrace:
         if kind == "assistant":
             item = self.message(message, event)
             self.record_usage(message, item)
+            self.count(short(message.get("id")), message.get("model"), message.get("usage"))
             self.record_blocks(item, content)
             if message.get("stop_reason") in ("end_turn", "tool_use", "refusal", "max_tokens", "stop_sequence"):
                 item["stop_reason"] = message["stop_reason"]
@@ -152,6 +185,7 @@ class ClaudeTrace:
                 start = start if isinstance(start, dict) else {}
                 item = self.message(start, event)
                 self.record_usage(start, item)
+                self.count(short(start.get("id")), start.get("model"), start.get("usage"))
                 self.active_message = dict(item)
                 self.active_message["parent_tool_use_id"] = short(event.get("parent_tool_use_id"))
                 self.active_blocks = {}
@@ -178,6 +212,8 @@ class ClaudeTrace:
                 delta = part.get("delta")
                 stored = self.messages.get((self.active_message or {}).get("id"), {})
                 self.record_usage({"usage": part.get("usage")}, stored)
+                active = self.active_message or {}
+                self.count(active.get("id"), active.get("model"), part.get("usage"))
                 if stored and isinstance(delta, dict) and delta.get("stop_reason") in (
                         "end_turn", "tool_use", "refusal", "max_tokens", "stop_sequence"):
                     stored["stop_reason"] = delta["stop_reason"]
@@ -212,6 +248,9 @@ class ClaudeTrace:
             for key in ("pre_tokens", "post_tokens"):
                 if type(metadata.get(key)) is int and metadata[key] >= 0:
                     record[key] = metadata[key]
+            self.totals["compaction_count"] += 1
+            if len(self.totals["compactions"]) < 64:
+                self.totals["compactions"].append({key: record[key] for key in ("trigger", "pre_tokens", "post_tokens") if key in record})
         elif event["subtype"] == "informational":
             # CLI notices are public interface text, not model output.
             record["level"] = short(event.get("level"), 40)
@@ -245,8 +284,13 @@ class ClaudeTrace:
                 "input_usage": dict(self.usage),
                 "messages": [dict(item) for item in self.messages.values()],
                 "refusals": list(self.refusals), "recent_actions": list(self.actions), "result": self.result,
-                "cli_events": list(self.cli_events),
+                "cli_events": list(self.cli_events), "usage_totals": self.usage_totals(),
                 "limits": "Metadata only. This report does not identify the instruction that caused a refusal."}
+
+    def usage_totals(self):
+        return dict(self.totals, compactions=list(self.totals["compactions"]),
+                    claude_code_version=self.initialization.get("claude_code_version"),
+                    gap="The usage of a compaction call is not in the stream. Its pre_tokens estimate the read of that call.")
 
 
 RESULT_FRAMES = (b'\\"type\\":\\"result\\"', b'\\"type\\": \\"result\\"')
@@ -482,8 +526,9 @@ def selected_refusals(directory, state, correction=False):
 
     With correction=True, list only conversations that survive `cc-focus correct`.
     A correction drops the pair review with its reader jobs. A new repair batch
-    drops the repair_execute session.
+    drops the repair_execute session, and the next outer pair drops the Pair A executor sessions.
     """
+    from focus_pair_profile import PAIR_WRITERS
     blocker = (state or {}).get("blocker") or {}
     if blocker.get("code") != "claude-refusal":
         return []
@@ -491,7 +536,7 @@ def selected_refusals(directory, state, correction=False):
     interrupted = blocker.get("interrupted") or {}
     call = saved_claude_call(directory, interrupted.get("id"))
     if (call and (state.get("sessions") or {}).get(interrupted.get("role")) == call["session_id"]
-            and not (correction and interrupted.get("role") == "repair_execute")):
+            and not (correction and interrupted.get("role") in PAIR_WRITERS)):
         found.append({"invocation": interrupted["id"], "role": interrupted.get("role"), "session_id": call["session_id"]})
     if correction:
         return found
@@ -610,6 +655,11 @@ def scan_claude_invocation(target):
     for number, (trace, boundary) in enumerate(attempts, 1):
         report = trace.report()
         known = launch if number == owner else {}
+        # A restart after a refusal keeps the refused attempt's launch record and prompt under its attempt ID.
+        kept = kept_attempt(target, (boundary or {}).get("attempt"))
+        row_completion, prompt_file, row_prompt = completion, "prompt.txt", prompt_sha256
+        if kept:
+            known, row_completion, prompt_file, row_prompt = kept
         started = (boundary or {}).get("started")
         estimated = False
         if type(started) not in (int, float) or not started > 0:
@@ -628,7 +678,7 @@ def scan_claude_invocation(target):
         files = file_hashes(known.get("instruction_files"))
         # In older records, the runtime hashed the files at completion under the launch label. Their timing stays unknown.
         timing = "before-start" if files is not None and known.get("instruction_files_captured") == "before-start" else None
-        final = file_hashes(completion.get("instruction_files")) if timing else None
+        final = file_hashes(row_completion.get("instruction_files")) if timing else None
         resumed = known.get("resumed", (boundary or {}).get("resumed"))
         row_role = role or short((boundary or {}).get("role"))
         loaded = known.get("instruction_files_enabled")
@@ -646,13 +696,17 @@ def scan_claude_invocation(target):
             "first_input_tokens": report["input_usage"]["first_input_tokens"],
             "peak_input_tokens": report["input_usage"]["peak_input_tokens"],
             "compactions": sum(e["subtype"] == "compact_boundary" for e in report["cli_events"]),
+            "usage": {key: value for key, value in report["usage_totals"].items() if key != "gap"},
+            # A newer CLI can ignore the compaction window without a message. This shows it.
+            "window_exceeded_without_compaction": window_ignored(report["usage_totals"]),
             "refusals": [{key: refusal.get(key) for key in ("sequence", "input_tokens", "category", "model",
                           "request_id", "message_id", "source")} for refusal in report["refusals"]],
             "cli_refusal_notices": sum(e["subtype"] != "compact_boundary" for e in report["cli_events"]),
             "role_contract_sha256": known.get("role_contract_sha256") if isinstance(known.get("role_contract_sha256"), str) else None,
             # A launch without a prompt hash is older; its prompt is the current file.
-            "prompt_known": number == len(attempts) and prompt_sha256 is not None
-                            and known.get("prompt_sha256", prompt_sha256) == prompt_sha256,
+            "prompt_known": (bool(kept) or number == len(attempts)) and row_prompt is not None
+                            and known.get("prompt_sha256", row_prompt) == row_prompt,
+            "prompt_file": prompt_file,
             "result": {key: result.get(key) for key in ("subtype", "is_error", "stop_reason", "terminal_reason", "deferred")}
                       if result else None,
             "completed": completed,
@@ -661,6 +715,67 @@ def scan_claude_invocation(target):
             "instruction_files_changed_during_run": None if final is None else
                 sorted(p for p in files.keys() | final.keys() if files.get(p) != final.get(p))})
     return rows
+
+
+WINDOW_MARGIN = 50000  # The CLI compacts a little before the window. Above it plus this margin, it did not compact.
+
+
+def window_ignored(totals):
+    from cycle_prompts import CLAUDE_COMPACT_WINDOW
+    return bool(totals["peak_context"] > CLAUDE_COMPACT_WINDOW + WINDOW_MARGIN and not totals["compaction_count"])
+
+
+USAGE_FIELDS = ("turns", "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "cache_write_5m",
+                "cache_write_1h", "output_tokens", "compaction_count")
+
+
+def usage_summary(store_directory, iteration):
+    """Totals of the Claude usage records of one iteration in one run store, also for each role."""
+    total = dict.fromkeys(("attempts", *USAGE_FIELDS, "peak_context", "compaction_pre_tokens"), 0)
+    roles = {}
+    folder = Path(store_directory) / "invocations"
+    for path in sorted(folder.glob("*/usage-*.json")) if folder.is_dir() else ():
+        try:
+            if path.is_symlink() or path.stat().st_size > 256 * 1024:
+                continue
+            record = json.loads(path.read_bytes())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or record.get("iteration") != iteration:
+            continue
+        role = roles.setdefault(str(record.get("role")), dict.fromkeys(total, 0))
+        for row in (total, role):
+            row["attempts"] += 1
+            for key in USAGE_FIELDS:
+                value = record.get(key)
+                row[key] += value if type(value) is int and value >= 0 else 0
+            peak = record.get("peak_context")
+            row["peak_context"] = max(row["peak_context"], peak if type(peak) is int else 0)
+            # A compaction call is not in the stream. Its pre_tokens estimate its read.
+            rows = record.get("compactions") if isinstance(record.get("compactions"), list) else []
+            row["compaction_pre_tokens"] += sum(item["pre_tokens"] for item in rows
+                                                if isinstance(item, dict) and type(item.get("pre_tokens")) is int and item["pre_tokens"] >= 0)
+    return dict(total, roles=roles)
+
+
+def kept_attempt(target, attempt):
+    """Return the kept launch record, completion, prompt name and prompt hash of one refused attempt."""
+    if not isinstance(attempt, str) or not re.fullmatch(r"[0-9a-f]{32}", attempt):
+        return None
+    saved, prompt = target / f"claude-diagnostics-{attempt}.json", target / f"prompt-{attempt}.txt"
+    try:
+        if saved.is_symlink() or not saved.is_file() or saved.stat().st_size > 1024 * 1024:
+            return None
+        value = json.loads(saved.read_bytes())
+        launch, completion = value.get("launch"), value.get("completion")
+        if not isinstance(launch, dict) or launch.get("attempt") != attempt:
+            return None
+        digest_value = None
+        if prompt.is_file() and not prompt.is_symlink() and prompt.stat().st_size <= 4 * 1024 * 1024:
+            digest_value = hashlib.sha256(prompt.read_bytes()).hexdigest()
+        return launch, completion if isinstance(completion, dict) else {}, prompt.name, digest_value
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def file_hashes(files):
@@ -778,9 +893,9 @@ def refusal_history(directory, state=None, root=None, limit=500):
                     unknown.append("instruction_files")
                     if changed:
                         differences["instruction_files_timing_unknown"] = changed
-            # The prompt file belongs to the last attempt. A launch record of that attempt must name the same prompt hash.
-            old = prompt_blocks(base / reference["invocation"] / "prompt.txt") if reference["prompt_known"] else {}
-            new = prompt_blocks(base / first["invocation"] / "prompt.txt") if first["prompt_known"] else {}
+            # The prompt file belongs to the last attempt, or to a kept refused attempt. Its launch record must name the same prompt hash.
+            old = prompt_blocks(base / reference["invocation"] / reference["prompt_file"]) if reference["prompt_known"] else {}
+            new = prompt_blocks(base / first["invocation"] / first["prompt_file"]) if first["prompt_known"] else {}
             if old and new:
                 known = runtime_instruction_blocks()
                 for name, source, other in (("added", new, old), ("removed", old, new)):
@@ -805,8 +920,12 @@ def refusal_history(directory, state=None, root=None, limit=500):
             if saved and saved["role_contract_sha256"]:
                 try:
                     from cycle_prompts import role_contract
-                    current_contract = hashlib.sha256(role_contract(item["role"]).encode("utf-8")).hexdigest()
-                    item["role_contract_changed"] = current_contract != saved["role_contract_sha256"]
+                    from focus_review_contract import review_contract
+                    # In a review campaign, outer readers get the campaign form and repair readers the plain form.
+                    current = role_contract(item["role"])
+                    forms = {hashlib.sha256(review_contract(current, campaign).encode("utf-8")).hexdigest()
+                             for campaign in (False, True)}
+                    item["role_contract_changed"] = saved["role_contract_sha256"] not in forms
                 except KeyError:
                     pass  # Unknown legacy role: the comparison stays unknown.
         retry = {"invocation": interrupted.get("id"), "role": interrupted.get("role"),
@@ -824,6 +943,7 @@ def refusal_history(directory, state=None, root=None, limit=500):
             "limits": ("Metadata, fingerprints and instruction first lines only. "
                        "Each Claude process in an invocation directory is a separate attempt. "
                        "Only the attempt that owns the saved launch record has its launch metadata. "
+                       "A refused attempt before an automatic restart keeps its own launch record and prompt file. "
                        "The prompt file belongs to the last attempt. "
                        "An attempt without a start time is listed but not used for the onset. "
                        "The onset reference is the last earlier Claude attempt with a successful terminal result. "
@@ -874,7 +994,10 @@ def diagnose(directory, invocation, public_output=False, native_log=None):
     attempts = claude_attempts(protocol)
     result["attempts"] = [{"attempt": number, "session_id": trace_session(item.initialization, item.refusals, boundary),
                            "started": (boundary or {}).get("started") if type((boundary or {}).get("started")) in (int, float) else None,
-                           "refusals": len(item.refusals), "result": item.result or None}
+                           "refusals": len(item.refusals), "result": item.result or None,
+                           "usage": {key: value for key, value in item.usage_totals().items() if key != "gap"},
+                           # A newer CLI can ignore the compaction window without a message. This shows it.
+                           "window_exceeded_without_compaction": window_ignored(item.totals)}
                           for number, (item, boundary) in enumerate(attempts, 1)]
     saved = target / "claude-diagnostics.json"
     if saved.is_file() and not saved.is_symlink() and saved.stat().st_size <= 1024 * 1024:

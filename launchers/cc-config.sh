@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
-# Seed .work/config.md and .work/constraints.md from the repo templates if they do not
-# exist yet, and seed the Claude Code allow-rules for autonomous Codex (the runtime
+# Create an inactive, fully documented .work/config.md when absent, seed
+# .work/constraints.md from the repo template when absent, and seed the Claude Code
+# allow-rules for autonomous Codex (the runtime
 # wrapper the adapters actually run, in both its layout forms -
 # `pwsh -File tools/codex-runtime.ps1` from a repo checkout or
 # `pwsh -File ~/.claude/scripts/codex-runtime.ps1` from a cc-sync mirror - plus the
 # historical `codex exec` anchor) into .claude/settings.local.json. An existing target
-# file is NEVER overwritten wholesale (same guarantee for all three). Finally, register
-# the canonical project root in the user-global Orchestra registry and create
-# .inbox/messages plus .inbox/releases for cross-project communication and release audit.
-#   - config.md: only the copyable block between the "# >>> config.md seed start" /
-#     "# <<< config.md seed end" markers inside config.example.md's fenced code block
-#     (headings/prose/tables are never copied).
+# file is NEVER overwritten wholesale (same guarantee for all three). Open the local
+# .work/config.md in a console editor immediately after creating or detecting it, then
+# register the canonical project root in the user-global Orchestra registry and create
+# .inbox/messages plus
+# .inbox/releases for cross-project communication and release audit.
+#   - config.md: config-runtime.ps1 validates and renders the copyable block between the
+#     "# >>> config.md seed start" / "# <<< config.md seed end" markers. Every project
+#     key stays commented and receives Default, Values, Effect and effective root-config
+#     help. Existing config.md content is never replaced; it is still opened for editing.
 #   - constraints.md: the WHOLE constraints.example.md (the entire document IS the policy
 #     content - there is no seed block to slice, unlike config.md).
 #   - .claude/settings.local.json: ensures the canonical Codex allow-list
@@ -34,6 +38,22 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd -P)"
 export ORCHESTRA_HOME="${ORCHESTRA_HOME:-$HOME/.orchestra}"
 
 mkdir -p ".work"
+
+if ! command -v pwsh >/dev/null 2>&1; then
+  echo "Failed to configure project (pwsh is required by config-runtime.ps1)." >&2
+  exit 2
+fi
+CONFIG_RUNTIME="$SCRIPT_DIR/../tools/config-runtime.ps1"
+if [ ! -f "$CONFIG_RUNTIME" ]; then
+  CONFIG_RUNTIME="$ORCHESTRA_HOME/scripts/config-runtime.ps1"
+fi
+if [ ! -f "$CONFIG_RUNTIME" ]; then
+  CONFIG_RUNTIME="$SCRIPT_DIR/config-runtime.ps1"
+fi
+if [ ! -f "$CONFIG_RUNTIME" ]; then
+  echo "Failed to configure project (config-runtime.ps1 not found next to the launcher or in the cc-sync mirror - run cc-sync)." >&2
+  exit 2
+fi
 
 # Look for a template next to launchers/ first (repo checkout layout: this file lives in
 # launchers/, the *.example.md one level up at the repo root), then in ~/.orchestra
@@ -85,29 +105,39 @@ else
   fi
 fi
 
-# --- config.md (seed only the marked block) ---
-if [ -f ".work/config.md" ]; then
+# --- config.md (render an inactive, fully documented catalog of project keys) ---
+if [ -e ".work/config.md" ] && [ ! -f ".work/config.md" ]; then
+  echo "Failed to use .work/config.md (path is not a regular file)." >&2
+  exit 2
+elif [ -f ".work/config.md" ]; then
   echo ".work/config.md already exists - leaving it unchanged."
 else
   TEMPLATE="$(find_template config.example.md)"; template_rc=$?
   if [ "$template_rc" -eq 1 ]; then
     echo "Failed to create .work/config.md (config.example.md exists but is a directory, not a file - the ~/.claude/scripts mirror is corrupted; run cc-sync to repair it)."
+    exit 2
   elif [ "$template_rc" -ne 0 ]; then
     echo "Failed to create .work/config.md (config.example.md not found next to launchers or in the mirror - run cc-sync, or check your checkout)."
+    exit 2
   else
-    # Extract only the lines strictly between the seed markers (both markers excluded).
-    seed="$(awk '
-      /^# >>> config\.md seed start/ { f=1; next }
-      /^# <<< config\.md seed end/   { f=0 }
-      f
-    ' "$TEMPLATE")"
-    if [ -z "$seed" ]; then
-      echo "Failed to create .work/config.md (config.example.md is a file but has no 'config.md seed start/end' block to copy)."
+    pwsh -NoProfile -File "$CONFIG_RUNTIME" seed-project \
+      -Template "$TEMPLATE" -Output ".work/config.md" \
+      -RootConfig "$ORCHESTRA_HOME/root-config.md" 2>/dev/null
+    config_rc=$?
+    if [ "$config_rc" -ne 0 ]; then
+      echo "Failed to create .work/config.md (config.example.md is incomplete, unreadable, or .work is not writable)."
+      exit "$config_rc"
     else
-      printf '%s\n' "$seed" > ".work/config.md"
-      echo "Created .work/config.md from config.example.md - edit it for this project."
+      echo "Created .work/config.md with all project settings commented out."
     fi
   fi
+fi
+
+pwsh -NoProfile -File "$CONFIG_RUNTIME" edit-project -Config ".work/config.md"
+editor_rc=$?
+if [ "$editor_rc" -ne 0 ]; then
+  echo "Failed to edit .work/config.md (editor exit $editor_rc)." >&2
+  exit "$editor_rc"
 fi
 
 # --- constraints.md (copy the WHOLE file; plain cp preserves the BOM-less UTF-8 bytes) ---
@@ -242,8 +272,10 @@ if [ ! -f "$PROJECT_REGISTRY" ]; then
   echo "Failed to register project (project-registry.ps1 not found next to the launcher or in the cc-sync mirror - run cc-sync)." >&2
   exit 2
 fi
-if ! command -v pwsh >/dev/null 2>&1; then
-  echo "Failed to register project (pwsh is required by project-registry.ps1)." >&2
-  exit 2
-fi
 pwsh -NoProfile -File "$PROJECT_REGISTRY" register --root "$PWD" --ensure-inbox
+register_rc=$?
+if [ "$register_rc" -ne 0 ]; then
+  echo "Failed to register project or initialize .inbox (project-registry exit $register_rc)." >&2
+  exit "$register_rc"
+fi
+exit 0

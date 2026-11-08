@@ -7,15 +7,19 @@ import time
 
 from cycle_prompts import REVIEW_ROLES, FINAL_ROLES, READONLY_REVIEW_ROLES
 from cycle_state import Blocked
+from focus_control import request_stage_stop, stage_stop_request
 from focus_messages import MessagePending, Messages
 from focus_status import StatusPanel, build_panel, reset_notice
 
 
 HELP = """Text: save an instruction for the active invocation (not a shell command).
 /pause: finish this invocation, then pause; publication includes CI.
+/finish-stage: finish this stage through publication and CI, then pause before the next stage.
+/finish-stage cancel: cancel that scheduled pause. This command does not resume processing.
 /stop: interrupt now; partial work is preserved. Ctrl+C is equivalent.
 /resume: continue from a stopped boundary; retry a preserved blocker or quota wait.
 /correct TEXT: while stopped, return this same stage to coding and fresh reviews.
+In a review campaign, /correct restarts its reviews without initial coding.
 /messages: list delivery states. /retry-message ID: explicitly resend uncertain input
 (may repeat an already received instruction). /discard-message ID: abandon delivery.
 /status: current state. /approve or /deny: answer the displayed approval only.
@@ -46,6 +50,10 @@ class Interaction:
         self.message_notice = ""
         self.runtime_notice = ""
         self.message_iteration = None
+        self.stage_request = None
+        self.stage_request_key = None
+        self.stage_request_updated = 0
+        self.review_run_id = None
         terminal.callback = self.submit
         terminal.status_tick = self.tick
 
@@ -148,6 +156,12 @@ class Interaction:
                         self.note(json.dumps(self.approval, ensure_ascii=False, indent=2))
                 elif command == "/messages":
                     self.show_messages()
+                elif command == "/finish-stage" and argument.strip() in ("", "cancel"):
+                    if not self.messages or not self.state:
+                        raise ValueError("No current stage exists.")
+                    response = request_stage_stop(self.messages.store, argument.strip() == "cancel", self.state["iteration"])
+                    self.refresh_stage_request(force=True)
+                    self.respond(response)
                 elif command in ("/pause", "/stop", "/exit") and not argument:
                     if command == "/exit":
                         self.quit = True
@@ -191,15 +205,27 @@ class Interaction:
         live = self.progress.view() if self.progress else {}
         stop = (self.control.announced if self.control else "") or ("safe" if self.quit and not self.paused else "")
         panel = build_panel(self.state, live, paused=self.paused, approval=self.approval is not None,
-                            notice=self.message_notice, stop=stop)
+                            notice=self.message_notice, stop=stop,
+                            finish_stage=self.stage_request if self.stage_request_key ==
+                            (self.state.get("iteration"), bool(self.state.get("stage_completed"))) else None)
         if self.runtime_notice:
             panel = StatusPanel((*panel.lines[:-1], self.runtime_notice),
                                 (*panel.compact[:-1], self.runtime_notice), panel.tone)
         return panel
 
+    def refresh_stage_request(self, force=False):
+        if not self.messages or not self.state:
+            return
+        key = (self.state.get("iteration"), bool(self.state.get("stage_completed")))
+        now = time.monotonic()
+        if force or key != self.stage_request_key or now - self.stage_request_updated >= 1:
+            self.stage_request = stage_stop_request(self.messages.store, self.state)
+            self.stage_request_key, self.stage_request_updated = key, now
+
     def tick(self):
         if self.state:
             with self.lock:
+                self.refresh_stage_request()
                 self.terminal.status(self.panel())
 
     def take(self):

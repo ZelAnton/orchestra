@@ -1,17 +1,21 @@
 @echo off
 chcp 65001 >nul
-rem Seed .work\config.md and .work\constraints.md from the repo templates if they do not
-rem exist yet, and seed the Claude Code allow-rules for autonomous Codex (the runtime
+rem Create an inactive, fully documented .work\config.md when absent, seed
+rem .work\constraints.md from the repo template when absent, and seed the Claude Code
+rem allow-rules for autonomous Codex (the runtime
 rem wrapper the adapters actually run, in both its layout forms -
 rem `pwsh -File tools/codex-runtime.ps1` from a repo checkout or
 rem `pwsh -File ~/.claude/scripts/codex-runtime.ps1` from a cc-sync mirror - plus the
 rem historical `codex exec` anchor) into .claude\settings.local.json. An existing target
-rem file is NEVER overwritten wholesale (same guarantee for all three). Finally, register
-rem the canonical project root in the user-global Orchestra registry and create
-rem .inbox\messages plus .inbox\releases for cross-project communication and release audit.
-rem  - config.md: only the copyable block between the "# >>> config.md seed start" /
-rem    "# <<< config.md seed end" markers inside config.example.md's fenced code block
-rem    (headings/prose/tables are never copied).
+rem file is NEVER overwritten wholesale (same guarantee for all three). Open the local
+rem .work\config.md in a console editor immediately after creating or detecting it, then
+rem register the canonical project root in the user-global Orchestra registry and create
+rem .inbox\messages plus
+rem .inbox\releases for cross-project communication and release audit.
+rem  - config.md: config-runtime.ps1 validates and renders the copyable block between the
+rem    "# >>> config.md seed start" / "# <<< config.md seed end" markers. Every project
+rem    key stays commented and receives Default, Values, Effect and effective root-config
+rem    help. Existing config.md content is never replaced; it is still opened for editing.
 rem  - constraints.md: the WHOLE constraints.example.md (the entire document IS the policy
 rem    content - there is no seed block to slice, unlike config.md).
 rem  - .claude\settings.local.json: ensures the canonical Codex allow-list
@@ -48,6 +52,14 @@ set "CC_PS_EXE=powershell"
 where pwsh >nul 2>nul
 if not errorlevel 1 set "CC_PS_EXE=pwsh"
 
+set "CC_CONFIG_RUNTIME=%~dp0..\tools\config-runtime.ps1"
+if not exist "%CC_CONFIG_RUNTIME%" set "CC_CONFIG_RUNTIME=%ORCHESTRA_HOME%\scripts\config-runtime.ps1"
+if not exist "%CC_CONFIG_RUNTIME%" set "CC_CONFIG_RUNTIME=%~dp0config-runtime.ps1"
+if not exist "%CC_CONFIG_RUNTIME%" (
+  echo Failed to configure project ^(config-runtime.ps1 not found next to the launcher or in the cc-sync mirror - run cc-sync^).
+  endlocal & exit /b 2
+)
+
 if exist "%ORCHESTRA_HOME%\root-config.md\" (
   echo Failed to use %ORCHESTRA_HOME%\root-config.md ^(path is a directory, not a file^).
   endlocal & exit /b 2
@@ -60,9 +72,23 @@ if exist "%ORCHESTRA_HOME%\root-config.md\" (
   )
 )
 
-if exist ".work\config.md" (
+if exist ".work\config.md\" (
+  echo Failed to use .work\config.md ^(path is a directory, not a file^).
+  endlocal & exit /b 2
+) else if exist ".work\config.md" (
   echo .work\config.md already exists - leaving it unchanged.
-) else call :seed_config
+) else (
+  call :seed_config
+  if errorlevel 1 (
+    endlocal & exit /b 2
+  )
+)
+
+call :edit_config
+set "CC_CONFIG_RC=%errorlevel%"
+if not "%CC_CONFIG_RC%"=="0" (
+  endlocal & exit /b %CC_CONFIG_RC%
+)
 
 if exist ".work\constraints.md" (
   echo .work\constraints.md already exists - leaving it unchanged.
@@ -72,7 +98,10 @@ call :seed_codex_permission
 
 call :register_project
 set "CC_CONFIG_RC=%errorlevel%"
-endlocal & exit /b %CC_CONFIG_RC%
+if not "%CC_CONFIG_RC%"=="0" (
+  endlocal & exit /b %CC_CONFIG_RC%
+)
+endlocal & exit /b 0
 
 :seed_root_config
 set "CC_ROOT_CONFIG_TEMPLATE=%~dp0..\root-config.example.md"
@@ -115,28 +144,26 @@ rem  (c) the template is a real file - defer to PowerShell, which distinguishes 
 rem      -found from a read/write error via distinct exit codes below.
 if not exist "%CC_CONFIG_TEMPLATE%" (
   echo Failed to create .work\config.md ^(config.example.md not found next to launchers or in the mirror - run cc-sync, or check your checkout^).
-  goto :eof
+  exit /b 2
 )
 if exist "%CC_CONFIG_TEMPLATE%\" (
   echo Failed to create .work\config.md ^(config.example.md exists but is a directory, not a file - the ~/.claude/scripts mirror is corrupted; run cc-sync from the repo checkout to repair it^).
-  goto :eof
+  exit /b 2
 )
-rem Wrap the PowerShell body in try/catch so a .NET exception - unreadable file, locked
-rem .work, etc. - never leaks its ParentContainsErrorRecordException trace to stderr on top
-rem of this script's own diagnostic. Exit codes: 0 created; 2 seed markers not found; 3 an
-rem exception was caught; any other non-zero is an unexpected PowerShell failure. Residual
-rem stderr is discarded ^(2^>nul^) so only the cmd-side message below is ever shown.
-%CC_PS_EXE% -NoProfile -Command "try { $ErrorActionPreference='Stop'; $c=[System.IO.File]::ReadAllLines('%CC_CONFIG_TEMPLATE%', [System.Text.Encoding]::UTF8); $s=($c | Select-String -Pattern '^# >>> config\.md seed start' | Select-Object -First 1).LineNumber; $e=($c | Select-String -Pattern '^# <<< config\.md seed end' | Select-Object -First 1).LineNumber; if (-not $s -or -not $e -or $e -le $s) { exit 2 }; [System.IO.File]::WriteAllLines('.work\config.md', $c[$s..($e-2)], (New-Object System.Text.UTF8Encoding($false))); exit 0 } catch { exit 3 }" 2>nul
-if errorlevel 3 (
-  echo Failed to create .work\config.md ^(reading config.example.md or writing .work\config.md raised an error - is the template unreadable or .work not writable?^).
-) else if errorlevel 2 (
-  echo Failed to create .work\config.md ^(config.example.md is a file but has no "config.md seed start/end" block to copy^).
-) else if errorlevel 1 (
-  echo Failed to create .work\config.md ^(unexpected PowerShell error^).
-) else (
-  echo Created .work\config.md from config.example.md - edit it for this project.
+%CC_PS_EXE% -NoProfile -File "%CC_CONFIG_RUNTIME%" seed-project -Template "%CC_CONFIG_TEMPLATE%" -Output ".work\config.md" -RootConfig "%ORCHESTRA_HOME%\root-config.md" 2>nul
+set "CC_CONFIG_SEED_RC=%errorlevel%"
+if not "%CC_CONFIG_SEED_RC%"=="0" (
+  echo Failed to create .work\config.md ^(config.example.md is incomplete, unreadable, or .work is not writable^).
+  exit /b %CC_CONFIG_SEED_RC%
 )
-goto :eof
+echo Created .work\config.md with all project settings commented out.
+exit /b 0
+
+:edit_config
+%CC_PS_EXE% -NoProfile -File "%CC_CONFIG_RUNTIME%" edit-project -Config ".work\config.md"
+set "CC_CONFIG_EDITOR_RC=%errorlevel%"
+if not "%CC_CONFIG_EDITOR_RC%"=="0" echo Failed to edit .work\config.md ^(editor exit %CC_CONFIG_EDITOR_RC%^).
+exit /b %CC_CONFIG_EDITOR_RC%
 
 :seed_constraints
 set "CC_CONSTRAINTS_TEMPLATE=%~dp0..\constraints.example.md"

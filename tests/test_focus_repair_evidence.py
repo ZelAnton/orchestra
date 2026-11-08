@@ -8,7 +8,7 @@ import test_focus_repair as repair_tests
 from test_cycle import report
 from cycle_state import Blocked, digest, encode
 from cycle_transport import parse_report
-from focus_pair_view import read_record, ViewInspector
+from focus_pair_view import artifact, materialize, read_record, ViewInspector
 from focus_pair_profile import pair_nodes, PAIR_READONLY
 from focus_status import build_panel
 
@@ -90,12 +90,99 @@ class RepairEvidenceTests(unittest.TestCase):
             diff = inspector.call({'tool': 'focus_inspect', 'arguments': {'operation': 'diff', 'path': 'plan.md', 'offset': 0, 'limit': 100}})
             self.assertIn('+Targeted guard test passed.', diff['contentItems'][0]['text'])
             self.assertNotIn('+Implementation requirements', diff['contentItems'][0]['text'])
-            self.assertEqual(c['history'], [])
+            self.assertEqual(set(c['history']), {'__review__/publication.json', '__review__/gate.json', '__review__/gate-record-0.json'})
+            self.assertEqual(c['publication_manifest'], '__review__/publication.json')
             return self.audit(c)
         self.transport.handlers['repair_evidence'] = audit
         self.step()
         self.assertIn('repair_evidence', PAIR_READONLY)
         self.assertEqual(pair['repair']['step'], 'complete')
+
+    def test_resume_renews_an_audit_view_frozen_without_evidence(self):
+        pair = self.prepare()
+        self.step()
+        reader = pair['repair']['evidence_reader']
+        view = materialize(self.cycle, reader)
+        # Earlier runtimes froze audit views without the evidence and its pointer.
+        reader['view'] = artifact(self.store, 'legacy/audit-view.json', {k: v for k, v in view.items() if k != 'publication'})
+        self.cycle.save()
+        seen = []
+        def audit(c, h):
+            seen.append(c.get('publication_manifest'))
+            return self.audit(c)
+        self.transport.handlers['repair_evidence'] = audit
+        self.step()
+        self.assertEqual(seen, ['__review__/publication.json'])
+        self.assertEqual(reader['view_generation'], 1)
+        self.assertEqual(pair['repair']['step'], 'complete')
+
+    def test_a_negative_audit_verdict_survives_the_renewal_of_its_legacy_view(self):
+        pair = self.prepare(verdict='behavioral')
+        self.step()
+        reader = pair['repair']['evidence_reader']
+        with self.assertRaisesRegex(Blocked, 'behavioral or uncertain'):
+            self.step()
+        legacy = self.legacy_audit(reader)
+        calls = len(self.transport.calls)
+        self.transport.handlers['repair_evidence'] = lambda c, h: self.audit(c)
+        with self.assertRaisesRegex(Blocked, 'behavioral or uncertain'):
+            self.step()
+        self.assertEqual(len(self.transport.calls), calls)
+        self.assertEqual((reader['view_generation'], reader['jobs']['evidence']['frozen_view']), (1, legacy))
+        self.assertIn('publication', read_record(self.store, reader['view']))
+
+    def legacy_audit(self, reader):
+        """Make the saved audit look like the work of an earlier runtime: no evidence in its view or prompt."""
+        view = read_record(self.store, reader['view'])
+        legacy = artifact(self.store, 'legacy/audit-view.json', {k: v for k, v in view.items() if k != 'publication'})
+        job = reader['jobs']['evidence']
+        prefix, assignment = job['prompt'].split('\nRuntime assignment:\n', 1)
+        value = json.loads(assignment)
+        value.pop('publication_manifest')
+        value.pop('publication_rule')
+        value['history'] = []
+        job['prompt'] = prefix + '\nRuntime assignment:\n' + json.dumps(value, ensure_ascii=False, sort_keys=True)
+        reader['view'] = legacy
+        self.cycle.save()
+        return legacy
+
+    def test_an_audit_report_under_correction_survives_the_renewal_of_its_legacy_view(self):
+        pair = self.prepare(verdict='behavioral')
+        self.step()
+        reader = pair['repair']['evidence_reader']
+        def wrong(c, h):
+            value = self.audit(c, 'behavioral')
+            value['evidence_delta']['after'] = '0' * 64
+            return value
+        self.transport.handlers['repair_evidence'] = wrong
+        self.step()
+        rejected = reader['jobs']['evidence']['report_source']
+        legacy = self.legacy_audit(reader)
+        self.transport.handlers['repair_evidence'] = lambda c, h: self.audit(c, 'behavioral')
+        with self.assertRaisesRegex(Blocked, 'behavioral or uncertain'):
+            self.step()
+        job = reader['jobs']['evidence']
+        self.assertEqual((job['frozen_view'], job['rejected_reports']), (legacy, [rejected]))
+        self.assertIn('"publication_manifest"', job['prompt'])
+
+    def test_an_accepted_audit_from_a_legacy_view_names_that_view(self):
+        pair = self.prepare()
+        self.step()
+        reader = pair['repair']['evidence_reader']
+        accept = self.cycle.accept_repair_result
+        def crash(*args, **kwargs):
+            raise RuntimeError('Stopped after the saved audit result')
+        self.cycle.accept_repair_result = crash
+        with self.assertRaisesRegex(RuntimeError, 'saved audit result'):
+            self.step()
+        self.cycle.accept_repair_result = accept
+        legacy = self.legacy_audit(reader)
+        calls = len(self.transport.calls)
+        self.step()
+        self.assertEqual(len(self.transport.calls), calls)
+        self.assertEqual(pair['repair']['step'], 'complete')
+        approval = read_record(self.store, pair['repair']['evidence_changes'][-1])
+        self.assertEqual(approval['earlier_views'], [legacy])
 
     def test_behavioral_documentation_is_not_exempted(self):
         pair = self.prepare(verdict='behavioral')

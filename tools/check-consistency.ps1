@@ -571,6 +571,66 @@ if (-not $rootOnlyMatch.Success) {
     }
 }
 
+$configTemplatePath = Join-Path $RepoRoot 'config.example.md'
+if (-not (Test-Path -LiteralPath $configTemplatePath -PathType Leaf)) {
+    Add-Finding -FileRef 'config.example.md' -Check 'project-config-seed' -Detail 'project configuration template is missing'
+} else {
+    $configTemplateLines = @(Get-Content -LiteralPath $configTemplatePath -Encoding utf8)
+    $seedStarts = @(for ($i = 0; $i -lt $configTemplateLines.Count; $i++) {
+            if ([string]$configTemplateLines[$i] -match '^# >>> config\.md seed start') { $i }
+        })
+    $seedEnds = @(for ($i = 0; $i -lt $configTemplateLines.Count; $i++) {
+            if ([string]$configTemplateLines[$i] -match '^# <<< config\.md seed end') { $i }
+        })
+    if ($seedStarts.Count -ne 1 -or $seedEnds.Count -ne 1 -or $seedEnds[0] -le ($seedStarts[0] + 1)) {
+        Add-Finding -FileRef 'config.example.md' -Check 'project-config-seed' `
+            -Detail 'expected exactly one non-empty config.md seed start/end block'
+    } else {
+        $seedLines = @($configTemplateLines[($seedStarts[0] + 1)..($seedEnds[0] - 1)])
+        foreach ($activeLine in @($seedLines | Where-Object { [string]$_ -match '^\s*[A-Z][A-Z0-9_]*\s*:' })) {
+            Add-Finding -FileRef 'config.example.md' -Check 'project-config-seed' `
+                -Detail "seed contains an active project setting instead of a commented example: $activeLine"
+        }
+
+        $seedHeaders = [System.Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt $seedLines.Count; $i++) {
+            $match = [regex]::Match([string]$seedLines[$i], '^# ([A-Z][A-Z0-9_]+):\s*(.*?)\s*$')
+            if ($match.Success) {
+                $seedHeaders.Add([pscustomobject]@{
+                        Name = $match.Groups[1].Value
+                        Index = $i
+                    })
+            }
+        }
+        $expectedSeedNames = @($schemaForModels.config | ForEach-Object { [string]$_.name })
+        $actualSeedNames = @($seedHeaders | ForEach-Object { [string]$_.Name })
+        if (($actualSeedNames -join "`n") -cne ($expectedSeedNames -join "`n")) {
+            Add-Finding -FileRef 'config.example.md' -Check 'project-config-seed' `
+                -Detail "commented seed keys/order differ from schema: found [$($actualSeedNames -join ', ')]"
+        } else {
+            for ($i = 0; $i -lt $seedHeaders.Count; $i++) {
+                $from = $seedHeaders[$i].Index + 1
+                $to = if ($i + 1 -lt $seedHeaders.Count) { $seedHeaders[$i + 1].Index - 1 } else { $seedLines.Count - 1 }
+                $help = if ($from -le $to) { @($seedLines[$from..$to]) } else { @() }
+                $defaults = @($help | Where-Object { [string]$_ -match '^#\s{3}Default:\s*(.*?)\s*$' })
+                $values = @($help | Where-Object { [string]$_ -match '^#\s{3}Values:\s*\S' })
+                $effects = @($help | Where-Object { [string]$_ -match '^#\s{3}Effect:\s*\S' })
+                if ($defaults.Count -ne 1 -or $values.Count -ne 1 -or $effects.Count -ne 1) {
+                    Add-Finding -FileRef 'config.example.md' -Check 'project-config-seed' `
+                        -Detail "'$($seedHeaders[$i].Name)' must have exactly one non-empty Default, Values and Effect line"
+                    continue
+                }
+                $documentedDefault = ([regex]::Match([string]$defaults[0], '^#\s{3}Default:\s*(.*?)\s*$')).Groups[1].Value
+                $schemaDefault = [string]$schemaForModels.config[$i].default
+                if ($documentedDefault -cne $schemaDefault) {
+                    Add-Finding -FileRef 'config.example.md' -Check 'project-config-seed' `
+                        -Detail "'$($seedHeaders[$i].Name)' seed default '$documentedDefault' differs from schema '$schemaDefault'"
+                }
+            }
+        }
+    }
+}
+
 $rootTemplatePath = Join-Path $RepoRoot 'root-config.example.md'
 if (-not (Test-Path -LiteralPath $rootTemplatePath -PathType Leaf)) {
     Add-Finding -FileRef 'root-config.example.md' -Check 'root-config-template' -Detail 'global configuration template is missing'

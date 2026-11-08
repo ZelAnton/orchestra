@@ -12,6 +12,10 @@ $env:PYTHONIOENCODING = 'utf-8'
 if ($LASTEXITCODE -ne 0) { throw "Focus instruction style tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_cycle.py')
 if ($LASTEXITCODE -ne 0) { throw "Cycle regression tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_finish_stage.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus stage pause tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_campaign.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus review campaign tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_focus_diagnostics.py')
 if ($LASTEXITCODE -ne 0) { throw "Focus diagnostic tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_focus_refusals.py')
@@ -40,5 +44,15 @@ if ($LASTEXITCODE -ne 0) { throw "Focus status regression tests failed: $LASTEXI
 if ($LASTEXITCODE -ne 0) { throw "Focus project regression tests failed: $LASTEXITCODE" }
 & $python.Source (Join-Path $repo 'tests/test_focus_publication_recovery.py')
 if ($LASTEXITCODE -ne 0) { throw "Focus publication recovery tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_publication_scope.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus publication scope tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_brief.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus project brief tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_parallel.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus parallel member tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_resolve.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus merge resolver tests failed: $LASTEXITCODE" }
+& $python.Source (Join-Path $repo 'tests/test_focus_context_budget.py')
+if ($LASTEXITCODE -ne 0) { throw "Focus context budget tests failed: $LASTEXITCODE" }
 & (Join-Path $repo 'tools/focus-runtime.ps1') --help
 if ($LASTEXITCODE -ne 0) { throw 'Cycle PowerShell help smoke failed.' }

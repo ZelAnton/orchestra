@@ -55,104 +55,258 @@ recovery; без обоих — обычную холодную Phase-0 recovery
 `cc-resume codex --from claude`: transcript не переносится, источниками истины служат
 `.work/` и VCS, а живая аренда processor блокирует переключение.
 
-`launchers/cc-config.cmd` сеет `.work/config.md` из блока ниже, ограниченного
-маркерами `# >>> config.md seed start >>>` / `# <<< config.md seed end <<<`, —
-копируются только сами маркеры-границы и всё между ними, без заголовков и
-пояснительного текста этого документа.
+`launchers/cc-config.cmd` and `cc-config.sh` create `.work/config.md` from the block
+below. The boundary markers are not copied. Every setting is intentionally commented,
+so a newly created file has no project overrides. The launcher adds a `Root config`
+line after every key using the current `~/.orchestra/root-config.md`, then opens the
+result in a console text editor. Uncomment only the values this project should override.
 
 ```
-# >>> config.md seed start (cc-config.cmd copies only this block) >>>
-MAX_PARALLEL: 5
-# --- Роллинг-приём когорты (см. ниже) ---
-# COHORT_SIZE: 15        # по умолч. 3×MAX_PARALLEL — сколько задач максимум принять
-                          #   в одну когорту, прежде чем закрыть приём
-# COHORT_MAX_AGE: 90      # по умолч. 90 (минут) — сколько держать приём открытым по
-                          #   возрасту когорты; закрывается по тому, что наступит раньше
-REVIEW_MIN_PASSES: 2
-REVIEW_LOOP_MAX: 8
-INTEGRATION_LOOP_MAX: 8
-CI_FIX_MAX: 5
-# STAGNATION_LIMIT: 2   # по умолч. 2 — повтор той же нормализованной сигнатуры находки/
-                        #   ошибки без изменения evidence N раз подряд = стагнация: ранняя
-                        #   эскалация цикла R/F/CI вместо сжигания оставшихся попыток. Пример
-                        #   (закомментирован — не применяется); по умолчанию действует значение 2
-QUARANTINE_MAX_ATTEMPTS: 3
-# --- Supervisor выполнения (дедлайн/попытки/объём вывода/бюджет; см. ниже) ---
-# CALL_DEADLINE_SEC: 1800        # дедлайн одного вызова исполнителя (сек): превышение →
-                                 #   таймаут (дерево процессов снимается, безопасный ретрай)
-# CALL_MAX_ATTEMPTS: 2           # сколько раз supervise повторяет вызов при ТРАНЗИЕНТНОМ
-                                 #   сбое (таймаут/крэш), прежде чем эскалировать
-# CALL_OUTPUT_MAX_BYTES: 1048576 # предел объёма захватываемого вывода вызова (байт)
-# COHORT_BUDGET_SEC: 0           # общий бюджет стенных часов когорты (сек); 0 = без лимита
-# COHORT_TOKEN_BUDGET: 0         # фактические токены моделей на когорту; 0 = без лимита
-# COHORT_TOKEN_BUDGET_STRICT: false # true — любой unmetered-маркер (внутренний Claude
-                                 #   Agent(...), см. COHORT_TOKEN_BUDGET) сам по себе делает
-                                 #   телеметрию батча ненадёжной (fail-closed); по умолчанию
-                                 #   false — undercount видимый, но не блокирующий
-# SMOKE_CMD: npm test   # пример; по умолчанию smoke не запускается
-# VERIFICATION_MODE: disabled    # auto | required | disabled; по умолчанию (ключ не
-                                 #   задан) — disabled: неконфигурированный проект не
-                                 #   блокирует публикацию. auto/required — явный опт-ин
-                                 #   в строгий гейт «нет профиля — blocked»
-# VERIFICATION_COMMANDS: ["cargo fmt --check", "cargo clippy --workspace --all-targets -- -D warnings"]
-                                 # JSON-массив точных команд; выполняются по порядку через
-                                 #   supervisor. Если не задан, SMOKE_CMD остаётся fallback
-PUSH: true
-CI_WATCH: true
-# --- Гейт публикации: ожидание обязательных CI-проверок (Фаза 5.4; см. ниже) ---
-# PUBLISH_CI_DEADLINE_SEC: 1800  # сколько ждать полного набора обязательных CI-проверок,
-                                 #   прежде чем fail-closed (не публиковать/не архивировать)
-# PUBLISH_CI_BACKOFF_SEC: 30     # пауза между опросами CI в цикле ожидания
-# PUBLISH_LINEAR_HISTORY: false  # false (по умолч.) | true — при true processor на публикации
-                                 #   (Фаза 5.3, ПОСЛЕ интеграционного ревью, ПЕРЕД ff) линеаризует
-                                 #   отревьюенную вершину интеграции в бесмёрджевую цепочку и
-                                 #   пере-верифицирует её; для trunk с branch-protection «линейная
-                                 #   история». По умолчанию выкл. — merger и откат Фазы 4.3 без изменений
-# APPROVAL_DEADLINE_SEC: 86400   # срок действия запроса на human approval; нет ответа к
-                                 #   дедлайну = отказ (fail-closed), не одобрение по умолчанию
+# >>> config.md seed start >>>
+# Orchestra project configuration.
+#
+# Precedence: this file -> ~/.orchestra/root-config.md -> documented default.
+# Uncomment a key to override the user-global value for this project.
+#
+# MAX_PARALLEL: 5
+#   Default: 5
+#   Values: Integer greater than or equal to 1.
+#   Effect: Limits the number of task workers that may run concurrently.
+#
+# COHORT_SIZE: 15
+#   Default: 3xMAX_PARALLEL
+#   Values: Integer greater than or equal to 1.
+#   Effect: Limits how many tasks one cohort may admit before admission closes.
+#
+# COHORT_MAX_AGE: 90
+#   Default: 90
+#   Values: Integer greater than or equal to 1, in minutes.
+#   Effect: Closes cohort admission after this many minutes even if capacity remains.
+#
+# REVIEW_MIN_PASSES: 2
+#   Default: 2
+#   Values: Integer greater than or equal to 1.
+#   Effect: Sets the minimum task-review passes required before integration.
+#
+# REVIEW_LOOP_MAX: 8
+#   Default: 8
+#   Values: Integer greater than or equal to 1.
+#   Effect: Caps task review and repair iterations before escalation.
+#
+# INTEGRATION_LOOP_MAX: 8
+#   Default: 8
+#   Values: Integer greater than or equal to 1.
+#   Effect: Caps integration review and repair iterations before escalation.
+#
+# CI_FIX_MAX: 5
+#   Default: 5
+#   Values: Integer greater than or equal to 1.
+#   Effect: Caps post-publication CI repair iterations.
+#
+# STAGNATION_LIMIT: 2
+#   Default: 2
+#   Values: Integer greater than or equal to 2.
+#   Effect: Escalates a review or repair loop after this many unchanged failure signatures.
+#
+# QUARANTINE_MAX_ATTEMPTS: 3
+#   Default: 3
+#   Values: Integer greater than or equal to 1.
+#   Effect: Limits how many times quarantined work may return to the queue.
+#
+# CALL_DEADLINE_SEC: 1800
+#   Default: 1800
+#   Values: Integer greater than or equal to 1, in seconds.
+#   Effect: Sets the deadline for one supervised agent call before process-tree cleanup.
+#
+# CALL_MAX_ATTEMPTS: 2
+#   Default: 2
+#   Values: Integer greater than or equal to 1.
+#   Effect: Limits retries of transient agent-call failures.
+#
+# CALL_OUTPUT_MAX_BYTES: 1048576
+#   Default: 1048576
+#   Values: Integer greater than or equal to 1, in bytes.
+#   Effect: Caps captured output from one supervised agent call.
+#
+# COHORT_BUDGET_SEC: 0
+#   Default: 0
+#   Values: Integer greater than or equal to 0; 0 disables the limit.
+#   Effect: Limits total cohort wall-clock time and stops further admission when exhausted.
+#
+# COHORT_TOKEN_BUDGET: 0
+#   Default: 0
+#   Values: Integer greater than or equal to 0; 0 disables the limit.
+#   Effect: Limits metered model tokens consumed by one cohort.
+#
+# COHORT_TOKEN_BUDGET_STRICT: false
+#   Default: false
+#   Values: true | false.
+#   Effect: When true, unmetered usage also closes further cohort admission.
+#
+# SMOKE_CMD: npm test
+#   Default: unset
+#   Values: A shell command; leave commented to disable the legacy smoke fallback.
+#   Effect: Supplies coder/merge smoke checks and the fallback final verification command.
+#
+# VERIFICATION_MODE: auto
+#   Default: disabled
+#   Values: auto | required | disabled.
+#   Effect: Controls whether final publication verification is automatic, mandatory, or exempt.
+#
+# VERIFICATION_COMMANDS: ["npm test", "npm run lint"]
+#   Default: unset
+#   Values: A JSON array of non-empty shell-command strings.
+#   Effect: Runs the listed publication verification commands in order through the supervisor.
+#
+# PUSH: true
+#   Default: true
+#   Values: true | false.
+#   Effect: When false, keeps the local main ff-merge but skips remote push and CI waiting.
+#
+# CI_WATCH: true
+#   Default: true
+#   Values: true | false.
+#   Effect: Waits for terminal remote CI after publication when enabled.
+#
+# PUBLISH_CI_DEADLINE_SEC: 1800
+#   Default: 1800
+#   Values: Integer greater than or equal to 1, in seconds.
+#   Effect: Limits how long publication waits for the required remote CI checks.
+#
+# PUBLISH_CI_BACKOFF_SEC: 30
+#   Default: 30
+#   Values: Integer greater than or equal to 1, in seconds.
+#   Effect: Sets the delay between remote CI status polls.
+#
+# PUBLISH_LINEAR_HISTORY: false
+#   Default: false
+#   Values: true | false.
+#   Effect: Linearizes the reviewed integration tip before publication and re-verifies it when true.
+#
+# APPROVAL_DEADLINE_SEC: 86400
+#   Default: 86400
+#   Values: Integer greater than or equal to 1, in seconds.
+#   Effect: Sets how long a durable human approval request remains valid.
+#
 # NOTIFY_CMD: notify-send "Orchestra"
-                                 # опциональная operator-owned shell-команда: получает event и
-                                 # уже redacted короткий текст двумя последними argv; пусто = off
-REVIEWER_TIERING: true
-# --- Модели Claude-ролей coder/reviewer (пусто → модель из frontmatter агента) ---
-# CLAUDE_CODER_FAST_MODEL: sonnet   # haiku | sonnet | opus | fable; дефолт sonnet
-# CLAUDE_CODER_MODEL: sonnet        # haiku | sonnet | opus | fable; дефолт sonnet
-# CLAUDE_CODER_DEEP_MODEL: opus     # haiku | sonnet | opus | fable; дефолт opus
-# CLAUDE_REVIEWER_STD_MODEL: sonnet # haiku | sonnet | opus | fable; дефолт sonnet
-# CLAUDE_REVIEWER_MODEL: opus       # haiku | sonnet | opus | fable; дефолт opus
-                                    # ^ глобальное значение можно задать в ~/.orchestra/root-config.md
-# MAIN_BRANCH: main      # по умолчанию — автоопределение (см. ниже)
-# --- Событийный outbox (.work/events.jsonl) ---
-# EVENTS_OUTBOX: off     # on (по умолч.) | off — писать ли машинные события в
-                         #   .work/events.jsonl (append-only машинный контракт для
-                         #   будущей платформы наблюдаемости; см. ниже)
-# --- База знаний проекта (.work/knowledge/) ---
-# KB: on                 # on (по умолч.) | off — отключает KB (чтение + Фаза 5.5)
-# KB_TTL: 8              # истечение неподтверждённых одиночных записей, в батчах
-# KB_CAP: 12             # максимум записей на область
-# --- Codex-агенты (опционально; требуют установленного codex + `codex login`) ---
-# CODEX_CODER: fast+std        # реализация/R--фиксы: off (по умолч.) | fast | fast+std | all
-# CODEX_REVIEWER: fast+std      # ревью: off (по умолч.) | fast | fast+std | deep | all
-                               # ^ РЕКОМЕНДУЕТСЯ при наличии codex: снимает самый дорогой
-                               #   повторяющийся расход (opus reviewer) и ускоряет loop;
-                               #   для полностью Codex task-level пути выставьте оба в all
-                               #   без codex — чистый фолбэк на Claude (лишний спавн на задачу).
-# CODEX_CIFIX: on              # точечные CI/сборочные фиксы (Режим 3): off (по умолч.) | on
-# CODEX_MODEL: gpt-5.6-terra   # пусто → модель из ~/.codex/config.toml
-# CODEX_CODER_MODEL: gpt-5.6-terra      # модель coder_codex (fast/std + Режим 3);
-                                        #   пусто → CODEX_MODEL → дефолт codex
-# CODEX_CODER_DEEP_MODEL: gpt-5.6-sol   # модель coder_codex для coder_deep;
-                                        #   пусто → gpt-5.6-sol (CODEX_MODEL сюда не течёт)
-# CODEX_REVIEWER_MODEL: gpt-5.6-terra   # модель reviewer_codex (fast/std);
-                                        #   пусто → CODEX_MODEL → дефолт codex
+#   Default: unset
+#   Values: An operator-owned command; leave commented to disable notifications.
+#   Effect: Receives durable escalation, approval and CI-failure events with redacted text.
+#
+# REVIEWER_TIERING: true
+#   Default: true
+#   Values: true | false.
+#   Effect: Selects standard or deep reviewers by task tier when enabled.
+#
+# MAIN_BRANCH: main
+#   Default: autodetect
+#   Values: A branch name, or leave commented to auto-detect the integration branch.
+#   Effect: Selects the repository branch used for integration and publication.
+#
+# EVENTS_OUTBOX: on
+#   Default: on
+#   Values: on | off.
+#   Effect: Enables or disables durable machine-readable event telemetry.
+#
+# KB: on
+#   Default: on
+#   Values: on | off.
+#   Effect: Enables knowledge-base prompt enrichment and join-barrier curation.
+#
+# KB_TTL: 8
+#   Default: 8
+#   Values: Integer greater than or equal to 1, in batches.
+#   Effect: Sets the freshness window for unconfirmed knowledge entries.
+#
+# KB_CAP: 12
+#   Default: 12
+#   Values: Integer greater than or equal to 1.
+#   Effect: Caps knowledge entries included for one task scope.
+#
+# CLAUDE_CODER_FAST_MODEL: sonnet
+#   Default: sonnet
+#   Values: haiku | sonnet | opus | fable.
+#   Effect: Selects the Claude model used by the fast coder tier.
+#
+# CLAUDE_CODER_MODEL: sonnet
+#   Default: sonnet
+#   Values: haiku | sonnet | opus | fable.
+#   Effect: Selects the Claude model used by the standard coder tier.
+#
+# CLAUDE_CODER_DEEP_MODEL: opus
+#   Default: opus
+#   Values: haiku | sonnet | opus | fable.
+#   Effect: Selects the Claude model used by the deep coder tier.
+#
+# CLAUDE_REVIEWER_STD_MODEL: sonnet
+#   Default: sonnet
+#   Values: haiku | sonnet | opus | fable.
+#   Effect: Selects the Claude model used by the standard reviewer tier.
+#
+# CLAUDE_REVIEWER_MODEL: opus
+#   Default: opus
+#   Values: haiku | sonnet | opus | fable.
+#   Effect: Selects the Claude model used by the deep reviewer tier.
+#
+# CODEX_CODER: fast+std
+#   Default: off
+#   Values: off | fast | fast+std | all.
+#   Effect: Enables Codex implementation for the selected coder tiers.
+#
+# CODEX_REVIEWER: fast+std
+#   Default: off
+#   Values: off | fast | fast+std | deep | all.
+#   Effect: Enables Codex review for the selected reviewer tiers.
+#
+# CODEX_CIFIX: on
+#   Default: off
+#   Values: off | on.
+#   Effect: Enables Codex for focused post-publication CI repairs.
+#
+# CODEX_MODEL: gpt-5.6-terra
+#   Default: unset
+#   Values: A Codex model identifier; leave commented to use the Codex CLI configuration.
+#   Effect: Supplies the legacy shared model fallback for non-deep adapter roles.
+#
+# CODEX_CODER_MODEL: gpt-5.6-terra
+#   Default: unset
+#   Values: A Codex model identifier; leave commented to use CODEX_MODEL or the CLI default.
+#   Effect: Selects the model used by the non-deep Codex coder.
+#
+# CODEX_CODER_DEEP_MODEL: gpt-5.6-sol
+#   Default: gpt-5.6-sol
+#   Values: A Codex model identifier.
+#   Effect: Selects the deep Codex coder model without inheriting CODEX_MODEL.
+#
+# CODEX_REVIEWER_MODEL: gpt-5.6-terra
+#   Default: unset
+#   Values: A Codex model identifier; leave commented to use CODEX_MODEL or the CLI default.
+#   Effect: Selects the model used by the non-deep Codex reviewer.
+#
 # CODEX_REVIEWER_DEEP_MODEL: gpt-5.6-sol
-                                        # модель reviewer_codex для coder_deep
-                                        #   (full и augment); пусто → gpt-5.6-sol
-                                        # ^ глобальное значение можно задать в ~/.orchestra/root-config.md
-# CODEX_REASONING: auto        # auto | low | medium | high | xhigh
+#   Default: gpt-5.6-sol
+#   Values: A Codex model identifier.
+#   Effect: Selects the deep Codex reviewer model without inheriting CODEX_MODEL.
+#
+# CODEX_REASONING: auto
+#   Default: auto
+#   Values: auto | low | medium | high | xhigh.
+#   Effect: Selects reasoning effort for Codex adapter roles.
+#
 # CODEX_SANDBOX: workspace-write
-# CODEX_NETWORK: on            # сеть в песочнице coder_codex: on (по умолч.) | off
+#   Default: workspace-write
+#   Values: read-only | workspace-write.
+#   Effect: Selects the Codex adapter sandbox; reviewer execution remains read-only.
+#
+# CODEX_NETWORK: on
+#   Default: on
+#   Values: on | off.
+#   Effect: Enables network access only for the sandboxed Codex coder.
+#
 # CODEX_CMD: codex
+#   Default: codex
+#   Values: A Codex executable name or path.
+#   Effect: Selects the executable launched by Codex adapter roles.
 # <<< config.md seed end <<<
 ```
 

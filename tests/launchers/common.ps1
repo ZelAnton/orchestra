@@ -173,10 +173,24 @@ function Install-Launcher {
             }
         }
         if ($n -eq 'cc-config.cmd') {
-            foreach ($runtime in @('common.ps1', 'project-registry-lib.ps1', 'project-registry.ps1')) {
+            foreach ($runtime in @(
+                    'common.ps1', 'config-runtime.ps1', 'policy-schema.ps1',
+                    'project-registry-lib.ps1', 'project-registry.ps1')) {
                 Copy-Item -LiteralPath (Join-Path $script:RepoRoot ('tools/' + $runtime)) `
                     -Destination (Join-Path $Paths.Orchestra ('scripts/' + $runtime)) -Force
             }
+            $editorStub = @'
+@echo off
+setlocal
+set "editor_rc=0"
+if defined FAKE_CONFIG_EDITOR_RC set "editor_rc=%FAKE_CONFIG_EDITOR_RC%"
+if defined FAKE_CONFIG_EDITOR_ARGS_FILE >"%FAKE_CONFIG_EDITOR_ARGS_FILE%" echo %~1
+if defined FAKE_CONFIG_EDITOR_ORDER_FILE if exist "%FAKE_CONFIG_REGISTRY_PATH%" >"%FAKE_CONFIG_EDITOR_ORDER_FILE%" echo after-registration
+if defined FAKE_CONFIG_EDITOR_ORDER_FILE if not exist "%FAKE_CONFIG_REGISTRY_PATH%" >"%FAKE_CONFIG_EDITOR_ORDER_FILE%" echo before-registration
+exit /b %editor_rc%
+'@
+            Set-Content -LiteralPath (Join-Path $Paths.Bin 'orchestra-test-editor.cmd') `
+                -Value $editorStub -Encoding ascii
         }
 
         foreach ($m in [regex]::Matches($text, 'call\s+"%~dp0([A-Za-z0-9_.-]+\.cmd)"')) {
@@ -375,7 +389,11 @@ function Invoke-Launcher {
     if ($Name -eq 'cc-config.cmd') {
         # cc-config now writes a user-global registry. Keep every launcher fixture fully
         # sandboxed even when an individual scenario does not explicitly pass an override.
+        # It also opens config.md synchronously; use a deterministic no-op console editor
+        # unless the scenario supplies its own VISUAL/EDITOR override.
         $effectiveEnvVars['ORCHESTRA_REGISTRY_PATH'] = Join-Path $Paths.Root 'profile/projects.json'
+        if (-not $EnvVars.ContainsKey('VISUAL')) { $effectiveEnvVars['VISUAL'] = '' }
+        if (-not $EnvVars.ContainsKey('EDITOR')) { $effectiveEnvVars['EDITOR'] = 'orchestra-test-editor.cmd' }
     }
     foreach ($k in $EnvVars.Keys) { $effectiveEnvVars[$k] = $EnvVars[$k] }
     $rootConfigLines = @(

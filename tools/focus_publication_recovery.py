@@ -39,11 +39,17 @@ def prepare(cycle):
         members = repo.repositories
     else:
         members = {"": repo}
+    parallel = sorted(set(state.get("publication_targets", {})) & set(state.get("parallel", []))) if project else []
+    if parallel:
+        raise Blocked("reconcile-publication-parallel", "Publication recovery does not support the parallel members "
+                      + ", ".join(parallel) + ". A parallel member has no protected work, and other writers can change its remote main. "
+                      f"Resolve the blocker, then run {cycle.retry_command()}. The retry continues the publication from its integration record.")
     owned = set(cycle.publication_paths())
     rows, repositories = [], []
     for name, member in members.items():
         if project and name not in state.get("publication_targets", {}):
             continue  # validate_targets already requires its unchanged HEAD.
+
         before = state["baseline"]["head"][name] if project else state["baseline"]["head"]
         head = current["head"][name] if project else current["head"]
         remote = state["publication_targets"][name]["remote"] if project else state["remote"]

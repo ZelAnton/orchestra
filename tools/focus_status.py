@@ -32,6 +32,8 @@ class StatusPanel:
 
 def accept_task(state, report, role):
     """Task labels never choose a stage or decide whether a report is accepted."""
+    if state.get("review_run") or state.get("publication_scope"):
+        return  # The operator's sealed selection owns the campaign identity.
     value = report.get("task")
     if role not in ("coordinate", "code") or not isinstance(value, dict):
         return
@@ -47,12 +49,22 @@ def accept_task(state, report, role):
                 "plan": path.relative_to(root).as_posix(), "iteration": state["iteration"]}
     except (OSError, ValueError, RuntimeError):
         return
+    previous = (state.get("previous_stage") or {}).get("task") or {}
     old = state.get("task")
+    if role == "coordinate" and (previous.get("id"), previous.get("plan")) == (task["id"], task["plan"]):
+        if old and old.get("iteration") == state["iteration"] and (old.get("id"), old.get("plan")) == (
+                task["id"], task["plan"]) and state.get("task_source") in ("code", "operator"):
+            return None  # A code report already continues this stage.
+        # The plan can still show the published stage as open. Only a code report can continue that stage.
+        return "previous-stage"
     if old and old.get("iteration") == state["iteration"] and (
             old.get("id"), old.get("plan")) != (task["id"], task["plan"]):
-        return  # A later transition cannot relabel this iteration as another task.
+        if role != "code" or state.get("code_report") or state.get("task_source") in ("code", "operator"):
+            return  # Only the first accepted code report can replace a provisional coordinator label.
     if task["id"] and task["title"]:
         state["task"] = task
+        if role == "code" or state.get("task_source") not in ("code", "operator"):
+            state["task_source"] = role
 
 
 def new_reviews():
@@ -109,10 +121,10 @@ def activity_text(value):
     return value or "Подготовка следующего действия"
 
 
-def build_panel(state, live=None, paused=False, approval=False, notice="", stop=""):
+def build_panel(state, live=None, paused=False, approval=False, notice="", stop="", finish_stage=None):
     """Pure, bounded formatting: no disk, Git, provider calls or transcript scans."""
     if state.get("review_profile", 0) >= 6 and not state.get("publication_review_profile") and state.get("phase") not in REVIEW_ROLES and not state.get("final_review"):
-        return pair_panel(state, live, paused, approval, notice, stop)
+        return pair_panel(state, live, paused, approval, notice, stop, finish_stage)
     live = live or {}
     phase = state.get("phase", "code")
     legacy_publication = state.get("publication_review_profile") in (1, 2, 3, 4, 5, 6, 7) and phase in ("publish", "ci")
@@ -121,7 +133,10 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     if task.get("iteration") != state.get("iteration"):
         task = {}
     project = Path(state.get("root", ".")).name
-    title = f"{project} · " + (f"{task['id']} · {task['title']}" if task else f"Задача {state.get('iteration', 1)}")
+    previous = (state.get("previous_stage") or {}).get("task") or {}
+    # Until a report names the stage, the published stage tells where the iteration stands.
+    fallback = f"Задача {state.get('iteration', 1)}" + (f" · после {previous['id']}" if previous.get("id") else "")
+    title = f"{project} · " + (f"{task['id']} · {task['title']}" if task else fallback)
     blocker = state.get("blocker") or {}
     complete = state.get("status") == "complete"
     blocked = blocker.get("status") == "blocked"
@@ -138,7 +153,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     elif stop:
         mode, tone = "ОСТАНОВКА" if stop == "now" else "ОЖИДАНИЕ ПАУЗЫ", "warning"
     elif paused:
-        mode, tone = "ПРЕРВАНО" if state.get("status") == "interrupted" else "ПАУЗА", "warning"
+        mode, tone = ("ЭТАП ЗАВЕРШЁН · ПАУЗА" if state.get("stage_completed") else
+                      "ПРЕРВАНО" if state.get("status") == "interrupted" else "ПАУЗА"), "warning"
     elif quota:
         mode, tone = "ОЖИДАНИЕ КВОТЫ", "warning"
     elif transient:
@@ -170,6 +186,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
         remaining = len(following) + 3  # Final inspection round, publication and CI.
     position = f"шаг {index + 1}/{len(PHASES)} · этапов впереди: {remaining}" if not complete else "незавершённых задач нет"
     headline = f"{mode} · {role_label}{profile} · {position}"
+    if finish_stage:
+        headline += " · пауза после этапа и CI"
     if route and route[0].get("repeat_for"):
         headline += " · повтор после " + NAMES.get(route[0]["repeat_for"], route[0]["repeat_for"])
     if phase in REVIEW_ROLES and following:
@@ -250,7 +268,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     elif notice:
         activity = notice
     elif paused:
-        activity = "/resume — продолжить · /messages — сообщения · /exit — закрыть"
+        activity = ("/resume — начать следующий этап · /exit — закрыть" if state.get("stage_completed") else
+                    "/resume — продолжить · /messages — сообщения · /exit — закрыть")
     elif quota:
         retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
         activity = f"Claude · повтор {retry} · через {duration(quota['retry_at'] - time.time())} · автоматически · модель не запущена"
@@ -262,13 +281,18 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     compact_progress = f"{role_label} · {index + 1}/{len(PHASES)} · {counts}" if not complete else position
     if legacy_publication:
         compact_progress = f"{role_label} · прежний профиль ревью"
+    if finish_stage:
+        compact_progress += " · пауза после этапа и CI"
     compact = (clean(f"{mode} · {title}", 400), clean(compact_progress, 400), lines[-1])
     return StatusPanel(lines, compact, tone)
 
 
-def pair_panel(state, live=None, paused=False, approval=False, notice="", stop=""):
+def pair_panel(state, live=None, paused=False, approval=False, notice="", stop="", finish_stage=None):
     from focus_pair_profile import PAIRS
     phases = ("code", "pair_a", "pair_b", "final", "publish", "ci")
+    review_run = state.get("review_run")
+    if review_run:
+        phases = phases[1:]
     labels = {"code": "Реализация", "pair_a": "Пара A", "pair_b": "Пара B",
               "final": "Финальная пара", "publish": "Публикация", "ci": "CI"}
     phase = state.get("phase", "code")
@@ -276,9 +300,14 @@ def pair_panel(state, live=None, paused=False, approval=False, notice="", stop="
     pair = state.get("pair_review") or {}
     repair = pair.get("repair") or {}
     readers = repair.get("evidence_reader") or repair.get("reader") or pair
-    legacy = build_panel(dict(state, review_profile=5), live, paused, approval, notice, stop)
+    legacy = build_panel(dict(state, review_profile=5), live, paused, approval, notice, stop, finish_stage)
     title, old_headline = legacy.lines[:2]
+    if review_run:
+        title = "ПОВТОРНОЕ РЕВЬЮ · " + title
+        title += f" · целей закрыто: {len(review_run['results'])}/{review_run['target_count']}"
     if state.get("status") == "complete":
+        if review_run:
+            return StatusPanel((title, "✓ Выбранные цели проверены · публикация и CI завершены"), (title,), "good")
         return StatusPanel((title, old_headline, legacy.lines[-1]), legacy.compact, legacy.tone)
     blocker = state.get("blocker") or {}
     blocked = blocker.get("status") == "blocked"
@@ -288,7 +317,9 @@ def pair_panel(state, live=None, paused=False, approval=False, notice="", stop="
         headline = headline.replace("Финальный раунд", labels[phase])
         if phase != "final":
             headline = headline.replace(phase, labels[phase])
-    headline += f" · шаг {index + 1}/6 · этапов впереди: {5 - index}"
+    headline += f" · шаг {index + 1}/{len(phases)} · этапов впереди: {len(phases) - index - 1}"
+    if finish_stage:
+        headline += " · пауза после этапа и CI"
     active_keys = (state.get("pending") or {}).get("participants", {})
     active_jobs = [readers.get("jobs", {}).get(key, {}) for key in active_keys]
     waiting = [j for j in active_jobs if j.get("status") == "waiting"]
@@ -312,7 +343,11 @@ def pair_panel(state, live=None, paused=False, approval=False, notice="", stop="
         steps = {"scan": "независимое чтение", "discuss": "согласование", "arbitrate": "арбитраж Astra/max",
                  "complexity": f"оценка сложности {assessor}/high", "decide": "проверка решений",
                  "fix": f"исправления Opus/{effort}", "cleanup": f"закрытие незначимых Opus/{effort}"}
-        if repair:
+        if repair.get("final_gate") and repair["step"] in ("test", "evidence", "complete") and not repair.get("reviews"):
+            step = {"test": "полный прогон Opus/xhigh", "evidence": "проверка журнальной записи", "complete": "прогон завершён"}.get(repair["step"], repair["step"])
+            rows.append(f"Финальный гейт · {step}")
+            rows.append("Запрос финальной пары: полный прогон перед публикацией · далее: публикация")
+        elif repair:
             mode = "самопроверка Opus/xhigh" if repair["mode"] == "self" else "Opus/xhigh + Astra/xhigh"
             step = {"fix": "исправление", "review": "статическое ревью", "test": "целевые тесты", "evidence": "проверка журнальной записи", "complete": "проверка завершена"}.get(repair["step"], repair["step"])
             destination = "повтор внешней пары" if repair["repeat_outer"] else "следующий этап"

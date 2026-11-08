@@ -30,7 +30,26 @@ def archive_path(root):
     return safe_path(Path(root).parent / "source.zip")
 
 
-def read_source(view, name):
+class open_archive:
+    """One open snapshot archive for several reads. It opens the archive at the first read that needs it."""
+    def __init__(self, root):
+        self.root, self.archive = Path(root), None
+
+    def read(self, name):
+        if self.archive is None:
+            self.archive = zipfile.ZipFile(archive_path(self.root))
+        return self.archive.read(name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        if self.archive is not None:
+            self.archive.close()
+
+
+def read_source(view, name, archive=None):
+    """The verified bytes of one frozen file. ARCHIVE is an open_archive for several reads."""
     name = logical_path(name)
     expected = view["files"][name]
     root = safe_path(Path(view["root"]))
@@ -39,9 +58,12 @@ def read_source(view, name):
         data = source.read_bytes()
     else:
         try:
-            with zipfile.ZipFile(archive_path(root)) as archive:
+            if archive is not None:
                 data = archive.read(name)
-        except (zipfile.BadZipFile, KeyError, RuntimeError) as error:
+            else:
+                with zipfile.ZipFile(archive_path(root)) as opened:
+                    data = opened.read(name)
+        except (zipfile.BadZipFile, KeyError, RuntimeError, OSError) as error:
             raise ValueError("Frozen input archive cannot be read: " + name) from error
     if digest(data) != expected:
         raise ValueError("Frozen input changed: " + name)

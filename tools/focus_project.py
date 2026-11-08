@@ -5,28 +5,106 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import posixpath
 
 from cycle_state import Blocked, Lease, LocalLock, Repository, Store, digest, encode
 from focus_control import check_parked_provider, container_identity, read_json, runtime_active, wait_container
+from focus_resolve import check_resolvers
 
 
 MANIFEST = "focus-project.json"
+# Version 1 of the instruction list. Saved reader prompts contain the list, so a change
+# of the names, the depth, or the entries needs a new project_instructions_version.
+INSTRUCTION_NAMES = ("AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md")
+LINK_DEPTH = 40  # A longer link chain or a loop gives no target.
+
+
+def instruction_entries(repositories, kind, link):
+    """The instruction files of the project root and of each member, with project-relative paths.
+
+    KIND gives "f", "x", "link" or None for a path. LINK gives the text of a link, or None.
+    A relative link to a regular file of the same source gets its target. Other links are left out.
+    """
+    entries = []
+    for repository in (None, *repositories):
+        for name in INSTRUCTION_NAMES:
+            path = name if repository is None else repository + "/" + name
+            entry = {"path": path, "repository": repository}
+            if kind(path) == "link":
+                target = link_target(path, kind, link)
+                if target is None:
+                    continue
+                entry["target"] = target
+            elif kind(path) not in ("f", "x"):
+                continue
+            entries.append(entry)
+    return entries
+
+
+def link_target(path, kind, link):
+    for _ in range(LINK_DEPTH):
+        text = link(path)
+        if text and os.name == "nt":
+            text = text.replace("\\", "/")  # Windows gives a relative link with backslashes.
+        if not text or text.startswith("/") or "\\" in text or (os.name == "nt" and ":" in text):
+            return None
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            return None  # A prompt holds only UTF-8 text.
+        path = posixpath.normpath(posixpath.join(posixpath.dirname(path), text))
+        if path == ".." or path.startswith("../"):
+            return None
+        if kind(path) in ("f", "x"):
+            return path
+        if kind(path) != "link":
+            return None
+    return None
+
+
+def read_manifest(root):
+    """The checked manifest value, or None for a project without a manifest."""
+    manifest = Path(root) / MANIFEST
+    if not manifest.exists():
+        return None
+    try:
+        if manifest.is_symlink() or manifest.stat().st_size > 65536:
+            raise ValueError("manifest must be a regular file, at most 64 KiB")
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+        # An older runtime rejects the parallel and resolvers keys, so it cannot ignore their rules.
+        if (not isinstance(value, dict) or not {"version", "repositories"} <= set(value)
+                or set(value) - {"version", "repositories", "parallel", "resolvers"}
+                or type(value["version"]) is not int or value["version"] != 1):
+            raise ValueError("expected version 1, repositories, an optional parallel list, and optional resolvers")
+        paths = value["repositories"]
+        if not isinstance(paths, list) or not 1 <= len(paths) <= 64:
+            raise ValueError("repositories must contain 1 to 64 paths")
+        parallel = value.get("parallel", [])
+        if (not isinstance(parallel, list) or any(not isinstance(name, str) for name in parallel)
+                or len(set(parallel)) != len(parallel) or not set(parallel) <= set(p for p in paths if isinstance(p, str))):
+            raise ValueError("parallel must list repositories of the manifest, each one time")
+        if "resolvers" in value:
+            value["resolvers"] = check_resolvers(value["resolvers"], parallel)
+    except (OSError, ValueError, TypeError) as error:
+        raise Blocked("project-manifest", f"Cannot read {MANIFEST}: {error}") from error
+    return value
+
+
+def parallel_members(root):
+    """The member repositories with parallel writers. A project without the key has none."""
+    return parallel_config(root)[0]
+
+
+def parallel_config(root):
+    """The parallel members and their resolvers from one read of the manifest. A stage saves both together."""
+    value = read_manifest(root) or {}
+    return sorted(value.get("parallel", [])), value.get("resolvers", {})
 
 
 def repository_paths(root):
-    manifest = root / MANIFEST
-    if manifest.exists():
-        try:
-            if manifest.is_symlink() or manifest.stat().st_size > 65536:
-                raise ValueError("manifest must be a regular file, at most 64 KiB")
-            value = json.loads(manifest.read_text(encoding="utf-8"))
-            if set(value) != {"version", "repositories"} or type(value["version"]) is not int or value["version"] != 1:
-                raise ValueError("expected version 1 and repositories")
-            paths = value["repositories"]
-            if not isinstance(paths, list) or not 1 <= len(paths) <= 64:
-                raise ValueError("repositories must contain 1 to 64 paths")
-        except (OSError, ValueError, TypeError) as error:
-            raise Blocked("project-manifest", f"Cannot read {MANIFEST}: {error}") from error
+    value = read_manifest(root)
+    if value is not None:
+        paths = value["repositories"]
     else:
         paths = [p.name for p in root.iterdir() if (p / ".git").exists()]
     if len(paths) > 64:
@@ -66,6 +144,8 @@ class Project:
     def __init__(self, root, names):
         self.root = Path(root).resolve()
         self.repositories = {name: Repository(self.root / name) for name in names}
+        # The manifest values at admission. A stage records its own values in state["parallel"] and state["resolvers"].
+        self.parallel, self.resolvers = parallel_config(self.root)
 
     def assert_main(self):
         if (self.root / ".git").exists() or repository_paths(self.root) != list(self.repositories):
@@ -84,6 +164,33 @@ class Project:
 
     def owner(self, path):
         return next((name for name in self.repositories if path.startswith(name + "/")), None)
+
+    def instruction_entries(self):
+        """The instruction files on disk. A frozen review view lists its own files with the same rules.
+
+        A file that Git ignores is on disk, but no view contains it.
+        """
+        def link(relative):
+            try:
+                return os.readlink(self.root / relative)
+            except OSError:
+                return None
+        return instruction_entries(self.repositories, self.source_kind, link)
+
+    def source_kind(self, relative):
+        """The kind of a project file, with the kinds of a frozen view. A file in .git, .jj, .work,
+        or below a linked directory has None, as in a view."""
+        if any(part in (".git", ".jj", ".work") for part in relative.split("/")):
+            return None
+        path = self.root / relative
+        # A view contains no file below a linked directory.
+        if any(parent.is_symlink() for parent in path.parents if parent != self.root and parent.is_relative_to(self.root)):
+            return None
+        if path.is_symlink():
+            return "link"
+        if path.is_file():
+            return "x" if path.stat().st_mode & 0o111 else "f"
+        return None
 
     def local_paths(self, name, paths):
         return [path[len(name) + 1:] for path in paths if self.owner(path) == name]

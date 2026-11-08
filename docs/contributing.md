@@ -64,9 +64,11 @@ Treat the key as one contract propagated through this chain:
    enum/range, project/root scope, and sensitivity there; this is the versioned schema
    source consumed by `tools/policy.ps1`.
 2. Add the key and exact default to
-   [Values by default](../config.example.md#значения-по-умолчанию). If `cc-config` should
-   seed it, also add it inside the `config.md seed` markers at the top of
-   [`config.example.md`](../config.example.md). Do not create a second default in prose.
+   [Values by default](../config.example.md#значения-по-умолчанию). Every project key must
+   also appear, in schema order, inside the `config.md seed` markers at the top of
+   [`config.example.md`](../config.example.md). Keep its example assignment commented and
+   add non-empty `Default`, `Values`, and `Effect` lines; the consistency guard and
+   `config-runtime.ps1 seed-project` both reject incomplete or active seed blocks.
 3. Document behavior, ownership, precedence, and failure semantics under
    [What each key means](../config.example.md#что-означает-каждый-ключ). For a Codex key,
    also update [Codex agents](../config.example.md#codex-агенты-coder_codex-reviewer_codex)

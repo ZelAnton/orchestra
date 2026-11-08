@@ -134,7 +134,8 @@ def read_plan(path, *, schema=SCHEMA):
         if len(data) > 2 * 1024 * 1024:
             raise ValueError("plan exceeds 2 MiB")
         value = json.loads(data, object_pairs_hook=unique)
-        if not isinstance(value, dict) or value.get("schema") != schema:
+        schemas = schema if isinstance(schema, tuple) else (schema,)
+        if not isinstance(value, dict) or value.get("schema") not in schemas:
             raise ValueError("unsupported reconciliation plan")
         return value
     except (OSError, ValueError, TypeError) as error:

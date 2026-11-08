@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -30,11 +31,11 @@ class ProviderQuota(Blocked):
         super().__init__("claude-quota", f"Claude quota rejected; advertised reset: {reset}.")
 
 
-def transient_exhausted(holder="The retained invocation"):
+def transient_exhausted(holder="The retained invocation", retry="cc-focus --retry"):
     """Closing text after the last server-error retry. The operator reads it."""
     # No invocation ID: the blocker signature must stay the same for a repeated failure.
     return (f"{holder} holds the server failure. "
-            "Operator: wait until the provider is available. Then run cc-focus --retry.")
+            f"Operator: wait until the provider is available. Then run {retry}.")
 
 
 class ProviderTransient(Blocked):
@@ -187,20 +188,36 @@ class Repository:
 
     def remote_head(self, remote, progress=None):
         url = self.push_url(remote)
+        result = self.remote_query(["ls-remote", "--refs", url, "refs/heads/main"], url, progress, "verify")
+        lines = result.stdout.decode("utf-8").strip().splitlines()
+        if len(lines) != 1:
+            raise Blocked("remote-main", "Remote main is missing or ambiguous.")
+        return lines[0].split()[0]
+
+    def fetch_main(self, remote, progress=None):
+        """Fetch remote main from the push URL into refs/remotes/<remote>/main. No hook runs."""
+        url = self.push_url(remote)
+        # The fetch can run before the process control of a run exists, so it gets an empty hooks directory.
+        hooks = self.root / ".work" / "cycle" / "no-hooks"
+        hooks.mkdir(parents=True, exist_ok=True)
+        self.remote_query(["-c", "core.hooksPath=" + str(hooks), "fetch", "--no-tags", "--no-recurse-submodules",
+                           "--no-write-fetch-head", url, f"+refs/heads/main:refs/remotes/{remote}/main"], url, progress, "fetch")
+        return self.text("rev-parse", "--verify", f"refs/remotes/{remote}/main^{{commit}}")
+
+    def remote_query(self, args, url, progress, action):
         # Keep existing credential helpers, but do not wait for terminal/GCM login.
-        # These settings affect only this read-only query, never provider commands.
+        # These settings affect only this remote query, never provider commands.
         env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never", LC_ALL="C")
         for attempt in range(1, REMOTE_QUERY_ATTEMPTS + 1):
             if progress:
                 progress(attempt, REMOTE_QUERY_ATTEMPTS)
             try:
-                result = command(["git", "ls-remote", "--refs", url, "refs/heads/main"],
-                                 self.root, timeout=REMOTE_QUERY_TIMEOUT, check=False, env=env)
+                result = command(["git", *args], self.root, timeout=REMOTE_QUERY_TIMEOUT, check=False, env=env)
             except Blocked as error:
                 if error.code != "command-timeout":
                     raise
                 code = "remote-query-timeout"
-                detail = f"Git ls-remote timed out after {REMOTE_QUERY_TIMEOUT} seconds."
+                detail = f"Git {args[0] if action == 'verify' else 'fetch'} timed out after {REMOTE_QUERY_TIMEOUT} seconds."
                 retryable = True
             else:
                 if not result.returncode:
@@ -214,15 +231,15 @@ class Repository:
                     "the requested url returned error: 502", "the requested url returned error: 503",
                     "the requested url returned error: 504"))
             if not retryable or attempt == REMOTE_QUERY_ATTEMPTS:
-                raise Blocked(code, f"Cannot verify remote main at the configured push URL "
-                              f"({attempt}/{REMOTE_QUERY_ATTEMPTS} attempts). {detail}\n"
-                              "Check network/proxy access and Git credentials in the launcher environment, "
-                              "then run cc-focus --retry. Publication is unconfirmed; saved work and reviews are preserved.")
+                after = ("Check network/proxy access and Git credentials in the launcher environment, "
+                         "then run cc-focus --retry. Publication is unconfirmed; saved work and reviews are preserved."
+                         if action == "verify" else
+                         "Check network/proxy access and Git credentials in the launcher environment. "
+                         "Then run the same cc-focus command again, or the retry command of a stopped run. Saved work is preserved.")
+                raise Blocked(code, f"Cannot {action} remote main at the configured push URL "
+                              f"({attempt}/{REMOTE_QUERY_ATTEMPTS} attempts). {detail}\n" + after)
             time.sleep(2)
-        lines = result.stdout.decode("utf-8").strip().splitlines()
-        if len(lines) != 1:
-            raise Blocked("remote-main", "Remote main is missing or ambiguous.")
-        return lines[0].split()[0]
+        return result
 
     def push_url(self, remote):
         urls = self.text("remote", "get-url", "--push", "--all", remote).splitlines()
@@ -237,9 +254,13 @@ def changed(before, after):
 
 
 class Store:
-    def __init__(self, root):
+    def __init__(self, root, review_id=None):
         self.root = Path(root).resolve()
-        self.directory = self.root / ".work" / "cycle"
+        self.control_directory = self.root / ".work" / "cycle"
+        self.review_id = review_id
+        if review_id is not None and not re.fullmatch(r"[0-9a-f]{32}", review_id):
+            raise Blocked("review-id", "Invalid review run ID.")
+        self.directory = self.control_directory / "review-runs" / review_id if review_id else self.control_directory
         if not self.directory.resolve().is_relative_to(self.root):
             raise Blocked("external-state-path", "The cycle state directory resolves outside the repository.")
         self.path = self.directory / "state.json"

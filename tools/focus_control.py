@@ -1,5 +1,6 @@
 """Repository-scoped operator stop requests and exact-run process containment."""
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,76 @@ def read_json(path):
         raise Blocked("invalid-control", f"Cannot read focus control file {path}: {error}") from error
 
 
+def control_store(store):
+    from cycle_state import Store
+    return Store(store.root) if getattr(store, "review_id", None) else store
+
+
+@contextlib.contextmanager
+def stage_stop_lock(store):
+    """Serialize the operator request with the transition to the next stage."""
+    deadline = time.monotonic() + 5
+    while True:
+        lock = LocalLock(store.directory, "stage-stop.lock")
+        try:
+            lock.__enter__()
+            break
+        except Blocked as error:
+            if error.code != "cycle-active" or time.monotonic() >= deadline:
+                raise
+            time.sleep(.01)
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def stage_stop_request(store, state):
+    """Read a durable request for this iteration. Old requests cannot stop a later stage."""
+    request = read_json(store.directory / "finish-stage.json")
+    if request is None:
+        return None
+    if (not isinstance(request, dict) or type(request.get("iteration")) is not int
+            or request["iteration"] < 1 or type(request.get("enabled")) is not bool):
+        raise Blocked("invalid-control", "Invalid finish-stage request. Preserve it for inspection.")
+    if request["enabled"] and request["iteration"] == state.get("iteration") and not state.get("stage_completed"):
+        return request
+    return None
+
+
+def request_stage_stop(store, cancel=False, expected_iteration=None):
+    """Schedule a pause after publication and CI. Never start or interrupt a provider."""
+    with stage_stop_lock(store):
+        state = store.read()
+        if not state:
+            raise Blocked("finish-stage-state", "No current stage exists. Start cc-focus before scheduling this pause.")
+        if expected_iteration is not None and state["iteration"] != expected_iteration:
+            raise Blocked("finish-stage-changed", "The stage changed before the request. Inspect /status and send it again.")
+        active = read_json(control_store(store).directory / "active.json") or {}
+        if runtime_active(store) and active.get("review_id") != getattr(store, "review_id", None):
+            raise Blocked("finish-stage-run", "Another workflow owns the project. Address its review run explicitly.")
+        if not cancel and runtime_active(store) and active.get("supports_finish_stage") is not True:
+            raise Blocked("finish-stage-unavailable", "The running runtime does not support finish-stage. Stop it and restart cc-focus before scheduling this pause.")
+        request = stage_stop_request(store, dict(state, stage_completed=None) if cancel else state)
+        if cancel:
+            if request:
+                store.artifact("finish-stage.json", encode(dict(request, enabled=False)))
+            return "Pause after this stage cancelled. Processing was not started."
+        if state.get("status") == "complete":
+            raise Blocked("finish-stage-complete", "The plan is already complete. No stage pause was scheduled.")
+        if state.get("stage_completed"):
+            raise Blocked("finish-stage-complete", "The current stage is already complete. Use /resume to start the next stage.")
+        if not request:
+            task = state.get("task") or {}
+            request = {"iteration": state["iteration"], "enabled": True, "requested": time.time(),
+                       "task": task if task.get("iteration") == state["iteration"] else None}
+            store.artifact("finish-stage.json", encode(request))
+        title = (request.get("task") or {}).get("title") or f"iteration {state['iteration']}"
+        return f"Pause scheduled after publication and CI for {title}. If processing is stopped, use /resume to continue."
+
+
 def runtime_active(store):
+    store = control_store(store)
     try:
         with LocalLock(store.directory, existing=True):
             return False
@@ -98,6 +168,7 @@ def owner_alive(active):
 
 def check_parked_provider(store):
     """A live parked UI must prove leaf exit before another epoch takes ownership."""
+    store = control_store(store)
     active = read_json(store.directory / "active.json") or {}
     for provider in provider_records(active) if active.get("interactive") and owner_alive(active) else []:
         if not container_identity(provider):
@@ -111,32 +182,35 @@ def check_parked_provider(store):
 class Control:
     def __init__(self, store):
         self.store = store
+        self.controls = control_store(store)
         self.active = None
         self.announced = None
         self.provider_lock = threading.RLock()
 
     def begin(self):
-        with LocalLock(self.store.directory, "control.lock"):
+        with LocalLock(self.controls.directory, "control.lock"):
             self.active = {"nonce": uuid.uuid4().hex, "root": str(self.store.root),
                            "pid": os.getpid(), "started": time.time(), "finished": None,
+                           "supports_finish_stage": True,
+                           "review_id": getattr(self.store, "review_id", None),
                            "owner_stamp": owner_stamp(os.getpid()),
                            "processkit_run_id": os.environ.get("ORCHESTRA_PROCESSKIT_ROOT_RUN_ID", ""),
                            "processkit_cli": os.environ.get("ORCHESTRA_FOCUS_PROCESSKIT_CLI", "")}
-            self.store.artifact("active.json", encode(self.active))
+            self.controls.artifact("active.json", encode(self.active))
 
     def request(self):
-        request = read_json(self.store.directory / "stop.json")
+        request = read_json(self.controls.directory / "stop.json")
         return request if request and self.active and request.get("nonce") == self.active["nonce"] else None
 
     def submit_stop(self, now=False):
         """Nonblocking request from this run's terminal; never target a newer run."""
-        with LocalLock(self.store.directory, "control.lock"):
-            current = read_json(self.store.directory / "active.json")
+        with LocalLock(self.controls.directory, "control.lock"):
+            current = read_json(self.controls.directory / "active.json")
             if not current or current.get("nonce") != self.active["nonce"] or current.get("finished"):
                 raise Blocked("stop-target-changed", "This run has ended; no stop was sent to another run.")
             previous = self.request()
             mode = "now" if now or (previous and previous.get("mode") == "now") else "safe"
-            self.store.artifact("stop.json", encode({"nonce": self.active["nonce"], "mode": mode, "requested": time.time()}))
+            self.controls.artifact("stop.json", encode({"nonce": self.active["nonce"], "mode": mode, "requested": time.time()}))
 
     def child(self, slot, cwd=None):
         parent = self
@@ -165,7 +239,7 @@ class Control:
                 self.active["provider_run"] = record
             else:
                 self.active.setdefault("provider_runs", {})[slot] = record
-            self.store.artifact("active.json", encode(self.active))
+            self.controls.artifact("active.json", encode(self.active))
             return [cli, "run", "--run-id", run_id, "--cwd", str(cwd or self.store.root),
                     "--jsonl", str(Path(log).with_suffix(".processkit.jsonl")), "--inherit-stdio", "--"]
 
@@ -175,7 +249,7 @@ class Control:
                 self.active["provider_run"] = None
             else:
                 self.active.setdefault("provider_runs", {}).pop(slot, None)
-            self.store.artifact("active.json", encode(self.active))
+            self.controls.artifact("active.json", encode(self.active))
 
     def poll(self):
         request = self.request()
@@ -198,8 +272,8 @@ class Control:
         self.active.update(finished=time.time(), exit_code=exit_code,
                            phase=state.get("phase"), status=state.get("status"),
                            ui_parked=bool(self.active.get("interactive") and not provider_records(self.active)))
-        self.store.artifact(f"runs/{self.active['nonce']}.json", encode(self.active))
-        self.store.artifact("active.json", encode(self.active))
+        self.controls.artifact(f"runs/{self.active['nonce']}.json", encode(self.active))
+        self.controls.artifact("active.json", encode(self.active))
 
 
 def status(store, state):
@@ -218,6 +292,12 @@ def status(store, state):
             brief["pair_review"]["execution"] = {"remaining": pair["execution"]["remaining"],
                 "completed": len(pair["execution"]["resolutions"]), "reports": len(pair["execution"]["reports"])}
     brief["pair_clean"] = state.get("pair_clean")
+    from focus_brief import status_entry
+    brief["project_brief"] = status_entry(store.root, state)  # It never reads the original source file.
+    if state.get("review_run"):
+        run = state["review_run"]
+        brief["review_run"] = {k: run[k] for k in ("id", "current", "target_count", "remaining")}
+        brief["review_run"].update(completed=len(run["results"]), report=str(store.directory / "report.md"))
     brief["pair_completed"] = list(state.get("pair_completed", {}))
     final = state.get("final_review")
     if final:
@@ -226,27 +306,40 @@ def status(store, state):
                                  "confirmed_blockers": sum(bool(row.get("blocking")) for row in final.get("confirmed", [])),
                                  "cleanup_closed": len(final.get("confirmed", [])) if final.get("cleanup") else 0,
                                  "backlog": str(store.directory / "backlog.json")}
-    active = read_json(store.directory / "active.json")
-    live = runtime_active(store)
+    active = read_json(control_store(store).directory / "active.json")
+    live = runtime_active(store) and (active or {}).get("review_id") == getattr(store, "review_id", None)
     progress = read_json(store.directory / "progress.json")
     if progress and (not active or progress.get("run_nonce") != active.get("nonce")):
         progress = None
+    from focus_diagnostics import usage_summary
+    brief["usage"] = usage_summary(store.directory, state.get("iteration"))  # Claude tokens of the current iteration.
     brief.update(running=live, active=active, progress=progress,
-                 stop_request=read_json(store.directory / "stop.json"),
+                 stop_request=read_json(control_store(store).directory / "stop.json"),
                  pause_switch=(store.root / ".work" / "PAUSE").exists())
     if progress:
         progress["age_seconds"] = max(0, int(time.time() - progress["updated"]))
         progress["live"] = live and not active.get("finished") and progress["age_seconds"] <= 30
         progress["stale"] = not progress["live"]
     from focus_status import build_panel
+    finish_stage = stage_stop_request(store, state)
     brief.update(task=state.get("task"), review_events=state.get("display_review_events", []),
+                 finish_stage=finish_stage, stage_completed=state.get("stage_completed"),
                  quota_wait=(state.get("pending") or {}).get("quota_wait"),
                  transient_wait=(state.get("pending") or {}).get("transient_wait"),
                  dashboard=list(build_panel(state, progress if progress and progress["live"] else None,
-                                            paused=not live).lines))
+                                            paused=not live, finish_stage=finish_stage).lines))
     if state.get("baseline", {}).get("repositories"):
-        brief.update(repositories=state["baseline"]["repositories"],
+        brief.update(repositories=state["baseline"]["repositories"], parallel=state.get("parallel", []),
+                     parallel_integrations={name: {key: record.get(key) for key in ("local", "result", "step", "resolved")
+                                                   if key in record}
+                                            for name, record in state.get("parallel_integrations", {}).items()},
                      publication_repositories=state.get("publication_repositories", {}))
+        if state.get("resolver_cleanup"):
+            brief["resolver_cleanup"] = state["resolver_cleanup"]
+            brief.setdefault("warnings", []).append(
+                "Temporary merge worktrees could not be removed: " + ", ".join(entry["path"] for entry in state["resolver_cleanup"])
+                + ". The runtime tries the removal again at the next integration and at the next stage start."
+                " More than three stop the next resolution.")
         brief["pause_switch"] = brief["pause_switch"] or any(
             (store.root / name / ".work" / "PAUSE").exists() for name in state["baseline"]["repositories"])
     return brief
@@ -294,6 +387,8 @@ def wait_container(store, active, timeout=30):
 
 def request_stop(store, now=False, timeout=None):
     """Wait for the addressed run, never redirect a stop to a newer invocation."""
+    requested_review = getattr(store, "review_id", None)
+    store = control_store(store)
     if not runtime_active(store):
         previous = read_json(store.directory / "active.json") or {}
         if previous.get("interactive") and provider_records(previous):
@@ -304,6 +399,8 @@ def request_stop(store, now=False, timeout=None):
             return 0
     with LocalLock(store.directory, "control.lock"):
         active = read_json(store.directory / "active.json")
+        if requested_review and (active or {}).get("review_id") != requested_review:
+            raise Blocked("stop-run", "Another run owns the active control. This review was not stopped.")
         if (not active or active.get("root") != str(store.root)
                 or not re.fullmatch(r"[0-9a-f]{32}", active.get("nonce", ""))):
             raise Blocked("unaddressable-run", "No current focus control identity. For a running legacy cc-cycle use cc-pause and wait, or Ctrl+C, before updating.")
@@ -325,7 +422,9 @@ def request_stop(store, now=False, timeout=None):
                 wait_container(store, active, remaining)
             if mode == "safe" and done.get("status") not in ("paused", "complete", "blocked"):
                 raise Blocked("stop-not-clean", "Processing ended before a safe-boundary acknowledgement; partial work is preserved for crash recovery.")
-            print(f"cc-focus: stopped; phase={done.get('phase')} status={done.get('status')}. Run cc-focus to continue.", flush=True)
+            action = ("The run output names the blocker and the retry command." if done.get("status") == "blocked"
+                      else "Run cc-focus to continue.")
+            print(f"cc-focus: stopped; phase={done.get('phase')} status={done.get('status')}. {action}", flush=True)
             return 0
         if not held and killed and leaf_stopped:
             print("cc-focus: emergency termination confirmed; partial work remains. Run cc-focus to recover.", flush=True)

@@ -17,6 +17,7 @@ PWSH_ARGS_FILE="$MOCK_DIR/pwsh-args"
 FAILURES=0
 ROOT_CONFIG_DIR="$RUN_DIR/.orchestra"
 ROOT_CONFIG_FILE="$ROOT_CONFIG_DIR/root-config.md"
+ORIGINAL_PATH="$PATH"
 AWK_PATH="$(command -v awk 2>/dev/null || true)"
 mkdir -p "$ROOT_CONFIG_DIR"
 
@@ -294,6 +295,126 @@ run_with_shared_processkit_cli() {
     pass "$name"
 }
 
+run_cc_config_editor_flow() {
+    local name="cc-config.sh (inactive catalog, root annotations, editor)"
+    local config_project="$RUN_DIR/config-project"
+    local config_home="$RUN_DIR/config-home"
+    local config_file="$config_project/.work/config.md"
+    local editor="$config_project/test-editor"
+    local editor_log="$config_project/editor.log"
+    local editor_order_log="$config_project/editor-order.log"
+    local registry_path="$config_home/projects.json"
+    local output
+    local rc
+    local key_count
+
+    mkdir -p "$config_project" "$config_home"
+    cat > "$config_home/root-config.md" <<EOF
+ORCHESTRA_REGISTRY_PATH: $config_home/projects.json
+MAX_PARALLEL: 9
+CODEX_NETWORK: off
+EOF
+    cat > "$editor" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >> "$CC_CONFIG_EDITOR_LOG"
+if [ -n "${CC_CONFIG_EDITOR_ORDER_LOG:-}" ]; then
+    if [ -e "$CC_CONFIG_REGISTRY_PATH" ]; then
+        printf '%s\n' 'after-registration' > "$CC_CONFIG_EDITOR_ORDER_LOG"
+    else
+        printf '%s\n' 'before-registration' > "$CC_CONFIG_EDITOR_ORDER_LOG"
+    fi
+fi
+exit "${CC_CONFIG_EDITOR_RC:-0}"
+EOF
+    chmod +x "$editor"
+
+    output=$(
+        cd "$config_project" || exit 99
+        PATH="$ORIGINAL_PATH" ORCHESTRA_HOME="$config_home" VISUAL='' EDITOR="$editor" \
+            CC_CONFIG_EDITOR_LOG="$editor_log" CC_CONFIG_EDITOR_ORDER_LOG="$editor_order_log" \
+            CC_CONFIG_REGISTRY_PATH="$registry_path" \
+            "$BASH" "$REPO_ROOT/launchers/cc-config.sh" 2>&1
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -f "$config_file" ]; then
+        fail "$name" "fresh launcher failed or omitted config.md (rc=$rc; output=$output)"
+        return
+    fi
+    if grep -Eq '^[[:space:]]*[A-Z][A-Z0-9_]*[[:space:]]*:' "$config_file"; then
+        fail "$name" 'fresh config contains an active project override'
+        return
+    fi
+    key_count=$(grep -Ec '^# [A-Z][A-Z0-9_]*:' "$config_file")
+    if [ "$key_count" -ne 48 ] || \
+        [ "$(grep -Ec '^#   Root config:' "$config_file")" -ne 48 ] || \
+        [ "$(grep -Ec '^#   Default:' "$config_file")" -ne 48 ] || \
+        [ "$(grep -Ec '^#   Values:' "$config_file")" -ne 48 ] || \
+        [ "$(grep -Ec '^#   Effect:' "$config_file")" -ne 48 ]; then
+        fail "$name" 'fresh config does not document every schema key with all help fields'
+        return
+    fi
+    if ! grep -Fq '#   Root config: 9' "$config_file" || \
+        ! grep -Fq '#   Root config: off' "$config_file" || \
+        ! grep -Fq '#   Default: 5' "$config_file" || \
+        ! grep -Fq '#   Default: on' "$config_file"; then
+        fail "$name" 'root-config values or documented defaults were not rendered'
+        return
+    fi
+    if [ "$(cat "$editor_log")" != "$config_file" ] || \
+        ! printf '%s\n' "$output" | grep -Fq 'Opening'; then
+        fail "$name" 'editor was not opened synchronously with .work/config.md'
+        return
+    fi
+    if [ "$(cat "$editor_order_log")" != 'before-registration' ] || [ ! -f "$registry_path" ]; then
+        fail "$name" 'local config was not opened before project registration'
+        return
+    fi
+
+    printf '%s\n' '# operator sentinel' >> "$config_file"
+    output=$(
+        cd "$config_project" || exit 99
+        PATH="$ORIGINAL_PATH" ORCHESTRA_HOME="$config_home" VISUAL='' EDITOR="$editor" \
+            CC_CONFIG_EDITOR_LOG="$editor_log" "$BASH" "$REPO_ROOT/launchers/cc-config.sh" 2>&1
+    )
+    rc=$?
+    if [ "$rc" -ne 0 ] || ! tail -n 1 "$config_file" | grep -Fq '# operator sentinel' || \
+        [ "$(wc -l < "$editor_log")" -ne 2 ] || \
+        ! printf '%s\n' "$output" | grep -Fq 'already exists - leaving it unchanged'; then
+        fail "$name" 'existing config was overwritten or not reopened by the editor'
+        return
+    fi
+
+    set +e
+    output=$(
+        cd "$config_project" || exit 99
+        PATH="$ORIGINAL_PATH" ORCHESTRA_HOME="$config_home" VISUAL='' EDITOR="$editor" \
+            CC_CONFIG_EDITOR_LOG="$editor_log" CC_CONFIG_EDITOR_RC=7 \
+            "$BASH" "$REPO_ROOT/launchers/cc-config.sh" 2>&1
+    )
+    rc=$?
+    set -e
+    if [ "$rc" -ne 7 ] || ! printf '%s\n' "$output" | grep -Fq 'Editor exited with code 7'; then
+        fail "$name" "editor failure was not reported and propagated (rc=$rc; output=$output)"
+        return
+    fi
+
+    set +e
+    output=$(
+        cd "$config_project" || exit 99
+        PATH="$ORIGINAL_PATH" ORCHESTRA_HOME="$config_home" VISUAL='' \
+            EDITOR="$config_project/editor-does-not-exist" \
+            "$BASH" "$REPO_ROOT/launchers/cc-config.sh" 2>&1
+    )
+    rc=$?
+    set -e
+    if [ "$rc" -ne 4 ] || ! printf '%s\n' "$output" | grep -Fq 'configured editor'; then
+        fail "$name" "an invalid explicit editor silently fell back (rc=$rc; output=$output)"
+        return
+    fi
+
+    pass "$name"
+}
+
 test_launcher() {
     local launcher="$1"
     local agent="$2"
@@ -537,6 +658,7 @@ test_launcher cc-proposal.sh proposal_curator
 test_launcher cc-queue.sh queue_builder
 test_launcher cc-resume.sh processor
 test_launcher cc-thinker.sh thinker
+run_cc_config_editor_flow
 run_with_mock_codex_processor cc-processor.sh start
 run_with_config_runtime_failure
 run_metrics_from_shared_mirror

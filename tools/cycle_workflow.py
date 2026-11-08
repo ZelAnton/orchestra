@@ -10,41 +10,104 @@ import threading
 import uuid
 
 from cycle_prompts import (PROMPTS, REVIEW_PROFILE_VERSION, REVIEW_ROLES, REVIEW_TARGETS, review_target,
-                           FINAL_ROLES, READONLY_REVIEW_ROLES)
+                           FINAL_ROLES, READONLY_REVIEW_ROLES, BRIEF_CHANGE_CORRECTION)
+import focus_brief
 from focus_review import FinalReview
 from focus_pairs import PairedReview
 from focus_pair_profile import PAIRS, PAIR_ROLES, PAIR_WRITERS
 from focus_pair_view import read_record, artifact
 from focus_snapshot_archive import compact_legacy_views
 from cycle_state import Blocked, ProviderQuota, ProviderTransient, transient_exhausted, changed, command, digest, encode
-from cycle_transport import (concise_summary, parse_report, report_object, repairable_executor_accounting,
+from cycle_transport import (concise_summary, enum_problems, field_name, parse_report, report_object,
+                             repairable_enum, repairable_executor_accounting, repairable_repair_mode,
                              repairable_substantial_accounting)
 from focus_status import accept_task, new_reviews, reset_notice, review_event
 from focus_output import terminal_text
 from focus_messages import MessagePending, Messages
+from focus_control import stage_stop_lock, stage_stop_request
 
 
 MANUAL_BLOCKERS = {"claude-access-denied", "approval-required", "approval-denied"}
+# The healer may not change operator inputs.
+BRIEF_BLOCKERS = {"brief-drift", "brief-path"}
+# A saved record from a newer runtime. A recovery agent cannot install a runtime.
+RUNTIME_VERSION_BLOCKERS = {"instruction-version"}
+# A recovery agent may not change the work of other writers or the root context.
+OPERATOR_CONTEXT_BLOCKERS = {"parallel-dirty", "parallel-diverged", "parallel-merge-conflict", "parallel-remote-busy",
+                             "parallel-remote-rewritten", "parallel-unsupported-path", "parallel-integration-state",
+                             "parallel-git", "parallel-resolver-failed", "parallel-resolver-scope",
+                             "parallel-resolver-cleanup", "project-manifest"}
 UNSAFE_PROVIDER_BLOCKERS = {"cleanup-incomplete", "turn-active"}
+CATCH_UPS = 3  # Catch-ups of parallel members for reported blockers in one stage.
 # Server-error retries are exhausted. A recovery agent cannot retry a provider.
 PROVIDER_UNAVAILABLE_BLOCKERS = {"claude-transient", "codex-transient"}
-ACCOUNTING_REPAIRS = ("invocation-accounting", "substantial-accounting", "changed-file-accounting", "unchanged-accounting")
+COUNTERS = ("implementation_fixes", "other_fixes", "minor_edits")
+# Report-only corrections in which an executor corrects its own report against frozen work.
+ACCOUNTING_REPAIRS = ("invocation-accounting", "substantial-accounting", "changed-file-accounting", "unchanged-accounting",
+                      "repair-mode", "report-enum")
 PROVIDER_RETRY_DELAYS = (15, 30, 60)
 ESCALATION_REASONS = {
     "manual-action": "This action requires the operator; the recovery agent cannot supply consent or account access.",
+    "brief-input": "The project brief needs the operator. A recovery agent may not change it.",
+    "runtime-version": "A saved record needs a newer runtime or a repair. A recovery agent cannot install a runtime.",
+    "operator-context": "This blocker needs the operator. A recovery agent may not change the work of other writers or the root context.",
     "provider-refusal": "Claude refused the request. Inspect the provider detail; automatic recovery cannot clear this refusal.",
     "unsafe-provider": "A prior provider may still be active; recovery cannot safely start another agent.",
     "provider-unavailable": "The provider still has a server failure after the automatic retries. Recovery cannot retry a provider.",
+    "stage-boundary": "The next stage needs operator action first. A recovery agent may not change main or its remote.",
     "healer-failed": "Astra/xhigh attempted recovery and could not complete it.",
     "verification-failed": "Astra/xhigh reported a repair, but the next work step could not verify recovery.",
     "repeated-blocker": "This blocker already received an Astra/xhigh recovery attempt in the current iteration.",
 }
 
 
+def counter_text(repair, original):
+    """The counter sentence of a report-only correction. Unchanged work and uncounted changed work get new counters."""
+    if not repair.get("changed_paths"):
+        return 'The original invocation changed no files. Also set all three counters to 0 and substantial=false. '
+    if not any(original[k] for k in COUNTERS):
+        return ('The original invocation changed the listed paths, but its three counters are 0. Also count these changes. '
+                'Count behavior, check, or instruction changes as implementation_fixes. Count new records of completed '
+                'checks as minor_edits. ')
+    return 'Keep the three counters and substantial. '
+
+
+def counter_fields(repair, original):
+    """The counter fields that a report-only correction can change."""
+    return ({"substantial", *COUNTERS} if not repair.get("changed_paths") or not any(original[k] for k in COUNTERS)
+            else set())
+
+
+def check_counters(repair, report):
+    if not repair.get("changed_paths") and (report["substantial"] or any(report[k] for k in COUNTERS)):
+        raise Blocked("report-repair-content", "The original invocation changed no files, so every counter must be 0 and substantial must be false.")
+    if repair.get("changed_paths") and not sum(report[k] for k in COUNTERS):
+        raise Blocked("report-repair-content", "The original invocation changed files, so the corrected report needs at least one positive edit counter.")
+
+
+def enum_fields(problems):
+    """The fields that a value correction can change, as path tuples.
+
+    A problem in an array lets the whole array change. Another problem lets only its own field change.
+    Listed risks need pair mode, so a risks problem also lets repair.mode and repair.reason change.
+    """
+    fields = {tuple(problem["path"][:-1] if isinstance(problem["path"][-1], int) else problem["path"])
+              for problem in problems}
+    if any(path[:2] == ("repair", "risks") for path in fields):
+        fields |= {("repair", "mode"), ("repair", "reason")}
+    return fields
+
+
 def fresh_state(repository):
     baseline = repository.snapshot()
     protected = repository.dirty_paths()
-    return {"version": 1, "root": str(repository.root), "phase": "code", "iteration": 1,
+    # The first stage captures the brief default before any state exists.
+    brief = focus_brief.capture(repository.root, focus_brief.start_remedy(focus_brief.BEFORE_RUN))
+    # A project stage records its parallel members and their resolvers. A manifest change becomes active at the next stage.
+    parallel = ({"parallel": list(repository.parallel), "resolvers": copy.deepcopy(repository.resolvers)}
+                if hasattr(repository, "parallel") else {})
+    return {"version": 1, "root": str(repository.root), "phase": "code", "iteration": 1, **parallel,
+            "project_brief": {"iteration": 1, "sha256": brief},
             "sessions": {}, "session_generation": 1, "handoffs": [], "baseline": baseline,
             "protected": protected, "protected_index": repository.index_entries(protected), "pending": None, "blocker": None,
             "healed": [], "coordinated": None, "last": None, "code_report": "",
@@ -69,6 +132,14 @@ def publication_history(repo, baseline, head):
             "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", fields[0]
         ).stdout.split(b"\0") if name)
     return committed
+
+
+def stage_record(state):
+    """Describe the stage that the runtime published. Only a code or operator label names that stage."""
+    published = state.get("published") or {}
+    task = state.get("task") if state.get("task_source") in ("code", "operator") else None
+    return {"iteration": state["iteration"], "task": task, "published": published.get("sha"),
+            "repositories": {name: (record or {}).get("sha") for name, record in (published.get("repositories") or {}).items()}}
 
 
 class Cycle(PairedReview, FinalReview):
@@ -106,6 +177,7 @@ class Cycle(PairedReview, FinalReview):
                         verb, "--work", str(self.repo.root / ".work"), *args], self.repo.root, check=False)
 
     def reset_reviews(self, reason="Реализация завершена; ревью требуется заново"):
+        self.state.pop("stage_completed", None)
         reset_notice(self.state, reason)
         self.state.pop("publication_review_profile", None)
         self.state["final_review"] = None
@@ -215,6 +287,8 @@ class Cycle(PairedReview, FinalReview):
             print("cc-focus: the already-started publication retains its original review seal through CI; new work uses all required reviews.", flush=True)
 
     def check_protected(self, snapshot):
+        from focus_publication_scope import check_scope
+        check_scope(self, snapshot)
         touched = set(self.changes(self.state["baseline"], snapshot)) & set(self.state["protected"])
         if touched:
             raise Blocked("protected-work", "Pre-existing work was changed; preserve and reconcile it: " + ", ".join(sorted(touched)) +
@@ -249,7 +323,8 @@ class Cycle(PairedReview, FinalReview):
         self.validate_corrections()
         if role in PAIR_WRITERS:
             return self.pair_writer_context(role)
-        corrections = state.get("corrections", [])
+        # A brief change is not a task correction. Only its fixed notice reaches the roles.
+        corrections = [c for c in state.get("corrections", []) if not c.get("brief_change")]
         if role != "heal":
             for handoff in state["handoffs"]:
                 try:
@@ -291,15 +366,17 @@ class Cycle(PairedReview, FinalReview):
                            review_exit=(
                                'Each pair repeats after significant findings. B/final repairs first require two clean'
                                ' inner passes and targeted tests. Minor-only repairs advance after that gate. Do not '
-                               'return across pairs.'
+                               'return across pairs. If a final inspector requests a full run, the runtime can run '
+                               'one final gate after the pair passes.'
                            ))
             context["verification"] = {
                 "full_run_allowed": False, "builds_tests_allowed": role in ("code", "heal"),
                 "policy": (
-                    'Limit builds and tests to affected areas. B/final fix invocations must not test. Only'
-                    ' the separate test invocation after two clean static passes can run checks. All '
-                    'inspectors and arbiters are read-only. An explicit pair_b assignment can require a '
-                    'full suite after the inner gate, with a stated risk reason.'
+                    'Limit builds and tests to the current changes. In B/final, fix invocations must not '
+                    'test. In B/final, only the separate test invocation can run checks. Except in the final'
+                    ' gate, that invocation follows two clean static passes. All inspectors and arbiters are'
+                    ' read-only. Only one pair_b full_suite assignment in each stage and the final gate '
+                    'permit a full run.'
                 )}
         if state.get("publication_review_profile") in (1, 2, 3, 4, 5, 6, 7):
             context["publication_review_profile"] = (
@@ -363,13 +440,19 @@ class Cycle(PairedReview, FinalReview):
                         'implementation or do Git writes. The runtime will check existing pushes and finish '
                         'the remaining reviewed publication.'
                     ))
+        if any(c.get("brief_change") for c in state.get("corrections", [])):
+            context["project_brief_notice"] = BRIEF_CHANGE_CORRECTION
+        if role == "code":
+            brief = focus_brief.stage_hash(state)
+            if brief:
+                context["project_brief"] = focus_brief.delivery(self.repo.root, brief, self.brief_prompt_remedy())
         pending = state.get("pending") or {}
         if (state["phase"] == "code" and state.get("code_started")
                 and (pending.get("resume_code", True) or pending.get("attempts", 0))):
             context["coding_recovery"] = (
-                'This stage already started. The code phase includes recovery of its lost or rejected '
-                'final report. Do not repeat completed implementation. Pending reviews do not require '
-                'another stage. Only the runtime advances the phase after it validates the coding '
+                'Coding of this iteration already started. The code phase includes recovery of its lost or '
+                'rejected final report. Do not repeat completed implementation. Pending reviews do not '
+                'require another stage. Only the runtime advances the phase after it validates the coding '
                 'result.'
             )
         if role == "publish":
@@ -394,6 +477,15 @@ class Cycle(PairedReview, FinalReview):
                 'handoff.'
             ))
         context["task"] = state.get("task")
+        previous = self.previous_stage()
+        if role in ("coordinate", "code") and previous.get("task"):
+            context["previous_stage"] = {**previous, "rule": (
+                'A code report or an operator selection in the previous iteration named this stage, and the runtime '
+                'published that work. If the plan still shows this stage as unfinished, compare the plan with the '
+                'published commits. Do not repeat published work or its completed reviews. If the published commits '
+                'lack plan work of this stage, select this stage again only for that work. Otherwise, do not report '
+                'this stage as the current task.'
+            )}
         if role in (*REVIEW_ROLES, *FINAL_ROLES):
             stage_paths = self.publication_paths()
             current_files = self.snapshot()["files"]
@@ -479,6 +571,60 @@ class Cycle(PairedReview, FinalReview):
                 'gives no extra review credit. '
             ) +
                 json.dumps({"source": str(source), "original_report": original}, ensure_ascii=False))
+        if repair.get("reason") == "report-enum":
+            result = json.loads(source.read_text(encoding="utf-8"))
+            found = enum_problems(result["raw"], pending["role"])
+            if found is None or self.snapshot(result["after"]) != self.snapshot(repair["after"]):
+                raise Blocked("report-repair-source", "The original report values no longer match the frozen correction.")
+            original, problems = found
+            fields = enum_fields(problems)
+            examples = {"status": ("status",), "evidence": ("evidence",), "resolutions": ("resolutions",), "handoff": ("handoff",)}
+            if not counter_fields(repair, original):
+                examples.update(counters=("implementation_fixes",), substantial=("substantial",))
+            if isinstance(original.get("repair"), dict):
+                examples["repair.tests"] = ("repair", "tests")
+            kept = [name for name, prefix in examples.items() if not any(path[:len(prefix)] == prefix for path in fields)]
+            risks = any(path[:2] == ("repair", "risks") for path in fields)
+            keep_pair = (original.get("repair") or {}).get("mode") == "pair" and not any(
+                problem["path"] == ["repair", "mode"] for problem in problems)
+            return ((
+                'REPORT-ONLY CORRECTION of the ORIGINAL invocation. This is not another execution, review, or '
+                'test run. The runtime rejects its report, because the listed fields have values outside their '
+                'allowed values.\n\nFor each listed field, choose the allowed value that describes the original '
+                'work. In an array, you may also merge or remove items. Each remaining item must be an allowed value '
+                'that applies. Change only these fields or arrays, summary, description, and the fields that the '
+                'rules below name. ' + (
+                    'Keep repair.mode=pair. You may change repair.reason to match the risks. ' if risks and keep_pair else
+                    'Listed risks require repair.mode=pair. Also set repair.mode and repair.reason to match the risks. '
+                    if risks else '') + '\n\n' + counter_text(repair, original) +
+                '\n\nKeep every other field exactly' + (', for example ' + ', '.join(kept) if kept else '') +
+                '. Do not run tools, tests, builds, or formatting. Do not edit files, '
+                'journals, staging, or runtime records. If no allowed value describes the work, return blocked. '
+                'This call gives no extra review credit. '
+            ) + json.dumps({"source": str(source), "changed_paths": repair.get("changed_paths", []), "invalid": [
+                {"field": field_name(problem["path"]), "value": problem["value"], "allowed": problem["allowed"]}
+                for problem in problems], "original_report": original}, ensure_ascii=False))
+        if repair.get("reason") == "repair-mode":
+            result = json.loads(source.read_text(encoding="utf-8"))
+            original = repairable_repair_mode(result["raw"], pending["role"])
+            if original is None or self.snapshot(result["after"]) != self.snapshot(repair["after"]):
+                raise Blocked("report-repair-source", "Original repair mode no longer matches the frozen correction.")
+            return ((
+                'REPORT-ONLY CORRECTION of the ORIGINAL repair invocation. This is not another '
+                'execution or test run. Its report lists repair.risks but sets repair.mode=self. The '
+                'runtime requires mode=pair for every listed risk.\n\nDecide again for the original '
+                'invocation. If a listed risk applies, set repair.mode=pair. Give the reason in '
+                'repair.reason. Remove each risk that does not apply. If you are not sure, keep the '
+                'risk and set repair.mode=pair. In pair mode, the runtime collects independent reviews '
+                'and repeats checks where the gate requires them.\n\nChange repair.mode, '
+                'repair.risks, repair.reason, summary, and description as necessary. ' + counter_text(repair, original) +
+                'Keep EVERY other field and array exactly, including status, evidence, resolutions, '
+                'handoff, and repair.tests.\n\nDo not run tools, tests, builds, or formatting. Do not '
+                'edit files, journals, staging, or runtime records. If you cannot correct the report '
+                'accurately, return blocked. This call gives no extra review credit. '
+            ) +
+                json.dumps({"source": str(source), "changed_paths": repair.get("changed_paths", []),
+                            "original_report": original}, ensure_ascii=False))
         return (
             (
                 (
@@ -520,8 +666,34 @@ class Cycle(PairedReview, FinalReview):
         if repair["reason"] == "changed-file-accounting" and pending["role"] not in PAIR_WRITERS:
             return  # Review accounting keeps its existing validation in invoke().
         original = report_object(json.loads(Path(repair["source"]).read_text(encoding="utf-8"))["raw"])
+        if repair["reason"] == "report-enum":
+            found = enum_problems(json.loads(Path(repair["source"]).read_text(encoding="utf-8"))["raw"], pending["role"])
+            fields = enum_fields(found[1]) if found else set()
+
+            def kept(value):
+                value = json.loads(json.dumps(value))
+                for path in fields:
+                    target = value
+                    for part in path[:-1]:
+                        target = target[part]
+                    target[path[-1]] = None
+                for key in ("summary", "description", *counter_fields(repair, original)):
+                    value.pop(key, None)
+                return value
+            try:
+                same = bool(fields) and kept(original) == kept(report)
+            except (KeyError, IndexError, TypeError):
+                same = False
+            if not same:
+                raise Blocked("report-repair-content", "A value correction may change only the fields with values "
+                              "outside their allowed values, the summary, and the description.")
+            mode_problem = any(problem["path"] == ["repair", "mode"] for problem in found[1])
+            if (original.get("repair") or {}).get("mode") == "pair" and not mode_problem and report["repair"]["mode"] != "pair":
+                raise Blocked("report-repair-content", "A value correction can raise the repair mode, but it cannot lower pair to self.")
+            check_counters(repair, report)
+            return
         if repair["reason"] in ("substantial-accounting", "changed-file-accounting", "unchanged-accounting"):
-            counters = ("implementation_fixes", "other_fixes", "minor_edits")
+            counters = COUNTERS
             mutable = {"summary", "description", "substantial", *counters}
             if ({k: v for k, v in original.items() if k not in mutable}
                     != {k: v for k, v in report.items() if k not in mutable}):
@@ -530,6 +702,15 @@ class Cycle(PairedReview, FinalReview):
                 raise Blocked("report-repair-content", "The original invocation changed files, so the corrected report needs at least one positive edit counter.")
             if not repair.get("changed_paths") and (report["substantial"] or any(report[k] for k in counters)):
                 raise Blocked("report-repair-content", "The original invocation changed no files, so every counter must be 0 and substantial must be false.")
+            return
+        if repair["reason"] == "repair-mode":
+            # Unchanged work drops counters copied from its batch. Changed work with zero counters counts its changes.
+            mutable, choice = {"summary", "description", "repair", *counter_fields(repair, original)}, ("mode", "risks", "reason")
+            if ({k: v for k, v in original.items() if k not in mutable} != {k: v for k, v in report.items() if k not in mutable}
+                    or {k: v for k, v in original["repair"].items() if k not in choice}
+                    != {k: v for k, v in report["repair"].items() if k not in choice}):
+                raise Blocked("report-repair-content", "A repair mode correction changed a field that it must keep.")
+            check_counters(repair, report)
             return
         mutable = {"summary", "description", "substantial"}
         if (report["substantial"] or {k: v for k, v in original.items() if k not in mutable}
@@ -556,7 +737,9 @@ class Cycle(PairedReview, FinalReview):
         except Blocked:
             report = (repairable_executor_accounting(result["raw"], intent["role"],
                           self.snapshot(result["before"]), self.snapshot(result["after"]))
-                      or repairable_substantial_accounting(result["raw"], intent["role"]))
+                      or repairable_substantial_accounting(result["raw"], intent["role"])
+                      or repairable_repair_mode(result["raw"], intent["role"])
+                      or repairable_enum(result["raw"], intent["role"]))
             if report is None:
                 raise
             return report
@@ -616,9 +799,13 @@ class Cycle(PairedReview, FinalReview):
         if pending and pending.get("correction_revision") != state.get("correction_revision"):
             raise Blocked("correction-stale-result", "This invocation predates the latest operator correction; it must not be replayed.")
         if not pending:
+            # A damaged brief record stops before the intent changes code_started.
+            brief = ({"project_brief_sha256": focus_brief.stage_hash(state)} if role == "code" and "project_brief" in state else
+                     {"project_brief_sha256": focus_brief.pair_hash(state["pair_review"])}
+                     if role in PAIR_WRITERS and "project_brief_sha256" in (state.get("pair_review") or {}) else {})
             pending = {"id": uuid.uuid4().hex, "role": role, "iteration": state["iteration"],
                        "before": self.snapshot(), "started": time.time(),
-                       "correction_revision": state.get("correction_revision")}
+                       "correction_revision": state.get("correction_revision"), **brief}
             if role == "code":
                 pending["resume_code"] = self.state.get("code_started", False)
                 self.state["code_started"] = True
@@ -687,6 +874,13 @@ class Cycle(PairedReview, FinalReview):
             # Retry invalidation changes review/test eligibility; send the updated context.
             prompt = self.report_repair_context(pending) if pending.get("report_repair") else self.context(role)
             raw = self.transport.run(role, prompt, pending, directory)
+            if pending.get("refusal_restart") and role in REVIEW_ROLES:
+                # The refused attempt can have changed files. Earlier clean passes cannot certify that work.
+                reset_notice(state, "Проход повторяется после отказа", (role,))
+                self.state[role + "_clean"] = 0
+                if self.changes(pending["before"], self.snapshot()):
+                    state["review_substantial"] = True
+                self.save()  # The cached result path does not repeat this reset.
             if self.messages.unresolved(state["iteration"], pending["id"]):
                 raise MessagePending("Input remains undelivered; the saved invocation cannot advance yet.")
             if cached:
@@ -711,6 +905,12 @@ class Cycle(PairedReview, FinalReview):
             elif repairable_substantial_accounting(result["raw"], role) is not None:
                 # The healer cannot rewrite a provider report. The author corrects its own counters.
                 reason = "substantial-accounting"
+            elif repairable_repair_mode(result["raw"], role) is not None:
+                # Listed risks require pair mode. The author decides again on the mode or on each risk.
+                reason = "repair-mode"
+            elif repairable_enum(result["raw"], role) is not None:
+                # Only values outside their allowed values are wrong. The author chooses allowed values.
+                reason = "report-enum"
             else:
                 raise
             self.check_protected(self.snapshot(result["after"]))
@@ -750,7 +950,10 @@ class Cycle(PairedReview, FinalReview):
                               "Account for every changed file: record new verification evidence/journal writes in minor_edits; "
                               "report actual defects as implementation_fixes or other_fixes. Minor edits do not reset clean passes.")
         summary = concise_summary(report["summary"])
-        accept_task(state, report, role)
+        if accept_task(state, report, role) == "previous-stage":
+            print(f"cc-focus: the {role} report names {state['previous_stage']['task']['id']}. The runtime published "
+                  f"that stage in iteration {state['previous_stage']['iteration']}. The runtime does not accept a "
+                  "coordinator label for that stage. A code report can set it.", flush=True)
         if role != "coordinate":
             state["last"] = {"role": role, "summary": summary, "report": str(result_path)}
         else:
@@ -763,6 +966,26 @@ class Cycle(PairedReview, FinalReview):
             self.progress.result(report)
             self.progress.note(f"{role} result validated; report: {result_path}")
         return report, before, after, result["raw"]
+
+    def previous_stage(self):
+        """Return the published-stage record. A state that an older runtime advanced gets it from the archive."""
+        state = self.state
+        if "previous_stage" not in state:
+            record = {}
+            try:
+                archived = json.loads((self.store.directory / f"iterations/{state['iteration'] - 1:06d}.json").read_bytes())
+                if isinstance(archived, dict) and archived.get("iteration") == state["iteration"] - 1:
+                    record = stage_record(archived)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                pass  # No archived stage: there is no published label to compare.
+            state["previous_stage"] = record
+            task, previous = state.get("task") or {}, (record or {}).get("task") or {}
+            if previous and state.get("task_source") in (None, "coordinate") and (
+                    task.get("id"), task.get("plan")) == (previous.get("id"), previous.get("plan")):
+                # An older runtime accepted the coordinator's label of the published stage.
+                state["task"] = None
+                state.pop("task_source", None)
+        return state["previous_stage"] or {}
 
     def accepted_pair_results(self):
         """Count accepted pair results; a rejected report removes its result instead."""
@@ -811,9 +1034,49 @@ class Cycle(PairedReview, FinalReview):
         self.check_protected(current)
         self.record_correction(data, current)
 
+    def brief_prompt_remedy(self):
+        return focus_brief.prompt_remedy(self.retry_command(), (self.state.get("review_run") or {}).get("id"))
+
+    def brief_unused(self):
+        """No work, conversation, or pending invocation of this stage received the brief."""
+        state = self.state
+        if any(state.get(key) for key in ("code_started", "pair_review", "pair_completed", "pair_handoff", "final_review")):
+            return False
+        if any(state["sessions"].get(role) for role in focus_brief.SESSION_ROLES):
+            return False
+        pending = state.get("pending")
+        if pending and pending["role"] not in ("coordinate", "heal"):
+            return False
+        return "project_brief" not in state or focus_brief.valid_record(state["project_brief"], state["iteration"])
+
+    def apply_brief(self, brief):
+        """Accept a captured default for the stopped current stage. No provider starts."""
+        state = self.state
+        current = self.snapshot()
+        if current["head"] != state["baseline"]["head"]:
+            raise Blocked("correction-head", "HEAD changed after this review target started." if state.get("review_run") else
+                          "HEAD changed after this stage started. Reconcile the publication first.")
+        self.check_protected(current)
+        record = {"iteration": state["iteration"], "sha256": brief}
+        # After this point, an error can follow a committed save. The CLI then reads the saved state.
+        self.brief_save_started = True
+        if self.brief_unused():
+            # A saved blocker stays. The retry command follows.
+            state["project_brief"] = record
+            self.save()
+            return "direct update"
+        candidate = copy.deepcopy(state)
+        candidate["project_brief"] = record
+        self.record_correction(BRIEF_CHANGE_CORRECTION.encode("utf-8"), current, candidate=candidate,
+                               metadata={"brief_change": {"sha256": brief, "previous": state.get("project_brief")}},
+                               resume_phase="code" if state["phase"] == "code" else "pair_a")
+        return "correction"
+
     def record_correction(self, data, current, *, candidate=None, metadata=None, validate=None, resume_phase="code"):
         """Persist an already-validated operator transition; never a provider action."""
         state = self.state
+        if state.get("review_run"):
+            resume_phase = "pair_a"
         if resume_phase not in ("code", "opus", "pair_a"):
             raise ValueError("An operator correction must resume coding or first review.")
         if not data.strip() or len(data) > 65536 or b"\0" in data:
@@ -831,7 +1094,12 @@ class Cycle(PairedReview, FinalReview):
         corrections.append({"id": correction_id, "iteration": state["iteration"],
                             "path": path, "sha256": digest(data), "archive": archive,
                             "archive_sha256": digest(archive_bytes), "before_code": not state.get("code_started", False)})
-        if resume_phase in ("opus", "pair_a"):
+        brief = bool((metadata or {}).get("brief_change"))
+        if brief:
+            # The contexts deliver this entry only as the fixed brief notice.
+            corrections[-1]["brief_change"] = True
+        if (resume_phase in ("opus", "pair_a") and not state.get("review_run")
+                and not (metadata or {}).get("publication_selection") and not brief):
             corrections[-1]["publication_recovery"] = True
         if validate:
             validate()
@@ -840,15 +1108,19 @@ class Cycle(PairedReview, FinalReview):
             if candidate is not None:
                 state.clear()
                 state.update(candidate)
-            self.reset_reviews("Оператор согласовал область публикации" if resume_phase in ("opus", "pair_a") else "Оператор изменил требования")
-            if not state.get("code_started"):
+            self.reset_reviews("Оператор изменил бриф проекта" if brief else
+                               "Оператор согласовал область публикации" if resume_phase in ("opus", "pair_a") else "Оператор изменил требования")
+            if not state.get("code_started") and not state.get("review_run"):
                 # A coordinator's provisional label must not pin the old plan's
                 # stage before the operator's updated instructions are read.
                 state["task"] = None
             state.update(phase=resume_phase, status="paused", pending=None, blocker=None,
                          healed=[], recovery_unverified=False, coordination=None,
                          corrections=corrections, correction_revision=correction_id,
-                         correction_pending=correction_id if state.get("code_started") and resume_phase == "code" else None, last_snapshot=current)
+                         # A brief change adds no work. It keeps the guard of an earlier correction.
+                         correction_pending=(state.get("correction_pending") if brief else
+                                             correction_id if state.get("code_started") and resume_phase == "code" else None),
+                         last_snapshot=current)
             self.save()
         except BaseException:
             # The CLI may save an interrupted status while handling this error.
@@ -861,7 +1133,8 @@ class Cycle(PairedReview, FinalReview):
                         "Paused before stage selection from the current plan; any unpublished work requires coding and all required reviews.")
         print(f"cc-focus: correction {correction_id[:12]} saved for iteration {state['iteration']}. "
               + continuation + " Sessions and work preserved.", flush=True)
-        print("Run cc-focus to apply the correction and continue. No model was started.", flush=True)
+        resume = "cc-focus review --resume " + state["review_run"]["id"] if state.get("review_run") else "cc-focus"
+        print(f"Run {resume} to apply the correction and continue. The command started no model.", flush=True)
 
     def recover_review(self, source):
         """Operator-selected recovery of a completed, unpublished coding result."""
@@ -934,14 +1207,14 @@ class Cycle(PairedReview, FinalReview):
             counts = ", ".join(f"{name} clean={self.state[name + '_clean']}/{review_target(self.state, name)}" for name in REVIEW_ROLES)
             self.progress.note(f"Review complete: {counts}; next={self.state['phase']}")
 
-    def remote_head(self, remote):
+    def remote_head(self, remote, repo=None):
         def progress(attempt, attempts):
             if self.progress:
                 self.progress.runtime("git")
                 self.progress.note(f"Checking remote main at the push URL ({attempt}/{attempts}); no model is running.")
             self.heartbeat()
         try:
-            return self.repo.remote_head(remote, progress=progress)
+            return (repo or self.repo).remote_head(remote, progress=progress)
         finally:
             if self.progress:
                 self.progress.finish()
@@ -965,12 +1238,19 @@ class Cycle(PairedReview, FinalReview):
         if self.state.get("publication_push_url", push_url) != push_url:
             raise Blocked("remote-changed", "The publication push URL changed since preparation.")
         self.state["publication_push_url"] = push_url
-        remote_head = self.remote_head(remote)
-        known_heads = {self.state["baseline"]["head"], current["head"]}
-        if self.state.get("published"):
-            known_heads.add(self.state["published"]["sha"])
-        if remote_head not in known_heads:
-            raise Blocked("remote-drift", "Remote main differs from the stage baseline; reconcile it without force or discarding WIP.")
+        if self.state.get("parallel_member"):
+            # The preparation rule: other writers can push, but remote main must contain the base.
+            import focus_parallel
+            if not focus_parallel.contains(self, self.repo, remote, self.state["baseline"]["head"]):
+                raise focus_parallel.rewritten(getattr(self, "name", self.repo.root.name),
+                                               self.state["baseline"]["head"], self.retry_command())
+        else:
+            remote_head = self.remote_head(remote)
+            known_heads = {self.state["baseline"]["head"], current["head"]}
+            if self.state.get("published"):
+                known_heads.add(self.state["published"]["sha"])
+            if remote_head not in known_heads:
+                raise Blocked("remote-drift", "Remote main differs from the stage baseline; reconcile it without force or discarding WIP.")
         policy = self.policy("check-publish", "--branch", "main", "--remote", remote)
         if policy.returncode:
             raise Blocked("publish-policy", policy.stderr.decode("utf-8", errors="replace")[-3000:])
@@ -981,6 +1261,9 @@ class Cycle(PairedReview, FinalReview):
         return True
 
     def publication_paths(self):
+        if self.state.get("publication_scope"):
+            # An explicit selection is an upper bound, never a union with WIP.
+            return list(self.state["publication_scope"]["paths"])
         paths = set(self.state.get("publication_paths", [])) | set(self.changes(self.state["baseline"], self.state["reviewed"]))
         published = self.state.get("published")
         if not self.state.get("publication_paths") and published and isinstance(self.state["baseline"]["head"], str):
@@ -1014,7 +1297,11 @@ class Cycle(PairedReview, FinalReview):
         if not self.validate_publication_commit():
             return False
         current = self.snapshot()
-        if self.remote_head(self.state["remote"]) != current["head"]:
+        if self.state.get("parallel_member"):
+            import focus_parallel
+            if not focus_parallel.contains(self, self.repo, self.state["remote"], current["head"]):
+                return False
+        elif self.remote_head(self.state["remote"]) != current["head"]:
             return False
         self.state["published"] = {"sha": current["head"], "at": time.time(), "remote": self.state["remote"]}
         self.state.update(phase="ci", pending=None, coordinated=None, last_snapshot=current, recovery_unverified=False)
@@ -1069,9 +1356,15 @@ class Cycle(PairedReview, FinalReview):
             state["blocker"] = {"code": error.code, "message": str(error), "signature": signature,
                                 "phase": state["phase"], "status": "healing", "at": time.time()}
             reason = ("provider-refusal" if error.code == "claude-refusal" else
+                      "brief-input" if error.code in BRIEF_BLOCKERS else
+                      "runtime-version" if error.code in RUNTIME_VERSION_BLOCKERS else
+                      "operator-context" if error.code in OPERATOR_CONTEXT_BLOCKERS else
                       "manual-action" if error.code in MANUAL_BLOCKERS else
                       "unsafe-provider" if error.code in UNSAFE_PROVIDER_BLOCKERS else
                       "provider-unavailable" if error.code in PROVIDER_UNAVAILABLE_BLOCKERS else
+                      # No provider work remains after a completed stage. The healer result
+                      # would also be checked against the finished stage, not against main.
+                      "stage-boundary" if self.stage_completed() else
                       "verification-failed" if state.get("recovery_unverified") else
                       "repeated-blocker" if signature in state["healed"] else None)
             if reason:
@@ -1088,6 +1381,22 @@ class Cycle(PairedReview, FinalReview):
             print("cc-focus: routing blocker to the separate Astra/xhigh recovery agent; no operator action needed yet.", flush=True)
 
     def heal(self):
+        blocker = self.state["blocker"]
+        signature, caught = blocker.get("signature"), self.state.get("caught_up", [])
+        # A role reports a blocker when its work needs commits of other writers. The runtime first brings
+        # remote main into the parallel members and runs the step again. Each blocker gets one catch-up,
+        # and a stage gets at most CATCH_UPS. After that, the recovery agent starts.
+        if (blocker.get("code") == "reported-blocker" and signature and signature not in caught and len(caught) < CATCH_UPS
+                and blocker.get("phase") and blocker["phase"] not in ("publish", "ci") and not self.state.get("published")):
+            self.state["caught_up"] = [*caught, signature]
+            moved = self.catch_up_parallel()
+            self.save()
+            if moved:
+                # The same blocker can come again. It then gets the recovery agent, not a repeated-blocker stop.
+                self.state["healed"] = [item for item in self.state["healed"] if item != signature]
+                self.state.update(phase=blocker["phase"], coordinated=None, blocker=None, status="ready")
+                self.save()
+                return
         paired = self.state.get("pair_review")
         saved_test = self.saved_repair_test(paired)
         saved_execution = self.saved_pair_execution(paired)
@@ -1211,6 +1520,10 @@ class Cycle(PairedReview, FinalReview):
             self.save()
             print(f"cc-focus: Archived {len(receipts)} legacy review snapshots; original manifests and review evidence preserved.", flush=True)
 
+    def retry_command(self):
+        return ("cc-focus review --resume " + self.state["review_run"]["id"] + " --retry"
+                if self.state.get("review_run") else "cc-focus --retry")
+
     def run(self):
         storage_checked = False
         while self.state["status"] != "complete":
@@ -1228,7 +1541,7 @@ class Cycle(PairedReview, FinalReview):
                 if reason:
                     print("cc-focus: " + reason, flush=True)
                 print(terminal_text("cc-focus: blocked: " + blocker.get("resolution", blocker["message"])), flush=True)
-                print("Resolve the problem, then run cc-focus --retry. Work and sessions are preserved.", flush=True)
+                print("Resolve the problem, then run " + self.retry_command() + ". Work and sessions are preserved.", flush=True)
                 if self.state["phase"] == "code" and self.state.get("code_started"):
                     print((
                         'If coding completed but its report was rejected: cc-focus recover --review-from '
@@ -1259,6 +1572,7 @@ class Cycle(PairedReview, FinalReview):
                 # A saved provider wait also holds a healer that hit a server error.
                 if self.wait_quota() or self.wait_transient():
                     continue
+                self.resume_catch_ups()  # A move that an interruption left open completes before any other step.
                 if blocker:
                     self.heal()
                     continue
@@ -1266,8 +1580,11 @@ class Cycle(PairedReview, FinalReview):
                     if self.progress:
                         self.progress.role = None
                         self.progress.note("Waiting for CI on the published commit; no model is running.")
-                    self.wait_ci()
-                    self.next_stage()
+                    if not self.stage_completed():
+                        self.wait_ci()
+                    if self.next_stage() is False:
+                        print("cc-focus: current stage published. CI gate passed. Paused before the next stage. Use /resume or run cc-focus to continue.", flush=True)
+                        return 0
                     continue
                 pending = self.state["pending"]
                 if not pending and phase in (*REVIEW_ROLES, *PAIRS, "publish"):
@@ -1321,7 +1638,7 @@ class Cycle(PairedReview, FinalReview):
                         # handle_block stops the run for the operator. It starts no healer.
                         error = Blocked(error.code, str(error) +
                                         f" The runtime used all {len(PROVIDER_RETRY_DELAYS)} automatic retries. "
-                                        + transient_exhausted())
+                                        + transient_exhausted(retry=self.retry_command()))
                     except Blocked as guard_error:
                         error = guard_error
                 if self.messages.unresolved(self.state["iteration"]) and self.state.get("pending"):
@@ -1331,40 +1648,190 @@ class Cycle(PairedReview, FinalReview):
                         raise
                     raise MessagePending(f"{error.code}: {error}. The original invocation and operator messages were preserved; inspect delivery before resuming.") from error
                 self.handle_block(error)
-                if self.control and self.control.request():
+                # An escalated blocker needs no pause: the next pass reports it and returns 3.
+                if self.control and self.control.request() and self.state["blocker"]["status"] == "healing":
                     self.state["status"] = "paused"
                     self.save()
                     print("cc-focus: stopped at a preserved blocker; recovery will run only after continuation.", flush=True)
                     return 0
+        with stage_stop_lock(self.store):
+            request = stage_stop_request(self.store, self.state)
+            if request:
+                self.store.artifact("finish-stage.json", encode(dict(request, enabled=False)))
         print("cc-focus: stage source complete.", flush=True)
         return 0
 
+    def stage_completed(self):
+        completed = self.state.get("stage_completed") or {}
+        return (self.state["phase"] == "ci" and completed.get("iteration") == self.state["iteration"]
+                and completed.get("sha") == (self.state.get("published") or {}).get("sha"))
+
     def next_stage(self):
-        self.assert_publication_current()
+        if self.stage_completed():
+            self.assert_stage_base()
+        else:
+            self.assert_publication_current()
+        self.sync_parallel(self.retry_command())
+        baseline = self.snapshot()
+        protected = self.repo.dirty_paths()
+        protected_index = self.repo.index_entries(protected)
+        # The command and this boundary share a lock. An accepted request cannot
+        # arrive between the last check and the durable iteration change.
+        with stage_stop_lock(self.store):
+            if not self.stage_completed() and stage_stop_request(self.store, self.state):
+                self.state.update(status="paused", stage_completed={"iteration": self.state["iteration"],
+                                  "sha": self.state["published"]["sha"], "at": time.time()})
+                self.store.save(self.state)
+                return False
+            self.advance_stage(baseline, protected, protected_index)
+        if self.progress and self.progress.on_update:
+            self.progress.on_update()
+        return True
+
+    def assert_stage_base(self):
+        """Check a completed stage after its pause. Pushed commits on top of it are operator work."""
+        self.repo.assert_main()
+        published = self.state["published"]
+        self.check_stage_base(self.repo, published["sha"], published["remote"])
+        self.check_stage_dirty()
+
+    def check_stage_base(self, repo, sha, remote, label="", parallel=False):
+        head = repo.text("rev-parse", "HEAD")
+        if repo.git("merge-base", "--is-ancestor", sha, head, check=False).returncode:
+            raise Blocked("stage-base-drift", f"{label}Main no longer contains commit {sha[:12]} of the stage boundary. "
+                          f"Restore that history on main. Then run {self.retry_command()}.")
+        if parallel:
+            # Other writers push to a parallel member. The sync at the stage start takes their commits.
+            import focus_parallel
+            focus_parallel.check_boundary(self, repo, remote, sha, head, label.rstrip(": ") or repo.root.name, self.retry_command())
+        elif self.remote_head(remote, repo) != head:
+            raise Blocked("stage-base-unpublished", f"{label}Local main and remote main differ at the stage boundary. "
+                          f"Make local main equal to remote main. Then run {self.retry_command()}.")
+
+    def assert_checkpoint_base(self, snapshot):
+        """Check a saved development boundary. Pushed commits on top of it are operator work."""
+        self.repo.assert_main()
+        for name, repo in getattr(self.repo, "repositories", {"": self.repo}).items():
+            head = snapshot["head"][name] if name else snapshot["head"]
+            self.check_stage_base(repo, head, repo.remote(), name + ": " if name else "",
+                                  parallel=name in self.state.get("parallel", []))
+        self.check_stage_dirty()
+
+    def check_stage_dirty(self):
+        # Protected work stays with the operator. The next stage protects every uncommitted path again.
+        outside = sorted(set(self.repo.dirty_paths()) - set(self.state["protected"]))
+        if outside:
+            detail = ", ".join(outside[:12]) + (f", and {len(outside) - 12} more" if len(outside) > 12 else "")
+            raise Blocked("stage-base-dirty", "Uncommitted changes outside protected work at the stage boundary: "
+                          f"{detail}. Make the checkout clean outside protected work. Then run {self.retry_command()}.")
+
+    def advance_stage(self, baseline, protected, protected_index):
+        """Advance under stage-stop.lock. Do not call UI callbacks while holding it."""
+        # A failed read leaves the earlier stage and its sessions intact.
+        brief = focus_brief.capture(self.repo.root, focus_brief.start_remedy(self.retry_command()))
         self.store.artifact(f"iterations/{self.state['iteration']:06d}.json", encode(self.state))
+        # Coordination and coding read this fact. The plan can still show the published stage as open.
+        self.state["previous_stage"] = stage_record(self.state)
+        # Each stage starts new role conversations. The plan, handoffs and files carry the context,
+        # so a conversation never resends the history of earlier stages.
+        self.store.artifact(f"sessions/generation-{self.state['session_generation']:06d}.json", encode(self.state["sessions"]))
+        self.state.update(sessions={}, session_generation=self.state["session_generation"] + 1)
         self.state.update(iteration=self.state["iteration"] + 1, phase="code", status="ready",
-                          baseline=self.snapshot(), protected=self.repo.dirty_paths(),
-                          protected_index=self.repo.index_entries(self.repo.dirty_paths()),
+                          project_brief={"iteration": self.state["iteration"] + 1, "sha256": brief},
+                          baseline=baseline, protected=protected, protected_index=protected_index,
                           code_report="", reviewed=None, published=None, pending=None,
                           sol_passes=0, opus_clean=0, sol_clean=0, claude_clean=0, astra_clean=0, opus_final_clean=0, final_review=None, coordinated=None,
-                          last_snapshot=self.snapshot(), code_started=False, healed=[], recovery_unverified=False,
+                          last_snapshot=baseline, code_started=False, healed=[], recovery_unverified=False,
                           corrections=[], correction_revision=None, correction_pending=None, coordination=None,
                           publication_started=False)
-        for key in ("pair_review", "pair_clean", "pair_completed", "pair_return", "pair_b_substantial", "pair_return_changed", "pair_carry", "pair_handoff", "pair_instructions", "pair_round"):
+        self.state.pop("stage_completed", None)
+        for key in ("pair_review", "pair_clean", "pair_completed", "pair_return", "pair_b_substantial", "pair_return_changed", "pair_carry", "pair_handoff", "pair_decisions", "pair_instructions", "pair_round", "pair_full_runs", "refused_sessions", "caught_up"):
             self.state.pop(key, None)
         self.state.pop("publication_prepared", None)
         self.state.pop("publication_push_url", None)
         self.state.pop("publication_paths", None)
+        self.state.pop("publication_scope", None)
+        self.state.pop("task_source", None)
         self.state.pop("publication_review_profile", None)
         self.state.update(review_plan=[], review_substantial=False, review_targets=dict(REVIEW_TARGETS),
                           task=None, display_reviews=new_reviews(), display_review_events=[], display_ci=None)
         if self.state["baseline"].get("repositories"):
-            for key in ("publication_targets", "publication_repositories", "remote"):
+            # state["resolver_cleanup"] stays: a worktree that the runtime could not remove waits for a later removal.
+            for key in ("publication_targets", "publication_repositories", "remote", "parallel_integrations",
+                        "publication_resolutions"):
                 self.state.pop(key, None)
+            from focus_project import parallel_config
+            config = getattr(self, "stage_parallel", None)  # sync_parallel read the manifest for this stage.
+            parallel, resolvers = config if config is not None else parallel_config(self.repo.root)
+            self.state.update(parallel=parallel, resolvers=resolvers)
+            self.stage_parallel = None
+        self.prepare_next_stage()
+        self.store.save(self.state)
+
+    def prepare_next_stage(self):
+        """Allow a campaign to select its next target before the atomic state save."""
+
+    def sync_parallel(self, retry):
+        """A single repository has no parallel members."""
+        return {}
+
+    def catch_up_parallel(self):
+        """A single repository has no parallel members."""
+        return {}
+
+    def resume_catch_ups(self):
+        """A single repository has no parallel members."""
+
+    def later_ci(self, host, repository, sha):
+        """A parallel member: the green, complete CI result of a later remote main that contains SHA, or None.
+
+        Another writer can fix a failure on remote main. The record names that commit and the stage
+        paths that changed after SHA, because the later commit can also change the stage work.
+        """
+        import focus_parallel
+        published = self.state["published"]
+        started = self.progress.started if self.progress else None
+        later = focus_parallel.fetch(self, self.repo, published["remote"])
+        if self.progress:
+            # The fetch ends its own progress operation. The CI wait keeps its total time.
+            self.progress.runtime("ci")
+            self.progress.started = started
+        self.later_state = None
+        if later == sha or not focus_parallel.ancestor(self.repo, sha, later):
+            return None
+        names = {os.fsdecode(name) for name in self.repo.git("ls-tree", "-r", "--name-only", "-z", later).stdout.split(b"\0") if name}
+        workflows = any(name.startswith(".github/workflows/") and name.endswith((".yml", ".yaml")) for name in names)
+        records = self.gh_records(host, repository, later)
+        gate = self.ci_gate(later, records, time.time() - published["at"], artifact="ci/later-checks.json")
+        latest = {}
+        for record in records:
+            key = record.get("source", "check") + ":" + record["name"]
+            if record["head_sha"] == later and record["run_id"] > latest.get(key, {}).get("run_id", -1):
+                latest[key] = record
+        complete = bool(latest) and all(c["status"] == "completed" for c in latest.values())
+        if workflows and not any(c.get("source") == "workflow" for c in latest.values()):
+            complete = False
+        green = complete and all(c["conclusion"] in ("success", "neutral", "skipped") for c in latest.values())
+        ready = gate["verdict"] in ("ready", "no-required-checks")
+        self.later_state = (later, "red" if complete and not green else "not complete" if not green
+                            else "green" if ready else f"green, but the CI gate gave {gate['verdict']}")
+        if not green or not ready:
+            return None
+        return {"sha": later, "checks": list(latest), "fingerprint": digest(encode({"sha": later, "checks": latest}))}
+
+    def accept_later_ci(self, sha, later):
+        paths = self.state.get("publication_paths") or []
+        changed = sorted({os.fsdecode(name) for name in self.repo.git(
+            "--literal-pathspecs", "diff", "--name-only", "-z", "--no-renames", sha, later["sha"], "--", *paths
+        ).stdout.split(b"\0") if name}) if paths else []
+        self.store.artifact("ci/result.json", encode({"sha": sha, "verdict": "ready", "accepted_commit": later["sha"],
+                                                      "changed_stage_paths": changed, "checks": later["checks"]}))
+        self.state["display_ci"] = {"sha": sha, "status": "ready", "total": len(later["checks"]), "passed": len(later["checks"]),
+                                    "accepted_commit": later["sha"], "changed_stage_paths": changed}
         self.save()
 
-    def ci_gate(self, sha, records, elapsed):
-        checks = self.store.artifact("ci/checks.json", encode(records))
+    def ci_gate(self, sha, records, elapsed, artifact="ci/checks.json"):
+        checks = self.store.artifact(artifact, encode(records))
         response = self.policy("check-gate", "--sha", sha, "--checks-from", checks,
                                "--elapsed-sec", str(int(elapsed)), "--deadline-sec", "1800",
                                "--backoff-sec", "30", "--json")
@@ -1414,8 +1881,13 @@ class Cycle(PairedReview, FinalReview):
         published = self.state["published"]
         current = self.snapshot()
         self.check_protected(current)
-        if (current["head"] != published["sha"] or self.changes(self.state["reviewed"], current)
-                or self.remote_head(published["remote"]) != published["sha"]):
+        if current["head"] != published["sha"] or self.changes(self.state["reviewed"], current):
+            raise Blocked("ci-head-drift", "Local/remote main or reviewed content changed during the publication window.")
+        if self.state.get("parallel_member"):
+            import focus_parallel
+            if not focus_parallel.contains(self, self.repo, published["remote"], published["sha"]):
+                raise focus_parallel.rewritten(getattr(self, "name", self.repo.root.name), published["sha"], self.retry_command())
+        elif self.remote_head(published["remote"]) != published["sha"]:
             raise Blocked("ci-head-drift", "Local/remote main or reviewed content changed during the publication window.")
 
     def wait_ci(self):
@@ -1442,7 +1914,7 @@ class Cycle(PairedReview, FinalReview):
         host, repo = self.github(published["remote"])
         # Authentication is read-only; never change credentials to unblock a run.
         command(["gh", "auth", "status", "--hostname", host], self.repo.root)
-        previous_green = None
+        previous_green = later_green = self.later_state = None
         while True:
             self.heartbeat()
             elapsed = time.time() - published["at"]
@@ -1461,20 +1933,42 @@ class Cycle(PairedReview, FinalReview):
             self.state["display_ci"] = {"sha": sha, "status": "waiting", "total": len(latest),
                                         "passed": sum(c["status"] == "completed" and c["conclusion"] in ("success", "neutral", "skipped") for c in latest.values())}
             self.save()
-            if red or gate["verdict"] in ("failed", "timeout"):
-                raise Blocked("ci-failed", f"CI is not green at {sha}: {', '.join(red)}; {gate['verdict']}")
-            fingerprint = digest(encode(latest))
-            if terminal and gate["verdict"] in ("ready", "no-required-checks"):
-                if previous_green == fingerprint:
-                    self.store.artifact("ci/result.json", encode({"sha": sha, "verdict": "ready", "checks": list(latest)}))
-                    self.state["display_ci"]["status"] = "ready"
-                    self.save()
+            if not latest and self.state.get("parallel_member"):
+                # Another writer can merge the stage commit into remote main. Then the commit can have no CI.
+                # This branch comes first, because a policy with required checks gives timeout at the deadline.
+                if elapsed >= 1800:
+                    seen = getattr(self, "later_state", None)
+                    raise Blocked("ci-timeout", f"Configured CI did not produce a complete green result at {sha} within 30 minutes."
+                                  + (f" Remote main {seen[0][:12]} contains this commit. Its last CI result was {seen[1]}." if seen else ""))
+                later = self.later_ci(host, repo, sha)
+                if later and later_green == later["fingerprint"]:
+                    self.accept_later_ci(sha, later)
                     return
-                previous_green = fingerprint
+                later_green = later["fingerprint"] if later else None
+            elif red or gate["verdict"] in ("failed", "timeout"):
+                later = (self.later_ci(host, repo, sha)
+                         if self.state.get("parallel_member") and elapsed < 1800 else None)  # Also this wait has the deadline.
+                if not later:
+                    raise Blocked("ci-failed", f"CI is not green at {sha}: {', '.join(red)}; {gate['verdict']}")
+                # A later commit of a parallel member also needs the same green result in two polls.
+                if later_green == later["fingerprint"]:
+                    self.accept_later_ci(sha, later)
+                    return
+                later_green = later["fingerprint"]
             else:
-                previous_green = None
-            if elapsed >= 1800 and not (terminal and gate["verdict"] in ("ready", "no-required-checks")):
-                raise Blocked("ci-timeout", f"Configured CI did not produce a complete green result at {sha} within 30 minutes.")
+                later_green = None
+                fingerprint = digest(encode(latest))
+                if terminal and gate["verdict"] in ("ready", "no-required-checks"):
+                    if previous_green == fingerprint:
+                        self.store.artifact("ci/result.json", encode({"sha": sha, "verdict": "ready", "checks": list(latest)}))
+                        self.state["display_ci"]["status"] = "ready"
+                        self.save()
+                        return
+                    previous_green = fingerprint
+                else:
+                    previous_green = None
+                if elapsed >= 1800 and not (terminal and gate["verdict"] in ("ready", "no-required-checks")):
+                    raise Blocked("ci-timeout", f"Configured CI did not produce a complete green result at {sha} within 30 minutes.")
             print(f"cc-focus: waiting for CI at {sha[:12]} ({int(elapsed)}s); no model is running.", flush=True)
             if self.control:
                 deadline = time.monotonic() + 30

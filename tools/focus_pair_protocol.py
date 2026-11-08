@@ -24,11 +24,13 @@ COMPLEXITY = object_schema({"assignment_sha256": TEXT, "effort": EFFORT, "reason
         "source_id": TEXT, "effort": EFFORT, "reason": TEXT})}})
 REPAIR = object_schema({
     "mode": {"type": "string", "enum": ["self", "pair"]}, "reason": TEXT,
-    "risks": {"type": "array", "uniqueItems": True, "items": {"type": "string", "enum": [
+    "risks": {"type": "array", "items": {"type": "string", "enum": [
         "contracts", "storage", "security", "concurrency", "cross_component", "algorithm", "uncertainty"]}},
     "tests": object_schema({"status": {"type": "string", "enum": ["deferred", "passed", "not_needed", "failed", "infrastructure"]},
         "reason": TEXT, "evidence": {"type": "array", "items": TEXT},
         "failures": {"type": "array", "items": ISSUE}})})
+# A final-pair inspector requests the optional full run before publication.
+FINAL_GATE = object_schema({"full_run": {"type": "boolean"}, "reason": TEXT})
 EVIDENCE_DELTA = object_schema({"before": TEXT, "after": TEXT,
     "files": {"type": "array", "minItems": 1, "items": object_schema({"path": TEXT,
         "verdict": {"type": "string", "enum": ["evidence_only", "behavioral", "uncertain"]},
@@ -39,6 +41,8 @@ def extend_schema(schema, role):
     extra = {}
     if role in PAIR_SCANNERS:
         extra = {"findings": {"type": "array", "items": ISSUE}}
+        if role in PAIRS["final"]:
+            extra["final_gate"] = FINAL_GATE
     elif role == "pair_complexity":
         extra = {"complexity": COMPLEXITY}
     elif role == "repair_evidence":
@@ -62,6 +66,8 @@ def extend_schema(schema, role):
 def validate_report(report, role):
     schema = extend_schema({"properties": {}, "required": []}, role)
     for key, child in schema["properties"].items():
+        if key == "final_gate" and key not in report:
+            continue  # A report saved before this field requests no final gate.
         validate_shape(report[key], child)
     if role in PAIR_READONLY and (report["substantial"] or any(report[k] for k in
             ("implementation_fixes", "other_fixes", "minor_edits"))):
@@ -82,8 +88,8 @@ def validate_report(report, role):
         if report["consensus"] is not None and (report["assessments"] or report["new_findings"]):
             raise ValueError("endorsement cannot also propose changes. "
                              "To disagree, set consensus to null and assess every supplied source_id.")
-        if role == "pair_arbiter" and (report["consensus"] is not None or report["new_findings"]):
-            raise ValueError("arbiter must decide the complete supplied registry")
+        if role == "pair_arbiter" and report["consensus"] is not None:
+            raise ValueError("The arbiter cannot endorse a proposal. Set consensus to null and decide every supplied source_id.")
     if role == "repair_execute":
         repair = report["repair"]
         if repair["risks"] and repair["mode"] != "pair":
@@ -100,7 +106,7 @@ def validate_report(report, role):
             raise ValueError("test completion requires actual evidence or a justified applicability assessment")
 
 
-def validate_decisions(issues, decisions, phase):
+def validate_decisions(issues, decisions, phase, full_run_used=False):
     by_id = {row["source_id"]: row for row in decisions}
     if set(by_id) != {row["source_id"] for row in issues} or len(by_id) != len(decisions):
         raise Blocked("pair-coverage", "Every finding requires exactly one disposition; no omission is accepted.")
@@ -117,12 +123,16 @@ def validate_decisions(issues, decisions, phase):
         if row["action"] == "duplicate" and significant(row) and not significant(by_id[row["duplicate_of"]]):
             raise Blocked("pair-decision", "A significant duplicate must retain significance in its canonical finding.")
         if row["full_suite"] and (phase != "pair_b" or row["action"] not in ("fix", "verify")):
-            raise Blocked("pair-verification", "Broad verification requires an actionable, justified late-pair assignment.")
+            raise Blocked("pair-verification", "Only a Pair B fix or verify assignment can set full_suite=true. Set full_suite to false.")
+        if row["full_suite"] and full_run_used:
+            raise Blocked("pair-verification", "Pair B already used its one full run for this stage. Set full_suite to false. Assign targeted checks.")
     return decisions
 
 
 # Older runtimes stored this correction text. It asked readers to name the impact in consensus.
 LEGACY_CONSENSUS_ERROR = "Endorsement must name the exact candidate proposal and its impact."
+# Older runtimes refused every new arbiter finding with this parser error. The registry now takes them.
+LEGACY_ARBITER_ERROR = "Provider final report is invalid: arbiter must decide the complete supplied registry"
 
 
 def consensus_error(proposal_hash, impact):

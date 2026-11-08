@@ -12,6 +12,13 @@ root-config.md содержит комментарии со всеми ключ�
 (ORCHESTRA_*, CODEX_HOME, CC_PROCESSKIT_*, ORCHESTRA_REGISTRY_PATH и launcher
 timeouts) из project config игнорируются.
 
+`cc-config` creates a missing `.work/config.md` with no active settings. Every
+project-scoped key is present as a commented example followed by `Root config`,
+`Default`, `Values`, and `Effect` help. It then opens the file synchronously in the
+executable named by `VISUAL`, then `EDITOR`; if neither resolves, it discovers a
+console editor. These standard process variables select the editor only and are not
+Orchestra configuration values.
+
 ## Основные root keys
 
 | Ключ | Значения / default | Эффект |

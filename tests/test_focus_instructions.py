@@ -10,8 +10,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / 'tools'))
-from check_focus_instructions import audit, sentences, word_count
-from cycle_prompts import COMMAND_EXECUTION_CONTRACT, CONTRACT, PAIR_CONTRACT, PROFILES, WRITING_CONTRACT, role_contract
+from check_focus_instructions import audit, prose, sentences, word_count
+from cycle_prompts import (COMMAND_EXECUTION_CONTRACT, CONTRACT, PAIR_CONTRACT, PARALLEL_REPOSITORIES_RULE, PROFILES,
+                           PROJECT_INSTRUCTIONS_RULE, WRITING_CONTRACT, role_contract)
 from focus_pair_jobs import same_pair_prompt
 
 
@@ -43,6 +44,12 @@ class InstructionTests(unittest.TestCase):
         self.assertGreater(result['sentences'], 500)
         self.assertFalse(result['certification'])
         self.assertEqual(result['findings'], [])
+
+    def test_the_checker_scans_the_project_instructions_rule(self):
+        self.assertIn(PROJECT_INSTRUCTIONS_RULE.strip(), {text for _, text in prose(ROOT)})
+
+    def test_the_checker_scans_the_parallel_repositories_rule(self):
+        self.assertIn(PARALLEL_REPOSITORIES_RULE.strip(), {text for _, text in prose(ROOT)})
 
     def test_word_counter_keeps_machine_literals_and_does_not_split_paths(self):
         parts = list(sentences('Use `git diff --check`. Read .work/cycle/state.json. Keep (the old version) unchanged.'))
@@ -85,11 +92,27 @@ class InstructionTests(unittest.TestCase):
         self.assertNotIn('Use only focus_inspect', code)
         self.assertNotIn('action=verify', code)
         self.assertIn('New implementation can be substantial with zero implementation_fixes.', code)
-        self.assertIn('Full suites require an explicit late-pair assignment', code)
+        self.assertIn('Do not start a full run in the code role.', code)
+        self.assertNotIn('Full suites require an explicit late-pair assignment', code)
         self.assertIn('Do not skip required checks', code)
         self.assertIn('All required review phases still follow coding.', code)
         for role in ('pair_opus', 'pair_sol', 'repair_execute', 'pair_arbiter'):
             self.assertIn(PAIR_CONTRACT, role_contract(role))
+
+    def test_every_role_receives_the_test_scope_rules(self):
+        for role in PROFILES:
+            with self.subTest(role=role):
+                contract = role_contract(role)
+                self.assertIn('Test scope rules for every cc-focus role:', contract)
+                self.assertIn('Only two cases permit a full run.', contract)
+                self.assertIn('In the report, name each omitted broader check and the reason.', contract)
+        self.assertIn('After the one Pair B full run of a stage, the runtime rejects full_suite assignments.', PAIR_CONTRACT)
+        self.assertIn('State the change type and the risk in the reason of the assignment.', PAIR_CONTRACT)
+        self.assertIn('The first run of the new checks and mutants of a stage is not a full run.', COMMAND_EXECUTION_CONTRACT)
+        self.assertIn('Without full_suite=true, do not request a full run in the check text of an assignment.', COMMAND_EXECUTION_CONTRACT)
+        self.assertIn('Each stage also permits one final gate after the passed final pair, with one full run.', COMMAND_EXECUTION_CONTRACT)
+        self.assertIn('If the changes justify a full run before publication, set final_gate.full_run=true.', PAIR_CONTRACT)
+        self.assertNotIn('Full test suites are optional.', PAIR_CONTRACT)
 
     def test_known_revision_keeps_saved_job_bytes_and_context(self):
         before, after = self.prompts()

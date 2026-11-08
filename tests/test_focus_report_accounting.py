@@ -9,6 +9,7 @@ from unittest.mock import patch
 import test_focus_executor_accounting as accounting_tests
 import test_focus_pair_execution as execution_tests
 import test_focus_pairs as pairs
+import test_focus_repair_evidence as evidence_tests
 import test_focus_repair as repair_tests
 import test_focus_snapshot_archive as archives
 import test_cycle as fixtures
@@ -183,6 +184,104 @@ class SubstantialCorrectionTests(unittest.TestCase):
                 self.assertEqual((self.root / 'source.txt').read_text(), 'cleaned\n')  # Work is kept.
 
 
+class RepairModeTests(unittest.TestCase):
+    """A repair report that lists risks but keeps self mode, in a fix and in the direct final gate."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'until', 'assign', 'writer', 'set_writer', 'step',
+                  'request_final_gate', 'gate_tests'):
+        locals()[_name] = getattr(repair_tests.RepairTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def test_a_fix_with_risks_in_self_mode_gets_one_correction_and_pair_reviews(self):
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer()
+        def risky(c, h):
+            value = execute(c, h)
+            if c['operation'] == 'fix':
+                value['repair'].update(mode='self', risks=['storage'])
+            return value
+        self.transport.handlers['repair_execute'] = risky
+        self.correction_transport(lambda value: dict(value, repair=dict(value['repair'], mode='pair', reason='Storage change')))
+        gate = pair['repair']
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), 1)
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode'])
+        self.assertTrue(self.corrections[0][2]['report_repair']['changed_paths'])
+        self.assertEqual((gate['mode'], gate['step'], gate['clean']), ('pair', 'review', 0))
+
+    def test_a_direct_final_gate_with_a_pair_choice_publishes_without_reviews_or_another_run(self):
+        from focus_pair_repair import TEST_RISKS
+        self.request_final_gate()
+        normal = self.transport.dispatch
+        def dispatch(role, prompt, heartbeat):
+            value = json.loads(normal(role, prompt, heartbeat))
+            if role == 'repair_execute':
+                value['repair'].update(mode='self', risks=['cross_component'])
+            return json.dumps(value)
+        self.transport.dispatch = dispatch
+        self.correction_transport(lambda value: dict(value, repair=dict(value['repair'], mode='pair', reason='Cross-component stage')))
+        self.until(lambda: self.state['phase'] == 'publish')
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual([r for r, c in self.transport.calls], ['pair_final_opus', 'pair_final_fable', 'repair_execute'])
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode'])
+        self.assertTrue(self.gate_tests()[0]['verification'].endswith(TEST_RISKS))
+
+
+class RepairModeEvidenceTests(unittest.TestCase):
+    """A test run that changed a journal, reported zero counters and listed risks in self mode."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'until', 'assign', 'writer', 'set_writer', 'step', 'audit'):
+        locals()[_name] = getattr(evidence_tests.RepairEvidenceTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def journal_test_run(self, correction):
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer()
+        self.test_runs = 0
+        def writer(context, heartbeat):
+            value = execute(context, heartbeat)
+            if context['operation'] == 'fix':
+                (self.root / 'plan.md').write_text('# Plan\n\nImplementation requirements remain unchanged.\n')
+            else:
+                self.test_runs += 1
+                with (self.root / 'plan.md').open('a') as out:
+                    out.write('\n## Completed verification\nTargeted guard test passed.\n')
+                value['minor_edits'] = 0
+                value['repair'].update(mode='self', risks=['cross_component'])
+                for row in value['resolutions']:
+                    row.update(outcome='verified', evidence=['Targeted test verified the earlier fix'])
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.transport.handlers['repair_evidence'] = lambda c, h: self.audit(c)
+        self.correction_transport(correction)
+        gate = pair['repair']
+        self.until(lambda: gate['step'] == 'test')
+        return gate
+
+    def test_counted_journal_changes_reach_the_evidence_audit(self):
+        gate = self.journal_test_run(lambda value: dict(value, minor_edits=1, repair=dict(
+            value['repair'], mode='pair', reason='Cross-component checks')))
+        self.until(lambda: gate['step'] != 'test')
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.test_runs, 1)
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode'])
+        self.assertIn('Also count these changes', self.corrections[0][1])
+        self.assertIn('"changed_paths": ["plan.md"]', self.corrections[0][1])
+
+    def test_uncounted_journal_changes_are_refused_and_not_replayed_after_a_heal(self):
+        gate = self.journal_test_run(lambda value: dict(value, repair=dict(
+            value['repair'], mode='pair', reason='Cross-component checks')))
+        with self.assertRaises(Blocked) as caught:
+            self.until(lambda: gate['step'] != 'test')
+        self.assertEqual(caught.exception.code, 'report-repair-content')
+        self.cycle.handle_block(caught.exception)
+        transport, self.cycle.transport = self.cycle.transport, fixtures.FixtureTransport(self.root, [('heal', report())])
+        self.cycle.heal()
+        self.cycle.transport = transport
+        # The failed correction of changed work is not adopted again. The heal resets the stale pair.
+        self.assertFalse((self.state['pair_review'] or {}).get('repair'))
+        self.assertEqual((self.state['phase'], self.test_runs, len(self.corrections)), ('pair_a', 1, 1))
+
+
 class CorrectedOriginalTests(unittest.TestCase):
     for _name in ('setUp', 'tearDown', 'edit', 'start', 'assign', 'until', 'step', 'resolution', 'result'):
         locals()[_name] = getattr(execution_tests.PairExecutionTests, _name)
@@ -219,6 +318,83 @@ class CorrectedOriginalTests(unittest.TestCase):
         sources = [Path(c[2]['report_repair']['source']).parent.name for c in self.corrections]
         self.assertEqual(len(set(sources)), 2)
 
+
+    def risky_self_test_run(self, correction, copied=None):
+        """A late test run lists a risk but keeps self mode; the checks passed and no file changed."""
+        pair = self.assign('pair_b', 'low', False)
+        gate = pair['repair']
+        self.until(lambda: gate['step'] == 'test')
+        normal = self.transport.dispatch
+        def dispatch(role, prompt, heartbeat):
+            value = json.loads(normal(role, prompt, heartbeat))
+            if role == 'repair_execute' and value['repair']['tests']['status'] != 'deferred':
+                value['repair'].update(mode='self', risks=['cross_component'])
+                value.update(copied or {})
+            return json.dumps(value)
+        self.transport.dispatch = dispatch
+        self.correction_transport(correction)
+        return gate
+
+    def test_risks_in_self_mode_get_one_correction_without_another_test_run(self):
+        for name, choice, mode, step in (('risk removed', dict(risks=[]), 'self', 'complete'),
+                                         ('pair chosen', dict(mode='pair', reason='Cross-component checks'), 'pair', 'review')):
+            with self.subTest(name=name):
+                self.tearDown()
+                self.setUp()
+                gate = self.risky_self_test_run(lambda value: dict(value, repair=dict(value['repair'], **choice)))
+                test_runs = [role for role, _ in self.transport.calls].count('repair_execute')
+                self.until(lambda: gate['step'] != 'test')
+                self.assertIsNone(self.state['blocker'])
+                self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), test_runs + 1)
+                self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode'])
+                prompt = self.corrections[0][1]
+                self.assertIn('lists repair.risks but sets repair.mode=self', prompt)
+                self.assertIn('Do not run tools, tests, builds', prompt)
+                # A pair choice promotes the gate. Independent reviews then precede the checks again.
+                self.assertEqual((gate['mode'], gate['step'], len(gate['tests'])), (mode, step, 1))
+
+    def test_copied_counters_and_risks_in_self_mode_get_one_correction(self):
+        for name, counters, blocked in (('counters reset', 0, None), ('counters kept', 1, 'report-repair-content')):
+            with self.subTest(name=name):
+                self.tearDown()
+                self.setUp()
+                # The unchanged test run also copies a counter of its fix batch.
+                gate = self.risky_self_test_run(lambda value: dict(value, implementation_fixes=counters, repair=dict(
+                    value['repair'], risks=[])), copied=dict(implementation_fixes=1))
+                test_runs = [role for role, _ in self.transport.calls].count('repair_execute')
+                if blocked:
+                    with self.assertRaises(Blocked) as caught:
+                        self.until(lambda: False)
+                    self.assertEqual(caught.exception.code, blocked)
+                    continue
+                self.until(lambda: gate['step'] != 'test')
+                self.assertIsNone(self.state['blocker'])
+                self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), test_runs + 1)
+                self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode'])
+                self.assertIn('Also set all three counters to 0', self.corrections[0][1])
+
+    def test_a_repair_mode_correction_cannot_change_test_results(self):
+        self.risky_self_test_run(lambda value: dict(value, repair=dict(
+            value['repair'], risks=[], tests=dict(value['repair']['tests'], evidence=['Invented check']))))
+        with self.assertRaises(Blocked) as caught:
+            self.until(lambda: False)
+        self.assertEqual(caught.exception.code, 'report-repair-content')
+
+    def test_a_risky_self_test_run_rejected_by_an_older_runtime_is_corrected_after_a_heal(self):
+        gate = self.risky_self_test_run(lambda value: dict(value, repair=dict(value['repair'], risks=[])))
+        with patch('cycle_workflow.repairable_repair_mode', return_value=None):  # Older runtime.
+            with self.assertRaisesRegex(Blocked, 'require pair review') as caught:
+                self.until(lambda: False)
+        test_runs = [role for role, _ in self.transport.calls].count('repair_execute')
+        self.cycle.handle_block(caught.exception)
+        transport, self.cycle.transport = self.cycle.transport, fixtures.FixtureTransport(self.root, [('heal', report())])
+        self.cycle.heal()
+        self.cycle.transport = transport
+        self.until(lambda: gate['step'] != 'test')
+        self.assertIsNone(self.state['blocker'])
+        # The saved test run is corrected in its session. Its successful checks do not run again.
+        self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), test_runs)
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode'])
 
     def test_a_failed_late_pair_correction_is_not_started_again_after_a_heal(self):
         pair = self.assign('pair_b', 'low', False)
@@ -478,6 +654,239 @@ class RecoveryVerificationTests(unittest.TestCase):
         self.assertTrue(self.state['recovery_unverified'])
         self.cycle.handle_block(Blocked('fixture', 'Same failure after recovery'))
         self.assertEqual(self.state['blocker']['escalation_reason'], 'verification-failed')
+
+
+class ReportEnumTests(unittest.TestCase):
+    """A writer report whose only invalid values are outside their allowed values, as a Claude writer can give."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'until', 'assign', 'writer', 'set_writer', 'step'):
+        locals()[_name] = getattr(repair_tests.RepairTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def descriptive_fix(self, correction):
+        """A pair-mode fix that describes its risks in words instead of allowed values."""
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer('pair')
+        def writer(c, h):
+            value = execute(c, h)
+            if c['operation'] == 'fix':
+                value['repair']['risks'] = ['contracts', 'core algorithms', 'uncertainty: new fixtures are uncompiled']
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport(correction)
+        return pair['repair']
+
+    def allowed(self, value):
+        return dict(value, repair=dict(value['repair'], risks=['contracts', 'algorithm', 'uncertainty']))
+
+    def test_the_recognizer_names_only_values_outside_their_allowed_values(self):
+        from cycle_transport import enum_problems, field_name
+        context = {'operation': 'fix', 'assignments': [{'source_id': 'p/pair_sol/f1', 'action': 'fix'}]}
+        value = self.writer(context, 'pair')
+        value['repair']['risks'] = ['contracts', 'core algorithms']
+        value['resolutions'][0]['outcome'] = 'done'
+        found = enum_problems(json.dumps(value), 'repair_execute')
+        self.assertEqual([(field_name(p['path']), p['value']) for p in found[1]],
+                         [('resolutions[0].outcome', 'done'), ('repair.risks[1]', 'core algorithms')])
+        self.assertIn('algorithm', found[1][1]['allowed'])
+        self.assertIsNone(enum_problems(json.dumps(dict(value, summary=' ')), 'repair_execute'))  # Another error.
+        self.assertIsNone(enum_problems(json.dumps(dict(value, status='blocked')), 'repair_execute'))
+        self.assertIsNone(enum_problems(json.dumps(value), 'code'))
+        value['resolutions'][0]['outcome'] = 'fixed'
+        value['repair']['risks'] = ['contracts']
+        self.assertIsNone(enum_problems(json.dumps(value), 'repair_execute'))  # A valid report has no problem.
+        # Mistakes that need another allowed value, a removal, or the other mode are recognized too.
+        selfish = self.writer(context, 'self')
+        for repair in ({'risks': ['none']}, {'risks': ['core algorithms', 'contracts']},
+                       {'mode': 'pair review', 'risks': ['contracts']}):
+            with self.subTest(repair=repair):
+                self.assertIsNotNone(enum_problems(json.dumps(dict(selfish, repair=dict(selfish['repair'], **repair))),
+                                                   'repair_execute'))
+
+    def test_a_fix_with_descriptive_risks_gets_one_value_correction_in_its_session(self):
+        gate = self.descriptive_fix(self.allowed)
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), 1)
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
+        prompt = self.corrections[0][1]
+        self.assertIn('values outside their allowed values', prompt)
+        self.assertIn('"field": "repair.risks[1]"', prompt)
+        self.assertIn('"value": "core algorithms"', prompt)
+        self.assertIn('Do not run tools, tests, builds', prompt)
+        self.assertEqual(gate['step'], 'review')
+        corrected = json.loads(Path(self.state['last']['report']).read_text())
+        self.assertEqual(parse_report(corrected['raw'], 'repair_execute')['repair']['risks'], ['contracts', 'algorithm', 'uncertainty'])
+
+    def test_descriptive_risks_in_self_mode_can_also_change_the_mode(self):
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer('self')
+        def writer(c, h):
+            value = execute(c, h)
+            if c['operation'] == 'fix':
+                value['repair']['risks'] = ['core algorithms']
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport(lambda value: dict(value, repair=dict(
+            value['repair'], risks=['algorithm'], mode='pair', reason='Algorithm change')))
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        prompt = self.corrections[0][1]
+        self.assertIn('Also set repair.mode and repair.reason to match the risks', prompt)
+        self.assertEqual((pair['repair']['mode'], pair['repair']['step']), ('pair', 'review'))
+
+    def test_a_value_correction_cannot_lower_pair_mode(self):
+        self.descriptive_fix(lambda value: dict(value, repair=dict(value['repair'], risks=[], mode='self', reason='Local')))
+        with self.assertRaises(Blocked) as caught:
+            self.step()
+        self.assertEqual(caught.exception.code, 'report-repair-content')
+        self.assertIn('Keep repair.mode=pair', self.corrections[0][1])
+
+    def test_the_prompt_keeps_only_fields_that_are_not_listed(self):
+        self.descriptive_fix(lambda value: dict(self.allowed(value), resolutions=[
+            dict(row, outcome='fixed') for row in value['resolutions']]))
+        writer = self.transport.handlers['repair_execute']
+        def wrong_outcome(c, h):
+            value = writer(c, h)
+            if c['operation'] == 'fix':
+                for row in value['resolutions']:
+                    row['outcome'] = 'done'
+            return value
+        self.transport.handlers['repair_execute'] = wrong_outcome
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        prompt = self.corrections[0][1]
+        self.assertIn('"field": "resolutions[0].outcome"', prompt)
+        keep = prompt.split('Keep every other field exactly', 1)[1].split('.', 1)[0]
+        self.assertIn('evidence', keep)
+        self.assertNotIn('resolutions', keep)
+
+    def test_a_value_correction_cannot_change_other_fields(self):
+        changes = (lambda value: dict(self.allowed(value), implementation_fixes=2),
+                   lambda value: dict(self.allowed(value), repair=dict(self.allowed(value)['repair'], tests=dict(
+                       value['repair']['tests'], reason='Another reason'))),
+                   lambda value: dict(self.allowed(value), resolutions=[dict(row, resolution='Changed') for row in value['resolutions']]))
+        for change in changes:
+            with self.subTest(change=change):
+                self.tearDown()
+                self.setUp()
+                self.descriptive_fix(change)
+                with self.assertRaises(Blocked) as caught:
+                    self.step()
+                self.assertEqual(caught.exception.code, 'report-repair-content')
+                self.assertEqual(len(self.corrections), 1)
+
+    def test_a_fix_rejected_by_an_older_runtime_is_corrected_after_a_retry(self):
+        gate = self.descriptive_fix(self.allowed)
+        with patch('cycle_workflow.repairable_enum', return_value=None):  # The runtime that stopped the live stage.
+            with self.assertRaisesRegex(Blocked, 'invalid finding enum') as caught:
+                self.step()
+        self.cycle.handle_block(caught.exception)
+        # cc-focus --retry clears the blocker. The step then finds the saved run instead of a drift stop.
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), 1)  # No second run.
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
+        self.assertEqual(gate['step'], 'review')
+
+    def test_a_retry_after_another_saved_report_runs_the_executor_again(self):
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer('pair')
+        runs = []
+        def writer(c, h):
+            runs.append(c['operation'])
+            if len(runs) == 1:
+                return dict(self.writer(c, 'pair'), status='blocked')  # The blocked run changed nothing.
+            return execute(c, h)
+        self.transport.handlers['repair_execute'] = writer
+        with self.assertRaises(Blocked) as caught:
+            self.step()
+        self.assertEqual(caught.exception.code, 'reported-blocker')
+        self.cycle.handle_block(caught.exception)
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.assertIsNone(self.cycle.saved_repair_fix(pair))  # A blocked report is not replayed.
+        self.step()
+        self.assertEqual(runs, ['fix', 'fix'])
+        self.assertEqual(pair['repair']['step'], 'review')
+
+
+class ReportEnumCounterTests(unittest.TestCase):
+    """A value correction also fixes the counters of a test run, as the repair-mode correction does."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'assign', 'until', 'step', 'resolution', 'result'):
+        locals()[_name] = getattr(execution_tests.PairExecutionTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def worded_test_run(self, correction, copied):
+        """An unchanged late test run with a risk in words and counters copied from its fix batch."""
+        pair = self.assign('pair_b', 'low', False)
+        gate = pair['repair']
+        self.until(lambda: gate['step'] == 'test')
+        normal = self.transport.dispatch
+        def dispatch(role, prompt, heartbeat):
+            value = json.loads(normal(role, prompt, heartbeat))
+            if role == 'repair_execute' and value['repair']['tests']['status'] != 'deferred':
+                value['repair'].update(mode='pair', risks=['generated output'], reason='Generated files')
+                value.update(copied)
+            return json.dumps(value)
+        self.transport.dispatch = dispatch
+        self.correction_transport(correction)
+        return gate
+
+    def test_copied_counters_and_a_risk_in_words_get_one_correction(self):
+        gate = self.worded_test_run(lambda value: dict(value, implementation_fixes=0, substantial=False, repair=dict(
+            value['repair'], risks=['contracts'])), dict(implementation_fixes=1))
+        test_runs = [role for role, _ in self.transport.calls].count('repair_execute')
+        self.until(lambda: gate['step'] != 'test')
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), test_runs + 1)
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
+        prompt = self.corrections[0][1]
+        self.assertIn('Also set all three counters to 0', prompt)
+        keep = prompt.split('Keep every other field exactly', 1)[1].split('.', 1)[0]
+        self.assertNotIn('counters', keep)
+
+    def test_kept_copied_counters_are_refused(self):
+        gate = self.worded_test_run(lambda value: dict(value, repair=dict(value['repair'], risks=['contracts'])),
+                                    dict(implementation_fixes=1))
+        with self.assertRaises(Blocked) as caught:
+            self.until(lambda: gate['step'] != 'test')
+        self.assertEqual(caught.exception.code, 'report-repair-content')
+
+
+class ReportEnumEvidenceTests(unittest.TestCase):
+    """A test run that changed a journal, counted nothing, and named a risk in words."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'until', 'assign', 'writer', 'set_writer', 'step', 'audit'):
+        locals()[_name] = getattr(evidence_tests.RepairEvidenceTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def test_uncounted_journal_changes_are_counted_by_the_value_correction(self):
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer()
+        self.test_runs = 0
+        def writer(context, heartbeat):
+            value = execute(context, heartbeat)
+            if context['operation'] == 'fix':
+                (self.root / 'plan.md').write_text('# Plan\n\nImplementation requirements remain unchanged.\n')
+            else:
+                self.test_runs += 1
+                with (self.root / 'plan.md').open('a') as out:
+                    out.write('\n## Completed verification\nTargeted guard test passed.\n')
+                value['minor_edits'] = 0
+                value['repair'].update(mode='pair', risks=['generated output'], reason='Generated files')
+                for row in value['resolutions']:
+                    row.update(outcome='verified', evidence=['Targeted test verified the earlier fix'])
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.transport.handlers['repair_evidence'] = lambda c, h: self.audit(c)
+        self.correction_transport(lambda value: dict(value, minor_edits=1, repair=dict(value['repair'], risks=['contracts'])))
+        gate = pair['repair']
+        self.until(lambda: gate['step'] == 'test')
+        self.until(lambda: gate['step'] != 'test')
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.test_runs, 1)
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
+        self.assertIn('Also count these changes', self.corrections[0][1])
+        self.assertIn('"changed_paths": ["plan.md"]', self.corrections[0][1])
 
 
 if __name__ == '__main__':

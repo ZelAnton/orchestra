@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 import test_cycle as fixtures
-from cycle_state import Blocked, LocalLock, encode
+from cycle_state import Blocked, LocalLock, ProviderTransient, encode
 from cycle_transport import Process, Rpc, Transport
 from focus_control import Control, FocusStop, check_parked_provider, owner_alive, request_stop, runtime_active
 from focus_input import Interaction
@@ -222,6 +222,21 @@ class FocusInputTests(unittest.TestCase):
         events = [json.loads(json.loads(line)["line"]) for line in log.splitlines()]
         self.assertEqual(sum(event.get("type") == "result" for event in events), 2)
 
+    def test_a_claude_response_gives_the_next_turn_new_server_error_retries(self):
+        transport, directory = self.run_transport("claude", ("follow-up-server-error",))
+        self.pending["transient_retries"] = 3  # Earlier server errors used all retries of this invocation.
+        with self.assertRaises(ProviderTransient):
+            transport.run("code", "Implement", self.pending, directory)
+        self.assertEqual(self.input.messages.records(1)[0]["status"], "accepted")
+        self.assertNotIn("transient_retries", self.pending)
+
+    def test_a_claude_server_error_before_any_response_keeps_the_retry_budget(self):
+        transport, directory = self.run_transport("claude", ("transient-server",))
+        self.pending["transient_retries"] = 2
+        with self.assertRaises(ProviderTransient):
+            transport.run("code", "Implement", self.pending, directory)
+        self.assertEqual(self.pending["transient_retries"], 2)
+
     def test_claude_result_without_acknowledgement_stops(self):
         transport, directory = self.run_transport("claude", ("no-ack",))
         with self.assertRaises(MessagePending):
@@ -321,6 +336,16 @@ class FocusInputTests(unittest.TestCase):
                 patch("focus_control.wait_container", side_effect=AssertionError("Parked UI is not a running provider")):
             self.assertEqual(request_stop(self.store, timeout=1), 0)
 
+    def test_external_stop_at_a_blocked_run_points_to_the_run_output(self):
+        self.setup_input()
+        self.state["status"] = "blocked"
+        self.control.finish(self.state, 3)
+        with patch("focus_control.runtime_active", side_effect=[True, False]), \
+                patch("focus_control.wait_container"), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(request_stop(self.store, timeout=1), 0)
+        self.assertIn("status=blocked. The run output names the blocker and the retry command.", out.getvalue())
+        self.assertNotIn("Run cc-focus to continue.", out.getvalue())
+
     def test_uncleared_provider_is_not_a_parked_ui(self):
         self.setup_input()
         self.control.active.update(interactive=True, provider_run={"processkit_run_id": "unknown"})
@@ -362,7 +387,10 @@ class FocusInputTests(unittest.TestCase):
                 pass
         for status in ("healing", "blocked", "quota"):
             with self.subTest(status=status), patch("cc_focus.Interaction") as interaction, \
-                    patch("cc_focus.Store") as store, patch("cc_focus.main", return_value=0) as run:
+                    patch("cc_focus.Store") as store, patch("cc_focus.main", return_value=0) as run, \
+                    patch("cc_focus.runtime_changed", return_value=False):
+                interaction.return_value.messages = None
+                store.return_value.review_id = None
                 interaction.return_value.wait_action.side_effect = [("/resume", ""), ("/exit", "")]
                 store.return_value.read.return_value = ({"pending": {"quota_wait": {"retry_at": time.time() + 3600}}}
                                                        if status == "quota" else {"blocker": {"status": status}})

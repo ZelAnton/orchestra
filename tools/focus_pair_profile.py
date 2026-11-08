@@ -8,6 +8,8 @@ PAIR_SCANNERS = (*tuple(role for roles in PAIRS.values() for role in roles), *RE
 PAIR_DISCUSSERS = tuple(role + "_discuss" for role in PAIR_SCANNERS)
 PAIR_READONLY = (*PAIR_SCANNERS, *PAIR_DISCUSSERS, "pair_arbiter", "pair_complexity", "repair_evidence")
 PAIR_WRITERS = ("pair_fix", "pair_cleanup", "pair_fix_high", "pair_cleanup_high", "repair_execute")
+# Pair A executors. Each new outer pair starts their sessions again. repair_execute gets a new session for each batch.
+PAIR_A_WRITERS = PAIR_WRITERS[:4]
 PAIR_ROLES = (*PAIR_READONLY, *PAIR_WRITERS)
 
 

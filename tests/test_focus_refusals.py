@@ -117,6 +117,19 @@ class RefusalHistoryTests(unittest.TestCase):
         self.assertEqual(result["sessions"][0]["current_roles"], ["code"])
         self.assertTrue(result["retry"]["same_conversation"])
         self.assertTrue(result["retry"]["role_contract_changed"])
+        # The current contract in its plain or review-campaign form is unchanged.
+        from cycle_prompts import role_contract
+        from focus_review_contract import review_contract
+        diagnostics = self.directory / "invocations" / ("c" * 32) / "claude-diagnostics.json"
+        original = diagnostics.read_text()
+        for campaign in (False, True):
+            with self.subTest(campaign=campaign):
+                saved = json.loads(original)
+                saved["launch"]["role_contract_sha256"] = hashlib.sha256(
+                    review_contract(role_contract("code"), campaign).encode("utf-8")).hexdigest()
+                diagnostics.write_text(json.dumps(saved))
+                self.assertIs(refusal_history(self.directory, state, self.root)["retry"]["role_contract_changed"], False)
+        diagnostics.write_text(original)
         for private in ("PRIVATE", "SECRET", "Old rule", "Old detail"):
             self.assertNotIn(private, json.dumps(result))
         state["sessions"] = {}

@@ -9,13 +9,17 @@ import re
 SOURCES = {
     'cycle_prompts.py': None,
     'cycle_workflow.py': {'context', 'report_repair_context'},
-    'cycle_transport.py': {'_run'},
+    'cycle_transport.py': {'_run', 'NEW_CONVERSATION', 'RECOVERY'},
     'focus_pairs.py': {'pair_prompt', 'pair_writer_context', 'pair_inspection_step', 'paired_review_step'},
-    'focus_pair_repair.py': {'repair_writer_context', 'repair_reader'},
+    'focus_pair_repair.py': {'repair_writer_context', 'repair_reader', 'start_final_gate', 'FINAL_GATE_VERIFICATION', 'FULL_RUN_DONE',
+                             'TEST_RISKS'},
     'focus_repair_evidence.py': {'queue_repair_evidence', 'repair_evidence_step'},
     'focus_pair_jobs.py': {'run_jobs'},
     'focus_review.py': {'final_context'},
-    'focus_readonly.py': {'READ_TOOL'},
+    'focus_review_contract.py': {'CONTRACT'},
+    'focus_review_run.py': {'context'},
+    'focus_publication_scope.py': {'apply', 'prepare'},
+    'focus_readonly.py': {'READ_TOOL', 'VIEW_TOOL'},
 }
 
 
@@ -40,7 +44,8 @@ def prose(root):
             if names is None and isinstance(node, ast.Assign):
                 if any(isinstance(t, ast.Name) and t.id in {
                         'PROMPTS', 'CONTRACT', 'PAIR_CONTRACT', 'CODE_IMPLEMENTATION_CONTRACT', 'COMMAND_EXECUTION_CONTRACT', 'WRITING_CONTRACT', 'EXECUTOR_ACCOUNTING_CONTRACT', 'DISCUSSION_CONSENSUS_CONTRACT',
-                        'REPORT_SCHEMA'} for t in node.targets):
+                        'PROJECT_BRIEF_RULE', 'BRIEF_CHANGE_CORRECTION', 'PROJECT_INSTRUCTIONS_RULE', 'PARALLEL_REPOSITORIES_RULE', 'REPORT_SCHEMA',
+                        'READER_SEARCH_CONTRACT', 'COMPACTION_RULE', 'READER_COMPACTION_RULE'} for t in node.targets):
                     roots.append(node.value)
             elif names is not None and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
                 roots.extend(node.body[1:] if ast.get_docstring(node) else node.body)

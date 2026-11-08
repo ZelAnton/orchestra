@@ -241,6 +241,82 @@ class StatusTests(unittest.TestCase):
         self.assertIsNone(self.state["display_ci"])
         self.assertIn("Задача 2", self.panel_text())
 
+    def test_next_stage_starts_new_conversations_and_ignores_the_published_label(self):
+        from cycle_workflow import stage_record
+        self.remote()
+        self.edit()()
+        self.state.update(phase="publish", reviewed=self.repo.snapshot(), remote="origin",
+                          sessions={"code": "stage-one-coder", "coordinate": "stage-one-luna"})
+        self.commit_stage()
+        self.cycle.reconcile_publish()
+        accept_task(self.state, {"task": self.label()}, "code")
+        sha, generation = self.state["published"]["sha"], self.state["session_generation"]
+        self.state["display_ci"] = {"sha": sha, "status": "ready"}
+        self.cycle.next_stage()
+        # A new stage never resends the conversation history of the previous stage.
+        self.assertEqual(self.state["sessions"], {})
+        self.assertEqual(self.state["session_generation"], generation + 1)
+        archived = json.loads((self.store.directory / f"sessions/generation-{generation:06d}.json").read_text())
+        self.assertEqual(archived, {"code": "stage-one-coder", "coordinate": "stage-one-luna"})
+        previous = self.state["previous_stage"]
+        self.assertEqual((previous["iteration"], previous["task"]["id"], previous["published"]), (1, "V9f-4", sha))
+        # The plan can still list the published stage as open. Its label cannot name the new stage.
+        self.assertEqual(accept_task(self.state, {"task": self.label()}, "coordinate"), "previous-stage")
+        self.assertIsNone(self.state["task"])
+        # Without a label of the current stage, the title still tells where the iteration stands.
+        self.assertIn("Задача 2 · после V9f-4", self.panel_text())
+        prompt = self.cycle.context("coordinate")
+        self.assertNotIn('"coding_recovery"', prompt)  # Coding of the new iteration has not started.
+        self.assertIn("In the task field, name the stage that this iteration implements.", prompt)
+        self.assertIn("If this iteration continues that stage, use null.", prompt)
+        self.assertIn("If the context has coding_recovery, the code phase can recover the report of this iteration.", prompt)
+        for role in ("coordinate", "code"):
+            prompt = self.cycle.context(role)
+            context = json.JSONDecoder().raw_decode(prompt.split("Runtime context:\n", 1)[1])[0]
+            self.assertEqual(context["previous_stage"]["task"]["id"], "V9f-4")
+            self.assertEqual(context["previous_stage"]["published"], sha)
+            self.assertIn("Do not repeat published work or its completed reviews.", context["previous_stage"]["rule"])
+            self.assertIn("If the published commits lack plan work of this stage, select this stage again only for "
+                          "that work.", context["previous_stage"]["rule"])
+        # A code report can continue remaining work of the published stage, so its label stays valid.
+        self.assertIsNone(accept_task(self.state, {"task": self.label()}, "code"))
+        self.assertEqual((self.state["task"]["id"], self.state["task_source"]), ("V9f-4", "code"))
+        self.assertEqual(stage_record(self.state)["task"]["id"], "V9f-4")
+        # A later coordinator report keeps that identity and gets no rejection.
+        self.assertIsNone(accept_task(self.state, {"task": self.label()}, "coordinate"))
+        self.assertEqual(self.state["task_source"], "code")
+
+    def test_only_a_code_or_operator_label_names_the_published_stage(self):
+        from cycle_workflow import stage_record
+        self.state.update(task=dict(self.label(), iteration=1), task_source="coordinate",
+                          published={"sha": "a" * 40, "repositories": {"api": {"sha": "b" * 40}}})
+        # A coordinator's provisional label is not evidence of the implemented stage.
+        self.assertIsNone(stage_record(self.state)["task"])
+        self.state["previous_stage"] = stage_record(dict(self.state, iteration=0))
+        for role in ("coordinate", "code"):
+            self.assertNotIn('"previous_stage"', self.cycle.context(role))
+        self.state["task_source"] = "code"
+        record = stage_record(self.state)
+        self.assertEqual((record["task"]["id"], record["published"], record["repositories"]), ("V9f-4", "a" * 40, {"api": "b" * 40}))
+
+    def test_a_state_from_an_older_runtime_reads_the_published_stage_from_the_archive(self):
+        archived = dict(self.state, iteration=1, task=dict(self.label(), iteration=1), task_source="code",
+                        published={"sha": "c" * 40})
+        self.store.artifact("iterations/000001.json", json.dumps(archived).encode())
+        self.state.update(iteration=2, task=dict(self.label(), iteration=2), task_source="coordinate")
+        self.state.pop("previous_stage", None)
+        self.assertEqual(self.cycle.previous_stage()["task"]["id"], "V9f-4")
+        # The older runtime accepted the coordinator's label of the published stage. The record removes it.
+        self.assertIsNone(self.state["task"])
+        self.assertNotIn("task_source", self.state)
+        self.assertEqual(self.state["previous_stage"]["published"], "c" * 40)
+        self.assertEqual(accept_task(self.state, {"task": self.label()}, "coordinate"), "previous-stage")
+        # Without an archive there is no record, and the label stays free.
+        self.state.update(iteration=5)
+        self.state.pop("previous_stage")
+        self.assertEqual(self.cycle.previous_stage(), {})
+        self.assertIsNone(accept_task(self.state, {"task": self.label()}, "coordinate"))
+
     def test_activity_priority_and_provider_lifetime(self):
         live = {"role": "sol", "active": True, "elapsed_seconds": 125, "event_age_seconds": 8}
         self.assertIn("02:05", self.panel_text(live=live))

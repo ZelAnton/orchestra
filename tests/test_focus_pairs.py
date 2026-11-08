@@ -66,6 +66,17 @@ class PairTransport:
         return self.dispatch(role, prompt, lambda: None)
 
     def dispatch(self, role, prompt, heartbeat):
+        raw = self.answer(role, prompt, heartbeat)
+        context = json.JSONDecoder().raw_decode(prompt.split("assignment:\n", 1)[1])[0]
+        if "final_gate" not in context:
+            return raw
+        # A current initial final scan must report final_gate. Fixtures request no gate by default.
+        value = json.loads(raw)
+        if not value.pop("omit_final_gate", False):
+            value.setdefault("final_gate", {"full_run": False, "reason": "Targeted checks cover the stage changes."})
+        return json.dumps(value)
+
+    def answer(self, role, prompt, heartbeat):
         context = json.JSONDecoder().raw_decode(prompt.split("assignment:\n", 1)[1])[0]
         with self.lock:
             self.calls.append((role, context))
@@ -277,6 +288,115 @@ class PairTests(unittest.TestCase):
         self.until(lambda: self.state["phase"] == "pair_b")
         self.assertEqual([r for r, c in self.transport.calls].count("pair_arbiter"), 1)
 
+    def disputed_arbitration(self):
+        pair = self.assign(severity="low", blocking=False)
+        self.cycle.paired_review_step()
+        self.transport.handlers["pair_cleanup_high"] = lambda c, h: report(
+            resolutions=[{"source_id": "assigned", "outcome": "disputed", "resolution": "Requirement contradicts finding", "evidence": ["Source contract"]}],
+            handoff={"decisions": [], "checks": [], "assumptions": []})
+        self.cycle.paired_review_step()
+        self.assertEqual(pair["step"], "arbitrate")
+        return pair
+
+    def test_new_arbiter_findings_join_the_registry_and_a_second_arbitration_decides_them(self):
+        pair = self.disputed_arbitration()
+        contexts = []
+        def arbiter(c, h):
+            contexts.append(c["assignment"])
+            new = [finding("arbiter-new")] if len(contexts) == 1 else []
+            return report(assessments=[decision(r, "reject", False) for r in c["assignment"]["registry"]],
+                          new_findings=new, consensus=None, impact="minor")
+        self.transport.handlers["pair_arbiter"] = arbiter
+        self.until(lambda: self.state["phase"] == "pair_b")
+        self.assertEqual(len(contexts), 2)
+        added = pair["id"] + "/pair_arbiter/arbitrate-1/arbiter-new"
+        self.assertNotIn(added, [r["source_id"] for r in contexts[0]["registry"]])
+        self.assertIn(added, [r["source_id"] for r in contexts[1]["registry"]])
+        # A saved first arbitration keeps its prompt. Only the second one gets the closing rule.
+        self.assertEqual(contexts[0]["rule"], 'Make binding decisions. Disagreement is not an operator blocker. Do not repeat '
+                         'an answered diagnostic without new evidence. For a closed defect, explicitly return reject with proof of closure.')
+        self.assertIn("The previous arbitration added findings to the registry.", contexts[1]["rule"])
+        self.assertIn(added, [r["source_id"] for r in pair["decisions"]])
+
+    def test_an_arbiter_report_refused_by_an_older_runtime_is_registered_after_retry(self):
+        import focus_pair_protocol
+        from unittest.mock import patch
+        pair = self.disputed_arbitration()
+        # Like the live job: an earlier ruling of this pair makes the refused job arbitrate/2.
+        pair["rulings"] = [report(assessments=[], new_findings=[], consensus=None, impact="minor")]
+        contexts = []
+        def arbiter(c, h):
+            contexts.append(c["assignment"])
+            new = [] if any(r["source_id"].endswith("/arbiter-new") for r in c["assignment"]["registry"]) else [finding("arbiter-new")]
+            return report(assessments=[decision(r, "reject", False) for r in c["assignment"]["registry"]],
+                          new_findings=new, consensus=None, impact="minor")
+        self.transport.handlers["pair_arbiter"] = arbiter
+        current = focus_pair_protocol.validate_report
+        def older(report, role):
+            if role == "pair_arbiter" and report["new_findings"]:
+                raise ValueError("arbiter must decide the complete supplied registry")
+            return current(report, role)
+        with patch("focus_pair_protocol.validate_report", older), self.assertRaises(Blocked):
+            self.until(lambda: self.state["phase"] == "pair_b")
+        self.assertEqual(len(contexts), 3)  # The report and two corrections, all refused.
+        self.assertEqual(pair["jobs"]["arbitrate/2"]["report_error"], focus_pair_protocol.LEGACY_ARBITER_ERROR)
+        # The operator retries with the new runtime. cc_focus gives the reader a new correction budget.
+        for job in pair["jobs"].values():
+            if not job.get("result"):
+                job.pop("report_repairs", None)
+        self.state.update(blocker=None, status="ready")
+        self.until(lambda: self.state["phase"] == "pair_b")
+        # The saved report is accepted without a provider call. Only the extended arbitration runs.
+        self.assertEqual(len(contexts), 4)
+        self.assertEqual(pair["arbiter_extension"], 2)
+        self.assertIn(pair["id"] + "/pair_arbiter/arbitrate-2/arbiter-new", [r["source_id"] for r in contexts[3]["registry"]])
+        self.assertIn("The previous arbitration added findings to the registry.", contexts[3]["rule"])
+
+    def test_an_incomplete_refused_arbiter_report_gets_a_current_correction_text(self):
+        import focus_pair_protocol
+        from unittest.mock import patch
+        pair = self.disputed_arbitration()
+        prompts = []
+        dispatch = self.transport.dispatch
+        def record(role, prompt, heartbeat):
+            if role == "pair_arbiter":
+                prompts.append(prompt)
+            return dispatch(role, prompt, heartbeat)
+        self.transport.dispatch = record
+        def arbiter(c, h):
+            registry = c["assignment"]["registry"]
+            if any(r["source_id"].endswith("/arbiter-new") for r in registry):
+                return report(assessments=[decision(r, "reject", False) for r in registry], new_findings=[], consensus=None, impact="minor")
+            # Before the retry, the report also has no evidence.
+            return report(assessments=[decision(r, "reject", False) for r in registry], new_findings=[finding("arbiter-new")],
+                          consensus=None, impact="minor", evidence=[] if len(prompts) <= 3 else ["Registry decided"])
+        self.transport.handlers["pair_arbiter"] = arbiter
+        current = focus_pair_protocol.validate_report
+        def older(report, role):
+            if role == "pair_arbiter" and report["new_findings"]:
+                raise ValueError("arbiter must decide the complete supplied registry")
+            return current(report, role)
+        with patch("focus_pair_protocol.validate_report", older), self.assertRaises(Blocked):
+            self.until(lambda: self.state["phase"] == "pair_b")
+        for job in pair["jobs"].values():
+            if not job.get("result"):
+                job.pop("report_repairs", None)
+        self.state.update(blocker=None, status="ready")
+        self.until(lambda: self.state["phase"] == "pair_b")
+        # The incomplete report is not accepted. Its correction names the current problem, not the old parser error.
+        self.assertIn("Complete the arbitration. Return status=done with evidence.", prompts[3])
+        self.assertNotIn(focus_pair_protocol.LEGACY_ARBITER_ERROR, prompts[3])
+        self.assertEqual((len(prompts), pair["arbiter_extension"]), (5, 1))
+
+    def test_a_second_arbitration_cannot_add_findings_again(self):
+        self.disputed_arbitration()
+        self.transport.handlers["pair_arbiter"] = lambda c, h: report(
+            assessments=[decision(r, "reject", False) for r in c["assignment"]["registry"]],
+            new_findings=[finding("again-" + str(len(c["assignment"]["registry"])))], consensus=None, impact="minor")
+        with self.assertRaisesRegex(Blocked, "already added findings"):
+            self.until(lambda: self.state["phase"] == "pair_b")
+        self.assertEqual([r for r, c in self.transport.calls].count("pair_arbiter"), 4)  # One extension, then three refused reports.
+
     def test_partial_progress_allows_same_assignment_on_new_candidate(self):
         pair = self.assign()
         self.cycle.paired_review_step()
@@ -410,7 +530,7 @@ class PairTests(unittest.TestCase):
         row = dict(finding(), source_id="a")
         with self.assertRaisesRegex(Blocked, "Every finding"):
             validate_decisions([row], [], "pair_a")
-        with self.assertRaisesRegex(Blocked, "late-pair"):
+        with self.assertRaisesRegex(Blocked, "Only a Pair B fix or verify assignment"):
             validate_decisions([row], [decision(row, full_suite=True)], "pair_a")
         validate_decisions([row], [decision(row, full_suite=True)], "pair_b")
 
@@ -509,8 +629,10 @@ class PairTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "endorsement"):
             parse_report(json.dumps(report(assessments=[], new_findings=[finding()], consensus="a" * 64, impact="minor")), "pair_sol_discuss")
         # The arbiter keeps its own rule: it decides the registry and never endorses.
-        with self.assertRaisesRegex(Blocked, "arbiter must decide"):
+        with self.assertRaisesRegex(Blocked, "arbiter cannot endorse"):
             parse_report(json.dumps(report(assessments=[], new_findings=[], consensus="Binding ruling", impact="minor")), "pair_arbiter")
+        # A new arbiter finding parses. The arbitration step adds it to the registry.
+        parse_report(json.dumps(report(assessments=[], new_findings=[finding()], consensus=None, impact="minor")), "pair_arbiter")
         # A prose endorsement still parses. The discussion step rejects it after both readers finish,
         # so a slow peer keeps its completed report.
         parse_report(json.dumps(report(assessments=[], new_findings=[], consensus="Endorse " + "a" * 64,
@@ -687,6 +809,44 @@ class PairTests(unittest.TestCase):
         self.assertEqual(roles.count("pair_sol"), 2)
         self.assertEqual(roles.count("pair_opus"), 1)
 
+    def test_a_stop_takes_effect_while_a_participant_waits_for_quota(self):
+        import cc_focus
+        for mode in ("safe", "now"):
+            with self.subTest(mode=mode):
+                self.start()
+                self.transport.handlers["pair_sol"] = lambda c, h: (_ for _ in ()).throw(ProviderQuota(time.time() + 3600, no_work=True))
+                class Control:
+                    requested = None
+                    def request(self):
+                        return self.requested
+                    def poll(self):
+                        if self.requested and self.requested["mode"] == "now":
+                            raise FocusStop("Emergency stop requested by the operator.")
+                    def child(self, slot, cwd=None):
+                        return None
+                control = Control()
+                self.cycle.control = control
+                def tick():
+                    jobs = (self.state.get("pair_review") or {}).get("jobs", {})
+                    if any(job.get("status") == "waiting" for job in jobs.values()):
+                        control.requested = {"mode": mode}  # The operator stops during the wait.
+                self.cycle.heartbeat = tick
+                started = time.monotonic()
+                if mode == "safe":
+                    self.cycle.paired_review_step()
+                else:
+                    with self.assertRaises(FocusStop):
+                        self.cycle.paired_review_step()
+                self.assertLess(time.monotonic() - started, 30)
+                jobs = self.state["pair_review"]["jobs"]
+                # The completed peer and the saved deadline stay. /resume retries the wait at once.
+                self.assertTrue(jobs["scan/pair_opus"].get("result"))
+                self.assertEqual((jobs["scan/pair_sol"]["status"], jobs["scan/pair_sol"]["wait_reason"]), ("waiting", "claude-quota"))
+                self.assertGreater(jobs["scan/pair_sol"]["retry_at"], time.time() + 3000)
+                self.assertTrue(cc_focus.resume_retries(self.state))
+                self.cycle.control = None
+        self.assertFalse(cc_focus.resume_retries({"pair_review": {"jobs": {"scan/x": {"status": "waiting", "wait_reason": "codex-transient"}}}}))
+
     def test_a_codex_reader_server_error_retries_only_that_reader(self):
         self.start()
         failures = [1]
@@ -709,6 +869,15 @@ class PairTests(unittest.TestCase):
         self.assertEqual(set(waits), {("pair_sol", "codex-transient", 1)})
 
     def test_a_codex_reader_that_stays_overloaded_stops_after_three_retries_and_names_the_participant(self):
+        for retry in ("cc-focus --retry", "cc-focus review --resume abc123 --retry"):
+            with self.subTest(retry=retry):
+                self.tearDown()
+                self.setUp()
+                # A review run gives its own command. Pair review runs need a review cycle fixture.
+                with patch.object(self.cycle, "retry_command", return_value=retry):
+                    self.stay_overloaded(retry)
+
+    def stay_overloaded(self, retry):
         self.start()
         def overloaded(c, h):
             raise ProviderTransient("serverOverloaded", "Selected model is at capacity.", no_work=True, provider="codex")
@@ -720,11 +889,37 @@ class PairTests(unittest.TestCase):
         self.cycle.heartbeat = tick
         with self.assertRaises(Blocked) as caught:
             self.cycle.paired_review_step()
+        # A ProviderTransient would get three more retries from Cycle.run.
+        self.assertIs(type(caught.exception), Blocked)
         self.assertEqual(caught.exception.code, "codex-transient")
         self.assertIn("The runtime used all 3 retries of this pair participant.", str(caught.exception))
-        self.assertIn("The invocation of participant pair_sol holds the server failure. Operator: wait until the provider is available. Then run cc-focus --retry.", str(caught.exception))
+        self.assertIn("The invocation of participant pair_sol holds the server failure. "
+                      f"Operator: wait until the provider is available. Then run {retry}.", str(caught.exception))
         roles = [r for r, _ in self.transport.calls]
         self.assertEqual((roles.count("pair_sol"), roles.count("pair_opus")), (4, 1))
+
+    def test_a_provider_response_gives_a_report_correction_new_server_error_retries(self):
+        self.start()
+        steps = ["overloaded"] * 3 + ["invalid", "overloaded", "valid"]
+        def answer(c, h):
+            step = steps.pop(0)
+            if step == "overloaded":
+                raise ProviderTransient("serverOverloaded", "Selected model is at capacity.", no_work=True, provider="codex")
+            return {"status": "done"} if step == "invalid" else report(findings=[])
+        self.transport.handlers["pair_sol"] = answer
+        waits = []
+        def tick():
+            for job in (self.state.get("pair_review") or {}).get("jobs", {}).values():
+                if job.get("status") == "waiting":
+                    if not waits or waits[-1] != job["transient_retries"]:
+                        waits.append(job["transient_retries"])
+                    job["retry_at"] = 0  # Skip the delay.
+        self.cycle.heartbeat = tick
+        self.cycle.paired_review_step()
+        self.assertEqual(steps, [])
+        self.assertEqual(waits, [1, 2, 3, 1])
+        job = next(job for job in self.state["pair_review"]["jobs"].values() if job["role"] == "pair_sol")
+        self.assertEqual((job["status"], job["report_repairs"]), ("done", 1))
 
     def test_operator_instructions_keep_chronological_precedence(self):
         self.start()
@@ -903,6 +1098,66 @@ class PairTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "pair-intent")
         self.assertEqual(job["prompt"], saved)
         self.assertEqual(len(self.transport.calls), 1)
+
+    def test_saved_pair_job_from_before_the_test_scope_rules_continues(self):
+        from cycle_prompts import PAIR_CONTRACT
+        from focus_pair_jobs import same_pair_prompt
+        from focus_review_contract import review_contract
+        saved_contracts = json.loads((fixtures.REPO / "tests/fixtures/focus_test_scope_contract.json").read_text())
+        previous = saved_contracts["pair_contract"]
+        marker = "\nRuntime assignment:\n"
+        old = {"candidate": "same-candidate", "assignment": {"mode": "independent_initial"}}
+        new = dict(old, full_run={"available": True, "rule": "One full run."},
+                   final_gate={"full_runs": [], "rule": "Request the gate."})
+        for scoped in (False, True):
+            with self.subTest(scoped=scoped):
+                # The review-mode form of the saved job used the earlier review contract too.
+                with patch("focus_review_contract.CONTRACT", saved_contracts["review_contract"]):
+                    saved = review_contract(previous, scoped) + marker + json.dumps(old)
+                current = review_contract(PAIR_CONTRACT, scoped) + marker + json.dumps(new)
+                self.assertTrue(same_pair_prompt(saved, current))
+                # The other form of the contract, or other task data, is another assignment.
+                self.assertFalse(same_pair_prompt(saved, review_contract(PAIR_CONTRACT, not scoped) + marker + json.dumps(new)))
+                self.assertFalse(same_pair_prompt(saved, review_contract(PAIR_CONTRACT, scoped) + marker
+                                                  + json.dumps(dict(new, candidate="different-candidate"))))
+        # A saved job that has a new field keeps its exact value.
+        saved = previous + marker + json.dumps(dict(old, full_run={"available": False, "rule": "One full run."}))
+        self.assertFalse(same_pair_prompt(saved, PAIR_CONTRACT + marker + json.dumps(new)))
+        # The current contract accepts no field difference.
+        self.assertFalse(same_pair_prompt(PAIR_CONTRACT + marker + json.dumps(old), PAIR_CONTRACT + marker + json.dumps(new)))
+
+    def test_pair_b_permits_one_full_run_in_each_stage(self):
+        row = dict(finding(), source_id="a")
+        validate_decisions([row], [decision(row, full_suite=False)], "pair_b", full_run_used=True)
+        with self.assertRaisesRegex(Blocked, "one full run"):
+            validate_decisions([row], [decision(row, "verify", full_suite=True)], "pair_b", full_run_used=True)
+        self.start("pair_b")
+        self.assertFalse(self.cycle.full_run_used("pair_b"))
+        self.state["pair_full_runs"] = [{"phase": "final", "record": None, "candidate": "c", "status": "passed"}]
+        self.assertFalse(self.cycle.full_run_used("pair_b"))
+        self.state["pair_full_runs"].append({"phase": "pair_b", "record": None, "candidate": "c", "status": "failed"})
+        self.assertTrue(self.cycle.full_run_used("pair_b"))
+        # The final gate has its own limit of one run in each stage.
+        self.assertTrue(self.cycle.full_run_used("final"))
+        self.state["pair_full_runs"] = self.state["pair_full_runs"][1:]
+        self.assertFalse(self.cycle.full_run_used("final"))
+        self.assertFalse(self.cycle.full_run_used("pair_a"))
+
+    def test_only_final_inspectors_report_the_final_gate(self):
+        from focus_review import report_schema
+        for role in PAIRS["final"]:
+            self.assertIn("final_gate", report_schema(role)["required"])
+        for role in (*PAIRS["pair_a"], *PAIRS["pair_b"], "pair_final_opus_discuss", "repair_self", "pair_arbiter"):
+            self.assertNotIn("final_gate", report_schema(role)["properties"])
+        gate = {"full_run": True, "reason": "The build configuration changed."}
+        self.assertEqual(parse_report(json.dumps(report(findings=[], final_gate=gate)), "pair_final_fable")["final_gate"], gate)
+        # A report saved before this field requests no gate.
+        self.assertNotIn("final_gate", parse_report(json.dumps(report(findings=[])), "pair_final_opus"))
+        for value in ({"full_run": "yes", "reason": "Shared code."}, {"full_run": True, "reason": ""}, {"full_run": True}):
+            with self.assertRaises(Blocked):
+                parse_report(json.dumps(report(findings=[], final_gate=value)), "pair_final_opus")
+        with self.assertRaises(Blocked):
+            parse_report(json.dumps(report(findings=[], final_gate=gate)), "pair_opus")
 
     def test_completed_codex_blocker_retries_inspection_in_the_same_session(self):
         import os, sys

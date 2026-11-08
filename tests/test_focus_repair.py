@@ -3,6 +3,8 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
+from pathlib import Path
 
 import test_cycle as fixtures
 from test_cycle import report
@@ -12,7 +14,8 @@ from cycle_state import Blocked, digest, encode
 from cycle_prompts import PROFILES, REVIEW_PROFILE_VERSION
 from cycle_transport import parse_report
 from focus_pair_profile import PAIR_READONLY
-from focus_pair_view import materialize, read_record, ViewInspector
+from focus_pair_view import artifact, materialize, read_record, ViewInspector
+from focus_snapshot_archive import read_source
 from focus_status import build_panel
 
 
@@ -64,6 +67,9 @@ class RepairTests(unittest.TestCase):
                 self.assertEqual([r["candidate"] for r in gate["reviews"]], [candidate, candidate])
                 seal = read_record(self.store, pair["repair_seal"])
                 self.assertEqual(seal["clean"], 2)
+                # The seal keeps the inner review rounds of its gate and names the outer pair round separately.
+                self.assertEqual((seal["round"], seal["phase"], seal["pair_round"]),
+                                 (pair["repair"]["round"], pair["phase"], pair["round"]))
                 self.assertEqual(len(seal["tests"]), 1)
                 if destination == "publish":
                     publication_seal = json.loads((self.store.directory / f"pair-reviews/{self.state['iteration']}/{pair['id']}/seal.json").read_text())
@@ -304,9 +310,228 @@ class RepairTests(unittest.TestCase):
         self.assertIn("-changed", view["diffs"]["source.txt"])
         self.assertNotIn("-baseline", view["diffs"]["source.txt"])
         self.assertIn("+new repaired content", view["diffs"]["new.txt"])
-        self.assertFalse(any(n.startswith("__review__/") for n in view["files"]))
+        self.assertEqual(set(view["diffs"]), {"source.txt", "new.txt"})
         tool = ViewInspector(view)
         self.assertFalse(tool.call({"tool": "focus_inspect", "arguments": {"operation": "read", "path": "../state.json", "offset": 0, "limit": 10}})["success"])
+
+    def test_inner_repair_view_exposes_the_evidence_of_its_outer_phase(self):
+        for phase in ("pair_b", "final"):
+            with self.subTest(phase=phase):
+                pair = self.assign(phase, "low", False)
+                record = lambda name, value: artifact(self.store, f"evidence-{phase}/{name}.json", value)
+                fix = record("execution-0", {"operation": "fix", "report": {"summary": "Fixed"}})
+                test = record("execution-1", {"operation": "test", "report": {"summary": "Seven methods passed"}})
+                frozen = {"path": f"evidence-{phase}/view-0/view.json", "sha256": "0" * 64}
+                review = record("review-1", {"decisions": [], "view": frozen,
+                                             "sources": [record("report", {"summary": "Inner pass clean"})]})
+                approval = record("approval", {"audit": record("audit", {"verdict": "evidence_only"}),
+                                               "receipt": record("receipt", {"report": {"summary": "Journal updated"}})})
+                lost = {"path": f"evidence-{phase}/lost.json", "sha256": "0" * 64}
+                seal = record("seal", {"executions": [fix, test], "tests": [test], "choices": [{"mode": "self", "report": fix}],
+                                       "reviews": [{"record": review}], "evidence_changes": [approval], "test_view": frozen,
+                                       "lost": lost, "snapshot": {"files": {f"file-{n}.txt": "f:" + "0" * 64 for n in range(2000)}}})
+                self.state["pair_handoff"] = [seal, record("conclusion", {"repair_gate": seal, "sources": []})]
+                # A long coding account stays one JSON line in its copy.
+                self.state["code_report"] = "A" * 120000 + " TAIL-OF-ACCOUNT"
+                self.step()
+                reader = self.cycle.repair_reader(pair)
+                view = materialize(self.cycle, reader)
+                tool = ViewInspector(view)
+                def read(name):
+                    return tool.call({"tool": "focus_inspect", "arguments": {"operation": "read", "path": name, "offset": 0, "limit": 500}})
+                self.assertTrue(read(view["publication"])["success"])
+                manifest = json.loads(read_source(view, view["publication"]))
+                self.assertEqual(manifest["paths"], self.cycle.publication_paths())
+                self.assertEqual(manifest["candidate"], digest(encode(reader["snapshot"])))
+                context = json.JSONDecoder().raw_decode(self.cycle.pair_prompt(reader, "repair_opus", {}).split("assignment:\n", 1)[1])[0]
+                self.assertEqual(context["publication_manifest"], "__review__/publication.json")
+                names = [n for n in view["files"] if n.startswith("__review__/")]
+                # The open gate's own fix record is readable in both phases.
+                gate = json.loads(read_source(view, "__review__/gate.json"))
+                self.assertEqual({k: v for k, v in gate["executions"][0].items() if k != "exposed"}, pair["repair"]["executions"][0])
+                self.assertEqual(json.loads(read_source(view, gate["executions"][0]["exposed"]))["operation"], "fix")
+                if phase == "final":
+                    self.assertEqual(set(names), {"__review__/publication.json", "__review__/gate.json", "__review__/gate-record-0.json"})
+                    self.assertEqual(set(context["history"]), {"__review__/gate.json", "__review__/gate-record-0.json"})
+                    continue
+                # A long evidence line is shown in parts; following the page notices yields every character.
+                labels, parts = self.read_pages(tool, "__review__/coding-full.json")
+                self.assertIn("A" * 120000 + " TAIL-OF-ACCOUNT", "".join(parts))
+                self.assertTrue(any(" part " in label for label in labels))
+                def follow(reference):
+                    self.assertIn(reference["exposed"], context["history"])
+                    self.assertTrue(read(reference["exposed"])["success"])
+                    return json.loads(read_source(view, reference["exposed"]))
+                history = json.loads(read_source(view, "__review__/history-0.json"))
+                # Each reference keeps its runtime path and names one readable copy.
+                self.assertEqual({k: v for k, v in history["tests"][0].items() if k != "exposed"}, test)
+                self.assertEqual(follow(history["tests"][0])["report"]["summary"], "Seven methods passed")
+                self.assertEqual(history["tests"][0]["exposed"], history["executions"][1]["exposed"])
+                self.assertEqual(history["choices"][0]["report"]["exposed"], history["executions"][0]["exposed"])
+                self.assertEqual(follow(history["executions"][0])["report"]["summary"], "Fixed")
+                inner = follow(history["reviews"][0]["record"])
+                self.assertEqual(follow(inner["sources"][0])["summary"], "Inner pass clean")
+                self.assertEqual(inner["view"], frozen)
+                self.assertEqual(history["test_view"], frozen)
+                self.assertEqual(follow(follow(history["evidence_changes"][0])["receipt"])["report"]["summary"], "Journal updated")
+                self.assertIsNone(history["lost"]["exposed"])
+                conclusion = json.loads(read_source(view, "__review__/history-1.json"))
+                self.assertEqual(conclusion["repair_gate"]["exposed"], "__review__/history-0.json")
+                # A large seal stays readable page by page: no line reaches the inspector clip.
+                lines = read_source(view, "__review__/history-0.json").decode().splitlines()
+                self.assertGreater(len(lines), 2000)
+                tail = tool.call({"tool": "focus_inspect", "arguments": {"operation": "read", "path": "__review__/history-0.json", "offset": len(lines) - 20, "limit": 20}})
+                self.assertIn('"tests"', tail["contentItems"][0]["text"])
+                self.assertNotIn("[Clipped", tail["contentItems"][0]["text"])
+
+    def read_pages(self, tool, path):
+        """Follow the page notices of focus_inspect; return each row's label and text."""
+        labels, parts, offset = [], [], 0
+        while True:
+            text = tool.call({"tool": "focus_inspect", "arguments": {"operation": "read", "path": path, "offset": offset, "limit": 500}})["contentItems"][0]["text"]
+            # One page of this size fits one tool result.
+            self.assertLessEqual(len(text.encode("utf-8")), 30000)
+            notice = None
+            for row in text.split("\n")[2:]:
+                if row.startswith("[The page stops before line"):
+                    notice = int(row.rsplit("offset ", 1)[1].rstrip(".]"))
+                    break
+                label, _, part = row.partition(": ")
+                labels.append(label)
+                parts.append(part)
+            if notice is None:
+                self.assertNotIn("next offset", text.split("\n", 2)[1])
+                return labels, parts
+            self.assertEqual(notice, len(parts))
+            self.assertIn(f"; next offset: {notice}", text.split("\n", 2)[1])
+            offset = notice
+
+    def test_the_inspector_pages_a_long_source_line_without_loss(self):
+        pair = self.assign("pair_b", "low", False)
+        execute = self.set_writer()
+        def wide(c, h):
+            value = execute(c, h)
+            (self.root / "wide.txt").write_text("B" * 150000 + "END\nshort\n")
+            (self.root / "emoji.txt").write_text("\U0001F600" * 20000 + "\n", encoding="utf-8")
+            return value
+        self.transport.handlers["repair_execute"] = wide
+        self.step()
+        view = materialize(self.cycle, self.cycle.repair_reader(pair))
+        tool = ViewInspector(view)
+        labels, parts = self.read_pages(tool, "wide.txt")
+        self.assertEqual("".join(parts[:-1]), "B" * 150000 + "END")
+        self.assertEqual((labels[0], labels[-2], labels[-1], parts[-1]), ("1 part 1/26", "1 part 26/26", "2", "short"))
+        header = tool.call({"tool": "focus_inspect", "arguments": {"operation": "read", "path": "wide.txt", "offset": 0, "limit": 1}})["contentItems"][0]["text"]
+        self.assertIn("Total lines/paths: 2; rows: 27, and offsets count rows; offset: 0", header)
+        window = tool.call({"tool": "focus_inspect", "arguments": {"operation": "read", "path": "wide.txt", "offset": 25, "limit": 2}})["contentItems"][0]["text"]
+        self.assertTrue(window.endswith("\n1 part 26/26: END\n2: short"))
+        # A part of four-byte characters also fits on a page.
+        labels, parts = self.read_pages(tool, "emoji.txt")
+        self.assertEqual(("".join(parts), labels[-1]), ("\U0001F600" * 20000, "1 part 4/4"))
+        # Short lines keep the earlier format.
+        short = tool.call({"tool": "focus_inspect", "arguments": {"operation": "read", "path": "source.txt", "offset": 0, "limit": 5}})["contentItems"][0]["text"]
+        self.assertIn("Total lines/paths: 1; offset: 0\n1: ", short)
+
+    def test_resume_moves_an_inner_inspection_frozen_without_evidence_to_a_new_view(self):
+        pair = self.assign("pair_b", "low", False)
+        self.set_writer("pair")
+        self.step()
+        gate = pair["repair"]
+        reader = self.cycle.repair_reader(pair)
+        gate["reader"] = reader
+        with patch.object(self.cycle, "repair_review_result"):
+            self.step()
+        self.assertEqual(sorted(reader["scans"]), ["repair_astra", "repair_opus"])
+        # Earlier runtimes froze inner views and prompts without the evidence and its pointer.
+        view = read_record(self.store, reader["view"])
+        legacy = artifact(self.store, "legacy/view-0/view.json", {k: v for k, v in view.items() if k != "publication"})
+        for job in reader["jobs"].values():
+            prefix, assignment = job["prompt"].split("\nRuntime assignment:\n", 1)
+            value = json.loads(assignment)
+            value.pop("publication_manifest")
+            value.pop("publication_rule")
+            value["history"] = []
+            job["prompt"] = prefix + "\nRuntime assignment:\n" + json.dumps(value, ensure_ascii=False, sort_keys=True)
+        reader["view"] = legacy
+        # Between rounds, completed reports stay, name their frozen view, and the next round gets a new view.
+        completed = {key: dict(job, frozen_view=legacy) for key, job in reader["jobs"].items()}
+        reader["step"] = "discuss"
+        with patch.object(self.cycle, "pair_inspection_step") as inspect:
+            self.step()
+        inspect.assert_called_once_with(reader)
+        self.assertEqual((reader["jobs"], reader["view"], reader["view_generation"]), (completed, None, 1))
+        # In an interrupted step, only the job without a report starts again; the reader and its round stay.
+        reader.update(step="scan", scans={}, view=legacy, view_generation=0)
+        reader["jobs"] = {key: {k: v for k, v in job.items() if k != "frozen_view"} for key, job in reader["jobs"].items()}
+        reader["jobs"]["scan/repair_astra"].pop("result")
+        kept = reader["jobs"]["scan/repair_opus"]
+        self.cycle.save()
+        self.state = self.store.read()
+        self.cycle.state = self.state
+        pair, calls = self.state["pair_review"], len(self.transport.calls)
+        with patch.object(self.cycle, "pair_inspection_step"):
+            self.step()
+        current = pair["repair"]["reader"]
+        self.assertEqual(sorted(current["jobs"]), ["scan/repair_opus"])
+        self.assertEqual((current["jobs"]["scan/repair_opus"]["sessions"], current["jobs"]["scan/repair_opus"]["frozen_view"]),
+                         (kept["sessions"], legacy))
+        # A kept report that later fails validation reruns in its session and old directory,
+        # with the prompt of the renewed view.
+        self.cycle.reject_pair_report(current, "scan/repair_opus", Blocked("pair-report", "Fixture validation error"))
+        roots, fork = {}, self.transport.fork
+        def record(root, state, *args, **kwargs):
+            roots[state["pending"]["role"]] = root
+            return fork(root, state, *args, **kwargs)
+        self.transport.fork = record
+        self.step()
+        self.assertEqual(roots["repair_opus"], self.store.directory / "legacy/view-0/source")
+        self.assertEqual(roots["repair_astra"], Path(read_record(self.store, current["view"])["root"]))
+        self.assertEqual((current["id"], pair["repair"]["round"], current["view_generation"]), (reader["id"], 1, 1))
+        self.assertIn("publication", read_record(self.store, current["view"]))
+        self.assertEqual(current["jobs"]["scan/repair_opus"]["id"], kept["id"])
+        self.assertIn('"publication_manifest"', current["jobs"]["scan/repair_opus"]["prompt"])
+        self.assertEqual(current["jobs"]["scan/repair_opus"]["frozen_prompt"], kept["prompt"])
+        readers = self.transport.calls[calls:]
+        self.assertEqual(sorted(r for r, c in readers), ["repair_astra", "repair_opus"])
+        self.assertTrue(all(c["publication_manifest"] == "__review__/publication.json" for r, c in readers))
+        self.step()
+        self.assertEqual((pair["repair"]["clean"], pair["repair"]["reader"]), (1, None))
+        record = read_record(self.store, pair["repair"]["reviews"][-1]["record"])
+        self.assertEqual(record["earlier_views"], [legacy])
+
+    def test_renewal_keeps_only_jobs_with_work_to_finish(self):
+        pair = self.assign("pair_b", "low", False)
+        self.step()
+        reader = self.cycle.repair_reader(pair)
+        view = materialize(self.cycle, reader)
+        current = reader["view"]
+        legacy = artifact(self.store, "legacy/view.json", {k: v for k, v in view.items() if k != "publication"})
+        source = {"path": "legacy/report.json", "sha256": "0" * 64}
+        jobs = {"done": {"role": "repair_opus", "result": source},
+                "correcting": {"role": "repair_astra", "report_source": source, "report_error": "Invalid"},
+                "stale": {"role": "repair_astra", "report_source": source},
+                "turn": {"role": "repair_astra", "turn_id": "native-turn"},
+                "marker": {"role": "repair_astra", "attempts": 2, "sessions": {"repair_astra": "thread"}},
+                "first": {"role": "repair_astra", "attempts": 1, "sessions": {"repair_astra": "thread"}},
+                "unstarted": {"role": "repair_astra", "attempts": 0, "sessions": {"repair_astra": "thread"}},
+                "claude": {"role": "repair_opus", "attempts": 2, "sessions": {"repair_opus": "conversation"}},
+                "incomplete": {"role": "repair_opus", "incomplete_report": source},
+                "fresh": {"role": "repair_opus"}}
+        reader.update(view=legacy, jobs=copy.deepcopy(jobs))
+        self.cycle.renew_legacy_view(reader)
+        self.assertEqual(sorted(reader["jobs"]), ["correcting", "done", "first", "marker", "turn"])
+        self.assertTrue(all(job["frozen_view"] == legacy for job in reader["jobs"].values()))
+        self.assertEqual((reader["view"], reader["view_generation"]), (None, 1))
+        # A view of the previous runtime has the manifest but not the records of the open gate.
+        previous = artifact(self.store, "previous/view.json", dict(view, files={n: d for n, d in view["files"].items()
+                                                                              if not n.startswith("__review__/gate")}))
+        reader["view"] = previous
+        self.cycle.renew_legacy_view(reader)
+        self.assertEqual((reader["view"], reader["view_generation"]), (None, 2))
+        # A current view is never renewed.
+        reader["view"] = current
+        self.cycle.renew_legacy_view(reader)
+        self.assertEqual((reader["view"], reader["view_generation"]), (current, 2))
 
     def test_frozen_repair_baseline_cannot_be_modified(self):
         pair = self.assign("final", "low", False)
@@ -373,6 +598,10 @@ class RepairTests(unittest.TestCase):
         bad["repair"]["tests"]["failures"][0]["locations"][0]["path"] = "../outside.txt"
         with self.assertRaises(Blocked):
             parse_report(json.dumps(bad), "repair_execute")
+        # A repeated risk is harmless evidence, and a writer report gets no report correction.
+        repeated = self.writer(c, mode="pair")
+        repeated["repair"]["risks"] = ["contracts", "contracts"]
+        self.assertEqual(parse_report(json.dumps(repeated), "repair_execute")["repair"]["risks"], ["contracts", "contracts"])
 
     def test_future_verification_requested_by_inner_reviewer_runs_after_clean_gate(self):
         pair = self.assign("pair_b", "low", False)
@@ -555,6 +784,210 @@ class RepairTests(unittest.TestCase):
         self.assertTrue(saved["reader"]["allow_new_self_session"])
         self.assertEqual(job["transient_retries"], 0)
         self.assertNotIn("report_repairs", job)  # An operator retry gives a new report correction budget.
+
+    def request_final_gate(self, times=1):
+        self.start("final")
+        requests = [times]
+        def scan(c, h):
+            self.assertIn("final_gate", c)
+            requested = requests[0] > 0
+            requests[0] -= 1
+            return report(findings=[], final_gate={"full_run": requested, "reason": "The shared build configuration changed."})
+        self.transport.handlers["pair_final_opus"] = scan
+
+    def gate_tests(self):
+        return [c for r, c in self.transport.calls if r == "repair_execute" and c["operation"] == "test"]
+
+    def test_final_gate_runs_one_full_run_after_the_passed_final_pair(self):
+        from focus_pair_repair import FINAL_GATE_VERIFICATION
+        self.request_final_gate()
+        candidate = self.repo.snapshot()
+        self.until(lambda: self.state["phase"] == "publish")
+        self.assertEqual([r for r, c in self.transport.calls], ["pair_final_opus", "pair_final_fable", "repair_execute"])
+        context = self.gate_tests()[0]
+        self.assertEqual(context["verification"], FINAL_GATE_VERIFICATION)
+        self.assertEqual(context["clean_passes"], 0)
+        task = context["assignments"][0]
+        self.assertEqual((task["action"], task["full_suite"]), ("verify", True))
+        self.assertIn("The shared build configuration changed.", task["reason"])
+        self.assertEqual(self.state["reviewed"], candidate)
+        self.assertEqual([(r["phase"], r["status"]) for r in self.state["pair_full_runs"]], [("final", "passed")])
+        seals = sorted((self.store.directory / f"pair-reviews/{self.state['iteration']}").glob("*/seal.json"))
+        self.assertEqual(len(seals), 1)
+        seal = json.loads(seals[0].read_text())
+        self.assertFalse(seal["cleanup_without_rereview"])
+        self.assertEqual(seal["final_gate"]["requests"], ["The shared build configuration changed."])
+        self.assertEqual(seal["final_gate"]["review"], self.state["pair_completed"]["final"])
+        self.assertTrue(seal["repair_gate"])
+
+    def test_final_gate_is_skipped_without_a_request_or_after_a_full_run_of_this_candidate(self):
+        for passed in (False, True):
+            with self.subTest(passed=passed):
+                self.request_final_gate(times=1 if passed else 0)
+                candidate = digest(encode(self.repo.snapshot()))
+                if passed:
+                    # A failed run is review history. The inspectors receive only passed runs.
+                    self.state["pair_full_runs"] = [
+                        {"phase": "pair_b", "record": None, "candidate": "earlier", "status": "failed"},
+                        {"phase": "pair_b", "record": None, "candidate": candidate, "status": "passed"}]
+                self.until(lambda: self.state["phase"] == "publish")
+                self.assertEqual([r for r, c in self.transport.calls], ["pair_final_opus", "pair_final_fable"])
+                facts = self.transport.calls[0][1]["final_gate"]["full_runs"]
+                self.assertEqual(facts, [{"phase": "pair_b", "this_candidate": True}] if passed else [])
+
+    def test_final_gate_defect_starts_the_repair_loop_and_a_new_final_pair(self):
+        from focus_pair_repair import FULL_RUN_DONE
+        self.request_final_gate(times=2)
+        execute = self.set_writer()
+        def run(c, h):
+            if c["operation"] == "test" and len(self.gate_tests()) == 1:
+                return self.writer(c, status="failed", failures=[finding("regression")])
+            return execute(c, h)
+        self.transport.handlers["repair_execute"] = run
+        self.until(lambda: len(self.gate_tests()) == 2 and self.state["pair_review"] is None)
+        self.assertEqual(self.state["phase"], "final")
+        roles = [r for r, c in self.transport.calls]
+        self.assertEqual((roles[3], roles[-1]), ("repair_execute", "repair_execute"))
+        self.assertEqual(sorted(roles[4:-1]), ["repair_astra", "repair_astra", "repair_opus", "repair_opus"])
+        retest = self.gate_tests()[1]["assignments"]
+        self.assertFalse(any(t["full_suite"] for t in retest))
+        self.assertEqual(retest[0]["check"], FULL_RUN_DONE)
+        self.assertEqual([(r["phase"], r["status"]) for r in self.state["pair_full_runs"]], [("final", "failed")])
+        # The new final pair checks the correction. The stage has no second final gate.
+        self.assertEqual([r["title"] for r in self.state["pair_carry"]], ["Empty input guard"])
+        self.assertNotIn("final", self.state["pair_completed"])
+        self.assertIn("Финал: до устранения значимых", "\n".join(build_panel(self.state).lines))
+        self.until(lambda: self.state["phase"] == "publish")
+        self.assertEqual(len(self.gate_tests()), 2)
+        self.assertTrue(self.transport.calls[-1][0].endswith("_discuss"))
+        rescan = [c for r, c in self.transport.calls if r == "pair_final_opus"][-1]
+        self.assertFalse(rescan["final_gate"]["available"])
+        self.assertTrue(self.cycle.full_run_used("final"))
+
+    def test_disputed_gate_row_does_not_move_to_the_next_final_pair(self):
+        self.request_final_gate()
+        execute = self.set_writer()
+        def run(c, h):
+            if c["operation"] == "test" and len(self.gate_tests()) == 1:
+                value = self.writer(c, status="failed", failures=[finding("regression")])
+                for row in value["resolutions"]:
+                    row["outcome"] = "disputed"
+                return value
+            return execute(c, h)
+        self.transport.handlers["repair_execute"] = run
+        def discuss(c, h):
+            # The inner readers decide the disputed gate row again, without the runtime gate key.
+            a = c["assignment"]
+            if a.get("proposal_hash"):
+                return report(assessments=[], new_findings=[], consensus=a["proposal_hash"], impact="minor")
+            return report(assessments=[decision(r, "verify") for r in a["registry"]], new_findings=[],
+                          consensus=None, impact="minor")
+        for role in ("repair_opus", "repair_astra"):
+            self.transport.handlers[role + "_discuss"] = discuss
+        self.until(lambda: len(self.gate_tests()) == 2 and self.state["pair_review"] is None)
+        self.assertEqual(self.state["phase"], "final")
+        self.assertEqual([r["title"] for r in self.state["pair_carry"]], ["Empty input guard"])
+        self.assertFalse(any(r.get("final_gate") for r in self.state["pair_carry"]))
+
+    def test_final_gate_after_a_final_cleanup_reuses_its_view_and_keeps_the_cleanup_record(self):
+        pair = self.assign("final", "low", False)
+        pair["scans"] = {"pair_final_opus": report(findings=[], final_gate={"full_run": True, "reason": "Shared code changed."})}
+        self.set_writer()
+        self.until(lambda: (self.state.get("pair_review") or {}).get("final_gate"))
+        gate_pair = self.state["pair_review"]
+        self.assertEqual(gate_pair["view"], pair["repair"]["test_view"])
+        self.assertEqual(read_record(self.store, gate_pair["view"])["candidate"], digest(encode(self.repo.snapshot())))
+        self.until(lambda: self.state["phase"] == "publish")
+        self.assertEqual(len(self.gate_tests()), 2)
+        seal = json.loads((self.store.directory / f"pair-reviews/{self.state['iteration']}/{gate_pair['id']}/seal.json").read_text())
+        self.assertTrue(seal["cleanup_without_rereview"])
+        self.assertEqual(seal["final_gate"]["requests"], ["Shared code changed."])
+
+    def test_current_final_scan_without_final_gate_is_returned_for_correction(self):
+        self.start("final")
+        answers = []
+        def scan(c, h):
+            answers.append(c["final_gate"]["available"])
+            return report(findings=[], omit_final_gate=len(answers) == 1)
+        self.transport.handlers["pair_final_opus"] = scan
+        self.until(lambda: self.state["phase"] == "publish")
+        self.assertEqual(answers, [True, True])
+        self.assertEqual([r for r, c in self.transport.calls], ["pair_final_opus", "pair_final_opus", "pair_final_fable"])
+
+    def test_final_gate_cannot_skip_its_full_run(self):
+        self.request_final_gate()
+        self.transport.handlers["repair_execute"] = lambda c, h: self.writer(c, status="not_needed")
+        with self.assertRaisesRegex(Blocked, "cannot be skipped"):
+            self.until(lambda: self.state["phase"] == "publish")
+        self.assertEqual(self.state["pair_review"]["repair"]["step"], "test")
+        self.assertNotIn("pair_full_runs", self.state)
+
+    def test_restart_during_the_final_gate_carries_no_gate_request(self):
+        self.request_final_gate()
+        self.until(lambda: (self.state.get("pair_review") or {}).get("step") == "repair")
+        lines = "\n".join(build_panel(self.state).lines)
+        self.assertIn("Финальный гейт · полный прогон Opus/xhigh", lines)
+        self.assertNotIn("Проверка исправлений", lines)
+        # The gate reuses the frozen view of the final pair for this exact candidate.
+        pair = self.state["pair_review"]
+        self.assertEqual(read_record(self.store, pair["view"])["candidate"], digest(encode(self.repo.snapshot())))
+        self.assertNotIn(pair["id"], pair["view"]["path"])
+        self.assertEqual(pair["repair"]["base"], pair["view"])
+        self.cycle.reset_pairs()
+        self.assertEqual((self.state["phase"], self.state["pair_carry"]), ("pair_a", []))
+
+    def test_pair_b_full_run_limit_returns_full_suite_proposals_for_correction(self):
+        self.start("pair_b")
+        self.state["pair_full_runs"] = [{"phase": "pair_b", "record": None, "candidate": "c", "status": "passed"}]
+        calls = {"pair_astra_discuss": 0, "pair_arbiter": 0}
+        def broad(role):
+            # Each first answer assigns a full run. The reader keeps its own proposal, so arbitration follows.
+            def answer(c, h):
+                calls[role] += 1
+                rows = [decision(r, "verify", full_suite=calls[role] == 1) for r in c["assignment"]["registry"]]
+                return report(assessments=rows, new_findings=[], consensus=None, impact="minor")
+            return answer
+        self.transport.handlers["pair_astra"] = lambda c, h: report(findings=[finding()])
+        for role in calls:
+            self.transport.handlers[role] = broad(role)
+        corrections = []
+        answer = self.transport.answer
+        def record(role, prompt, heartbeat):
+            if "Correct the prior report" in prompt:
+                corrections.append((role, prompt.rsplit("Correct the prior report", 1)[1]))
+            return answer(role, prompt, heartbeat)
+        self.transport.answer = record
+        self.until(lambda: (self.state.get("pair_review") or {}).get("step") in ("decide", "repair"))
+        pair = self.state["pair_review"]
+        for key in ("discuss/1/pair_astra", "arbitrate/1"):
+            self.assertEqual(pair["jobs"][key]["report_repairs"], 1)
+        self.assertEqual([r for r, _ in corrections], ["pair_astra_discuss", "pair_arbiter"])
+        for _, text in corrections:
+            self.assertIn("Pair B already used its one full run for this stage.", text)
+        self.assertFalse(any(d["full_suite"] for d in pair["decisions"]))
+
+    def test_stage_transition_removes_the_full_run_records(self):
+        self.start("publish")
+        self.state["pair_full_runs"] = [{"phase": "pair_b", "record": None, "candidate": "c", "status": "passed"}]
+        self.cycle.advance_stage(self.repo.snapshot(), [], {})
+        self.assertNotIn("pair_full_runs", self.state)
+        self.assertFalse(self.cycle.full_run_used("pair_b"))
+
+    def test_pair_b_full_run_happens_once_and_later_checks_are_targeted(self):
+        self.start("pair_b")
+        pair = self.cycle.new_pair()
+        row = dict(finding(), source_id="broad")
+        pair.update(step="decide", issues=[row], decisions=[decision(row, "verify", full_suite=True)], impact="minor")
+        self.until(lambda: self.state["phase"] == "final")
+        tests = self.gate_tests()
+        self.assertEqual(len(tests), 1)
+        self.assertTrue(tests[0]["assignments"][0]["full_suite"])
+        self.assertEqual([(r["phase"], r["status"]) for r in self.state["pair_full_runs"]], [("pair_b", "passed")])
+        self.assertFalse(pair["repair"]["accepted"][0]["full_suite"])
+        # The verification is significant, so the same pair inspects again without a full run.
+        rescans = [c for r, c in self.transport.calls if r == "pair_astra"]
+        self.assertEqual([c["full_run"]["available"] for c in rescans], [False])
+        self.assertTrue(self.cycle.full_run_used("pair_b"))
 
     def test_panel_explains_mode_progress_and_next_step(self):
         pair = self.assign("pair_b", "low", False)

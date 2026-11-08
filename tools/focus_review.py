@@ -25,8 +25,13 @@ RESOLUTION = object_schema({"source_id": TEXT, "resolution": TEXT,
                             "evidence": {"type": "array", "minItems": 1, "items": TEXT}})
 
 
-def report_schema(role):
+def report_schema(role, existing_review=False):
     schema = copy.deepcopy(REPORT_SCHEMA)
+    if existing_review:
+        from focus_review_contract import SCANNERS, coverage_schema
+        if role in SCANNERS:
+            schema["properties"]["coverage"] = coverage_schema()
+            schema["required"].append("coverage")
     from focus_pair_profile import PAIR_ROLES
     if role in PAIR_ROLES:
         from focus_pair_protocol import extend_schema

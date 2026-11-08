@@ -21,6 +21,27 @@ from focus_control import FocusStop
 from focus_project import Project, check_project_owner, lock_members, open_project, register_members
 from focus_publication import MemberCycle, ProjectCycle
 import focus_reconcile
+from test_focus_pairs import PairTransport
+
+
+def add_member(test, name, files=None):
+    """A member repository with one published commit on a local bare remote."""
+    path = test.root / name
+    path.mkdir(parents=True)
+    repo = Repository(path)
+    repo.git("init", "--initial-branch=main")
+    repo.git("config", "user.name", "Test")
+    repo.git("config", "user.email", "test@example.invalid")
+    for relative, text in {".gitignore": ".work/\n", "source.txt": "original\n", **(files or {})}.items():
+        (path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (path / relative).write_text(text)
+    repo.git("add", "-A")
+    repo.git("commit", "-m", "Initial source")
+    remote = Path(test.temp.name) / (name + ".git")
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    repo.git("remote", "add", "origin", str(remote))
+    repo.git("push", "-u", "origin", "main")
+    test.members[name], test.remotes[name] = repo, remote
 
 
 class ProjectTests(unittest.TestCase):
@@ -32,21 +53,7 @@ class ProjectTests(unittest.TestCase):
         self.members = {}
         self.remotes = {}
         for name in ("Core", "Root", "Specification"):
-            path = self.root / name
-            path.mkdir()
-            repo = Repository(path)
-            repo.git("init", "--initial-branch=main")
-            repo.git("config", "user.name", "Test")
-            repo.git("config", "user.email", "test@example.invalid")
-            (path / ".gitignore").write_text(".work/\n")
-            (path / "source.txt").write_text("original\n")
-            repo.git("add", ".gitignore", "source.txt")
-            repo.git("commit", "-m", "Initial source")
-            remote = Path(self.temp.name) / (name + ".git")
-            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-            repo.git("remote", "add", "origin", str(remote))
-            repo.git("push", "-u", "origin", "main")
-            self.members[name], self.remotes[name] = repo, remote
+            add_member(self, name)
         (self.root / "HANDOFF.md").write_text("Read Core/PLAN.md and Specification requirements.\n")
         self.project = open_project(self.root)
         self.store = Store(self.root)
@@ -982,6 +989,379 @@ class ProjectTests(unittest.TestCase):
                 stop.assert_not_called()
             self.assertFalse((member_store.directory / "stop.json").exists())
             control.finish(self.state, 0)
+
+
+SPLIT_FILES = {
+    "Interlink": {"AGENTS.md": "Run the code checks in Interlink.\n", "CLAUDE.md": "Read AGENTS.md.\n"},
+    "Interlink-docs": {"AGENTS.md": "Documentation rules.\n", "project/AGENTS.md": "Project-root rules.\n",
+                       "project/CLAUDE.md": "Read AGENTS.md at the project root.\n"},
+    "Interlink-plans": {"plan/s2-adaptation.md": "# S2 adaptation\n\n## Stage 1\n\nStatus: complete.\n",
+                        ".claude/CLAUDE.md": "Plan rules.\n"},
+}
+SPLIT_PLAN = "Interlink-plans/plan/s2-adaptation.md"
+SPLIT_INSTRUCTIONS = [
+    {"path": "AGENTS.md", "repository": None, "target": "Interlink-docs/project/AGENTS.md"},
+    {"path": "CLAUDE.md", "repository": None, "target": "Interlink-docs/project/CLAUDE.md"},
+    {"path": "Interlink/AGENTS.md", "repository": "Interlink"},
+    {"path": "Interlink/CLAUDE.md", "repository": "Interlink"},
+    {"path": "Interlink-docs/AGENTS.md", "repository": "Interlink-docs"},
+    {"path": "Interlink-plans/.claude/CLAUDE.md", "repository": "Interlink-plans"},
+]
+
+
+def project_context(prompt):
+    return json.JSONDecoder().raw_decode(prompt.split("\nProject context:\n", 1)[1])[0]
+
+
+def runtime_assignment(prompt):
+    return json.JSONDecoder().raw_decode(prompt.split("Runtime assignment:\n", 1)[1])[0]
+
+
+class PromptTransport(PairTransport):
+    """Keep each full prompt. The fixture writers change source.txt in the member at ROOT."""
+    def __init__(self, root):
+        super().__init__(root)
+        self.prompts = []
+
+    def dispatch(self, role, prompt, heartbeat):
+        with self.lock:
+            self.prompts.append((role, prompt))
+        return super().dispatch(role, prompt, heartbeat)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX symlink fixture")
+class SplitLayoutTests(unittest.TestCase):
+    """A project root with code, documentation, and plans in separate member repositories."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="focus-split-")
+        self.root = (Path(self.temp.name) / "Interlink")
+        self.root.mkdir()
+        self.root = self.root.resolve()
+        self.members, self.remotes = {}, {}
+        for name, files in SPLIT_FILES.items():
+            add_member(self, name, files)
+        (self.root / "focus-project.json").write_text(json.dumps(
+            {"version": 1, "repositories": ["Interlink", "Interlink-docs", "Interlink-plans"]}))
+        (self.root / "AGENTS.md").symlink_to("Interlink-docs/project/AGENTS.md")
+        (self.root / "CLAUDE.md").symlink_to("Interlink-docs/project/CLAUDE.md")
+        self.project = open_project(self.root)
+        self.store = Store(self.root)
+        self.state = fresh_state(self.project)
+        self.transport = fixtures.FixtureTransport(self.root)
+        self.cycle = ProjectCycle(self.project, self.store, self.state, self.transport, lambda: None,
+                                  fixtures.REPO / "tools", "pwsh")
+        self.policy = patch.object(MemberCycle, "policy", return_value=subprocess.CompletedProcess(
+            [], 0, b'{"verdict":"no-required-checks"}', b""))
+        self.policy.start()
+        self.quiet = contextlib.redirect_stdout(io.StringIO())
+        self.quiet.__enter__()
+
+    def tearDown(self):
+        self.quiet.__exit__(None, None, None)
+        self.policy.stop()
+        self.temp.cleanup()
+
+    def start_pairs(self, phase="pair_a"):
+        (self.root / "Interlink/source.txt").write_text("stage change\n")
+        self.cycle.reset_reviews()
+        self.state.update(phase=phase, last_snapshot=self.project.snapshot())
+        self.cycle.transport = PromptTransport(self.root / "Interlink")
+        self.cycle.transport.cycle = self.cycle
+        return self.cycle.transport
+
+    def until(self, predicate, limit=70):
+        for _ in range(limit):
+            if predicate():
+                return
+            self.cycle.paired_review_step()
+        self.fail("pair did not converge")
+
+    def assign(self, phase):
+        from test_focus_pairs import complexity, decision, finding
+        transport = self.start_pairs(phase)
+        pair = self.cycle.new_pair()
+        row = dict(finding(), source_id="assigned", severity="low")
+        row["locations"][0]["path"] = "Interlink/source.txt"
+        pair.update(step="decide", issues=[row], decisions=[decision(row, "fix", False)], impact="minor")
+        transport.handlers["pair_complexity"] = lambda c, h: fixtures.report(complexity=complexity(c["assignment"], "high"))
+        return transport, pair
+
+    def test_layout_with_root_links_is_admitted_and_member_names_share_a_prefix(self):
+        from cycle_state import digest
+        self.project.assert_main()
+        self.assertEqual(list(self.project.repositories), ["Interlink", "Interlink-docs", "Interlink-plans"])
+        snapshot = self.project.snapshot()
+        self.assertEqual(snapshot["files"]["AGENTS.md"], "link:" + digest(b"Interlink-docs/project/AGENTS.md"))
+        self.assertEqual(self.project.owner("Interlink-docs/project/AGENTS.md"), "Interlink-docs")
+        self.assertEqual(self.project.owner("Interlink/AGENTS.md"), "Interlink")
+        self.assertIsNone(self.project.owner("AGENTS.md"))
+
+    def test_a_link_target_edit_is_member_work_and_a_retargeted_link_is_refused(self):
+        (self.root / "Interlink-docs/project/AGENTS.md").write_text("Changed project-root rules.\n")
+        snapshot = self.project.snapshot()
+        self.cycle.check_protected(snapshot)
+        self.assertEqual(self.cycle.changes(self.state["baseline"], snapshot), ["Interlink-docs/project/AGENTS.md"])
+        (self.root / "AGENTS.md").unlink()
+        (self.root / "AGENTS.md").symlink_to("Interlink-docs/AGENTS.md")
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.check_protected(self.project.snapshot())
+        self.assertEqual(caught.exception.code, "project-context-changed")
+        with self.assertRaises(Blocked) as caught:
+            focus_reconcile.prepare(self.cycle)
+        self.assertEqual(caught.exception.code, "reconcile-symlink")
+
+    def test_a_plan_in_a_member_is_the_task_plan_and_the_review_plan(self):
+        from focus_review_run import create_run
+        from focus_review_scope import make_request, plan_index
+        from focus_status import accept_task
+        accept_task(self.state, {"task": {"id": "S2.1", "title": "Adaptation", "plan": SPLIT_PLAN}}, "coordinate")
+        self.assertEqual(self.state["task"]["plan"], SPLIT_PLAN)
+        store, state = create_run(self.project, make_request(plan_index(self.root, SPLIT_PLAN), scope="Migration preflight"))
+        self.assertEqual(json.loads((store.directory / state["review_run"]["request"]["path"]).read_text())["plan"]["path"],
+                         SPLIT_PLAN)
+
+    def publish_code_and_plan(self):
+        (self.root / "Interlink/source.txt").write_text("stage change\n")
+        (self.root / SPLIT_PLAN).write_text("# S2 adaptation\n\n## Stage 1\n\nStatus: complete.\n\n## Stage 2\n")
+        reviewed = self.project.snapshot()
+        self.state.update(phase="publish", coordinated="publish", reviewed=reviewed,
+                          last_snapshot=reviewed, sol_clean=3, claude_clean=2)
+        self.transport.actions = [("publish", fixtures.report())]
+        self.cycle.publish()
+
+    def test_a_stage_publishes_only_the_changed_members(self):
+        docs = self.members["Interlink-docs"].text("rev-parse", "HEAD")
+        self.publish_code_and_plan()
+        self.assertEqual(set(self.state["published"]["repositories"]), {"Interlink", "Interlink-plans"})
+        for name in ("Interlink", "Interlink-plans"):
+            self.assertEqual(self.members[name].remote_head("origin"), self.members[name].text("rev-parse", "HEAD"))
+        self.assertEqual(self.members["Interlink-docs"].text("rev-parse", "HEAD"), docs)
+        self.assertEqual(self.members["Interlink-docs"].remote_head("origin"), docs)
+        role, prompt = self.transport.calls[-1]
+        self.assertEqual(role, "publish")
+        self.assertEqual(project_context(prompt)["project_instructions"]["files"], SPLIT_INSTRUCTIONS)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is not installed")
+    def test_members_without_checks_or_workflows_pass_the_real_policy_gate(self):
+        self.publish_code_and_plan()
+        self.policy.stop()
+        try:
+            self.cycle.wait_ci()
+        finally:
+            self.policy.start()
+        for name in ("Interlink", "Interlink-plans"):
+            result = json.loads((self.store.directory / "repositories" / name / "ci/result.json").read_text())
+            self.assertEqual(result["sha"], self.members[name].text("rev-parse", "HEAD"))
+        self.assertEqual(self.state["display_ci"]["status"], "not-configured")
+
+    def test_main_roles_get_the_instruction_list_with_link_targets(self):
+        from cycle_prompts import PROJECT_INSTRUCTIONS_RULE
+        for role in ("coordinate", "code", "heal"):
+            with self.subTest(role=role):
+                field = project_context(self.cycle.context(role))["project_instructions"]
+                self.assertEqual(field, {"files": SPLIT_INSTRUCTIONS, "rule": PROJECT_INSTRUCTIONS_RULE})
+
+    def test_link_chains_resolve_and_unusable_entries_are_left_out(self):
+        from focus_pair_view import materialize, view_instructions
+        interlink = self.root / "Interlink"
+        (interlink / "CLAUDE.md").unlink()
+        (interlink / "CLAUDE.md").symlink_to("../Interlink-docs/project/CLAUDE.md")
+        (interlink / "AGENTS.md").unlink()
+        (interlink / "AGENTS.md").symlink_to("CLAUDE.md")  # A chain of two links.
+        (interlink / ".claude").symlink_to("../Interlink-docs/project", target_is_directory=True)  # A view has no files below it.
+        docs = self.root / "Interlink-docs"
+        (docs / "CLAUDE.md").symlink_to("CLAUDE.md")  # A loop.
+        (docs / ".claude").mkdir()
+        (docs / ".claude/CLAUDE.md").mkdir()  # A directory.
+        plans = self.root / "Interlink-plans"
+        (plans / "AGENTS.md").symlink_to(str(docs / "AGENTS.md"))  # An absolute link.
+        (plans / "CLAUDE.md").symlink_to("../../outside.md")  # A link out of the project.
+        (Path(self.temp.name) / "outside.md").write_text("Outside rules.\n")
+        (plans / ".claude/CLAUDE.md").unlink()
+        (plans / ".claude/CLAUDE.md").symlink_to("../plan")  # A link to a directory.
+        expected = [
+            *SPLIT_INSTRUCTIONS[:2],
+            {"path": "Interlink/AGENTS.md", "repository": "Interlink", "target": "Interlink-docs/project/CLAUDE.md"},
+            {"path": "Interlink/CLAUDE.md", "repository": "Interlink", "target": "Interlink-docs/project/CLAUDE.md"},
+            {"path": "Interlink-docs/AGENTS.md", "repository": "Interlink-docs"},
+        ]
+        self.assertEqual(self.project.instruction_entries(), expected)
+        self.state.update(phase="pair_a", last_snapshot=self.project.snapshot())
+        pair = self.cycle.new_pair()
+        view = materialize(self.cycle, pair)
+        self.assertEqual(view_instructions(view, pair["snapshot"]["repositories"]), expected)
+
+    def test_every_listed_file_and_target_is_readable_in_the_frozen_view(self):
+        from focus_pair_view import ViewInspector, materialize, view_instructions
+        self.start_pairs()
+        pair = self.cycle.new_pair()
+        view = materialize(self.cycle, pair)
+        entries = view_instructions(view, pair["snapshot"]["repositories"])
+        self.assertEqual(entries, SPLIT_INSTRUCTIONS)
+        inspector = ViewInspector(view)
+        for entry in entries:
+            name = entry.get("target", entry["path"])
+            with self.subTest(path=name):
+                result = inspector.call({"tool": "focus_inspect", "arguments": {
+                    "operation": "read", "path": name, "offset": 0, "limit": 20}})
+                self.assertTrue(result["success"], result)
+                self.assertIn((self.root / name).read_text().strip(), result["contentItems"][0]["text"])
+
+    def test_readers_assessor_and_writers_get_the_list(self):
+        from cycle_prompts import PROJECT_INSTRUCTIONS_RULE
+        from focus_pair_profile import PAIR_WRITERS
+        transport, pair = self.assign("pair_a")
+        self.assertEqual(pair["project_instructions_version"], 2)
+        self.until(lambda: self.state["phase"] == "pair_b")
+        roles = [role for role, _ in transport.prompts]
+        self.assertIn("pair_complexity", roles)
+        self.assertTrue(any(role in PAIR_WRITERS for role in roles))
+        field = {"files": SPLIT_INSTRUCTIONS, "rule": PROJECT_INSTRUCTIONS_RULE}
+        for role, prompt in transport.prompts:
+            with self.subTest(role=role):
+                context = project_context(prompt) if role in PAIR_WRITERS else runtime_assignment(prompt)
+                self.assertEqual(context["project_instructions"], field)
+
+    def test_inner_readers_and_the_repair_writer_get_the_list(self):
+        transport, pair = self.assign("final")
+        self.until(lambda: self.state["phase"] == "publish")
+        roles = {role for role, _ in transport.prompts}
+        self.assertTrue({"repair_self", "repair_execute"} <= roles)
+        for role, prompt in transport.prompts:
+            with self.subTest(role=role):
+                context = project_context(prompt) if role == "repair_execute" else runtime_assignment(prompt)
+                self.assertEqual(context["project_instructions"]["files"], SPLIT_INSTRUCTIONS)
+
+    def test_the_final_gate_and_both_evidence_auditors_copy_the_marker(self):
+        self.start_pairs("final")
+        review = self.cycle.new_pair()
+        review["scans"] = {"pair_final_opus": {"final_gate": {"full_run": True, "reason": "Shared configuration changed."}}}
+        before = self.project.snapshot()
+        self.assertTrue(self.cycle.start_final_gate(review, before, "conclusion-ref"))
+        gate = self.state["pair_review"]
+        self.assertEqual(gate["project_instructions_version"], 2)
+        plain = self.cycle.new_pair()
+        plain["repair"] = {}
+        from focus_pair_view import materialize
+        materialize(self.cycle, plain)
+        (self.root / "Interlink-docs/AGENTS.md").write_text("Documentation rules, with a recorded check.\n")
+        after = self.project.snapshot()
+        for owner in (gate, plain):
+            with self.subTest(final_gate=owner is gate):
+                self.state["pair_review"] = owner
+                self.cycle.queue_repair_evidence(owner, fixtures.report(), before, after, {})
+                reader = owner["repair"]["evidence_reader"]
+                self.assertEqual(reader["project_instructions_version"], 2)
+                context = runtime_assignment(self.cycle.pair_prompt(reader, "repair_evidence", {"mode": "test_evidence_delta"}))
+                self.assertEqual(context["project_instructions"]["files"], SPLIT_INSTRUCTIONS)
+
+    def test_a_saved_reader_prompt_does_not_change_with_later_instruction_edits(self):
+        from focus_pair_jobs import same_pair_prompt
+        self.start_pairs()
+        pair = self.cycle.new_pair()
+        assignment = {"mode": "independent_initial"}
+        saved = self.cycle.pair_prompt(pair, "pair_opus", assignment)
+        (self.root / "Interlink/AGENTS.md").write_text("Changed code rules.\n")
+        (self.root / "Interlink/CLAUDE.md").unlink()
+        (self.root / "Interlink-docs/project/CLAUDE.md").unlink()
+        current = self.cycle.pair_prompt(pair, "pair_opus", assignment)
+        self.assertEqual(current, saved)
+        self.assertTrue(same_pair_prompt(saved, current))
+        self.assertEqual(runtime_assignment(current)["project_instructions"]["files"], SPLIT_INSTRUCTIONS)
+        self.assertEqual(project_context(self.cycle.context("coordinate"))["project_instructions"]["files"],
+                         [SPLIT_INSTRUCTIONS[0], SPLIT_INSTRUCTIONS[2], SPLIT_INSTRUCTIONS[4], SPLIT_INSTRUCTIONS[5]])
+
+    def test_an_older_pair_gets_no_list_and_an_unknown_version_needs_the_operator(self):
+        self.start_pairs("final")
+        pair = self.cycle.new_pair()
+        pair.pop("project_instructions_version")
+        context = runtime_assignment(self.cycle.pair_prompt(pair, "pair_opus", {"mode": "independent_initial"}))
+        self.assertNotIn("project_instructions", context)
+        pair["scans"] = {"pair_final_opus": {"final_gate": {"full_run": True, "reason": "Shared configuration changed."}}}
+        self.assertTrue(self.cycle.start_final_gate(pair, self.project.snapshot(), "conclusion-ref"))
+        self.assertNotIn("project_instructions_version", self.state["pair_review"])
+        pair = self.cycle.new_pair()
+        pair["project_instructions_version"] = 3
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.pair_prompt(pair, "pair_opus", {"mode": "independent_initial"})
+        self.assertEqual(caught.exception.code, "instruction-version")
+        self.assertIn("run cc-focus correct --message TEXT.", str(caught.exception))
+        self.state["publication_started"] = True  # Then a correction cannot reopen the stage.
+        with self.assertRaises(Blocked) as started:
+            self.cycle.pair_prompt(pair, "pair_opus", {"mode": "independent_initial"})
+        self.assertNotIn("cc-focus correct", str(started.exception))
+        self.state.pop("publication_started")
+        self.cycle.handle_block(caught.exception)
+        self.assertEqual(self.state["blocker"]["escalation_reason"], "runtime-version")  # No recovery agent starts.
+        self.assertEqual(self.state["status"], "blocked")
+
+    def test_a_campaign_gives_the_list_to_publish_heal_and_writers_but_not_the_coordinator(self):
+        from focus_review_run import ProjectReviewCycle, create_run
+        from focus_review_scope import make_request
+        store, state = create_run(self.project, make_request(scope="Inspect the migration"))
+        cycle = ProjectReviewCycle(self.project, store, state, self.transport, lambda: None, fixtures.REPO / "tools", "pwsh")
+        with self.assertRaisesRegex(Blocked, "cc-focus correct --review-run " + state["review_run"]["id"] + " --message TEXT"):
+            cycle.pair_instruction_context({"project_instructions_version": 3}, {})
+        self.assertNotIn("project_instructions", cycle.context("coordinate"))
+        self.assertNotIn("Project context", cycle.context("coordinate"))
+        self.assertEqual(project_context(cycle.context("heal"))["project_instructions"]["files"], SPLIT_INSTRUCTIONS)
+        with patch.object(cycle, "pair_writer_context", return_value="Executor assignment:\n{}"):
+            self.assertEqual(project_context(cycle.context("pair_fix"))["project_instructions"]["files"], SPLIT_INSTRUCTIONS)
+        (self.root / "Interlink/source.txt").write_text("Reviewed repair\n")
+        reviewed = self.project.snapshot()
+        state.update(phase="publish", reviewed=reviewed, last_snapshot=reviewed, coordinated="publish")
+        self.transport.actions = [("publish", fixtures.report())]
+        cycle.publish()
+        role, prompt = self.transport.calls[-1]
+        self.assertEqual(role, "publish")
+        self.assertEqual(project_context(prompt)["project_instructions"]["files"], SPLIT_INSTRUCTIONS)
+
+
+class InstructionListBoundaryTests(unittest.TestCase):
+    """Prompts without project instruction files keep their earlier form."""
+    def test_link_text_rules_for_each_platform(self):
+        from focus_project import instruction_entries
+        files = {"Docs/project/AGENTS.md": "f", "Docs/project/AGENTS.\udcff": "f"}
+        texts = {"AGENTS.md": "Docs\\project\\AGENTS.md", "CLAUDE.md": "C:\\Docs\\project\\AGENTS.md",
+                 ".claude/CLAUDE.md": "\\\\server\\share\\AGENTS.md", "Docs/AGENTS.md": "project/AGENTS.\udcff"}
+        kinds = dict(files, **{name: "link" for name in texts})
+        def entries():
+            return instruction_entries(["Docs"], kinds.get, texts.get)
+        windows = [{"path": "AGENTS.md", "repository": None, "target": "Docs/project/AGENTS.md"}]
+        with patch("focus_project.os.name", "nt"):
+            self.assertEqual(entries(), windows)  # Drive, UNC, and non-UTF-8 link texts give no entry.
+        with patch("focus_project.os.name", "posix"):
+            self.assertEqual(entries(), [])  # A POSIX backslash is part of a file name.
+
+    def test_a_project_without_instruction_files_adds_no_field(self):
+        test = ProjectTests("test_discovery_preserves_single_repository_and_prefixes_member_snapshots")
+        test.setUp()
+        try:
+            self.assertEqual(test.project.instruction_entries(), [])
+            self.assertNotIn("project_instructions", project_context(test.cycle.context("coordinate")))
+            test.edit("Core")
+            test.state.update(phase="pair_a", last_snapshot=test.project.snapshot())
+            pair = test.cycle.new_pair()
+            self.assertEqual(pair["project_instructions_version"], 2)
+            self.assertNotIn("project_instructions", runtime_assignment(
+                test.cycle.pair_prompt(pair, "pair_opus", {"mode": "independent_initial"})))
+        finally:
+            test.tearDown()
+
+    def test_a_single_repository_gets_no_list_and_no_marker(self):
+        test = fixtures.CycleTests("test_handoff_is_immutable_and_checksummed_state_is_bound")
+        test.setUp()
+        try:
+            (test.root / "AGENTS.md").write_text("Repository rules.\n")
+            self.assertNotIn("Project context", test.cycle.context("coordinate"))
+            test.edit()()
+            test.state.update(phase="pair_a", last_snapshot=test.repo.snapshot())
+            pair = test.cycle.new_pair()
+            self.assertNotIn("project_instructions_version", pair)
+            self.assertNotIn("project_instructions", runtime_assignment(
+                test.cycle.pair_prompt(pair, "pair_opus", {"mode": "independent_initial"})))
+        finally:
+            test.tearDown()
 
 
 if __name__ == "__main__":

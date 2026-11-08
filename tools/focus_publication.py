@@ -3,6 +3,7 @@
 import os
 import time
 
+from cycle_prompts import PARALLEL_PUBLICATION_RULE, PARALLEL_REPOSITORIES_RULE, PROJECT_INSTRUCTIONS_RULE
 from cycle_state import Blocked, Store, digest, encode
 from cycle_workflow import Cycle
 
@@ -43,14 +44,131 @@ class ProjectCycle(Cycle):
                 "push_url": target["push_url"], "ref": "refs/heads/main",
                 "baseline_head": self.state["baseline"]["head"][name],
                 "stage_paths": self.repo.local_paths(name, self.publication_paths()),
+                "parallel": name in self.state.get("parallel", []),
                 "published": (self.state.get("publication_repositories", {}).get(name, {}).get("published")
                               if self.state.get("publication_repositories", {}).get(name, {}).get("confirmed") else None)}
                 for name, target in self.state["publication_targets"].items()]
+        files = self.repo.instruction_entries()
+        if files:
+            details["project_instructions"] = {"files": files, "rule": PROJECT_INSTRUCTIONS_RULE}
+        if self.state.get("parallel"):
+            details["parallel_repositories"] = {"repositories": self.state["parallel"], "rule": PARALLEL_REPOSITORIES_RULE}
+            if role in ("publish", "heal"):
+                details["parallel_publication"] = PARALLEL_PUBLICATION_RULE
         if role in ("publish", "heal"):
             details["publication_artifacts"] = {name: str(self.store.directory / "repositories" / name / "publication")
                                                 for name in self.state.get("publication_targets", {})}
         import json
         return prompt + "\n\nProject context:\n" + json.dumps(details, ensure_ascii=False)
+
+    def sync_parallel(self, retry):
+        """At a stage transition: sync the parallel members of the finished stage and of the next stage."""
+        import focus_parallel
+        import focus_resolve
+        from focus_project import parallel_config
+        focus_resolve.retry_cleanup(self, stage_start=True)
+        self.stage_parallel = parallel_config(self.repo.root)  # advance_stage records these values.
+        names = sorted(set(self.state.get("parallel", [])) | set(self.stage_parallel[0]))
+        changed = {name: focus_parallel.sync(self, name, retry) for name in names}
+        focus_parallel.record_sync(self, changed)
+        return changed
+
+    def catch_up_parallel(self):
+        """A reported blocker: bring remote main into each parallel member that is behind. Return the changed paths.
+
+        A member with publication evidence keeps its checkout, because its published commit is the stage result.
+        A member that cannot move keeps its checkout. A failure of one member does not stop the others.
+        """
+        import focus_parallel
+        self.resume_catch_ups()
+        changed = {}
+        for name in focus_parallel.members(self.state):
+            if (self.state.get("publication_repositories", {}).get(name) or {}).get("published"):
+                continue
+            try:
+                paths = focus_parallel.catch_up(self, name)
+            except Blocked as error:
+                print(f"cc-focus: {name}: remote main was not brought in: {error.code}.", flush=True)
+                continue
+            if paths:
+                changed[name] = paths
+        if changed:
+            self.after_catch_up(changed)
+            print("cc-focus: brought remote main into " + ", ".join(f"{name} ({len(paths)} paths)" for name, paths in changed.items())
+                  + "; the blocked step runs again before any recovery agent.", flush=True)
+        return changed
+
+    def resume_catch_ups(self):
+        """Complete a catch-up that an interruption left open, before any other step uses the checkout."""
+        import focus_parallel
+        names = [name for name, record in self.state.get("parallel_integrations", {}).items()
+                 if record.get("catch_up") and record["step"] != "complete"]
+        changed = {name: focus_parallel.resume_catch_up(self, name) for name in names}
+        if changed:
+            self.after_catch_up(changed)
+
+    def after_catch_up(self, changed):
+        """The runtime moved these members. The next pass must not treat the move as an external change.
+
+        Only HEAD, the index, and the paths of the move get their current values. Another change of a member,
+        for example an edit of the blocked role, still resets the reviews. A pair in progress froze the candidate
+        before the move, so its phase starts a new pair on the current candidate with all open obligations.
+        Completed pairs keep their credit: the stage diff did not change.
+        """
+        current, last = self.snapshot(), self.state["last_snapshot"]
+        for name, paths in changed.items():
+            last["head"][name], last["index"][name] = current["head"][name], current["index"][name]
+            for path in (name + "/" + path for path in paths):
+                if path in current["files"]:
+                    last["files"][path] = current["files"][path]
+                else:
+                    last["files"].pop(path, None)
+        if self.state.get("pair_review"):
+            phase = self.state["pair_review"]["phase"]
+            self.state.update(pair_carry=self.pair_obligations(), pair_review=None, pending=None, reviewed=None)
+            self.state.setdefault("pair_clean", {})[phase] = 0
+        self.save()
+
+    def admit_parallel(self):
+        """The run admission sync, inside the lease block. It runs only at a stage start without an open invocation."""
+        import focus_parallel
+        import focus_resolve
+        from focus_brief import BEFORE_RUN
+        from focus_project import parallel_config
+        state = self.state
+        # A campaign target before its first pair has no pair_round. A review reset keeps pair_round.
+        start = ((state["phase"] == "code" and not state.get("code_started"))
+                 or (state.get("review_run") and state["phase"] == "pair_a"
+                     and not state.get("pair_review") and "pair_round" not in state))
+        if not start or state.get("pending") or state.get("blocker") or state.get("status") == "complete":
+            return
+        focus_resolve.retry_cleanup(self, stage_start=True)
+        parallel, resolvers = parallel_config(self.repo.root)
+        names = sorted(set(state.get("parallel", [])) | set(parallel))
+        if not names:
+            return
+        for name in parallel:
+            focus_parallel.check_git(self.repo.repositories[name])
+        review = (state.get("review_run") or {}).get("id")
+        retry = f"cc-focus review --resume {review}" if review else BEFORE_RUN
+        changed = {name: focus_parallel.sync(self, name, retry) for name in names}
+        current = self.snapshot()
+        # Take the parallel entries again, also when main did not move. The sync found each member clean.
+        # Exclusive members and the root keep their entries, so a handover with reconcile stays valid.
+        for key in ("baseline", "last_snapshot"):
+            snapshot = state[key]
+            for name in names:
+                snapshot["head"][name], snapshot["index"][name] = current["head"][name], current["index"][name]
+                snapshot["files"] = {path: value for path, value in snapshot["files"].items() if self.repo.owner(path) != name}
+                snapshot["files"].update({path: value for path, value in current["files"].items() if self.repo.owner(path) == name})
+        state["protected"] = [path for path in state["protected"] if self.repo.owner(path) not in names]
+        state["protected_index"] = {path: value for path, value in state["protected_index"].items()
+                                    if self.repo.owner(path) not in names}
+        state.update(parallel=parallel, resolvers=resolvers)
+        if any(changed.values()):
+            state["coordinated"] = None  # The coordinator reads the current plan.
+        focus_parallel.record_sync(self, changed)
+        self.save()
 
     def member(self, name):
         repo = self.repo.repositories[name]
@@ -70,7 +188,11 @@ class ProjectCycle(Cycle):
                      remote=self.state["publication_targets"][name]["remote"],
                      publication_push_url=self.state["publication_targets"][name]["push_url"],
                      publication_paths=self.repo.local_paths(name, self.publication_paths()),
-                     published=record.get("published"), display_ci=record.get("display_ci"), pending=None)
+                     published=record.get("published"), display_ci=record.get("display_ci"), pending=None,
+                     parallel_member=name in self.state.get("parallel", []))
+        if self.state.get("publication_scope"):
+            state["publication_scope"] = dict(self.state["publication_scope"],
+                paths=self.repo.local_paths(name, self.state["publication_scope"]["paths"]))
         member = MemberCycle(repo, store, state, self.transport, self.heartbeat, self.scripts, self.pwsh,
                              control=self.control, progress=self.progress)
         member.parent, member.name = self, name
@@ -99,7 +221,14 @@ class ProjectCycle(Cycle):
             if repo.remote() != target["remote"] or repo.push_url(target["remote"]) != target["push_url"]:
                 raise Blocked("remote-changed", f"{name}: publication remote or push URL changed.")
 
+    def resume_integrations(self):
+        """An open integration record is resolved before any publication check of its member."""
+        import focus_parallel
+        for name in sorted(self.state.get("parallel_integrations", {})):
+            focus_parallel.resume(self, name)
+
     def prepare_publish(self):
+        self.resume_integrations()
         reviewed, current = self.state["reviewed"], self.snapshot()
         if not reviewed or self.changes(reviewed, current):
             self.state["pending"] = None
@@ -148,6 +277,7 @@ class ProjectCycle(Cycle):
         return True
 
     def reconcile_publish(self):
+        self.resume_integrations()
         current = self.snapshot()
         self.check_protected(current)
         if self.changes(self.state["reviewed"], current):
@@ -177,7 +307,7 @@ class ProjectCycle(Cycle):
 
     def publication_paths(self):
         paths = set(super().publication_paths())
-        if not self.state.get("publication_paths"):
+        if not self.state.get("publication_scope") and not self.state.get("publication_paths"):
             for name, record in self.state.get("publication_repositories", {}).items():
                 if not record.get("published"):
                     continue
@@ -199,15 +329,23 @@ class ProjectCycle(Cycle):
 
     def execute_publication(self, subject):
         from focus_commit import commit_reviewed, push_reviewed
+        import focus_parallel
         for name in self.state["publication_targets"]:
             commit_reviewed(self.member(name), subject)
+        parallel = [name for name in self.state["publication_targets"] if name in self.state.get("parallel", [])]
+        # Every parallel target integrates before the first push, so a merge conflict stops before any push.
+        for name in parallel:
+            focus_parallel.integrate(self, name)
         # All members must validate before the first push. A commit hook in one
         # member may have touched another member's reviewed or protected work.
         for name in self.state["publication_targets"]:
             if not self.validate_publication_commit():
                 raise Blocked("uncommitted-stage", "Every target must be committed before project publication.")
             self.validate_targets(self.snapshot())
-            push_reviewed(self.member(name))
+            if name in parallel:
+                focus_parallel.push(self, name)
+            else:
+                push_reviewed(self.member(name))
 
     def assert_publication_current(self):
         current = self.snapshot()
@@ -223,6 +361,20 @@ class ProjectCycle(Cycle):
             if member.state["published"] != published[name]:
                 raise Blocked("publication-unconfirmed", f"{name}: publication evidence changed.")
             member.assert_publication_current()
+
+    def assert_stage_base(self):
+        self.repo.assert_main()
+        self.repo.validate_state(self.state)  # An added or removed repository is not pushed operator work.
+        published = self.state["published"]["repositories"]
+        for name, repo in self.repo.repositories.items():
+            label = name + ": "
+            parallel = name in self.state.get("parallel", [])
+            if name in published:
+                self.check_stage_base(repo, published[name]["sha"], published[name]["remote"], label, parallel=parallel)
+            elif repo.text("rev-parse", "HEAD") != self.state["baseline"]["head"][name]:
+                # A repository outside the publication may also get pushed operator commits.
+                self.check_stage_base(repo, self.state["baseline"]["head"][name], repo.remote(), label, parallel=parallel)
+        self.check_stage_dirty()
 
     def wait_ci(self):
         self.assert_publication_current()

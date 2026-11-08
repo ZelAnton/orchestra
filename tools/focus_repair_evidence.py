@@ -9,18 +9,74 @@ from pathlib import Path
 import uuid
 
 from cycle_state import Blocked, digest, encode
-from cycle_transport import parse_report
+from cycle_transport import (parse_report, repairable_enum, repairable_executor_accounting, repairable_repair_mode,
+                             repairable_substantial_accounting)
 from focus_pair_protocol import assignment_key
 from focus_pair_view import artifact, read_record
 from focus_snapshot_archive import SnapshotWriter, read_source
 
 
 class RepairEvidence:
+    @staticmethod
+    def earlier_views(reader):
+        """Name the legacy views where kept jobs began. A kept job that runs again
+        reads the renewed view; its first prompt stays in `frozen_prompt`."""
+        views = []
+        for job in reader["jobs"].values():
+            if job.get("frozen_view") and job["frozen_view"] not in views:
+                views.append(job["frozen_view"])
+        return {"earlier_views": views} if views else {}
+
     def repair_binding(self, pair):
         gate = pair["repair"]
         return {"pair": pair["id"], "operation": gate["step"],
                 "candidate": digest(encode(gate["snapshot"])),
                 "assignments": assignment_key(gate["snapshot"], gate["accepted"] if gate["step"] == "test" else gate["tasks"])}
+
+    def saved_repair_fix(self, pair):
+        """The intent of the last executor run of this fix step, when only a report-only correction can save its report.
+
+        After a stop on such a report, the step starts the correction again instead of a drift stop.
+        Any other saved result is not adopted, so a retry runs the executor again.
+        """
+        gate = pair["repair"]
+        if gate["step"] != "fix" or self.state.get("pending"):
+            return None
+        binding, latest = self.repair_binding(pair), None
+        folder = self.store.directory / "invocations"
+        for directory in (folder.iterdir() if folder.is_dir() else ()):
+            try:
+                intent = json.loads((directory / "intent.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (isinstance(intent, dict) and intent.get("role") == "repair_execute" and intent.get("id") == directory.name
+                    and intent.get("iteration") == self.state["iteration"] and intent.get("repair_binding") == binding
+                    and (latest is None or intent.get("started", 0) > latest[0].get("started", 0))):
+                latest = (intent, directory)
+        if latest is None:
+            return None
+        intent, directory = latest
+        if (intent.get("report_repair") or intent.get("restart_reviews")
+                or intent.get("correction_revision") != self.state.get("correction_revision")):
+            return None  # A correction gets no second correction. An operator change runs the executor again.
+        try:
+            result = json.loads((directory / "result.json").read_text(encoding="utf-8"))
+            if self.snapshot(intent["before"]) != gate["snapshot"] or self.snapshot(result["after"]) != self.snapshot():
+                return None
+            try:
+                parse_report(result["raw"], "repair_execute")
+                return None  # A valid report is not replayed. The retry runs the executor again.
+            except Blocked:
+                pass
+            # The same recognizers as in invoke(), in the same order.
+            correctable = (repairable_executor_accounting(result["raw"], "repair_execute",
+                                                          self.snapshot(result["before"]), self.snapshot(result["after"]))
+                           or repairable_substantial_accounting(result["raw"], "repair_execute")
+                           or repairable_repair_mode(result["raw"], "repair_execute")
+                           or repairable_enum(result["raw"], "repair_execute"))
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return intent if correctable is not None else None
 
     def saved_repair_test(self, pair):
         """Read-only discovery; callers may replay only this exact completed result."""
@@ -206,7 +262,8 @@ class RepairEvidence:
         pair["repair"].update(step="evidence", test_receipt=receipt,
             evidence_reader={"id": identity, "phase": pair["phase"], "snapshot": after, "round": 1, "step": "audit",
                 "jobs": {}, "roles": ["repair_evidence"], "repair_base": base, "repair_snapshot": before,
-                "repair_context": {"scope": 'Inspect only the exact documentation changes from the test invocation. Keep all static review credit until classification.'}})
+                "repair_context": {"scope": 'Inspect only the exact documentation changes from the test invocation. Keep all static review credit until classification.'},
+                **self.pair_instruction_record(pair)})
         self.state["pending"] = None
         self.save()
 
@@ -241,7 +298,8 @@ class RepairEvidence:
         if any(r["verdict"] != "evidence_only" for r in audit["files"]):
             raise Blocked("repair-test-edit", "Test-time documentation is behavioral or uncertain; no evidence exception granted.")
         reference = artifact(self.store, f"pair-reviews/{self.state['iteration']}/{pair['id']}/evidence-{reader['id']}/approval.json",
-            {"before": audit["before"], "after": audit["after"], "audit": reader["jobs"]["evidence"]["result"], "receipt": gate["test_receipt"]})
+            {"before": audit["before"], "after": audit["after"], "audit": reader["jobs"]["evidence"]["result"], "receipt": gate["test_receipt"],
+             **self.earlier_views(reader)})
         gate.setdefault("evidence_changes", []).append(reference)
         gate["test_view"] = reader["view"]
         self.accept_repair_result(pair, receipt["report"], receipt["before"], receipt["after"],

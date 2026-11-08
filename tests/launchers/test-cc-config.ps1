@@ -1,6 +1,7 @@
-# Verifies launchers/cc-config.cmd: seeds .work/config.md from the marked
-# block of config.example.md when absent, never overwrites an existing
-# .work/config.md, and fails gracefully when no template can be found. Also
+# Verifies launchers/cc-config.cmd: creates an inactive .work/config.md containing
+# every schema project key plus Default/Values/Effect/current-root help, never
+# overwrites an existing .work/config.md, and synchronously opens it in an operator
+# editor. Missing/incomplete templates and editor failures are fail-closed. Also
 # verifies the .claude/settings.local.json Codex allow-list (tasks T-058/T-078,
 # F-05, extended by T-114): created with ALL THREE canonical allow-rules - the
 # runtime wrapper in its checkout form Bash(pwsh -File tools/codex-runtime.ps1 *)
@@ -25,30 +26,66 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
     try {
         Install-Launcher -Paths $paths -Names 'cc-config.cmd'
         Install-ConfigExample -Paths $paths
+        $editorArgs = Join-Path $paths.Root 'editor-args.txt'
+        $editorOrder = Join-Path $paths.Root 'editor-order.txt'
+        $registryPath = Join-Path $paths.Root 'profile/projects.json'
 
-        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' `
+            -EnvVars @{
+                FAKE_CONFIG_EDITOR_ARGS_FILE = $editorArgs
+                FAKE_CONFIG_EDITOR_ORDER_FILE = $editorOrder
+                FAKE_CONFIG_REGISTRY_PATH = $registryPath
+            }
         Assert-Equal 0 $result.ExitCode '[fresh] exit code'
 
         $configPath = Join-Path $paths.Project '.work\config.md'
         Assert-FileExists $configPath '[fresh] .work/config.md must be created'
         $content = Get-Content -LiteralPath $configPath -Raw
 
-        Assert-Contains $content 'MAX_PARALLEL: 5' '[fresh] first seed line must be present'
-        Assert-Contains $content 'CODEX_SANDBOX: workspace-write' '[fresh] last seed line must be present'
+        Assert-Contains $content '# MAX_PARALLEL: 5' '[fresh] first key must be present and commented'
+        Assert-Contains $content '# CODEX_CMD: codex' '[fresh] last key must be present and commented'
+        Assert-True (-not [regex]::IsMatch($content, '(?m)^\s*[A-Z][A-Z0-9_]*\s*:')) '[fresh] no project setting may be active'
+        Assert-Equal 48 ([regex]::Matches($content, '(?m)^# [A-Z][A-Z0-9_]*:').Count) '[fresh] every schema project key is present exactly once'
+        Assert-Equal 48 ([regex]::Matches($content, '(?m)^#   Root config:').Count) '[fresh] every key reports its current root value or that it is unset'
+        Assert-Equal 48 ([regex]::Matches($content, '(?m)^#   Default:').Count) '[fresh] every key documents its default'
+        Assert-Equal 48 ([regex]::Matches($content, '(?m)^#   Values:').Count) '[fresh] every key documents possible values'
+        Assert-Equal 48 ([regex]::Matches($content, '(?m)^#   Effect:').Count) '[fresh] every key documents its effect'
         Assert-True ($content -notlike '*config.md seed start*') '[fresh] start marker must not be copied'
         Assert-True ($content -notlike '*config.md seed end*') '[fresh] end marker must not be copied'
         Assert-Contains $result.Output 'Created .work\config.md' '[fresh] success message printed'
+        Assert-Contains $result.Output 'Opening' '[fresh] editor launch is reported'
+        Assert-FileExists $editorArgs '[fresh] editor must be invoked'
+        Assert-Equal ([System.IO.Path]::GetFullPath($configPath)) ((Get-Content -LiteralPath $editorArgs -Raw).Trim()) '[fresh] editor receives the project config path'
+        Assert-Equal 'before-registration' ((Get-Content -LiteralPath $editorOrder -Raw).Trim()) '[fresh] local config opens before project registration'
 
         $inboxMessages = Join-Path $paths.Project '.inbox\messages'
         Assert-True (Test-Path -LiteralPath $inboxMessages -PathType Container) '[fresh] .inbox/messages must be created'
         Assert-True (Test-Path -LiteralPath (Join-Path $paths.Project '.inbox\releases') -PathType Container) '[fresh] .inbox/releases must be created'
-        $registryPath = Join-Path $paths.Root 'profile/projects.json'
         Assert-FileExists $registryPath '[fresh] user-global project registry must be created'
         $registry = Get-Content -LiteralPath $registryPath -Raw | ConvertFrom-Json
         Assert-Equal 'orchestra/project-registry@1' ([string]$registry.schema) '[fresh] registry schema'
         Assert-Equal 1 (@($registry.projects).Count) '[fresh] registry contains exactly this project'
         Assert-Equal ([System.IO.Path]::GetFullPath($paths.Project)) ([string]$registry.projects[0].root) '[fresh] registry records the project root'
         Assert-Contains $result.Output 'registered id=repo-' '[fresh] registration is reported'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Root config annotations: active global project values are copied as comments,
+    # while the new project file remains inactive and documents schema defaults. ---
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' `
+            -EnvVars @{ MAX_PARALLEL = '9'; CODEX_NETWORK = 'off' }
+        Assert-Equal 0 $result.ExitCode '[root annotations] exit code'
+        $content = Get-Content -LiteralPath (Join-Path $paths.Project '.work\config.md') -Raw
+        Assert-Contains $content "# MAX_PARALLEL: 5`r`n#   Root config: 9`r`n#   Default: 5" '[root annotations] numeric root value and default are shown'
+        Assert-Contains $content "# CODEX_NETWORK: on`r`n#   Root config: off`r`n#   Default: on" '[root annotations] enum root value and default are shown'
+        Assert-True (-not [regex]::IsMatch($content, '(?m)^\s*[A-Z][A-Z0-9_]*\s*:')) '[root annotations] root values are comments, not active project overrides'
     }
     finally {
         Remove-Sandbox $paths
@@ -105,15 +142,18 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         $workDir = Join-Path $paths.Project '.work'
         New-Item -ItemType Directory -Force -Path $workDir | Out-Null
         $configPath = Join-Path $workDir 'config.md'
+        $editorArgs = Join-Path $paths.Root 'existing-editor-args.txt'
         Set-Content -LiteralPath $configPath -Value 'MY_CUSTOM_KEY: yes' -Encoding utf8
 
-        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' `
+            -EnvVars @{ FAKE_CONFIG_EDITOR_ARGS_FILE = $editorArgs }
         Assert-Equal 0 $result.ExitCode '[existing] exit code'
 
         $content = Get-Content -LiteralPath $configPath -Raw
         Assert-Contains $content 'MY_CUSTOM_KEY: yes' '[existing] file content must be left untouched'
         Assert-True ($content -notlike '*MAX_PARALLEL*') '[existing] template must not be applied over an existing file'
         Assert-Contains $result.Output 'already exists' '[existing] launcher must report the file already exists'
+        Assert-Equal ([System.IO.Path]::GetFullPath($configPath)) ((Get-Content -LiteralPath $editorArgs -Raw).Trim()) '[existing] editor receives the existing project config path'
     }
     finally {
         Remove-Sandbox $paths
@@ -127,7 +167,7 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         # deliberately do not Install-ConfigExample
 
         $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd'
-        Assert-Equal 0 $result.ExitCode '[missing template] launcher itself still exits cleanly'
+        Assert-Equal 2 $result.ExitCode '[missing template] launcher fails closed'
 
         $configPath = Join-Path $paths.Project '.work\config.md'
         Assert-NoFileExists $configPath '[missing template] .work/config.md must not be created'
@@ -344,6 +384,41 @@ Invoke-Test -Name 'cc-config.cmd' -Body {
         Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(pwsh -File ~/.claude/scripts/codex-runtime.ps1 *)')) '[settings: no allow key] mirror-form runtime-wrapper rule (T-114) must be added under a new permissions.allow'
         Assert-True ([bool](@($merged.permissions.allow) -contains 'Bash(codex exec *)')) '[settings: no allow key] codex exec anchor rule must be added under a new permissions.allow'
         Assert-True ([bool](@($merged.permissions.deny) -contains 'Bash(rm *)')) '[settings: no allow key] pre-existing deny list must be preserved'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 12: the editor is part of the synchronous operator flow. A
+    # non-zero editor exit is reported and propagated after the config is safely created. ---
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' `
+            -EnvVars @{ FAKE_CONFIG_EDITOR_RC = '7' }
+        Assert-Equal 7 $result.ExitCode '[editor failure] exit code is propagated'
+        Assert-FileExists (Join-Path $paths.Project '.work\config.md') '[editor failure] generated config remains available for a retry'
+        Assert-Contains $result.Output 'Editor exited with code 7' '[editor failure] runtime reports the editor failure'
+        Assert-Contains $result.Output 'Failed to edit .work\config.md' '[editor failure] launcher reports the failed edit step'
+    }
+    finally {
+        Remove-Sandbox $paths
+    }
+
+    # --- Scenario 13: an explicit but missing editor is an operator error. It
+    # must not silently fall back to another installed editor. ---
+    $paths = New-Sandbox
+    try {
+        Install-Launcher -Paths $paths -Names 'cc-config.cmd'
+        Install-ConfigExample -Paths $paths
+
+        $result = Invoke-Launcher -Paths $paths -Name 'cc-config.cmd' `
+            -EnvVars @{ EDITOR = 'editor-that-does-not-exist.exe' }
+        Assert-Equal 4 $result.ExitCode '[missing explicit editor] exit code'
+        Assert-Contains $result.Output 'configured editor' '[missing explicit editor] precise failure is reported'
+        Assert-Contains $result.Output 'Failed to edit .work\config.md' '[missing explicit editor] launcher reports the failed edit step'
     }
     finally {
         Remove-Sandbox $paths

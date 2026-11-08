@@ -148,13 +148,30 @@ while macOS/Linux uses the managed executable copies installed beside the canoni
 `.sh` launchers. The explicit `.sh` names remain available too.
 
 For the separate Claude/Codex workflow directly on `main`, use
-[`cc-focus`](docs/sequential-cycle.md). It supports file-based handoff, persistent
-role sessions, parallel read-only review pairs with autonomous arbitration, blocker recovery and a publication CI
+[`cc-focus`](docs/sequential-cycle.md). Use [`cc-focus review`](docs/focus-review.md) to review completed plan items or an explicit scope.
+Select IDs, document-order ranges, or checkboxes in the optional menu.
+The review mode keeps the existing repair, publication, and CI gates without initial coding.
+
+The development mode supports file-based handoff,
+role sessions that persist within a stage, parallel read-only review pairs with autonomous arbitration, blocker recovery and a publication CI
 barrier. It does not use the queue processor's model or concurrency defaults.
 It also accepts a project directory containing independent Git repositories on
 `main`: list them in `focus-project.json` or use direct Git child directories.
 Each iteration reviews their combined changes and publishes only the repositories
 it changed, with separate commit/push recovery and CI for every target.
+
+The manifest key `parallel` lists members that other writers also change.
+cc-focus merges remote main of such a member with the stage commits before the push.
+The key `resolvers` names project commands for known conflicts, for example of generated files:
+
+```json
+{"version": 1, "repositories": ["Example", "Example-plans"], "parallel": ["Example", "Example-plans"],
+ "resolvers": {"Example": {"rules": [{"name": "generated", "paths": ["tests/**/Generated/*.g.cs"],
+   "command": ["python3", "tools/resolve.py", "generated"]}], "check": {"command": ["python3", "tools/resolve.py", "check"]}}}}
+```
+
+See [Merge resolvers](docs/sequential-cycle.md#merge-resolvers) for the rules, the checks, and the risks.
+
 Live messages, actions, command results and errors show the current work; use
 `--output compact` for activity-only output and `cc-focus status` for saved state.
 On a capable terminal, a permanent input line accepts instructions for the active
@@ -166,22 +183,28 @@ coordinator call and add no model invocation.
 Use `--ui off` for the ordinary text interface. Pausing releases runtime ownership
 while keeping the terminal open; uncertain message delivery requires an explicit
 retry/discard decision rather than silently moving to another role.
+
 Use `cc-focus stop` for
 a safe-boundary stop, or `cc-focus stop --now` for emergency interruption; launch
-`cc-focus` again to continue. Existing `cc-cycle` sessions and state are retained.
+`cc-focus` again to continue. After a safe stop at an escalated blocker, run the
+retry command that the run output names. Existing `cc-cycle` sessions and state are retained.
 After stopping, use `cc-focus correct --message "..."` or `--file correction.md`,
 then `cc-focus`, to apply an operator correction to the same unpublished stage
 with preserved sessions and renewed mandatory reviews.
+Import a short [project brief](docs/sequential-cycle.md#project-brief) with
+`cc-focus brief set FILE`. The roles that judge changes then also see the purpose and the priorities of the project.
 For completed coding stuck behind a rejected final report, use the guarded
 [`cc-focus recover --review-from` procedure](docs/sequential-cycle.md#recovering-a-rejected-coding-report)
 to validate the saved coding result and pause before mandatory reviews.
 
-1. `cc-config` — seeds `.work\config.md` for the project from the template block in
-   `config.example.md`, and `.work\constraints.md` from the whole of
-   `constraints.example.md` (an existing target file is never overwritten). It also
-   creates `.inbox/messages/` plus `.inbox/releases/` and idempotently registers the
-   canonical project root in the user-global `~/.orchestra/projects.json`, making the
-   project addressable by other Orchestra agents.
+1. `cc-config` — creates `.work/config.md` when absent as an inactive catalog of every
+   project key: all example assignments are commented, and every key documents its
+   allowed values, effect, schema default, and current `~/.orchestra/root-config.md`
+   value. It never overwrites an existing config, but always opens it in a text editor
+   (`VISUAL`, then `EDITOR`, then a discovered console editor) so the operator can
+   uncomment explicit project overrides. It also seeds `.work/constraints.md`, creates
+   `.inbox/messages/` plus `.inbox/releases/`, and idempotently registers the canonical
+   project root in the user-global `~/.orchestra/projects.json`.
 2. Populate `.work\Tasks_Queue.md` with tasks. Add entries by hand following the
    queue format, or use `cc-queue <source or description>` (`queue_builder`) to
    turn a spec/backlog/description into deduplicated `T-NNN` entries, or

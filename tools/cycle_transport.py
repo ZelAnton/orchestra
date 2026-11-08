@@ -1,6 +1,8 @@
 """Serial CLI transports. Codex approvals are answered only by the operator."""
 
 from collections import deque
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -14,11 +16,12 @@ import threading
 import time
 import uuid
 
-from cycle_prompts import CONTRACT, PAIR_CONTRACT, PROFILES, REPORT_SCHEMA, READONLY_REVIEW_ROLES, role_contract
+from cycle_prompts import (CLAUDE_COMPACT_WINDOW, COMPACTION_RULE, CONTRACT, PAIR_CONTRACT, PROFILES, READER_COMPACTION_RULE,
+                           REPORT_SCHEMA, READONLY_REVIEW_ROLES, role_contract)
 from focus_pair_profile import PAIR_ROLES, PAIR_READONLY, PAIR_WRITERS
 from focus_pair_view import ViewInspector
 from focus_review import report_schema, validate_findings
-from focus_readonly import Inspector, READ_TOOL, READONLY_FEATURE_OVERRIDES
+from focus_readonly import Inspector, READ_TOOL, READONLY_FEATURE_OVERRIDES, VIEW_TOOL
 from cycle_state import Blocked, ProviderQuota, ProviderTransient, atomic_write, digest, encode
 from focus_messages import MessagePending, message_text
 from focus_diagnostics import ClaudeTrace, instruction_files
@@ -46,8 +49,18 @@ def claude_refusal(event):
     return Blocked("claude-refusal", f"Claude refused the request ({category}). {explanation}\n{text}\n" +
                    "\n".join(identifiers) + "\n" + guidance +
                    "Contact provider support if a permitted request still appears to be misclassified. "
-                   "The runtime will not retry automatically or change the model or session. "
+                   "The runtime does not change the model or the instructions. "
                    "Existing work is preserved. This invocation is incomplete; no review credit is granted.")
+
+
+RECOVERY = ('\nRECOVERY: the previous attempt of THIS SAME invocation was interrupted. Do not select the next stage '
+            'or repeat a completed commit/push. Inspect retained files and public command results. If possible, '
+            'reconstruct the prior stage and result. Finish ONLY that same work. Repeat an incomplete review as one '
+            'complete pass.')
+# The runtime adds this text when it continues a phase after a lost native history or a refusal after earlier history.
+NEW_CONVERSATION = ('\nThe prior native conversation is unavailable. This is a new conversation for the SAME runtime '
+                    'phase. Reconstruct context from handoffs and invocation artifacts. Keep existing work. Do not '
+                    'discard it. Do not advance to another stage.')
 
 
 class WindowsJob:
@@ -90,6 +103,45 @@ class WindowsJob:
 
     def close(self):
         self.kernel.CloseHandle(self.handle)
+
+
+# The runtime accepts one protocol record of at most this size.
+RECORD_LIMIT = 8 * 1024 * 1024
+# After a file edit, Claude repeats the whole original file in tool_use_result.
+# The runtime does not use that echo. It reads such a record up to this size and removes the echo.
+ECHO_LIMIT = 128 * 1024 * 1024
+
+
+def without_tool_echo(label, line):
+    """Return an oversized Claude tool record without its file echo. Other oversized records stop the invocation."""
+    if label == "stdout" and len(line) <= ECHO_LIMIT:
+        try:
+            event = json.loads(line)
+            if isinstance(event, dict) and event.get("type") == "user" and "tool_use_result" in event:
+                event.pop("tool_use_result")
+                try:
+                    reduced = encode(event) + b"\n"
+                except UnicodeEncodeError:
+                    # ASCII escapes keep a lone surrogate from a cut snippet exact. Strict UTF-8 cannot encode it.
+                    reduced = json.dumps(event, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+                if len(reduced) <= RECORD_LIMIT:
+                    return reduced
+        except (ValueError, UnicodeError, RecursionError):
+            pass
+    size = f"more than {ECHO_LIMIT} bytes" if len(line) > ECHO_LIMIT else f"{len(line)} bytes"
+    raise Blocked("provider-output", f"Provider emitted an oversized protocol record ({size}).")
+
+
+def protocol_frame(label, line):
+    """The log frame of one line, and its record or the blocker that rejects it."""
+    if len(line) <= RECORD_LIMIT:
+        return {"stream": label, "line": line.decode("utf-8", errors="replace")}, line
+    try:
+        reduced = without_tool_echo(label, line)
+    except Blocked as error:
+        # Diagnostics read frames of at most 16 MiB. Keep only the size of a rejected line.
+        return {"stream": label, "rejected_bytes": len(line)}, error
+    return {"stream": label, "line": reduced.decode("utf-8"), "tool_echo_removed_bytes": len(line) - len(reduced)}, reduced
 
 
 class Process:
@@ -136,13 +188,20 @@ class Process:
             self.readers.append(reader)
 
     def _read(self, label, pipe):
+        # A raw pipe reads one byte per system call in readline. A large record needs a buffer.
+        buffered = io.BufferedReader(pipe, 1 << 20)
         try:
             while True:
-                line = pipe.readline(8 * 1024 * 1024 + 1)
+                line = buffered.readline(ECHO_LIMIT + 1)
                 if not line:
                     break
                 self.events.put((label, line))
+        except (OSError, ValueError):
+            pass  # close() closes the pipe. The reader then ends.
         finally:
+            # Popen keeps the raw pipe. A closed pipe makes detach fail.
+            with contextlib.suppress(ValueError, OSError):
+                buffered.detach()
             self.events.put((label, None))
 
     def send(self, data):
@@ -172,10 +231,12 @@ class Process:
                 if label == "stdout":
                     raise Blocked("provider-eof", "Provider closed stdout without a validated terminal result. " + self.stderr_tail)
                 continue
-            if len(line) > 8 * 1024 * 1024:
-                raise Blocked("provider-output", "Provider emitted an oversized protocol record.")
-            self.log.write(encode({"stream": label, "line": line.decode("utf-8", errors="replace")}) + b"\n")
+            frame, record = protocol_frame(label, line)
+            self.log.write(encode(frame) + b"\n")
             self.log.flush()
+            if isinstance(record, Blocked):
+                raise record
+            line = record
             if label == "stderr":
                 self.stderr_tail = (self.stderr_tail + line.decode("utf-8", errors="replace"))[-4000:]
                 if self.progress:
@@ -239,7 +300,7 @@ class Process:
             while not self.events.empty():
                 label, line = self.events.get_nowait()
                 if line is not None:
-                    self.log.write(encode({"stream": label, "line": line.decode("utf-8", errors="replace")}) + b"\n")
+                    self.log.write(encode(protocol_frame(label, line)[0]) + b"\n")
                     if label == "stderr" and self.progress:
                         self.progress.stderr(line.decode("utf-8", errors="replace"))
             if self.contained:
@@ -292,11 +353,11 @@ def report_object(raw):
     return report
 
 
-def parse_report(raw, role=None):
+def parse_report(raw, role=None, existing_review=False):
     try:
         report = report_object(raw)
-        schema = report_schema(role)
-        required = set(schema["required"]) - {"task"}
+        schema = report_schema(role, existing_review)
+        required = set(schema["required"]) - {"task", "final_gate"}
         if not required <= set(report) or set(report) - set(schema["properties"]):
             raise ValueError("missing or unknown report fields")
         if report["status"] not in ("done", "blocked", "complete"):
@@ -316,6 +377,9 @@ def parse_report(raw, role=None):
         if role != "code" and report["substantial"] and not report["implementation_fixes"]:
             raise ValueError("substantial requires implementation fixes")
         validate_findings(report, role)
+        if "coverage" in schema["properties"]:
+            from focus_review import validate_shape
+            validate_shape(report["coverage"], schema["properties"]["coverage"])
         return report
     except (ValueError, TypeError, KeyError) as error:
         raise Blocked("invalid-report", f"Provider final report is invalid: {error}") from error
@@ -356,6 +420,144 @@ def repairable_substantial_accounting(raw, role):
         return None
 
 
+def repairable_repair_mode(raw, role):
+    """Recognize, never accept, a repair report that lists risks but keeps self mode."""
+    if role != "repair_execute":
+        return None
+    try:
+        original = report_object(raw)
+        repair = original.get("repair")
+        if original.get("status") != "done" or not isinstance(repair, dict) or not repair.get("risks") or repair.get("mode") == "pair":
+            return None
+        # Every other field must already be valid; only the mode contradicts the listed risks.
+        parse_report(json.dumps(dict(original, repair=dict(repair, mode="pair"))), role)
+        return original
+    except (ValueError, TypeError, KeyError, Blocked):
+        return None
+
+
+def enum_problems(raw, role):
+    """Recognize, never accept, a writer report whose only invalid values are outside their allowed values.
+
+    Return the original report and the problems, or None. A problem names the path, the value, and the
+    allowed values. A Claude writer gets the schema as text, so its provider does not enforce the enums.
+    The report is recognized when some choice of allowed values makes it valid. In an array, the choice
+    can also remove the invalid items. Listed risks need pair mode, so a risks problem also tries both modes.
+    """
+    if role not in PAIR_WRITERS:
+        return None
+    try:
+        original = report_object(raw)
+        if original.get("status") != "done":
+            return None  # A blocked report stops the cycle anyway.
+        problems = []
+
+        def walk(value, schema, path):
+            kind = schema.get("type")
+            if isinstance(kind, list):
+                if value is None and "null" in kind:
+                    return
+                kind = next((item for item in kind if item != "null"), None)
+            if "enum" in schema:
+                if value not in schema["enum"]:
+                    problems.append({"path": path, "value": value, "allowed": list(schema["enum"])})
+                return
+            if kind == "object" and isinstance(value, dict):
+                for key, child in schema.get("properties", {}).items():
+                    if key in value:
+                        walk(value[key], child, [*path, key])
+            elif kind == "array" and isinstance(value, list):
+                for index, item in enumerate(value):
+                    walk(item, schema.get("items", {}), [*path, index])
+        walk(original, report_schema(role), [])
+        if not problems:
+            return None
+        if valid_choice(original, problems, role) is None:
+            return None  # Another field is invalid too, or no allowed value fits.
+        return original, problems
+    except (ValueError, TypeError, KeyError, IndexError, Blocked):
+        return None
+
+
+def valid_choice(original, problems, role):
+    """A report with allowed values at the problems that parse_report accepts, or None. The search is small."""
+    import itertools
+    arrays, scalars = {}, []
+    for problem in problems:
+        if isinstance(problem["path"][-1], int):
+            arrays.setdefault(tuple(problem["path"][:-1]), []).append(problem)
+        else:
+            scalars.append(problem)
+    choices = [[("array", path, "replace"), ("array", path, "remove")] for path in arrays]
+    choices += [[("value", problem["path"], value) for value in problem["allowed"]] for problem in scalars]
+    mode = ("repair", "mode")
+    if any(path[:2] == ("repair", "risks") for path in arrays) and not any(tuple(p["path"]) == mode for p in scalars):
+        choices.append([("value", list(mode), value) for value in ("pair", "self")])
+
+    def place(value, path, item):
+        for part in path[:-1]:
+            value = value[part]
+        value[path[-1]] = item
+    for combination in itertools.islice(itertools.product(*choices), 256):
+        probe = json.loads(json.dumps(original))
+        for kind, path, choice in combination:
+            if kind == "value":
+                place(probe, path, choice)
+                continue
+            target = probe
+            for part in path:
+                target = target[part]
+            for problem in sorted(arrays[path], key=lambda row: row["path"][-1], reverse=True):
+                if choice == "remove":
+                    del target[problem["path"][-1]]
+                else:
+                    target[problem["path"][-1]] = problem["allowed"][0]
+        try:
+            parse_report(json.dumps(probe), role)
+        except Blocked:
+            continue
+        return probe
+    return None
+
+
+def repairable_enum(raw, role):
+    found = enum_problems(raw, role)
+    return found[0] if found else None
+
+
+def field_name(path):
+    """A readable name of a report field, for example repair.risks[2]."""
+    return "".join(f"[{part}]" if isinstance(part, int) else ("." if index else "") + part
+                   for index, part in enumerate(path))
+
+
+PROMPT_MARKERS = ("Runtime context:", "Runtime assignment:", "Executor assignment:", "Report schema:")
+
+
+def readable_prompt(prompt):
+    """The prompt with indented JSON after each marker, so that a role can read it again by line ranges."""
+    decoder, parts, index = json.JSONDecoder(), [], 0
+    while True:
+        found = [(prompt.find(marker, index), marker) for marker in PROMPT_MARKERS]
+        found = [item for item in found if item[0] >= 0]
+        if not found:
+            parts.append(prompt[index:])
+            return "".join(parts)
+        start, marker = min(found)
+        end = start + len(marker)
+        parts.append(prompt[index:end])
+        begin = end
+        while begin < len(prompt) and prompt[begin] in " \n":
+            begin += 1
+        try:
+            value, stop = decoder.raw_decode(prompt, begin)
+        except ValueError:
+            index = end
+            continue
+        parts.append("\n" + json.dumps(value, ensure_ascii=False, indent=1))
+        index = stop
+
+
 def concise_summary(summary):
     """Bound the coordinator/display projection without changing report evidence."""
     limit = 1200
@@ -373,6 +575,10 @@ class Transport:
         self.control = control
         self.interaction = interaction
         self.commands = {"codex": [codex], "claude": [claude]}
+
+    def role_contract(self, role):
+        from focus_review_contract import review_contract
+        return review_contract(role_contract(role), bool(self.state.get("review_run") or self.state.get("review_scope")))
 
     def fork(self, root, state, save, heartbeat, control=None, progress=None):
         child = Transport(root, state, save, heartbeat, self.lock_fd,
@@ -397,13 +603,14 @@ class Transport:
     def _run(self, role, prompt, pending, directory):
         provider, model, effort = PROFILES[role]
         session = self.state["sessions"].get(role)
-        prompt += "\n\n" + role_contract(role) + "\nReport schema: " + json.dumps(report_schema(role))
+        existing_review = bool(self.state.get("review_run") or self.state.get("review_scope"))
+        prompt += "\n\n" + self.role_contract(role) + "\nReport schema: " + json.dumps(report_schema(role, existing_review))
         # Keep the durable marker compatible with conversations started as cc-cycle.
         prompt += "\nInvocation marker: cc-cycle/" + pending["id"]
         if pending.get("report_repair"):
             prompt += ("\nThis invocation is REPORT-ONLY CORRECTION. Keep all working files and staging unchanged. Do not repeat review, builds, or tests, including after an interruption. Correct only the original review's final JSON with existing evidence.")
         elif pending.get("attempts", 0):
-            prompt += ("\nRECOVERY: the previous attempt of THIS SAME invocation was interrupted. Do not select the next stage or repeat a completed commit/push. Inspect retained files and public command results. If possible, reconstruct the prior stage and result. Finish ONLY that same work. Repeat an incomplete review as one complete pass.")
+            prompt += RECOVERY
         prompt += ("\nUse saved reports and public command results for recovery. "
                    "Do not read raw provider transcripts or private content blocks. "
                    "For provider metadata, run `cc-focus diagnose --invocation INVOCATION_ID`. "
@@ -411,29 +618,98 @@ class Transport:
                    "Replace INVOCATION_ID with the interrupted invocation ID. "
                    "These commands do not start a provider or change cycle state. "
                    "\n\nRead-only inspectors must use only their assigned inspection tools.")
+        if provider == "claude" and session and session in (pending.get("refused_session"), *self.state.get("refused_sessions", [])):
+            # A pause for operator messages or a correction keeps the role session. A resume must not resend the refused history.
+            raise Blocked("claude-refusal", f"Claude refused the saved {role} conversation. A resume would send the "
+                          "refused history again, so the runtime starts no provider. If operator messages remain, resolve "
+                          "them. Then run cc-focus --new-sessions --retry. The runtime keeps the current work.")
         pending["attempts"] = pending.get("attempts", 0) + 1
         self.save(self.state)
         atomic_write(Path(directory) / "prompt.txt", prompt.encode("utf-8"))
         try:
             if provider == "claude":
-                try:
-                    return self._claude(role, model, effort, session, prompt, pending, directory)
-                except Blocked as error:
-                    if error.code != "claude-session-missing":
+                inspect = f"Inspect public metadata: cc-focus diagnose --invocation {Path(directory).name}"
+                current, restarted = session, False
+                while True:
+                    try:
+                        return self._claude(role, model, effort, current, prompt, pending, directory)
+                    except Blocked as error:
                         if error.code == "claude-refusal":
-                            raise Blocked(error.code, f"{error}\nInspect public metadata: cc-focus diagnose --invocation {Path(directory).name}") from error
-                        raise
-                    self.state.setdefault("session_recoveries", []).append({"role": role, "missing": session,
-                                                                           "invocation": pending["id"]})
+                            stop = self.restart_refused(role, current, pending, getattr(error, "history", False))
+                            if stop:
+                                self.mark_refused(role, pending)
+                                stop += " The provider refused that conversation too." if restarted else ""
+                                raise Blocked(error.code, f"{error}\n{stop}\n{inspect}") from error
+                            self.keep_refused_attempt(directory)
+                            print(f"cc-focus: Claude refused a {role} request that had earlier history. The runtime continues "
+                                  "the same invocation one time in a new conversation with the same role instructions.", flush=True)
+                            restarted = True
+                        elif error.code == "claude-session-missing" and current:
+                            self.state.setdefault("session_recoveries", []).append({"role": role, "missing": current,
+                                                                                   "invocation": pending["id"]})
+                            print(f"cc-focus: {role} native history is missing; continuing the same phase from durable context.", flush=True)
+                        else:
+                            raise
                     self.state["sessions"].pop(role, None)
                     self.save(self.state)
-                    print(f"cc-focus: {role} native history is missing; continuing the same phase from durable context.", flush=True)
-                    prompt += ('\nThe prior native conversation is unavailable. This is a new conversation for the SAME runtime phase. Reconstruct context from handoffs and invocation artifacts. Keep existing work. Do not discard it. Do not advance to another stage.')
+                    # The refused attempt can already have changed files, so the new conversation also gets the recovery rule.
+                    prompt += ("" if NEW_CONVERSATION in prompt else NEW_CONVERSATION) + (
+                        RECOVERY if restarted and RECOVERY not in prompt else "")
                     atomic_write(Path(directory) / "prompt.txt", prompt.encode("utf-8"))
-                    return self._claude(role, model, effort, None, prompt, pending, directory)
+                    current = None
             return self._codex(role, model, effort, session, prompt, pending, directory)
         except (OSError, ValueError, KeyError, TypeError, StopIteration) as error:
             raise Blocked("provider-protocol", f"{provider}: {error}") from error
+
+    def restart_refused(self, role, session, pending, history=False):
+        """Return the reason to stop after a refusal, or "" to continue once in a new conversation.
+
+        The refused request had earlier history: a resumed conversation or a completed tool exchange.
+        The new request has no earlier history, so it differs from the refused request.
+        The runtime stops after a refusal of the first request of a new conversation or a second refusal.
+        It also stops after a refusal in a report-only correction, in a self-review, or after operator messages.
+        """
+        if pending.get("refusal_restart"):
+            return "The runtime already continued this invocation one time in a new conversation."
+        if not session and not history:
+            return "The provider refused the first request of a new conversation, so the runtime does not repeat it."
+        if pending.get("report_repair"):
+            return "A report-only correction keeps its conversation, so the runtime does not start a new one."
+        if role.startswith("repair_self"):
+            return "A self-review needs the executor's conversation, so the runtime does not start a new one."
+        # A new conversation would not receive the messages that the refused conversation received.
+        # A queued message that no conversation received goes to the new conversation.
+        if pending.get("operator_intervened") or pending.get("restart_reviews"):
+            return "Operator messages went to the refused conversation, so the runtime does not start a new one."
+        refused = self.state["sessions"].get(role) or session  # A new conversation got its ID at launch.
+        pending["refusal_restart"] = {"session": refused, "at": time.time()}
+        self.state.setdefault("refusal_restarts", []).append({"role": role, "session": refused,
+                                                              "invocation": pending.get("id")})
+        return ""
+
+    def mark_refused(self, role, pending):
+        """Record the refused conversation of this invocation, so that a resume cannot send it again."""
+        refused = self.state["sessions"].get(role)
+        if refused:
+            pending["refused_session"] = refused
+            # The state keeps the record after a correction or a retry replaces the pending invocation.
+            if refused not in self.state.setdefault("refused_sessions", []):
+                self.state["refused_sessions"].append(refused)
+            self.save(self.state)
+
+    @staticmethod
+    def keep_refused_attempt(directory):
+        """Keep the launch record and prompt of the refused attempt. The next attempt replaces both files."""
+        directory = Path(directory)
+        try:
+            saved = directory / "claude-diagnostics.json"
+            attempt = json.loads(saved.read_bytes())["launch"]["attempt"]
+            if not re.fullmatch(r"[0-9a-f]{32}", attempt):
+                return
+            atomic_write(directory / f"claude-diagnostics-{attempt}.json", saved.read_bytes())
+            atomic_write(directory / f"prompt-{attempt}.txt", (directory / "prompt.txt").read_bytes())
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # Diagnostics stay optional. The protocol log keeps the refusal.
 
     def mark_attempt(self, directory, role, session, resumed):
         """Mark where a Claude process starts in the shared protocol log.
@@ -468,7 +744,14 @@ class Transport:
         # Enforce the serial profile in the CLI as well as the prompt. Its
         # default Bash timeout otherwise moves long tests to the background.
         command_env = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
-                       "BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "21600000"}
+                       "BASH_DEFAULT_TIMEOUT_MS": "1800000", "BASH_MAX_TIMEOUT_MS": "21600000",
+                       "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(CLAUDE_COMPACT_WINDOW)}
+        # The recovery copy of the prompt has a fixed path for each role in the run store.
+        folder = Path(directory)
+        recovery = (folder.parent.parent if folder.parent.name == "invocations" else folder) / "prompts" / f"{role}.txt"
+        recovery.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(recovery, readable_prompt(prompt).encode("utf-8"))
+        rule = READER_COMPACTION_RULE if role in PAIR_READONLY else COMPACTION_RULE.format(path=recovery)
         argv = self.commands["claude"] + ["--permission-mode", "bypassPermissions", "--model", model,
                 "--effort", effort, "--print", "--verbose", "--output-format", "stream-json", "--include-partial-messages",
                 "--disallowedTools", "Agent,Task,TeamCreate,TeamDelete,Monitor,CronCreate,ScheduleWakeup,RemoteTrigger,Workflow",
@@ -477,13 +760,13 @@ class Transport:
                                            "env": command_env}),
                 "--agent", "cycle_worker", "--agents", json.dumps({"cycle_worker": {
                     "description": "Execute the current cycle invocation only.",
-                    "prompt": "" if preserve_default else role_contract(role), "model": model}})]
+                    "prompt": "" if preserve_default else self.role_contract(role) + "\n\n" + rule, "model": model}})]
         if preserve_default:
-            argv += ["--append-system-prompt", role_contract(role)]
+            argv += ["--append-system-prompt", self.role_contract(role) + "\n\n" + rule]
         if role in PAIR_READONLY:
             argv[argv.index("user,project,local")] = ""
             server = {"mcpServers": {"focus": {"command": sys.executable,
-                "args": [str(Path(__file__).with_name("focus_pair_view.py")), self.state["inspection_path"]]}}}
+                "args": [str(Path(__file__).with_name("focus_pair_view.py")), self.state["inspection_path"], str(recovery)]}}}
             argv += ["--tools", "", "--strict-mcp-config", "--mcp-config", json.dumps(server),
                      "--allowedTools", "mcp__focus__inspect", "--disable-slash-commands"]
         elif role in READONLY_REVIEW_ROLES:
@@ -506,6 +789,15 @@ class Transport:
         # Paired inspectors start without user/project settings.
         launch_files = self.instruction_snapshot(role)
         diagnostic = ClaudeTrace()
+
+        tool_results = [0]  # Completed tool exchanges of this conversation in this process.
+
+        def refused(event):
+            # A refusal after a completed tool exchange carries history that a new conversation omits.
+            # A stream that broke before an answer completed is not such history.
+            error = claude_refusal(event)
+            error.history = tool_results[0] > 0
+            return error
         try:
             transport_digest = digest(Path(__file__).read_bytes())
         except OSError:
@@ -514,6 +806,15 @@ class Transport:
         # No work may run between process creation and the try block that closes it.
         process = Process(argv, self.root, Path(directory) / "protocol.jsonl", self.heartbeat, self.lock_fd, env, progress=self.progress, control=self.control)
         try:
+            def remember(text):
+                """Keep a delivered operator message in the recovery copy, because the prompt does not hold it."""
+                try:
+                    copy = recovery.read_text(encoding="utf-8")
+                    heading = "" if "\n\nOperator messages:\n" in copy else "\n\nOperator messages:\n"
+                    atomic_write(recovery, (copy + heading + "\n" + text + "\n").encode("utf-8"))
+                except OSError:
+                    pass  # The recovery copy helps after a compaction. It is not evidence.
+
             def send_message(text, message_id):
                 process.send(encode({"type": "user", "session_id": session, "uuid": message_id,
                                      "message": {"role": "user", "content": text}, "parent_tool_use_id": None}) + b"\n")
@@ -537,6 +838,11 @@ class Transport:
             process.on_poll = await_ack
             while True:
                 event = process.receive()
+                if event.get("type") == "user" and event.get("session_id") == session and event.get("parent_tool_use_id") is None and any(
+                        isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in (((event.get("message") or {}).get("content")) if isinstance(
+                            (event.get("message") or {}).get("content"), list) else [])):
+                    tool_results[0] += 1
                 refusal = diagnostic.feed(event)
                 if refusal and refusal["source"] == "message_delta":
                     if (not initialized or refusal["session_id"] != session
@@ -549,7 +855,7 @@ class Transport:
                         answer_model = answer_model.removesuffix("[1m]")
                     if answer_model != resolved_model:
                         raise Blocked("model-rerouted", "Claude streamed refusal belongs to a different model.")
-                    raise claude_refusal({"request_id": refusal["request_id"], "message": {
+                    raise refused({"request_id": refusal["request_id"], "message": {
                         "id": refusal["message_id"], "stop_details": {
                             "category": refusal["category"], "explanation": refusal["explanation"]}}})
                 if event.get("type") == "rate_limit_event":
@@ -603,7 +909,7 @@ class Transport:
                         if event.get("session_id") != session:
                             raise Blocked("provider-profile", "Claude API error belongs to a different session.")
                         if message.get("stop_reason") == "refusal":
-                            raise claude_refusal(event)
+                            raise refused(event)
                         code = event.get("error")
                         detail = " ".join(block["text"] for block in (message.get("content") or [])
                                           if isinstance(block, dict) and block.get("type") == "text"
@@ -628,7 +934,7 @@ class Transport:
                     if message.get("stop_reason") == "refusal":
                         if event.get("session_id") != session:
                             raise Blocked("provider-profile", "Claude refusal belongs to a different session.")
-                        raise claude_refusal(event)
+                        raise refused(event)
                     work_started = True
                 if (current_message and event.get("type") == "user" and event.get("session_id") == session
                         and event.get("uuid") == str(uuid.UUID(current_message["identity"]["id"]))):
@@ -696,7 +1002,10 @@ class Transport:
                                 earlier_reports.append(parse_report(raw, role))
                             current_message = self.interaction.take()
                             if current_message:
+                                # Claude answered. A server error in the next turn gets new retries.
+                                pending.pop("transient_retries", None)
                                 sent_at = time.monotonic()
+                                remember(message_text(current_message))
                                 send_message(message_text(current_message) + "\nReturn the complete structured report. Count fixes made in THIS response only; the runtime aggregates earlier responses. Do not repeat prior implementation or publication.",
                                              str(uuid.UUID(current_message["identity"]["id"])))
                                 continue
@@ -733,7 +1042,7 @@ class Transport:
                         "role": role, "requested_model": model, "effort": effort, "resumed": resumed, "attempt": attempt,
                         "session_id": session, "cwd": str(self.root),
                         "standard_system_prompt": preserve_default,
-                        "role_contract_sha256": digest(role_contract(role).encode("utf-8")),
+                        "role_contract_sha256": digest(self.role_contract(role).encode("utf-8")),
                         "prompt_sha256": digest(prompt.encode("utf-8")),
                         "transport_sha256": transport_digest,
                         "instruction_files": launch_files,
@@ -743,6 +1052,12 @@ class Transport:
                     }
                     metadata["completion"] = {"instruction_files": self.instruction_snapshot(role)}
                     atomic_write(Path(directory) / "claude-diagnostics.json", encode(metadata))
+                    # One usage record for each attempt. Pair job directories have no intent, so the record names its scope.
+                    folder = Path(directory)
+                    atomic_write(folder / f"usage-{attempt}.json", encode(dict(
+                        diagnostic.usage_totals(), version=1, role=role, iteration=self.state.get("iteration"),
+                        store=str(folder.parent.parent if folder.parent.name == "invocations" else folder),
+                        session_id=session, attempt=attempt, resumed=resumed, at=time.time())))
                 except Exception:
                     # Diagnostics must not turn a result or refusal into a recoverable
                     # error, or hide a containment failure. The raw log remains.
@@ -786,7 +1101,7 @@ class Transport:
                       # feature at process startup AND for resumed/new threads.
                       "config": {"features.multi_agent": False, "features.memories": False,
                                  "model_reasoning_effort": effort},
-                      "developerInstructions": role_contract(role)}
+                      "developerInstructions": self.role_contract(role)}
             if readonly:
                 params["config"].update({"features." + key: enabled for key, enabled in READONLY_FEATURE_OVERRIDES.items()})
                 params["config"]["web_search"] = "disabled"
@@ -816,7 +1131,8 @@ class Transport:
             if created:
                 params.update(ephemeral=False, allowProviderModelFallback=False)
                 if readonly:
-                    params["dynamicTools"] = [READ_TOOL]
+                    # Pair readers search their frozen view. The legacy inspector of other read-only roles cannot search.
+                    params["dynamicTools"] = [VIEW_TOOL if role in PAIR_READONLY else READ_TOOL]
                 reply = rpc.request("thread/start", params)
                 session = reply["thread"]["id"]
                 self.state["sessions"][role] = session
@@ -851,7 +1167,8 @@ class Transport:
             request = {"threadId": session, "input": [{"type": "text", "text": prompt}],
                        "model": model, "effort": effort, "cwd": str(self.root),
                        "approvalPolicy": "on-request", "approvalsReviewer": "user",
-                       "sandboxPolicy": {"type": "readOnly"} if readonly else {"type": "dangerFullAccess"}, "outputSchema": report_schema(role)}
+                       "sandboxPolicy": {"type": "readOnly"} if readonly else {"type": "dangerFullAccess"},
+                       "outputSchema": report_schema(role, bool(self.state.get("review_run") or self.state.get("review_scope")))}
             turn = rpc.request("turn/start", request)["turn"]
             pending["turn_id"] = turn["id"]
             self.save(self.state)

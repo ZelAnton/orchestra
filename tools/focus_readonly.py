@@ -16,12 +16,29 @@ READONLY_FEATURES = ("shell_tool", "unified_exec", "multi_agent", "multi_agent_v
 READONLY_FEATURE_OVERRIDES = {**{key: False for key in READONLY_FEATURES}, "code_mode_host": True}
 
 READ_TOOL = {"type": "function", "name": "focus_inspect",
-             "description": 'Read project files, list snapshot paths, or inspect a stage diff. Do not execute commands, write, build, or test. Offsets count lines or paths from zero. If a new file has an empty diff, read that file directly.',
+             "description": 'Read project files, list snapshot paths, or inspect a stage diff. Do not execute commands, write, build, or test. Offsets count the numbered rows of the output from zero. When a page names a next offset, continue there. If a new file has an empty diff, read that file directly.',
              "inputSchema": {"type": "object", "additionalProperties": False,
                              "properties": {"operation": {"type": "string", "enum": ["read", "list", "diff"]},
                                             "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
                                             "limit": {"type": "integer", "minimum": 1, "maximum": 500}},
                              "required": ["operation", "path", "offset", "limit"]}}
+
+
+# The frozen view of a pair can also search. The legacy Inspector keeps READ_TOOL, so it never advertises search.
+# Strict Codex schemas require every property, so pattern is null for the other operations.
+VIEW_TOOL = {"type": "function", "name": "focus_inspect",
+             "description": ('Read project files, search them, list snapshot paths, or inspect a stage diff. '
+                             'Do not execute commands, write, build, or test. Search first. Then read only the line ranges that you need.\n\n'
+                             'A search finds a literal, case-sensitive text in a file or a directory. Use "." for the whole view. '
+                             'A search shows at most 200 matches in one call. Set pattern to null for read, list, and diff.\n\n'
+                             'Offsets count the numbered rows of a read, or the matches of a search. '
+                             'When a page names a next offset, continue there. If a new file has an empty diff, read that file directly.'),
+             "inputSchema": {"type": "object", "additionalProperties": False,
+                             "properties": {"operation": {"type": "string", "enum": ["read", "search", "list", "diff"]},
+                                            "path": {"type": "string"}, "pattern": {"type": ["string", "null"]},
+                                            "offset": {"type": "integer", "minimum": 0},
+                                            "limit": {"type": "integer", "minimum": 1, "maximum": 500}},
+                             "required": ["operation", "path", "pattern", "offset", "limit"]}}
 
 
 class Inspector:

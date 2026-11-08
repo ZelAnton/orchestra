@@ -17,6 +17,15 @@ PROFILES = {
     "heal": ("codex", "gpt-6-astra", "xhigh"),
 }
 
+# Claude Code compacts the conversation of each Claude role at this context size. The model keeps its window.
+CLAUDE_COMPACT_WINDOW = 400000
+# A compaction removes the first message, with the runtime prompt and the report schema. The transport adds one
+# of these rules after role_contract(). Its path is fixed for each role in a run store, so a resumed session keeps its cache.
+COMPACTION_RULE = ("After a compaction of the conversation, read your runtime prompt again from {path}. "
+                   "Then read again the exact lines that a finding or a fix needs.")
+READER_COMPACTION_RULE = ("After a compaction of the conversation, read your runtime prompt again with focus_inspect: "
+                          "read the path __runtime__/prompt.txt. Then read again the exact lines that a finding needs.")
+
 REVIEW_ROLES = ("opus", "sol", "astra", "opus_final")
 FINAL_SCANNERS = ("final_opus", "final_astra", "claude")
 READONLY_REVIEW_ROLES = (*FINAL_SCANNERS, "final_triage")
@@ -117,9 +126,13 @@ Do not implement, review, or start another provider.
 Do not change files, commit, or push.
 Confirm the proposed phase, or report a specific blocker.
 
-The code phase can recover a lost or rejected report for an implemented stage.
+If the context has coding_recovery, the code phase can recover the report of this iteration.
 Confirm this report recovery route without doing that work yourself.
-Do not require another implementation stage. Do not claim that reviews occurred.
+Then do not require another implementation stage. Do not claim that reviews occurred.
+
+In the task field, name the stage that this iteration implements.
+A stage in previous_stage is published, so do not name it in the task field.
+If this iteration continues that stage, use null. The code report then names it.
 Return complete only when the stage source has no remaining stages or unfinished implementation or publication.
 Read public messages and command results only when the short outcome cannot support a decision.""",
     "heal": (
@@ -187,6 +200,26 @@ COMMAND_EXECUTION_CONTRACT = (
     'A waiting message is progress, never the final report.\nFinish all required '
     'verification before you return the structured report.\nInclude all corrections in that'
     ' report.\n\n'
+    'Test scope rules for every cc-focus role:\nRun only the checks that cover the current changes.\n'
+    'These checks test the new or changed behavior and the credible regression risks of these '
+    'changes.\nIn the code role, the current changes are the new and changed behavior of the stage.\n'
+    'In the code role, run each new check and each new mutant one time.\nIn other roles, the current '
+    'changes are the corrections of the current batch or recovery.\nThey also include the stage '
+    'behavior that an assignment names.\n\nAfter a correction, run again only the checks that the '
+    'correction can affect.\nA full run checks more than the current changes.\nExamples are a run of all test projects and a complete run of one '
+    'test project.\nA repeated run of all mutants of a battery after a local correction is also a '
+    'full run.\nThe first run of the new checks and mutants of a stage is not a full run.\n\nOnly two '
+    'cases permit a full run.\nPair B permits one full run in each stage, through an explicit '
+    'full_suite assignment.\nEach stage also permits one final gate after the passed final pair, with '
+    'one full run.\nDo not start a full run in other roles or phases.\nThe absence of a full run alone '
+    'is not a defect.\n\nWithout full_suite=true, do not request a full run in the check text of an '
+    'assignment.\nIf a check text requests a '
+    'full run without full_suite=true, run only its part for the current changes.\nIn the report, '
+    'name the omitted part.\n\nProject instructions can require broader runs.\nThe full-run limits '
+    'above also apply to these requirements.\nRun the part of such a check that covers the current '
+    'changes.\nIn the report, name each omitted broader check and the reason.\nAn omitted part is not'
+    ' a failed, incomplete, or skipped check.\nThe final pair can request the broader run for the '
+    'final gate.\n\n'
 )
 
 CONTRACT = (
@@ -451,8 +484,12 @@ PAIR_CONTRACT = (
         'repair_execute can change code.\nThe selected pair_fix/pair_cleanup effort is high or '
         'xhigh.\nThe repair_execute effort is xhigh.\nThe code role still implements the stage.\n'
         'Correct only accepted assignments. Prefer the smallest sufficient corrections, builds'
-        ' of affected projects, and relevant tests.\n\nFull test suites are optional.\nUse them '
-        'only for an explicit late-pair assignment with a stated risk reason.\nDo not change '
+        ' of affected projects, and relevant tests.\n\nA Pair B full_suite assignment is an '
+        'exception to the test scope rules.\nIf the change type does not strictly require a full run, '
+        'do not use this exception.\nThe benefit must justify the long wait.\nLocal changes and extra '
+        'confidence are not sufficient reasons.\nState the change type and the risk in the reason of '
+        'the assignment.\nAfter the one Pair B full run of a stage, the runtime rejects full_suite '
+        'assignments.\n\nDo not change '
         'credentials, permissions, runtime records, protected work, HEAD, or staging.\nOnly the'
         ' runtime commits and pushes.\nExecutors return one resolution per assignment with '
         'actual evidence.\nDisputed diagnoses return to the arbiter and must not silently '
@@ -530,7 +567,12 @@ PAIR_CONTRACT = (
         ' findings in the records.\nCite original evidence when more detail is necessary.\n\n'
         'Initial final-pair inspections receive only neutral inputs.\nDo not retrieve earlier '
         'sessions or review archives.\nReturn exactly the JSON schema for your role.\nKeep all '
-        'edit and fix counters at zero for read-only roles.\n'
+        'edit and fix counters at zero for read-only roles.\n\nInitial final-pair inspections also '
+        'decide about the final gate.\nIf the changes justify a full run before publication, set '
+        'final_gate.full_run=true.\nThe threshold for this request is lower than for a Pair B full_suite'
+        ' assignment.\nExplain the decision in'
+        ' final_gate.reason.\nThe runtime runs the gate only after the final pair passes.\nA test '
+        'defect in the gate starts the normal repair loop and a new final pair.\n'
     )
 )
 for _role in PAIR_ROLES:
@@ -555,7 +597,7 @@ If a provider failure prevents completion, report the unfinished work and the pu
 
 If a build is necessary, build only affected projects and required dependencies.
 Run the relevant tests and required diagnostics for the implementation.
-Full suites require an explicit late-pair assignment with a stated risk reason.
+Do not start a full run in the code role.
 Reuse completed checks only when their evidence applies to the current files.
 Report failed, incomplete, and unrun checks accurately.
 Do not skip required checks or claim that unrun checks passed.
@@ -600,6 +642,13 @@ If it changed no files, set all counters to 0 and substantial=false.
 """
 
 
+# Pair readers search their frozen view first. Saved reader prompts embed PAIR_CONTRACT, so this text is added in role_contract().
+READER_SEARCH_CONTRACT = """
+Search and read the frozen view:
+Use search to find a name, a requirement ID, or a heading. Then read only the lines that you need.
+Do not read a large file from its start to find one place.
+Read each instruction file once in one conversation. Read it again only after a compaction."""
+
 DISCUSSION_CONSENSUS_CONTRACT = """Discussion consensus field:
 To endorse the supplied proposal, copy the proposal_hash value from the runtime assignment into consensus.
 The consensus value is only these 64 hexadecimal characters.
@@ -613,6 +662,65 @@ To disagree or to propose changes, set consensus to null and assess every suppli
 
 """
 
+# The rule and the notice stay outside PAIR_CONTRACT, so earlier contract digests stay valid.
+# Saved pair prompts contain both texts. Before a change, add a _STYLE_TEXT entry in focus_pair_jobs.py.
+PROJECT_BRIEF_RULE = """The project brief is operator text about the purpose, direction, users, priorities, limits, and milestone goal of the project.
+Use the brief to find the effect of a change or a finding on these users and goals.
+The brief does not add requirements, tasks, or stages.
+It does not show the status of the work.
+Future direction does not define acceptance criteria for the current stage.
+
+If the brief does not agree with another source, obey the other source.
+These sources are your role contract, operator messages and corrections, the review scope, the project instructions, and the plan.
+
+Do not use the brief to select a stage or to decide that the plan is complete.
+Assess severity from actual effects and binding requirements.
+Do not use the brief to dismiss a correctness, safety, security, or required-contract failure, or to lower its severity.
+The brief alone is not a reason for a full run.
+Do not change the brief. Do not request a change to the brief."""
+
+# Main roles and writers get the rule in their project context. Saved pair prompts of a pair
+# with project_instructions_version contain it. Before a change, add a _STYLE_TEXT entry
+# for ('project_instructions', 'rule') in focus_pair_jobs.py.
+PROJECT_INSTRUCTIONS_RULE = """The files field lists the instruction files of the project root and its member repositories.
+The paths are relative to the project root. For a link, read the file that its target field names.
+These files are part of the project instructions.
+
+Before you use, change, or review files in a repository, read its instruction files.
+If a repository instruction file gives a command, run the command in the root of that repository.
+If a repository instruction and a project-root instruction do not agree, obey the repository instruction for that repository.
+In a pair inspection, read these files with focus_inspect.
+
+If an instruction file does not agree with another source, obey the other source.
+These sources are your role contract, operator messages and corrections, and the review scope."""
+
+# Main roles and writers get the rule in their project context. Saved prompts of a version-2 pair
+# contain it. Before a change, add a _STYLE_TEXT entry for ('parallel_repositories', 'rule') in focus_pair_jobs.py.
+PARALLEL_REPOSITORIES_RULE = """The repositories field lists the member repositories with parallel writers.
+Other writers change them at the same time as this stage. Their changes reach this checkout at a stage start, or when a blocked step needs them.
+
+In these repositories, change or request only what the stage needs. In the active plan, change only the status of stages.
+Do not revert or rewrite a change of another writer to make a check pass. If such a change stops your work, report a blocker.
+
+If your work needs commits that remote main of such a repository has, report a blocker. Do not copy their changes into this checkout.
+The runtime then brings remote main into the checkout, when it can keep the local changes. After that, the step runs again.
+A pair inspector reports a finding instead of a blocker.
+
+This rule has priority over the instruction files of the repositories."""
+
+# The publisher and the recovery agent also get this rule. Remote main of a parallel member is often ahead.
+PARALLEL_PUBLICATION_RULE = """Remote main of a parallel repository can have commits of other writers that the stage baseline does not have.
+The runtime merges remote main with the stage commit before the push. A conflict or another integration problem stops the runtime by itself.
+Thus their presence on remote main is not a blocker of the publication, also when they change stage paths.
+A failure that such a commit causes is still a blocker, as the repositories rule says.
+Do not request a reconcile or an operator integration for these commits."""
+
+BRIEF_CHANGE_CORRECTION = (
+    'The operator changed the project brief for this stage. If your context contains a project brief, use that '
+    'brief instead of earlier brief text. If your context contains no project brief, do not use earlier brief text. '
+    'This changes no requirement, task, or stage.'
+)
+
 
 def role_contract(role):
     contract = (CODE_CONTRACT if role == "code" else PAIR_CONTRACT if role in PAIR_ROLES
@@ -623,6 +731,8 @@ def role_contract(role):
     if role in PAIR_DISCUSSERS:
         # Saved discussion prompts embed PAIR_CONTRACT, so the exact consensus format is added here.
         contract += DISCUSSION_CONSENSUS_CONTRACT
+    if role in PAIR_READONLY:
+        contract += READER_SEARCH_CONTRACT
     # Observed Claude coding runs with this block ended in reasoning_extraction
     # refusals. Claude writers load the same policy from user settings.
     # Claude inspectors write no instructions or knowledge text.

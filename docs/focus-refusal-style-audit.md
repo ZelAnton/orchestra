@@ -150,7 +150,7 @@ The change makes the retry check stricter. It starts no model and clears no bloc
 ## Codex server error addendum
 
 Assessment date: 2026-10-13.
-The scope is the new Codex server error passages and one new runtime message.
+The scope is the new Codex server error passages and two new runtime messages.
 The passages are in `docs/sequential-cycle.md` and `knowledge.md`.
 The other runtime messages keep their wording, except for the provider name.
 
@@ -165,21 +165,120 @@ Two short sentences in `docs/sequential-cycle.md` are new.
 One is in the recovery rules, and one follows the list of terminal reasons.
 The count below includes the two new sentences. It does not include the two older sentences.
 
-The new message follows exhausted server-error retries.
+The closing message follows exhausted server-error retries.
 The run then stops for the operator, and no healer reads the message.
 The two instruction sentences address the operator, and each gives one action.
 Sequential roles and pair participants get the same instruction sentences, and the pair text names the participant role.
-`tools/check_focus_instructions.py` does not scan runtime messages, so a manual check covers this message.
-The new escalation text has two sentences with at most 11 words each.
 
-A manual count found at most 18 words per sentence in the new passages and the new message.
-Each changed paragraph has at most six sentences.
+The second message is the new escalation text. It has two sentences with at most 11 words each.
+`tools/check_focus_instructions.py` does not scan runtime messages, so a manual check covers both messages.
+
+A manual count found at most 18 words per sentence in the new passages and the new messages.
+Each new or split paragraph has at most six sentences.
 The new text has no semicolons, no parentheses, and no passive sentences.
-The rule results above also apply to this text. Seven rules stay unchecked, and rule 3.5 keeps its deviation.
-The result stays **42 satisfied rules / 50 applicable rules = 84 percent**.
+
+Several new and extended paragraphs of this change mixed subjects.
+The `knowledge.md` paragraph with the two older sentences also had 16 sentences.
+Before the follow-up below, rules 6.5 and 6.6 did not hold for this change.
+The follow-up splits or regroups these paragraphs.
+In the scope that the follow-up states, the rule results above then apply to this text.
+
+Seven rules stay unchecked, and rule 3.5 keeps its deviation.
+Before the follow-up, the result was **40 satisfied rules / 50 applicable rules = 80 percent**.
+With the follow-up, the result is **42 satisfied rules / 50 applicable rules = 84 percent**.
 
 The semantic review found no change to roles, models, efforts, or permissions.
 Codex server errors now use the bounded retries that Claude server errors already use.
 Other Codex errors still use the usual blocker handling.
 One recovery rule changed on the operator's decision.
 Exhausted server-error retries of either provider now stop the run and start no healer.
+
+## Inner repair evidence addendum
+
+Assessment date: 2026-10-14.
+The scope is the new inner repair evidence passages in `docs/sequential-cycle.md` and `knowledge.md`.
+The change adds five paragraphs to the inner repair gate section and two paragraphs to `knowledge.md`.
+It also adds two sentences to the publication manifest paragraph and splits that paragraph in two.
+The split sentences keep their wording.
+
+The change adds the page notice "The page stops before line N. Continue at offset M."
+It changes one sentence of the `focus_inspect` tool description and adds one.
+Inner and audit readers now also get the existing `publication_rule` and a list of evidence files.
+
+A script found at most 17 words per sentence in the new passages.
+It counts each machine literal as one word.
+Each changed paragraph has at most six sentences.
+The new text has no semicolons, no parentheses, and no passive sentences.
+
+The rule results above also apply to this text. Seven rules stay unchecked, and rule 3.5 keeps its deviation.
+The result stays **42 satisfied rules / 50 applicable rules = 84 percent**.
+
+The semantic review found no change to roles, models, efforts, or permissions.
+Inner inspectors get more read-only evidence, and they still have only `focus_inspect`.
+The publication rule that outer inspectors get now also applies to inner and audit inspectors.
+The final phase still hides earlier review reports from its inspectors.
+
+## Server error follow-up addendum
+
+Assessment date: 2026-10-15.
+The scope is the new, changed and moved sentences about server-error retries.
+It also includes the sentences about a safe stop at an escalated blocker.
+It also includes the split list of escalation reasons and one new runtime message.
+The sentences are in `docs/sequential-cycle.md`, `knowledge.md` and `README.md`.
+
+In `docs/sequential-cycle.md`, the paragraph about exhausted retries becomes two paragraphs.
+Two new sentences in these paragraphs tell the healer exception and the review run command.
+The older sentence about Claude server errors now says "in a row", and it becomes four sentences.
+The older sentence about errors that do not start retries moves after these four sentences.
+A new sentence after them tells the retry budget of the next Claude turn.
+These six sentences make a paragraph of their own.
+
+The older sentence about the pair retry count also says "in a row".
+A new sentence after it tells the retry budget of a report correction.
+The older healer sentences after it become a paragraph of their own.
+The older sentence about already-blocked runs also becomes a paragraph of its own.
+
+One new sentence after the terminal reasons tells the result of a safe stop at an escalated blocker.
+One new sentence in the safe stop paragraph tells the output of the stop command.
+The recovery rules, the recovery check and the terminal reasons become paragraphs with one subject each.
+Their older sentences keep their wording.
+
+In `knowledge.md`, one changed sentence names the healer exception.
+The older sentence about the retry budget now says "in a row".
+It becomes two sentences without a semicolon.
+One new sentence in the paragraph about `transient_exhausted` tells the review run command.
+One new paragraph tells the new retry budgets.
+Another new paragraph tells the safe stop at an escalated blocker.
+
+The older list of escalation reasons becomes two sentences with at most 16 words each.
+Its older paragraph had 16 sentences and several subjects.
+This change splits it into five paragraphs with one subject each.
+Their other sentences keep their wording.
+
+In `knowledge.md`, some sentences of other server-error paragraphs move, so that each paragraph has one subject.
+One older sentence about `--retry` becomes two sentences.
+One older sentence about escalated blockers after an update becomes two sentences without a semicolon.
+The other moved sentences keep their wording.
+
+In `README.md`, one new sentence tells the retry command after a safe stop at an escalated blocker.
+Its older paragraph about `cc-focus` becomes four paragraphs with one subject each.
+Their other sentences keep their wording.
+
+The new runtime message is "The run output names the blocker and the retry command."
+The stop command prints it after a safe stop at an escalated blocker.
+The closing text after exhausted retries keeps its wording.
+In a review run, it names the retry command of that run.
+`tools/check_focus_instructions.py` does not scan runtime messages, so a manual check covers this message.
+
+A manual count found at most 18 words per sentence in the new and changed sentences.
+Each new, changed, split or regrouped paragraph has at most six sentences and one subject.
+The new and changed sentences have no semicolons, no parentheses, and no passive sentences.
+Older sentences that keep their wording stay outside the sentence rules, also after a move or a split.
+
+In this scope, the rule results above also apply to this text. Seven rules stay unchecked, and rule 3.5 keeps its deviation.
+The result stays **42 satisfied rules / 50 applicable rules = 84 percent**.
+
+The semantic review found no change to roles, models, efforts, permissions, or review gates.
+A report correction of a pair participant gets three new retries.
+The next Claude turn for an operator message in the same process also gets three new retries.
+A safe stop at an escalated blocker now ends like a plain rerun, with exit code 3.

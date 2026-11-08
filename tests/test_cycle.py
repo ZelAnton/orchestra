@@ -20,7 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.path.insert(0, str(REPO / "tools"))
-from cycle_state import Blocked, ProviderQuota, ProviderTransient, Lease, LocalLock, Repository, Store, atomic_write, changed, command, encode
+from cycle_state import Blocked, ProviderQuota, ProviderTransient, Lease, LocalLock, Repository, Store, atomic_write, changed, command, digest, encode
 from cycle_prompts import CODE_IMPLEMENTATION_CONTRACT, COMMAND_EXECUTION_CONTRACT, PAIR_CONTRACT, PROFILES, REVIEW_PROFILE_VERSION, REVIEW_ROLES, REVIEW_TARGETS, WRITING_CONTRACT
 from focus_pair_profile import PAIRS, PAIR_ROLES, PAIR_READONLY, PAIR_WRITERS
 from cycle_transport import Process, Rpc, Transport, concise_summary, parse_report
@@ -30,6 +30,35 @@ from focus_progress import Progress, safe_text
 from focus_output import LiveOutput
 from focus_messages import MessagePending
 from focus_snapshot_archive import read_source
+
+
+# The report schema keywords that Codex strict structured output has accepted.
+STRICT_KEYWORDS = {"additionalProperties", "anyOf", "description", "enum", "items", "maxItems",
+                   "minItems", "minLength", "minimum", "properties", "required", "type"}
+
+
+def schema_keywords(schema):
+    if isinstance(schema, list):
+        return set().union(*map(schema_keywords, schema))
+    if not isinstance(schema, dict):
+        return set()
+    names = set(schema)
+    for key, value in schema.items():
+        names |= set().union(*map(schema_keywords, value.values())) if key == "properties" else schema_keywords(value)
+    return names
+
+
+def strict_objects(schema):
+    """Strict mode: each object requires all its properties and forbids other properties."""
+    if isinstance(schema, list):
+        return all(map(strict_objects, schema))
+    if not isinstance(schema, dict):
+        return True
+    kind, properties = schema.get("type"), schema.get("properties", {})
+    if "properties" in schema or ("object" in kind if isinstance(kind, list) else kind == "object"):
+        if "properties" not in schema or set(schema.get("required", [])) != set(properties) or schema.get("additionalProperties") is not False:
+            return False
+    return all(strict_objects(value) for key, value in schema.items() if key != "properties") and all(map(strict_objects, properties.values()))
 
 
 def report(**kwargs):
@@ -84,6 +113,8 @@ class FixtureTransport:
         if isinstance(action, BaseException):
             raise action
         result = action() if callable(action) else action
+        if role in PAIRS["final"] and '"final_gate": {' in prompt and isinstance(result, dict) and "final_gate" not in result:
+            result = dict(result, final_gate={"full_run": False, "reason": "Targeted checks cover the stage changes."})
         return json.dumps(result)
 
 
@@ -597,7 +628,9 @@ class CycleTests(unittest.TestCase):
         self.edit(content="pre-existing operator work\n")()
         self.edit(name="untouched.txt", content="protected unrelated work\n")()
         self.state = fresh_state(self.repo)
-        self.state.update(iteration=9, status="blocked", last={"role": "publish", "summary": "Previous stage published"},
+        # A real stage start writes the brief record with the iteration.
+        self.state.update(iteration=9, project_brief={"iteration": 9, "sha256": None}, status="blocked",
+                          last={"role": "publish", "summary": "Previous stage published"},
                           task={"id": "old-proposal", "title": "Provisional task", "plan": "source.txt", "iteration": 9},
                           sessions={"code": "previous-coding-session"},
                           blocker={"code": "protected-work", "status": "blocked"})
@@ -2294,6 +2327,26 @@ class CycleTests(unittest.TestCase):
                     if attempt:
                         self.assertEqual(self.state["sessions"][role], previous)
 
+    def test_codex_scanner_of_an_existing_review_gets_a_strict_coverage_schema(self):
+        # Codex strict mode refused uniqueItems in this coverage schema with HTTP 400.
+        files = {"source.txt": digest((self.root / "source.txt").read_bytes())}
+        self.state.update(review_scope={"coverage_ids": ["scope"]}, inspection_path=str(self.root / "manifest.json"),
+                          inspection={"root": str(self.root), "files": files, "stage_paths": ["source.txt"], "diffs": {}})
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["codex"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "codex"]
+        directory = self.store.directory / "scanner"
+        directory.mkdir(parents=True)
+        sent, original = [], Rpc.request
+        def record(rpc, method, params):
+            sent.append((method, params))
+            return original(rpc, method, params)
+        with patch.object(Rpc, "request", record):
+            transport.run("pair_sol", "Inspect the scope", {"id": directory.name}, directory)
+        schema = next(params["outputSchema"] for method, params in sent if method == "turn/start")
+        self.assertIn("coverage", schema["properties"])
+        self.assertLessEqual(schema_keywords(schema), STRICT_KEYWORDS)
+        self.assertTrue(strict_objects(schema))
+
     def test_interrupted_review_cannot_reuse_old_clean_streak(self):
         self.state.update(phase="sol", sol_clean=2, pending={
             "id": "interrupted-review", "role": "sol", "before": self.repo.snapshot(), "attempts": 1})
@@ -2801,6 +2854,7 @@ class CycleTests(unittest.TestCase):
         for variant, expected in cases:
             with self.subTest(variant=variant):
                 self.state["sessions"]["code"] = "saved-coding-session"
+                self.state.pop("refused_sessions", None)  # Each case is a separate conversation.
                 transport = Transport(self.root, self.state, self.store.save, lambda: None)
                 transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
                 directory = self.store.directory / variant
@@ -2808,10 +2862,11 @@ class CycleTests(unittest.TestCase):
                 before = self.repo.snapshot()
                 if expected:
                     with self.assertRaises(Blocked) as caught:
-                        transport.run("code", "same implementation", {"id": variant}, directory)
+                        transport.run("code", "same implementation", {"id": variant, "refusal_restart": {"session": "earlier"}}, directory)
                     self.assertEqual(caught.exception.code, expected)
                     if expected == "claude-refusal":
                         detail = str(caught.exception)
+                        self.assertIn("The runtime already continued this invocation one time in a new conversation.", detail)
                         self.assertIn("unspecified" if variant == "refusal-null" else "reasoning_extraction", detail)
                         self.assertIn("Request ID: req_fixture", detail)
                         self.assertIn("Response message ID: msg_fixture", detail)
@@ -2832,12 +2887,13 @@ class CycleTests(unittest.TestCase):
         for variant, expected in cases.items():
             with self.subTest(variant=variant):
                 self.state["sessions"] = {"code": "saved-coding-session"}
+                self.state.pop("refused_sessions", None)  # Each case is a separate conversation.
                 transport = Transport(self.root, self.state, self.store.save, lambda: None)
                 transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
                 directory = self.store.directory / "invocations" / variant
                 directory.mkdir(parents=True)
                 with self.assertRaises(Blocked) as caught:
-                    transport.run("code", "same implementation", {"id": variant}, directory)
+                    transport.run("code", "same implementation", {"id": variant, "refusal_restart": {"session": "earlier"}}, directory)
                 self.assertEqual(caught.exception.code, expected)
                 summary = json.loads((directory / "claude-diagnostics.json").read_text())
                 self.assertEqual(summary["refusals"][0]["source"], "message_delta")
@@ -2882,9 +2938,13 @@ class CycleTests(unittest.TestCase):
         saved = self.store.read()
         self.assertEqual(saved["blocker"]["code"], "claude-refusal")
         self.assertEqual(saved["blocker"]["escalation_reason"], "provider-refusal")
+        self.assertIn("The runtime already continued this invocation one time in a new conversation.", saved["blocker"]["message"])
         self.assertEqual(saved["phase"], "code")
         self.assertEqual(saved["status"], "blocked")
-        self.assertEqual(saved["sessions"], {"code": "saved-coding-session"})
+        # The resumed conversation was refused. The one new conversation was refused too and stays visible.
+        self.assertNotEqual(saved["sessions"]["code"], "saved-coding-session")
+        self.assertEqual(saved["refusal_restarts"], [{"role": "code", "session": "saved-coding-session",
+                                                       "invocation": saved["blocker"]["interrupted"]["id"]}])
         self.assertEqual(saved["healed"], [])
         self.assertFalse(saved.get("recovery_unverified", False))
         self.assertIsNone(saved["reviewed"])
@@ -2896,6 +2956,141 @@ class CycleTests(unittest.TestCase):
         intents = list(self.store.directory.glob("invocations/*/intent.json"))
         self.assertEqual(len(intents), 1)
         self.assertEqual(json.loads(intents[0].read_text())["id"], saved["blocker"]["interrupted"]["id"])
+        records = [json.loads(line) for line in (intents[0].parent / "protocol.jsonl").read_text().splitlines()]
+        attempts = [json.loads(r["line"]) for r in records if r.get("stream") == "runtime"]
+        self.assertEqual([a["resumed"] for a in attempts if a.get("type") == "attempt"], [True, False])
+
+    def test_a_refused_resumed_conversation_continues_once_in_a_new_conversation(self):
+        self.state["sessions"] = {"code": "saved-coding-session"}
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "refusal-resumed"]
+        directory = self.store.directory / "invocations" / ("a" * 32)
+        directory.mkdir(parents=True)
+        pending = {"id": "a" * 32}
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(parse_report(transport.run("code", "same implementation", pending, directory))["status"], "done")
+        self.assertIn("The runtime continues the same invocation one time in a new conversation", output.getvalue())
+        self.assertNotEqual(self.state["sessions"]["code"], "saved-coding-session")
+        self.assertEqual(pending["refusal_restart"]["session"], "saved-coding-session")
+        self.assertEqual(self.state["refusal_restarts"], [{"role": "code", "session": "saved-coding-session", "invocation": "a" * 32}])
+        self.assertNotIn("session_recoveries", self.state)
+        self.assertIn("The prior native conversation is unavailable.", (directory / "prompt.txt").read_text())
+
+    def test_a_late_refusal_of_a_new_conversation_continues_once(self):
+        for variant, outcome in (("refusal-late-once", "done"), ("refusal-late", "claude-refusal")):
+            with self.subTest(variant=variant):
+                marker = self.root / ".work/cycle/refusal-late-once"
+                marker.unlink(missing_ok=True)
+                self.state["sessions"] = {}
+                self.state.pop("refused_sessions", None)
+                self.state.pop("refusal_restarts", None)
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
+                directory = self.store.directory / "invocations" / (("4" if outcome == "done" else "3") * 32)
+                directory.mkdir(parents=True)
+                pending = {"id": directory.name}
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    if outcome == "done":
+                        self.assertEqual(parse_report(transport.run("code", "same implementation", pending, directory))["status"], "done")
+                    else:
+                        with self.assertRaises(Blocked) as caught:
+                            transport.run("code", "same implementation", pending, directory)
+                        self.assertIn("The runtime already continued this invocation one time in a new conversation. "
+                                      "The provider refused that conversation too.", str(caught.exception))
+                # The refused request had an earlier answer, so a new conversation sends a different request.
+                self.assertIn("request that had earlier history", output.getvalue())
+                self.assertEqual(len(self.state["refusal_restarts"]), 1)
+                self.assertTrue(self.state["refusal_restarts"][0]["session"])
+
+    def test_a_retried_first_request_has_no_earlier_history(self):
+        self.state["sessions"] = {}
+        self.state.pop("refused_sessions", None)
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "refusal-broken-stream"]
+        directory = self.store.directory / "invocations" / ("2" * 32)
+        directory.mkdir(parents=True)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Blocked) as caught:
+            transport.run("code", "same implementation", {"id": "2" * 32}, directory)
+        # Two message IDs, but no completed tool exchange: the runtime does not repeat the first request.
+        self.assertIn("The provider refused the first request of a new conversation", str(caught.exception))
+        self.assertNotIn("refusal_restarts", self.state)
+
+    def test_a_restart_keeps_the_diagnostics_of_the_refused_attempt(self):
+        from focus_diagnostics import refusal_history
+        self.state["sessions"] = {"code": "saved-coding-session"}
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "refusal-synthetic"]
+        directory = self.store.directory / "invocations" / ("7" * 32)
+        directory.mkdir(parents=True)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Blocked):
+            transport.run("code", "same implementation", {"id": "7" * 32}, directory)
+        rows = [r for r in refusal_history(self.store.directory)["refusals"] if r["invocation"] == "7" * 32]
+        self.assertEqual([(r["attempt"], r["resumed"]) for r in rows], [(1, True), (2, False)])
+        first, second = rows
+        # The second attempt replaced the shared files. The refused attempt keeps its own launch record and prompt.
+        self.assertTrue(first["role_contract_sha256"])
+        self.assertTrue(first["prompt_known"])
+        self.assertTrue(first["prompt_file"].startswith("prompt-"))
+        self.assertNotIn("The prior native conversation is unavailable.", (directory / first["prompt_file"]).read_text())
+        self.assertIn("The prior native conversation is unavailable.", (directory / "prompt.txt").read_text())
+        self.assertIn("RECOVERY: the previous attempt of THIS SAME invocation was interrupted.", (directory / "prompt.txt").read_text())
+        self.assertEqual((second["prompt_file"], second["prompt_known"]), ("prompt.txt", True))
+
+    def test_a_resume_never_resends_a_refused_conversation(self):
+        self.state["sessions"] = {}
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "refusal-synthetic"]
+        directory = self.store.directory / "invocations" / ("6" * 32)
+        directory.mkdir(parents=True)
+        pending = {"id": "6" * 32}
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Blocked):
+            transport.run("code", "same implementation", pending, directory)
+        refused = self.state["sessions"]["code"]
+        self.assertEqual(pending["refused_session"], refused)
+        # A pause for operator messages keeps the invocation. Its resume starts no provider.
+        transport.commands["claude"] = [sys.executable, "-c", "raise SystemExit('provider started')"]
+        attempts = pending["attempts"]
+        with self.assertRaises(Blocked) as caught:
+            transport.run("code", "same implementation", pending, directory)
+        self.assertEqual(caught.exception.code, "claude-refusal")
+        self.assertIn("starts no provider", str(caught.exception))
+        self.assertEqual((pending["attempts"], self.state["sessions"]["code"]), (attempts, refused))
+        # A correction or a retry replaces the pending invocation. The state still knows the refused conversation.
+        self.assertEqual(self.state["refused_sessions"], [refused])
+        with self.assertRaises(Blocked) as caught:
+            transport.run("code", "same implementation", {"id": "5" * 32}, directory)
+        self.assertIn("starts no provider", str(caught.exception))
+
+    def test_a_refusal_restart_has_limits(self):
+        cases = [("new conversation", {}, {"id": "b" * 32}, "code",
+                  "The provider refused the first request of a new conversation, so the runtime does not repeat it."),
+                 ("report correction", {"code": "saved"}, {"id": "c" * 32, "report_repair": {"source": "x"}}, "code",
+                  "A report-only correction keeps its conversation, so the runtime does not start a new one."),
+                 ("operator message", {"code": "saved"}, {"id": "d" * 32, "operator_intervened": True}, "code",
+                  "Operator messages went to the refused conversation, so the runtime does not start a new one."),
+                 ("second refusal", {"code": "saved"}, {"id": "e" * 32}, "code",
+                  "The runtime already continued this invocation one time in a new conversation. The provider refused that conversation too.")]
+        for name, sessions, pending, role, reason in cases:
+            with self.subTest(name):
+                self.state["sessions"] = dict(sessions)
+                self.state.pop("refusal_restarts", None)
+                self.state.pop("refused_sessions", None)  # Each case is a separate conversation.
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", "refusal-synthetic"]
+                directory = self.store.directory / "invocations" / pending["id"]
+                directory.mkdir(parents=True)
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(Blocked) as caught:
+                    transport.run(role, "same work", pending, directory)
+                self.assertEqual(caught.exception.code, "claude-refusal")
+                self.assertIn(reason, str(caught.exception))
+                restarted = name == "second refusal"
+                self.assertEqual(bool(self.state.get("refusal_restarts")), restarted)
+                if not restarted and sessions:
+                    self.assertEqual(self.state["sessions"], sessions)
+        # A self review resumes the executor's conversation. A new conversation would replace the executor.
+        transport = Transport(self.root, self.state, self.store.save, lambda: None)
+        self.assertIn("self-review", transport.restart_refused("repair_self", "executor-session", {"id": "9" * 32}))
+        self.assertEqual(transport.restart_refused("pair_opus", "reader-session", {"id": "f" * 32}), "")
         self.assertFalse(list(self.store.directory.glob("invocations/*/result.json")))
 
     def test_claude_diagnostics_keep_instruction_hashes_from_before_the_start(self):
@@ -2916,7 +3111,7 @@ class CycleTests(unittest.TestCase):
                 with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(config)):
                     if "refusal-work" in variant:
                         with self.assertRaises(Blocked) as caught:
-                            transport.run("code", "same implementation", {"id": directory.name}, directory)
+                            transport.run("code", "same implementation", {"id": directory.name, "refusal_restart": {"session": "earlier"}}, directory)
                         self.assertEqual(caught.exception.code, "claude-refusal")
                     else:
                         transport.run("code", "same implementation", {"id": directory.name}, directory)
@@ -2976,7 +3171,7 @@ class CycleTests(unittest.TestCase):
             transport = Transport(self.root, self.state, self.store.save, lambda: None)
             transport.commands["claude"] = [sys.executable, str(Path(__file__).resolve()), "fixture", "claude", variant]
             with self.assertRaises(Blocked) as caught:
-                transport.run("code", "same implementation", {"id": "c" * 32}, directory)
+                transport.run("code", "same implementation", {"id": "c" * 32, "refusal_restart": {"session": "earlier"}}, directory)
             self.assertEqual(caught.exception.code, expected)
             self.state["sessions"] = {}  # The second attempt starts a new conversation.
         rows = refusal_history(self.store.directory)
@@ -3003,7 +3198,7 @@ class CycleTests(unittest.TestCase):
             with patch("cycle_transport.atomic_write", side_effect=write), contextlib.redirect_stderr(io.StringIO()):
                 if variant:
                     with self.assertRaises(Blocked) as caught:
-                        transport.run("code", "same review", {"id": identity}, directory)
+                        transport.run("code", "same review", {"id": identity, "refusal_restart": {"session": "earlier"}}, directory)
                     self.assertEqual(caught.exception.code, "claude-refusal")
                 else:
                     transport.run("code", "same review", {"id": identity}, directory)
@@ -3181,7 +3376,7 @@ class CycleTests(unittest.TestCase):
         self.assertEqual({event["model"] for event in inits}, {"claude-opus-5-5"})
         self.assertTrue((invocations[0] / "result.json").exists())
 
-    def exhaust_server_retries(self, error, code):
+    def exhaust_server_retries(self, error, code, retry="cc-focus --retry"):
         self.state.update(coordinated="code")
         clock, deadlines, ids = [1000.0], [], []
         def fail():
@@ -3209,7 +3404,8 @@ class CycleTests(unittest.TestCase):
                          (code, "blocked", "provider-unavailable"))
         self.assertEqual(blocker["interrupted"]["id"], ids[0])
         self.assertIn("The retained invocation holds the server failure. "
-                      "Operator: wait until the provider is available. Then run cc-focus --retry.", blocker["message"])
+                      f"Operator: wait until the provider is available. Then run {retry}.", blocker["message"])
+        self.assertIn(f"Resolve the problem, then run {retry}.", out.getvalue())
         self.assertEqual(self.state["healed"], [])
         self.assertIn("Recovery cannot retry a provider.", out.getvalue())
         self.assertNotIn("routing blocker to the separate", out.getvalue())
@@ -3221,8 +3417,13 @@ class CycleTests(unittest.TestCase):
         self.exhaust_server_retries(lambda: ProviderTransient(
             "serverOverloaded", "Selected model is at capacity.", no_work=True, provider="codex"), "codex-transient")
 
+    def test_a_review_run_names_its_own_retry_command_after_exhausted_server_retries(self):
+        self.state["review_run"] = {"id": "abc123"}
+        self.exhaust_server_retries(lambda: ProviderTransient("server_error", "mid-response", no_work=True),
+                                    "claude-transient", "cc-focus review --resume abc123 --retry")
+
     def test_an_exhausted_pair_participant_stops_for_the_operator_without_a_healer(self):
-        # run_jobs raises a plain blocker with the provider code after the participant retries.
+        # run_jobs raises a plain blocker with the provider code after the participant retries (see test_focus_pairs).
         self.state.update(phase="pair_a", pending={"id": "group", "role": "pair_group", "before": self.repo.snapshot()})
         self.cycle.handle_block(Blocked("codex-transient", "Codex server error (serverOverloaded): at capacity."))
         blocker = self.state["blocker"]
@@ -3230,6 +3431,55 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(blocker["interrupted"]["role"], "pair_group")
         self.assertEqual(self.cycle.run(), 3)
         self.assertEqual(self.transport.calls, [])
+
+    def test_an_unavailable_provider_outranks_unverified_recovery_and_a_repeated_blocker(self):
+        error = Blocked("claude-transient", "Claude server error (server_error): mid-response. No review credit earned.")
+        signature = digest(encode({"code": error.code, "message": str(error)}))
+        for setup in ({"recovery_unverified": True}, {"healed": [signature]}):
+            with self.subTest(setup=setup):
+                self.state.update({"blocker": None, "pending": None, "recovery_unverified": False, "healed": [], **setup})
+                self.cycle.handle_block(error)
+                self.assertEqual((self.state["blocker"]["status"], self.state["blocker"]["escalation_reason"]),
+                                 ("blocked", "provider-unavailable"))
+
+    def stop_during_the_last_failure(self, error, failures):
+        control = Control(self.store)
+        control.begin()
+        self.cycle.control = control
+        self.state.update(coordinated="code")
+        calls = []
+        def fail():
+            calls.append(1)
+            if len(calls) == failures:
+                control.submit_stop(now=False)  # The operator stops the run during the last attempt.
+            raise error()
+        self.transport.actions = [("code", fail)] * failures
+        clock = [1000.0]
+        def tick(delay):
+            clock[0] = self.store.read()["pending"]["transient_wait"]["retry_at"]
+        with patch("cycle_workflow.time", wraps=time) as timer, contextlib.redirect_stdout(io.StringIO()) as out:
+            timer.time.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = tick
+            code = self.cycle.run()
+        control.finish(self.state, code)
+        self.assertEqual(len(calls), failures)
+        self.assertNotIn("heal", [role for role, _ in self.transport.calls])
+        return code, out.getvalue()
+
+    def test_a_stop_after_exhausted_server_retries_ends_like_a_blocked_run(self):
+        code, out = self.stop_during_the_last_failure(lambda: ProviderTransient("server_error", "mid-response", no_work=True), 4)
+        self.assertEqual((code, self.state["status"], self.state["blocker"]["escalation_reason"]),
+                         (3, "blocked", "provider-unavailable"))
+        self.assertIn("cc-focus: The provider still has a server failure", out)
+        self.assertIn("Operator: wait until the provider is available. Then run cc-focus --retry.", out)
+        self.assertIn("Resolve the problem, then run cc-focus --retry.", out)
+        self.assertIn("cc-focus recover --review-from", out)
+        self.assertNotIn("recovery will run", out)
+
+    def test_a_stop_at_a_blocker_for_recovery_pauses_before_the_healer(self):
+        code, out = self.stop_during_the_last_failure(lambda: Blocked("claude-failed", "Unexpected provider result."), 1)
+        self.assertEqual((code, self.state["status"], self.state["blocker"]["status"]), (0, "paused", "healing"))
+        self.assertIn("cc-focus: stopped at a preserved blocker; recovery will run only after continuation.", out)
 
     def test_a_codex_healer_server_error_waits_before_each_retry(self):
         self.state.update(coordinated="code")
@@ -3440,7 +3690,9 @@ class CycleTests(unittest.TestCase):
 
     def test_blocker_routing_only_skips_recovery_for_manual_or_unsafe_actions(self):
         for code, reason in (("claude-access-denied", "manual-action"), ("approval-required", "manual-action"),
-                             ("approval-denied", "manual-action"), ("cleanup-incomplete", "unsafe-provider"),
+                             ("approval-denied", "manual-action"), ("instruction-version", "runtime-version"),
+                             ("parallel-merge-conflict", "operator-context"), ("parallel-sync-git", None),
+                             ("cleanup-incomplete", "unsafe-provider"),
                              ("turn-active", "unsafe-provider"), ("operator-input", None),
                              ("remote-query-timeout", None), ("remote-query-failed", None),
                              ("claude-api-error", None), ("command-unavailable", None), ("failed-test", None)):
@@ -3957,6 +4209,118 @@ class CycleTests(unittest.TestCase):
         self.assertFalse(runtime_active(self.store))
 
 
+class ProtocolRecordTests(unittest.TestCase):
+    """An Edit of a large file makes Claude repeat the whole file in one tool record."""
+
+    def process(self, *lines):
+        import queue
+        process = Process.__new__(Process)
+        process.heartbeat, process.on_poll, process.progress = (lambda: None), None, None
+        process.deadline, process.stderr_tail = time.monotonic() + 60, ""
+        process.events = queue.Queue()
+        for label, line in lines:
+            process.events.put((label, line))
+        self.log = io.BytesIO()
+        process.log = self.log
+        return process
+
+    def tool_record(self, echo_bytes, content="Edited the file."):
+        return json.dumps({"type": "user", "session_id": "s", "parent_tool_use_id": None, "uuid": "u",
+                           "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": content}]},
+                           "tool_use_result": {"filePath": "plan.md", "originalFile": "x" * echo_bytes}}).encode() + b"\n"
+
+    def test_an_oversized_tool_echo_is_removed_and_the_record_is_kept(self):
+        line = self.tool_record(9 * 1024 * 1024)
+        event = self.process(("stdout", line)).receive()
+        self.assertNotIn("tool_use_result", event)
+        self.assertEqual(event["message"]["content"][0]["type"], "tool_result")
+        logged = json.loads(self.log.getvalue())
+        self.assertGreater(logged["tool_echo_removed_bytes"], 9 * 1024 * 1024)
+        self.assertEqual(json.loads(logged["line"]), event)
+        self.assertLess(len(self.log.getvalue()), 1024 * 1024)
+
+    def test_a_small_tool_echo_stays_unchanged(self):
+        event = self.process(("stdout", self.tool_record(1000))).receive()
+        self.assertEqual(len(event["tool_use_result"]["originalFile"]), 1000)
+        self.assertNotIn("tool_echo_removed_bytes", json.loads(self.log.getvalue()))
+
+    def test_a_lone_surrogate_survives_the_reduction(self):
+        event = self.process(("stdout", self.tool_record(9 * 1024 * 1024, content="cut \ud83d text"))).receive()
+        self.assertEqual(event["message"]["content"][0]["content"], "cut \ud83d text")
+
+    def test_a_rejected_line_logs_only_its_size(self):
+        line = json.dumps({"type": "assistant", "message": {"content": "q" * (20 * 1024 * 1024)}}).encode() + b"\n"
+        with self.assertRaises(Blocked):
+            self.process(("stdout", line)).receive()
+        frame = json.loads(self.log.getvalue())
+        self.assertEqual((frame["rejected_bytes"], "line" in frame), (len(line), False))
+        from cycle_transport import protocol_frame
+        self.assertIsInstance(protocol_frame("stdout", line)[1], Blocked)
+
+    def test_a_real_pipe_delivers_a_large_tool_record_and_the_next_record(self):
+        script = (
+            "import json, sys\n"
+            "record = {'type': 'user', 'session_id': 's', 'parent_tool_use_id': None, 'uuid': 'u',\n"
+            "          'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 't', 'content': 'ok'}]},\n"
+            "          'tool_use_result': {'originalFile': 'x' * (9 * 1024 * 1024)}}\n"
+            "sys.stdout.write(json.dumps(record) + '\\n')\n"
+            "sys.stdout.write(json.dumps({'type': 'result', 'subtype': 'success'}) + '\\n')\n"
+            "sys.stdout.flush()\n"
+            "sys.stdin.read()\n")
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "protocol.jsonl"
+            process = Process([sys.executable, "-c", script], Path(temp), log, lambda: None)
+            try:
+                started = time.monotonic()
+                first, second = process.receive(), process.receive()
+                self.assertLess(time.monotonic() - started, 20)
+            finally:
+                process.close()
+            self.assertNotIn("tool_use_result", first)
+            self.assertEqual(first["message"]["content"][0]["content"], "ok")
+            self.assertEqual(second["type"], "result")
+            self.assertLess(log.stat().st_size, 1024 * 1024)
+
+    def test_the_close_drain_logs_queued_large_lines_by_size_or_reduced(self):
+        script = (
+            "import json, sys\n"
+            "sys.stdout.write(json.dumps({'type': 'assistant', 'message': {'content': 'q' * (20 * 1024 * 1024)}}) + '\\n')\n"
+            "sys.stdout.write(json.dumps({'type': 'user', 'message': {'content': 'ok'},\n"
+            "                             'tool_use_result': {'originalFile': 'x' * (9 * 1024 * 1024)}}) + '\\n')\n"
+            "sys.stdout.flush()\n")
+        with tempfile.TemporaryDirectory() as temp:
+            log = Path(temp) / "protocol.jsonl"
+            process = Process([sys.executable, "-c", script], Path(temp), log, lambda: None)
+            for reader in process.readers:
+                reader.join(timeout=20)  # Both records are queued. receive() never runs.
+            process.close()
+            frames = [json.loads(line) for line in log.read_bytes().splitlines()]
+            self.assertTrue(all(len(json.dumps(frame)) < 4096 for frame in frames))
+            self.assertTrue(any((frame.get("rejected_bytes") or 0) > 20 * 1024 * 1024 for frame in frames))
+            reduced = [frame for frame in frames if "tool_echo_removed_bytes" in frame]
+            self.assertEqual(json.loads(reduced[0]["line"])["message"], {"content": "ok"})
+
+    def test_cjk_text_is_reduced_without_ascii_growth(self):
+        # About 6 MiB in UTF-8. ASCII escapes would need about 12 MiB and reject the record.
+        event = self.process(("stdout", self.tool_record(9 * 1024 * 1024, content="界" * (2 * 1024 * 1024)))).receive()
+        self.assertEqual(len(event["message"]["content"][0]["content"]), 2 * 1024 * 1024)
+
+    def test_other_oversized_records_still_stop_the_invocation(self):
+        big = b"y" * (9 * 1024 * 1024)
+        cases = {"assistant": json.dumps({"type": "assistant", "message": {"content": big.decode()}}).encode() + b"\n",
+                 "large message": self.tool_record(10, content="z" * (9 * 1024 * 1024)),
+                 "not json": big + b"\n",
+                 "stderr": None,
+                 "over the echo limit": b"z" * (128 * 1024 * 1024 + 1)}
+        for name, line in cases.items():
+            with self.subTest(name=name):
+                label = "stderr" if name == "stderr" else "stdout"
+                record = self.tool_record(9 * 1024 * 1024) if name == "stderr" else line
+                with self.assertRaisesRegex(Blocked, "oversized protocol record") as raised:
+                    self.process((label, record)).receive()
+                self.assertEqual(raised.exception.code, "provider-output")
+
+
 def fixture(provider):
     args = sys.argv[3:]
     if provider == "silent":
@@ -4031,7 +4395,7 @@ def fixture(provider):
             assert args[args.index('--effort') + 1] == os.environ['ORCHESTRA_FIXTURE_EFFORT']
         settings = json.loads(args[args.index("--settings") + 1])
         for key, value in {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_DEFAULT_TIMEOUT_MS": "1800000",
-                           "BASH_MAX_TIMEOUT_MS": "21600000"}.items():
+                           "BASH_MAX_TIMEOUT_MS": "21600000", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000"}.items():
             assert os.environ[key] == settings["env"][key] == value
         assert {"Agent", "Task", "Monitor", "CronCreate", "ScheduleWakeup", "RemoteTrigger", "Workflow"} <= set(
             args[args.index("--disallowedTools") + 1].split(","))
@@ -4051,6 +4415,12 @@ def fixture(provider):
             agent_prompt = args[args.index('--append-system-prompt') + 1]
         assert COMMAND_EXECUTION_CONTRACT in agent_prompt
         assert COMMAND_EXECUTION_CONTRACT in prompt
+        # Every Claude role can read its runtime prompt again after a compaction.
+        assert agent_prompt.endswith(" a finding needs.") or agent_prompt.endswith(" a finding or a fix needs."), agent_prompt[-200:]
+        assert "After a compaction of the conversation, read your runtime prompt again" in agent_prompt
+        if os.environ.get("ORCHESTRA_FIXTURE_SYSTEM_LOG"):
+            with open(os.environ["ORCHESTRA_FIXTURE_SYSTEM_LOG"], "a", encoding="utf-8") as log:
+                log.write(json.dumps(agent_prompt) + "\n")
         assert WRITING_CONTRACT not in agent_prompt and WRITING_CONTRACT not in prompt
         if os.environ.get('ORCHESTRA_FIXTURE_ROLE') == 'code':
             for instructions in (agent_prompt, prompt):
@@ -4063,6 +4433,10 @@ def fixture(provider):
             assert "--strict-mcp-config" in args and "--disable-slash-commands" in args
             servers = json.loads(args[args.index("--mcp-config") + 1])["mcpServers"]
             assert set(servers) == ({"focus"} if paired else set())
+            if paired:
+                # The view server gets the recovery copy of the reader's prompt as its second argument.
+                recovery = Path(servers["focus"]["args"][2])
+                assert recovery.name.endswith(".txt") and recovery.parent.name == "prompts" and recovery.is_file()
             if paired:
                 assert args[args.index("--setting-sources") + 1] == ""
         if not (readonly and paired):
@@ -4163,6 +4537,23 @@ def fixture(provider):
                   "result": json.dumps(report())})
             return
         refusal = next((arg for arg in args if arg.startswith("refusal-")), None)
+        if refusal == "refusal-resumed" and "--resume" not in args:
+            refusal = None  # A new conversation completes normally.
+        if refusal in ("refusal-late", "refusal-late-once"):
+            marker = Path.cwd() / ".work/cycle/refusal-late-once"
+            if refusal == "refusal-late-once" and marker.exists():
+                refusal = None  # The second conversation completes normally.
+            else:
+                marker.touch()
+                # The conversation completes a tool exchange, then the provider refuses a later request.
+                emit({"type": "assistant", "session_id": sid, "message": {"id": "msg_work", "model": effective_model,
+                      "content": [{"type": "tool_use", "id": "read", "name": "Bash", "input": {"command": "read-only fixture"}}]}})
+                emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [
+                      {"type": "tool_result", "tool_use_id": "read", "content": "fixture output"}]}})
+        if refusal == "refusal-broken-stream":
+            # A stream broke before its first answer completed. The CLI then retried the same first request.
+            emit({"type": "stream_event", "session_id": sid, "parent_tool_use_id": None, "event": {
+                  "type": "message_start", "message": {"id": "msg_aborted", "model": effective_model}}})
         if refusal:
             if refusal == "refusal-work":
                 (Path.cwd() / "source.txt").write_text("partial implementation\n")
@@ -4207,6 +4598,23 @@ def fixture(provider):
                 {"type": "thinking", "thinking": "PRIVATE REASONING"},
                 {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "fixture-command"}}]}})
             emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "Fixture output"}]}})
+        if "usage-stream" in args:
+            # One API message as a stream start, three assistant events, and a final delta; then a compaction and a second message.
+            usage = {"input_tokens": 10, "cache_creation_input_tokens": 300, "cache_read_input_tokens": 1000,
+                     "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 200}}
+            emit({"type": "stream_event", "session_id": sid, "event": {"type": "message_start", "message": {
+                "id": "usage-1", "model": effective_model, "usage": dict(usage, output_tokens=1)}}})
+            for output in (5, 9, 9):
+                emit({"type": "assistant", "session_id": sid, "message": {"id": "usage-1", "model": effective_model,
+                      "usage": dict(usage, output_tokens=output), "content": [{"type": "text", "text": "Fixture"}]}})
+            emit({"type": "stream_event", "session_id": sid, "event": {"type": "message_delta",
+                  "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 40}}})
+            emit({"type": "stream_event", "session_id": sid, "event": {"type": "message_stop"}})
+            emit({"type": "system", "subtype": "compact_boundary", "session_id": sid,
+                  "compact_metadata": {"trigger": "auto", "pre_tokens": 390000, "post_tokens": 9000}})
+            emit({"type": "assistant", "session_id": sid, "message": {"id": "usage-2", "model": effective_model, "usage": {
+                "input_tokens": 5, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 9000, "output_tokens": 7},
+                "content": [{"type": "text", "text": "Fixture after compaction"}]}})
         if "slow-ui" in args:
             time.sleep(0.6)
         native = next((arg for arg in args if arg.startswith("native-") or arg in ("queued-turn", "foreground-task")), None)
@@ -4255,6 +4663,9 @@ def fixture(provider):
                 first["repair"] = {"mode": "self", "reason": "Local fix", "risks": [], "tests": {"status": "deferred", "reason": "Await reviews", "evidence": [], "failures": []}}
         if "long-summary" in args:
             first["summary"] = "First summary " * 100 + "first summary ending"
+        if paired_report_once and paired and not Path(".paired-report-once").exists():
+            Path(".paired-report-once").touch()
+            first.pop("findings", None)  # The runtime asks once for a corrected report.
         emit({"type": "result", "subtype": "success", "is_error": False, "session_id": sid, "result": json.dumps(first)})
         if streaming_input:
             assert "--replay-user-messages" in args
@@ -4263,6 +4674,10 @@ def fixture(provider):
                 assert "focus-message:" in incoming["message"]["content"]
                 if "no-ack" not in args:
                     emit(incoming)
+                if "follow-up-server-error" in args:
+                    emit({"type": "assistant", "session_id": sid, "is_api_error_message": True, "error": "server_error",
+                          "message": {"model": "<synthetic>", "content": [{"type": "text", "text": "Internal server error"}]}})
+                    return
                 final = report(description="Operator instruction handled in the same process.")
                 if "long-summary" in args:
                     final["summary"] = "Final summary " * 100 + "final summary ending"
@@ -4313,6 +4728,10 @@ def fixture(provider):
                 assert "mcp_servers={}" in args
                 if method == "thread/start":
                     assert params["dynamicTools"][0]["name"] == "focus_inspect"
+                    if os.environ.get("ORCHESTRA_FIXTURE_ROLE"):
+                        # Only a reader of a frozen pair view gets the search operation.
+                        searchable = "pattern" in params["dynamicTools"][0]["inputSchema"]["properties"]
+                        assert searchable == (os.environ["ORCHESTRA_FIXTURE_ROLE"] in PAIR_READONLY), params["dynamicTools"][0]
             if method == "thread/resume":
                 assert params["excludeTurns"] is True, "Do not return unbounded conversation history"
             result = {"thread": {"id": sid, "turns": []}, "model": params["model"], "cwd": params["cwd"],
@@ -4334,6 +4753,8 @@ def fixture(provider):
             assert not recovery, "A completed turn must not be repeated"
             assert params["threadId"] == sid
             assert params["sandboxPolicy"] == {"type": "readOnly" if readonly else "dangerFullAccess"}
+            assert schema_keywords(params["outputSchema"]) <= STRICT_KEYWORDS and strict_objects(params["outputSchema"]), \
+                "Codex strict mode refuses this schema"
             if missing_session:
                 assert "new conversation for the SAME runtime phase" in params["input"][0]["text"]
             final = report()

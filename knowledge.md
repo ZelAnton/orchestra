@@ -67,8 +67,10 @@ The rule preserves requirements, permissions, machine syntax, and the user's con
 `tools/check_focus_instructions.py` checks measurable prose limits without executing runtime code.
 It does not certify the full dictionary or semantic equivalence.
 `tests/test_focus_instructions.py` checks those limits, role coverage, and saved-prompt compatibility.
-`focus_pair_jobs.same_pair_prompt` accepts only a known prose revision at named instruction fields.
-It preserves exact task data and saved prompt bytes.
+`focus_pair_jobs.same_pair_prompt` accepts only known earlier pair contracts, in the plain or review-mode form.
+The style revision can also change named instruction fields.
+The test scope revision adds only the `full_run` and `final_gate` assignment fields.
+`same_pair_prompt` preserves exact task data and saved prompt bytes.
 Historical compatibility fixtures are evidence, not instructions for new work.
 
 The shared user policy resides in both `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md`.
@@ -76,6 +78,40 @@ Keep their text identical.
 It includes language, attribution, instruction style, PAUSE, and task-queue rules.
 
 ### Opt-in sequential main-branch workflow
+
+`cc-focus review` reuses the pair, repair, publication, and CI engine without initial coding.
+See `docs/focus-review.md` for selectors, the menu, and development handover.
+`focus_review_scope.py` parses completed plan items and seals requirement selections. Several scope files become separate targets.
+`focus_review_cli.py` validates selection arguments before ownership or providers start.
+`focus_picker.py` provides an optional keyboard menu with pinned packages in a user virtual environment.
+Its requirement file and all review modules are shared cc-sync assets.
+
+`focus_review_run.py` owns isolated campaigns under `.work/cycle/review-runs/ID/`.
+Each campaign has its own sessions, messages, progress, and finish-stage request.
+Development and review share the root runtime lock, active process record, and project lease.
+An unfinished campaign prevents a development run or another campaign.
+Start requires clean published repositories and a safe development boundary.
+Completed campaign evidence permits a checked transfer back to the unchanged saved development state.
+
+`focus_review_contract.py` distinguishes existing implementation scope from the new repair diff.
+Independent outer reports must cover every selected requirement with snapshot paths and checks.
+Inner repair inspections retain their existing narrow scope and report format.
+The normal development prompts and report schemas stay unchanged.
+Later repairs requeue earlier targets when recorded coverage paths or their directories change.
+This uses declared coverage, not a complete semantic dependency graph.
+
+A target without repairs checks the existing remote revision and its CI policy without a commit or push.
+Other targets use normal publication of reviewed changes in affected repositories.
+`ReviewMode.prepare_next_stage` selects the next review target before the atomic state save.
+The transition cannot leave a campaign in an initial coding phase.
+Campaign corrections also restart Pair A, never coding.
+
+The final `report.md` and `result.json` link target evidence without rewriting source-plan completion history.
+In a review campaign, the decide step of each outer pair round saves its decisions in `pair_decisions`.
+A target record keeps these references and the `pair_handoff` references of its stage.
+`ReviewMode.finding_lines` joins the decisions and executor results by `source_id`, and the report
+ends with the deferred findings. A target that was reviewed again also lists the deferrals of its
+earlier records in `review_run.history`.
 
 `launchers/cc-focus.sh` and `cc-focus.cmd` delegate to `tools/focus-runtime.ps1`.
 This is a separate operator-selected profile, not a queue processor variant.
@@ -95,7 +131,7 @@ reports, exact-result replay and bounded continuation of outstanding assignments
 risk choice, two static passes and deferred targeted tests. `focus_repair_evidence.py`
 owns exact test-result replay and independently audited historical journal deltas,
 without excluding any files from candidate snapshots. `focus_pair_jobs.py` saves and joins independent reader jobs;
-`focus_pair_view.py` creates frozen source views and exposes bounded read/list/diff
+`focus_pair_view.py` creates frozen source views and exposes bounded search/read/list/diff
 through a Codex dynamic tool or Claude stdio MCP. `focus_pair_protocol.py` owns strict
 reports and exhaustive dispositions; `focus_pair_profile.py` owns pair identities.
 `focus_snapshot_archive.py` stores frozen bytes in `source.zip` under each view, with
@@ -107,6 +143,18 @@ A per-view receipt precedes retirement of verified duplicates, allowing crash re
 Unknown/changed files, symlinks or unsealed loose copies are preserved and block.
 Read-only status and inspection never compact storage. The module is a shared cc-sync
 asset; `tests/test_focus_snapshot_archive.py` exercises storage and migration boundaries.
+
+`focus_brief.py` owns the project brief, a shared cc-sync asset. `cc-focus brief set|restore|clear|show`
+run before the runtime lock and change no workflow state. `brief apply` runs under the normal admission.
+The pointer `.work/cycle/project-brief.json` names an immutable copy `.work/cycle/briefs/<sha256>.md`.
+Each stage start records `state["project_brief"]` with the iteration and the hash. A new pair stores
+`project_brief_sha256`, and its readers, writers, inner readers, and final gate use that hash.
+
+The code role, the pair executors, and all pair readers except the complexity assessor and the evidence
+auditor get `project_brief` with the text and `PROJECT_BRIEF_RULE`. A brief correction has
+`brief_change: true` and reaches the roles only as `project_brief_notice`. `brief-drift` and `brief-path` start no healer.
+`tests/test_focus_brief.py` exercises import, capture, delivery, application, and integrity.
+
 `focus_review.py` retains historical serial-report compatibility. `focus_readonly.py`
 owns the bounded legacy inspector and shared Codex inspection feature overrides:
 the isolated `code_mode_host` must remain enabled for Code Mode-only models, while
@@ -126,6 +174,43 @@ estimated-duration sleeps are prohibited. Resumed work reuses its completion mec
 or immediate status inspection followed by checks no more than 30 seconds apart while
 running. Role, operation and report-only restrictions still govern whether checks may run.
 These runtime files are shared cc-sync assets.
+
+Codex strict structured output refuses some JSON Schema keywords with HTTP 400, for
+example `uniqueItems`. Report schemas use only the keywords in `STRICT_KEYWORDS` of
+`tests/test_cycle.py`. Each object requires all its properties and forbids other
+properties. The tests check every role and the request that the transport sends.
+A rule that needs another keyword is an explicit validator check, for example unique
+coverage paths in `validate_coverage`.
+
+`focus_publication_scope.py` owns explicit file selection before development publication.
+`reconcile --publication-scope FILE` prepares a fingerprint-bound plan without accepting it.
+`reconcile --apply-plan FILE` accepts that plan and pauses before Pair A.
+Excluded changes become protected work without changing files, HEAD, or staging.
+The selected paths are an exact limit, not a union with inferred changes.
+The correction archive preserves the earlier state, findings, resolutions, and evidence.
+
+Multi-repository publication projects the selection into each affected member.
+New iterations clear the selection.
+
+Outer frozen inspectors expose `__review__/publication.json` before verification dispatch.
+The final pair receives only factual publication metadata, not earlier review reports.
+Executor assignments also contain the planned publication manifest.
+The first accepted code report replaces a provisional coordinator label.
+Subsequent reports cannot relabel the stage or override an operator selection.
+See `docs/sequential-cycle.md` for selection commands and whole-file ownership limits.
+
+Inner repair views expose the same manifest for all planned paths.
+In B, inner repair views also copy the coding report and the pair history.
+A history copy adds an `exposed` copy name to each record reference, except view manifests.
+Repair views also hold `__review__/gate.json` with the records of the open gate.
+Evidence copies use indented JSON, and `ViewInspector` shows any line longer than 6,000 characters in parts.
+A page has at most 30,000 UTF-8 bytes, and a clipped page names the next offset.
+
+`RepairReview.renew_legacy_view` renews an inner or audit view without a `publication` pointer or `__review__/gate.json`.
+It keeps jobs with a result, a report under correction or a recoverable Codex turn.
+It marks them with `frozen_view`, and independent jobs keep sessions in the old view directory.
+For such jobs, `same_saved_job` ignores only the evidence fields, and the job takes the current prompt.
+A completed negative audit verdict therefore stays in force.
 
 `CODE_IMPLEMENTATION_CONTRACT` gives the code role its implementation and verification instructions.
 It excludes reviewer-only inspection, discussion, arbitration, and repair schedules.
@@ -162,6 +247,71 @@ symlink escapes. `focus_publication.py` applies one coding/review cycle to their
 combined diff, with separate policy, commit/push reconciliation and CI per changed
 repository. Unchanged repositories are never publication targets. These two modules
 are shared cc-sync assets; `tests/test_focus_project.py` covers their integration.
+
+`instruction_entries` in `focus_project.py` lists `AGENTS.md`, `CLAUDE.md`, and `.claude/CLAUDE.md` of the root and of each member.
+A relative link to a regular file of the same source also gets `target`.
+`ProjectCycle.context` gives the list and `PROJECT_INSTRUCTIONS_RULE` as `project_instructions` to the main roles and the pair writers.
+A new project pair stores `project_instructions_version: 2`, and inner readers, the final gate, and the evidence reader copy it.
+`view_instructions` in `focus_pair_view.py` gives each reader of a marked pair the list of its frozen view.
+`SplitLayoutTests` in `tests/test_focus_project.py` cover a root with code, documentation, and plan members.
+
+`focus_parallel.py` handles the members in the manifest key `parallel`. Each stage records them in `state["parallel"]`.
+`sync` fast-forwards a clean parallel member at a stage transition and at a run start before coding. `admit_parallel` then takes its entries again.
+Before a push, remote main must contain the base. After a push, it must contain the published commit.
+
+`integrate` merges the stage commits with remote main through `merge-tree` and `commit-tree`, saves `parallel_integrations`, and moves the base.
+`resume` completes or undoes an open record before any publication check. `OPERATOR_CONTEXT_BLOCKERS` start no healer.
+New pairs store `project_instructions_version: 2` and `parallel_repositories`. `tests/test_focus_parallel.py` uses a second clone as the other writer.
+The `publish` and `heal` roles also get `PARALLEL_PUBLICATION_RULE`, and each publication target names `parallel`.
+
+`focus_resolve.py` handles the manifest key `resolvers`. `parallel_config` reads `parallel` and `resolvers` in one read.
+Each stage saves both, in `state["parallel"]` and `state["resolvers"]`. `integrate` reads the conflict entries of `merge-tree`.
+`classify` accepts only a text conflict at one path that a rule covers. `resolve` then runs the rules in a worktree under `.work/r/`.
+
+The record step `resolving` has `"result": None`. `resume` removes its worktree and the record, and the next integration starts again.
+A failed removal keeps an entry in `state["resolver_cleanup"]`. `advance_stage` keeps it, and `retry_cleanup` removes it later.
+At a stage start, `retry_cleanup` also removes other directories in `.work/r/`.
+
+`run_contained` in `focus_commit.py` gives a command the stop, heartbeat, and containment of `run_git`. `tests/test_focus_resolve.py` covers the resolvers.
+
+For a `reported-blocker`, `heal` first calls `catch_up_parallel`, one time for each signature and at most `CATCH_UPS` times in a stage.
+`focus_parallel.catch_up` fast-forwards a parallel member to remote main when HEAD is in remote main and no remote change touches a local path.
+It saves an integration record with `catch_up: true`, and `resume` moves the base. `move_base` accepts a state without a reviewed snapshot.
+
+`after_catch_up` updates HEAD, the index, and the moved paths in `last_snapshot`, and starts the open pair again with `pair_obligations`. `resume_catch_ups` runs at each pass of the run loop.
+If a member moved, the blocked step runs again without the healer. `CatchUpTests` in `tests/test_focus_parallel.py` cover it.
+
+`CLAUDE_COMPACT_WINDOW` in `cycle_prompts.py` is the compaction window of every Claude role, 400,000 tokens.
+`Transport._claude` puts it into the environment and `--settings` as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`.
+Before each launch, it writes the recovery copy `<store>/prompts/<role>.txt` with `readable_prompt`, and `remember` adds delivered operator messages.
+After `role_contract()`, the system prompt gets `COMPACTION_RULE` with this fixed path, or `READER_COMPACTION_RULE` for a pair reader.
+Thus a resumed session keeps the same system prompt, and `role_contract_sha256` does not change.
+
+`focus_pair_view.py` serves the recovery copy of a Claude reader at the reserved path `__runtime__/prompt.txt`, through `read` only.
+`freeze_view` refuses a project file at this path with `pair-input`.
+`ViewInspector.search` finds literal text with the exact name rule of `read` or the prefix rule of `list`.
+It skips links and binary files, stops at `PAGE`, and keeps up to `TEXT_CACHE` bytes of verified text.
+`open_archive` opens `source.zip` once for each call.
+
+`VIEW_TOOL` in `focus_readonly.py` is the tool of the frozen view. `READ_TOOL` and the legacy `Inspector` do not have search.
+`role_contract()` adds `READER_SEARCH_CONTRACT` only for `PAIR_READONLY`. `_STYLE_TEXT` maps both earlier `inspection` texts to the current text.
+
+`new_pair` removes the `PAIR_A_WRITERS` sessions. `pair_writer_context` adds `stage_handoff` with the absolute paths of the `pair_handoff` records.
+Executor records and conclusions have `phase` and `round`. A repair seal has `phase` and `pair_round`, because its `round` counts inner reviews.
+`selected_refusals(correction=True)` skips all `PAIR_WRITERS`.
+
+`ClaudeTrace.count` counts each message ID once, and its `usage_totals` go into `invocations/<id>/usage-<attempt>.json`.
+`usage_summary` gives the totals of one iteration for `cc-focus status`. `window_ignored` sets `window_exceeded_without_compaction` in diagnose.
+`tests/test_focus_context_budget.py` covers the window, the recovery copy, usage records, writer sessions, and search.
+
+`Cycle.wait_ci` calls `later_ci` for a red parallel commit, and also for one without any CI record.
+The second case happens, for example, after another writer merged the stage commit. Both need two equal green polls.
+`later_ci` restores the "ci" progress operation after its fetch. Its `later_state` names remote main in a timeout.
+
+`PairedReview.pair_instruction_context` raises `instruction-version` for an unknown `project_instructions_version`.
+`RUNTIME_VERSION_BLOCKERS` routes it to `runtime-version`, and no healer starts.
+Unless publication started, the message names the `cc-focus correct` form of the current run, with `--review-run` in a campaign.
+
 `focus_reconcile.py` owns explicit operator handover of changed shared context and
 protected member files; it is also installed by cc-sync.
 `focus_publication_recovery.py` provides the separate operator-only
@@ -201,13 +351,52 @@ in live mode (the CLI default); `--output compact` disables these payloads. It
 neutralizes terminal controls, caps per-item display, deduplicates recent streamed
 and final snapshots, and excludes reasoning/protocol envelopes. Transport logs keep
 the original events, including trailing stderr; logs and live payloads can contain
-secrets and must not be treated as redacted.
+secrets and must not be treated as redacted. A reduced Claude tool record and a rejected
+oversized line are the exceptions described below.
 `focus_control.py` owns addressed stop requests, run identity, acknowledgement and
 exact-ProcessKit-run emergency cleanup. The public command is now `cc-focus`;
 each provider has its own durable ProcessKit run address, including on weak
 process-group backends where the root's container cannot cover another group.
 Internal `cycle_*` modules, `.work/cycle/` and old invocation markers are retained
 to resume existing sessions without migrating another project's files.
+
+`/finish-stage` and `cc-focus finish-stage` schedule a pause after the current stage's publication and CI.
+`finish-stage.json` stores the request in `.work/cycle/` and binds it to the iteration, independent of the run identity.
+`stage-stop.lock` serializes requests with the durable transition to the next iteration.
+The command starts no provider and changes no cycle snapshot, review credit, or approval.
+
+The active run must advertise `supports_finish_stage` before the command can schedule a pause for it.
+It also works while processing is stopped. The operator must then resume processing separately.
+The `cancel` terminal argument and CLI `--cancel` flag cancel only the pending stage pause.
+
+`Cycle.next_stage` saves `stage_completed` and pauses before it increments the iteration when a request exists.
+The state retains the task, publication record, and CI result for the terminal panel.
+The terminal caches the stage-pause request for one second. Panel formatting performs no file reads.
+
+An explicit resume checks the publication again and advances without repeating the completed CI gate.
+Review reset clears the completion record and keeps the pending stage request.
+All published member repositories must finish their CI gates before the project pauses.
+
+After the pause, `Cycle.next_stage` calls `assert_stage_base` instead of `assert_publication_current`.
+It accepts pushed commits on top of the published commit as operator work.
+Main must contain the published commit, and local main must equal remote main.
+Uncommitted paths must be protected work, and protected content and staging can change during the pause.
+The check accepts changed project context outside the member repositories.
+`ProjectCycle.assert_stage_base` validates the repository set and checks each other repository with a changed main.
+
+At that boundary, `handle_block` gives every blocker the reason `stage-boundary` and starts no healer.
+This also applies to `remote-query-timeout` and `remote-query-failed`, which otherwise go through recovery.
+The runtime would check a healer result against the finished stage, and a provider may not change main.
+
+`ReviewMode.next_stage` uses the same check after a review stage pause.
+Then `ReviewMode.advance_stage` queues a completed target again when the new baseline changes its paths or directories.
+`hand_back` always uses `assert_stage_base` for the last review publication.
+`create_run` and `hand_back` first validate the repository set of the development state.
+At another development boundary, `create_run` uses `assert_checkpoint_base` for pushed commits.
+Outside a completed stage, both reject changed project context outside the member repositories.
+
+`tests/test_focus_finish_stage.py` covers completion, cancellation, restart, control priority, and concurrent requests.
+Plan exhaustion retires the request, so a later handoff does not inherit it.
 
 `focus_terminal.py` owns the optional standard-library TTY composer, bounded
 scrollback, key decoding, terminal restoration and redirected-output fallback.
@@ -329,6 +518,13 @@ The model-free `messages`, `retry-message --id` and `discard-message --id` comma
 support non-TTY recovery. All three new modules are shared cc-sync runtime assets;
 `tests/test_focus_terminal.py` adds protocol, lifecycle and POSIX PTY fixtures.
 
+One protocol record has at most 8 MiB. After a file edit, Claude repeats the whole original
+file in the `tool_use_result` field of the next `user` record. The runtime does not use that field.
+`cycle_transport.py` reads such a record up to 128 MiB through a 1 MiB buffer and removes the field.
+The log keeps the reduced record and `tool_echo_removed_bytes`. Any other record over 8 MiB
+stops the invocation with `provider-output`. The log keeps only its size as `rejected_bytes`.
+For a line over 128 MiB, each part over 8 MiB gets its own `rejected_bytes` frame.
+
 Profile 8 flows from Luna/xhigh coordination and Opus/xhigh coding to pair A
 (Opus/xhigh + Sol/xhigh), pair B (Astra/xhigh + Opus/max), and the independent final
 pair (Opus/max then Fable/xhigh). A/B initial readers run concurrently on one frozen
@@ -395,6 +591,35 @@ intact. Retry authenticates and reuses the exact completed result, including leg
 test prompts, never healer credit; consumed failures cannot replay as fresh checks.
 No-op healing preserves pending classification. `tests/test_focus_repair_evidence.py`
 covers these boundaries and restart/recovery. This does not change Profile 8.
+
+The test scope rules are in `COMMAND_EXECUTION_CONTRACT`, so every cc-focus role receives them.
+Each role runs only the checks that cover the current changes.
+A full run checks more than these changes.
+An example is a repeated run of all mutants after a local correction.
+The first run of the new checks and mutants of a stage is not a full run.
+
+Only a Pair B `full_suite` assignment and the final gate permit a full run.
+Each stage permits one Pair B run, and `PairedReview.full_run_used` enforces this limit through `validate_decisions`.
+The same method limits the final gate to one run in each stage.
+
+`accept_repair_result` records each passed or failed full run in `pair_full_runs`.
+In the open batch, it also sets `full_suite` to false, so later tests run only targeted checks.
+`advance_stage` removes these records.
+
+Only the initial final-pair reports have the `final_gate` field.
+`finish_pair` calls `start_final_gate` after a passed final pair.
+The gate needs a request and publication paths.
+An earlier final gate or a passed full run of this candidate prevents it.
+The gate is a repair batch that starts at the test step without static passes.
+`direct_gate` names this state.
+
+A passed gate seals publication.
+A defect starts the normal repair loop and a new final pair.
+`final_gate_row` removes the gate request from carried obligations.
+This rule also applies after a restart of the reviews.
+`tests/test_focus_repair.py` covers the gate and the Pair B limit.
+`tests/test_focus_pairs.py` covers the protocol, the schema, and saved jobs from the previous contract.
+
 Unexpected substantial repairs require renewed inspection of the same pair.
 No fixed OUTER clean streak or B→A return remains. With no accepted assignments, skip
 assessment/execution. `pair_completed` retains conclusions, including post-cleanup
@@ -412,8 +637,7 @@ frozen view, then requires fresh independent inspection before any clean credit.
 Early context is compact public decisions/checks with original evidence references;
 final initial inputs omit prior runtime judgments and use fresh sessions. Inspection
 tools can read only the frozen manifest, not hidden state/logs or arbitrary paths.
-Source documents are not semantically redacted. Full suites are optional assignments
-only in pair B; the executor otherwise builds/tests only affected behavior. Late
+Source documents are not semantically redacted. Late
 fix invocations cannot test until the inner static gate completes. Panel and JSON
 status expose the inner mode/reason/clean count and active nested reader jobs;
 retry/new-session handling includes those jobs. Native self-review uses the original
@@ -422,11 +646,14 @@ cwd with the frozen tool manifest, independent reviewers use frozen-view cwd.
 Profiles 1–7 migrate under ownership, archive former state and discard old review
 credit. Unpublished reviews restart at A; already-started publication/CI retains its
 original seal. Coding, coordinator, publisher and healer sessions are preserved.
+
 `tests/test_focus_pairs.py` covers concurrency, interrupted peers, independent final
 inputs, consensus/arbitration, closure and returns; native fixtures verify model,
 effort and bounded tool profiles. Legacy final tests retain artifact compatibility.
+
 Opus uses the `opus` CLI alias, validates its family at initialization and pins the
 resolved version throughout each invocation and retries.
+
 Recoverable blockers receive one Astra/xhigh recovery attempt before an operator-visible stop.
 The `heal` role has its own persisted conversation, separate from coding and all required
 review roles. Technical failures, including remote Git queries, generic provider
@@ -435,12 +662,17 @@ The healer verifies the diagnosis and existing authorization, performs necessary
 engineering repairs within the task/member scope and tests them before escalating.
 Product authentication code is not the agent's own runtime/account permissions;
 protected existing work and actual permission boundaries remain enforced.
+A failure at the transition after a completed-stage pause stops for the operator instead.
+
 Explicit account-access and approval barriers bypass model recovery.
 Structured Claude safeguard refusals also bypass this recovery.
-`cleanup-incomplete` and `turn-active` prevent another provider from starting safely.
-The blocker records `escalation_reason`: manual action, unsafe provider state,
-provider refusal, an unavailable provider, failed healer, failed post-repair verification or an already-attempted blocker.
-Terminal output explains whether recovery is starting or why human action remains.
+`cleanup-incomplete` and `turn-active` prevent the safe start of another provider.
+The blocker records `escalation_reason` for manual action, unsafe provider state,
+provider refusal or an unavailable provider. Other values name a failed healer, failed post-repair verification, a repeated blocker or a stage transition.
+Terminal output explains whether recovery starts or why human action remains.
+
+`brief-input` names a project brief blocker.
+`runtime-version` names a saved record that needs a newer runtime or a repair.
 
 Claude-generated API errors (`assistant`, `<synthetic>`, `is_api_error_message=true`
 and a matching session) are classified before model pin validation.
@@ -454,7 +686,8 @@ The word "organization" in an error does not establish managed billing.
 It uses public explanation text, categories, and supplied request and message identifiers.
 It does not copy thinking blocks or infer a refusal from quoted error text.
 `Cycle.handle_block` records `claude-refusal` with `escalation_reason=provider-refusal`.
-It preserves partial work without starting a healer, automatic retry, or another model or session.
+It preserves partial work and starts no healer or other model.
+Before this blocker, `Transport.restart_refused` can start one new conversation, as described below.
 The operator guidance distinguishes request inspection from optional support contact for a suspected false positive.
 
 `focus_diagnostics.ClaudeTrace` also joins streamed refusals with their message and request identifiers.
@@ -500,6 +733,30 @@ It also rejects `correct`, `recover` and `reconcile --apply-plan` when the refus
 The check runs before the shared lease and starts no model.
 `--new-sessions --retry` starts new conversations and passes the check.
 
+`Transport.restart_refused` allows one new conversation after a refusal with earlier history.
+Earlier history is a resumed conversation, or a completed tool exchange in the same conversation.
+`Transport._claude` counts tool results and sets `history` on each refusal.
+A stream that broke before its first answer completed is not earlier history.
+
+The limit is one restart in each invocation, through `pending["refusal_restart"]`.
+A refused first request of a new conversation stops for the operator.
+A report-only correction, a `repair_self` review, and operator messages also stop for the operator.
+`Transport._run` uses `NEW_CONVERSATION` for this restart and for a lost native history.
+The final refusal message tells which limit stopped the invocation.
+`tests/test_cycle.py` covers the restart and its limits.
+
+The new conversation also gets `RECOVERY`, because the refused attempt can have changed files.
+`Transport.keep_refused_attempt` keeps the launch record and the prompt of the refused attempt under its attempt ID.
+`focus_diagnostics.kept_attempt` reads these files, so the refusal history keeps that attempt's role contract and prompt.
+`run_jobs` copies the restarts and the refused conversations of pair participants into `refusal_restarts` and `refused_sessions`.
+It also gives each pair participant the refused conversations of the cycle.
+
+`Transport.mark_refused` records the refused conversation in `pending["refused_session"]` and `state["refused_sessions"]`.
+`Transport._run` then refuses to resume that conversation and starts no provider.
+`advance_stage` removes `refused_sessions` together with the role sessions.
+After a restart in a serial review role, `Cycle.invoke` resets that role's clean passes and saves the state.
+If files changed, it also sets `review_substantial`.
+
 `cycle_prompts.EXECUTOR_ACCOUNTING_CONTRACT` gives pair writers the counter rules that `parse_report` enforces.
 `PAIR_CONTRACT` stays unchanged, so saved reader prompts remain valid.
 `repairable_substantial_accounting` and executor `changed-file-accounting` start one report-only correction.
@@ -516,6 +773,21 @@ The test step cannot accept it. Unchanged work replays, so `invoke` can correct 
 `Cycle.pair_step` clears `recovery_unverified` after accepted pair work, so a later new blocker gets a healer.
 `tests/test_focus_report_accounting.py` covers these paths.
 
+`repairable_repair_mode` starts a `repair-mode` correction for a `repair_execute` report
+that lists risks but sets self mode. `validate_executor_correction` then permits changes
+to `repair.mode`, `repair.risks`, `repair.reason`, summary and description.
+For an unchanged invocation, it also requires zero counters and substantial=false.
+For changed work with three zero counters, it requires a positive counter.
+For other changed work, the counters stay fixed.
+
+`executor_candidate_report` recognizes the same report, so `read_saved_repair_test` can
+replay a saved test run, and its successful checks do not run again. Test invocations get
+`TEST_RISKS`: they list only the risks that their checks expose.
+
+`enum_problems` in `cycle_transport.py` recognizes a pair writer report whose only invalid values are outside their enums.
+`valid_choice` searches a few choices of allowed values, item removals, and both repair modes. `repairable_enum` starts a `report-enum` correction.
+`enum_fields` names what the correction can change, and `validate_executor_correction` checks it. `saved_repair_fix` lets a retried fix step adopt such a saved run.
+
 `cycle_prompts.DISCUSSION_CONSENSUS_CONTRACT` gives discussion roles the exact `consensus` format.
 Both Claude and Codex discussion readers put prose around the hash. The old rule said "name the hash".
 The parser does not check the format of `consensus`. `pair_inspection_step` rejects a wrong value after both readers finish.
@@ -526,29 +798,42 @@ Without a proposal, it tells the reader to set `consensus` to null. The arbiter 
 `cc-focus --retry` clears `report_repairs` of unfinished pair jobs.
 `run_jobs` replaces a saved `LEGACY_CONSENSUS_ERROR` with `consensus_error` in the correction prompt.
 
+The parser accepts `new_findings` from the arbiter. `pair_inspection_step` adds them to the registry
+and records `arbiter_extension`. The next arbitration decides the complete registry, and its `rule`
+gets one more paragraph. If that arbitration adds findings again, the step refuses its report with
+`pair-report`. Without an extension, the arbitration prompt is unchanged, so a saved arbitration
+job still matches.
+
+For a job with the exact `LEGACY_ARBITER_ERROR`, `run_jobs` parses the saved report again, and a
+valid completed report is accepted without a provider call. Another saved report gets a current
+correction text instead of the old parser error.
+
 `ProviderTransient` classifies only matching-session synthetic `server_error` /
 `overloaded_error`, or initialized error results with `terminal_reason=api_error`
 and integer HTTP status 500/502/503/504/529. Quoted text and unknown failures keep
 ordinary recovery.
 
 After confirmed cleanup, `Cycle.defer_transient` stores
-`pending.transient_retries` and `transient_wait`; the same invocation/session gets
-at most three outer-runtime retries after 15/30/60 seconds. Exhaustion goes to
-`handle_block`. It stops the run with `provider-unavailable` for both provider
-codes in `PROVIDER_UNAVAILABLE_BLOCKERS`. Neither the healer nor a provider
+`pending.transient_retries` and `transient_wait`. The same invocation/session gets
+at most three outer-runtime retries in a row after 15/30/60 seconds. Exhaustion goes to
+`handle_block`. Except for the healer, it stops the run with `provider-unavailable`
+for both provider codes in `PROVIDER_UNAVAILABLE_BLOCKERS`. Neither the healer nor a provider
 launches a retry. The budget and deadline survive
 pause/restart, including `--retry`; retiring an invocation retires its budget.
 
 `wait_transient` yields through normal stop, PAUSE, message and lease checks.
 Unresolved message delivery prevents automatic retry. Protected files, HEAD and
 staging are checked before scheduling and launching; report-only corrections
-retain their frozen snapshot checks.
+retain their frozen snapshot checks. Panel/progress/status
+expose the retry count and countdown with no active model. Inside the publication
+window, Stop and PAUSE wait until the window ends.
 
 Work is preserved, but an interrupted review loses its current streak and file
 edits latch substantial changes. Only a no-work failure on an unchanged snapshot
-preserves prior clean credit. No failed attempt earns a pass. Panel/progress/status
-expose the retry count and countdown with no active model. Existing escalated
-blockers still need operator continuation; installing this change does not resume them.
+preserves prior clean credit. No failed attempt earns a pass.
+
+Escalated blockers saved before an update still need operator continuation.
+Installing an update does not resume them.
 
 For Codex, `codex_transient` finds a failed turn with a server error. Its
 `codexErrorInfo` is `serverOverloaded` or `internalServerError`. An HTTP
@@ -560,14 +845,24 @@ approval requests.
 `Cycle.run` checks a saved quota or server-error wait before it starts the healer.
 A Codex healer with a server error therefore also waits. If the healer uses all its
 retries, the run stops with `healer-failed`. `--retry` retires a waiting healer
-with its blocker, and it resets `transient_retries` and `retry_at` of unfinished
-pair jobs. Inside the publication window, Stop and PAUSE wait until the window ends.
+with its blocker.
 
 After exhausted retries, every sequential role and pair participant gets the same
 closing sentences from `transient_exhausted`. They tell the operator to wait for
-the provider and then run `--retry`. For a pair participant, the text names the
+the provider and then run `--retry`. In a review run, they name the retry command
+of that run. For a pair participant, the text names the
 participant role, because the blocker names the pair group invocation. A server
 error of the healer keeps `healer-failed`, with the same text as its resolution.
+
+`run_jobs` removes `transient_retries` of a pair job when `transport.run` returns.
+A later report correction of that job then starts with three retries. Before Claude
+gets the next operator message in the same process, the transport also removes
+`pending.transient_retries`. `--retry` also resets `transient_retries` and `retry_at`
+of unfinished pair jobs.
+
+A safe stop at an escalated blocker does not pause the run. The next loop pass
+prints the blocker and returns 3. `request_stop` then says that the run output
+names the blocker and the retry command.
 
 Claude quota refusals are a separate transport/runtime path: `ProviderQuota` requires
 a matching-session rejected `rate_limit_event` with a finite positive `resetsAt`
@@ -589,6 +884,13 @@ normal interrupted-review resets. Ownership and HEAD are checked again before
 the retry starts a provider. No refusal earns review credit. Progress and
 the status panel show runtime waiting, UTC deadline and countdown; status JSON
 exposes `quota_wait`. Invalid/missing reset data uses ordinary API-error recovery.
+
+A pair participant waits in `run_jobs` instead.
+When no pair participant runs, `run_jobs` checks the stop control, for example during a quota wait.
+An emergency stop raises `FocusStop`, and a safe stop returns `None` to the run boundary.
+`cc_focus.resume_retries` adds `--retry` to `/resume` for a blocker, a quota wait, or a quota wait of a pair participant.
+`tests/test_focus_pairs.py` covers both rules.
+
 The access refusal stops directly;
 other generic API failures receive the normal Astra/xhigh recovery attempt. Neither
 replaces the session or earns review credit. They preserve the required model, phase and
@@ -662,11 +964,29 @@ URL directly; the operator can connect an existing GitHub login to HTTPS Git wit
 remote URLs automatically; see the publication recovery guide in `docs/sequential-cycle.md`.
 
 State, invocation intents/results and immutable handoffs live in `.work/cycle/`.
-Internal role session IDs persist automatically. `--handoff FILE` imports context;
-the current project plan referenced in that handoff is the source of stages, not
+Internal role session IDs persist automatically within a stage.
+`advance_stage` saves them in `sessions/generation-N.json` and clears them, so each stage starts new conversations.
+
+`advance_stage` also records the published stage in `previous_stage` through `stage_record`.
+Only a code or operator label names that stage.
+`Cycle.previous_stage` gets the record from the archived iteration for a state of an older runtime.
+It also removes a coordinator label of that stage.
+
+`Cycle.context` gives that record to the coordinator and the code role.
+The rule permits the stage again only for plan work that the published commits do not contain.
+`accept_task` rejects a coordinator label that names that stage, but a code report can name it.
+
+`PROMPTS["coordinate"]` permits its report recovery route only with `coding_recovery` in the context.
+The coordinator names the stage that this iteration implements, and never a stage in `previous_stage`.
+If the iteration continues that stage, the coordinator uses null, and the code report names it.
+`build_panel` shows `Задача N · после <previous stage>` until a report names the current stage.
+
+`--handoff FILE` imports context. The current project plan referenced in that handoff is the source of stages, not
 the task queue or conversation memory. Missing or ambiguous plans block selection.
+
 `--new-sessions` resets conversations without resetting progress or deleting WIP;
 `--retry` is the operator action after a blocked stop. Session ID import is absent.
+
 `cc-focus recover --review-from <saved-code-result>` is a separate, model-free
 operator transition for already completed coding whose report was rejected.
 `Cycle.recover_review` validates the original coding intent/result, current
@@ -676,6 +996,7 @@ credit. It does not accept healer prose as phase authority. Coding report parsin
 allows substantial new implementation with no review-fix count; review/healing
 classification remains strict. The code recovery context permits finalizing a
 lost report instead of selecting another implementation stage.
+
 `cc-focus correct --message <text>` or `--file <path>` is a stopped-only, model-free
 transition under the local lock and shared lease. It copies/hashes operator text
 and the previous stage context under `.work/cycle/corrections/`, retains the current
@@ -686,13 +1007,16 @@ results cannot acknowledge a newer revision. Publication/CI, changed HEAD/protec
 work and unstarted stages fail closed. After coding, `correction_pending` clears;
 after publication/CI, the archived iteration retains corrections and the new stage
 starts without them. `--retry` and `--new-sessions` do not remove corrections.
+
 `cc-focus reconcile --plan-out .work/focus-reconcile.json` prepares a model-free
 handover plan for `project-context-changed`/`protected-work`; `--apply-plan FILE`
 is explicit operator acceptance, never an action for a healer/provider to grant
 itself ownership. Plans seal all work, HEADs/index and semantic runtime state;
 only admission timestamps and lease bookkeeping are ignored. Applying a stale or
 edited plan fails, including work changing during correction artifact creation.
-Changed loose context receives new read-only expectations. Listed protected member
+Changed loose context receives new read-only expectations.
+
+Listed protected member
 files are handed over in full, including their pre-existing uncommitted content;
 their publication baselines become Git HEAD checkout fingerprints (absent for new
 files), so earlier dirty content stays owned even if coding reverts the latest edit.
@@ -700,17 +1024,15 @@ The archive retains the original dirty baselines. Unlisted work
 stays protected. The original state and exact plan are archived through
 `Cycle.record_correction`; the same stage returns to code with sessions preserved,
 a fresh correction revision and no review credit. Source/index/HEAD are untouched.
+
 An iteration blocked before its first coding invocation can also be reconciled.
 Its correction records `before_code=true`, preserves `code_started=false`, clears
 the provisional task label, and guides selection from the current plan instead of reopening the prior published
 stage. It has no mandatory correction acknowledgement for a nonexistent stage;
 the usual unpublished-diff barrier still requires coding and all required reviews for
 adopted work. A loose-context-only handover may finish an exhausted plan without
-inventing implementation. Fresh coding prompts no longer describe an initial
-invocation as report recovery; resumed/previously attempted invocations still do.
-Focus tests use the launcher's UTF-8 Python profile, canonical temporary roots
-(including Windows 8.3 aliases), and check lock contents only after releasing a
-Windows byte-range lock; probing a held lock still checks that metadata is unchanged.
+inventing implementation.
+
 Admission holds normal project/member locks and leases, honors PAUSE and uncertain
 messages, and refuses changed HEAD/protected staging, layout changes and any
 publication/CI phase. Plans never widen provider permissions or publication scope
@@ -718,17 +1040,29 @@ to files outside Git. Neither handoff import nor retry implicitly accepts these
 ownership changes. See the handover guide in `docs/sequential-cycle.md`.
 Plan destinations exclude shared runtime control files such as `.work/control_state.json`,
 even when those files do not exist yet.
+
 Publication/CI validation also rechecks protected staging in single-repository mode
-before archiving an iteration; the next stage cannot silently accept a changed index.
+before it archives an iteration. Without a completed-stage pause, the next stage cannot
+silently accept a changed index. After that pause, the new stage records the protected index again.
+
+Fresh coding prompts no longer describe an initial
+invocation as report recovery; resumed/previously attempted invocations still do.
+
+Focus tests use the launcher's UTF-8 Python profile, canonical temporary roots
+(including Windows 8.3 aliases), and check lock contents only after releasing a
+Windows byte-range lock; probing a held lock still checks that metadata is unchanged.
+
 `cc-focus stop` waits for a safe boundary, including CI if publication has started;
 `stop --now` interrupts the current attempt and may hard-kill only its recorded
 contained run. Stop requests never launch blocker recovery; continuation does.
 Run control uses `.work/cycle/active.json`, `stop.json`, `runs/<nonce>.json` and
 `control.lock`. These are separate from operator-owned `.work/PAUSE`, which is
 still checked only at boundaries. An old request cannot stop a newly started run.
+
 The mode explicitly pins Codex full-access/on-request and Claude bypass permissions
 without changing global settings or role frontmatter. Read `docs/sequential-cycle.md`
 for the ownership, CI, crash-recovery and filesystem-durability boundaries.
+
 Codex processes and thread start/resume also pin `features.memories=false`:
 memory consolidation is a separate tool-using agent, not covered by
 `features.multi_agent=false`. Diagnostic evidence showed such a background thread
@@ -739,6 +1073,7 @@ the healer's app-server tool transcript. The override preserves global settings,
 memory files and role sessions; it does not erase already-injected context or stop
 independent running providers. Do not infer an external overlapping run from the
 healer's prose alone, and do not force an old report onto a changed snapshot.
+
 `tests/test_cycle.py`, invoked by `tests/launchers/test-cc-focus.ps1`, uses only
 protocol fixtures and disposable Git repositories; it never starts paid models.
 
@@ -1624,11 +1959,15 @@ Files/Windows/Users и т.п. — много подпапок), поэтому �
 
 - `config.example.md` — каноническое описание `.work/config.md`, всех defaults и
   Codex/KB-переключателей; `root-config.example.md` документирует глобальные и те же
-  project-ключи для fallback. `launchers\cc-config.cmd`/`.sh` fail-closed создаёт отсутствующий
-  `~/.orchestra/root-config.md`, затем локальные `.work/config.md` (блочный seed) и
-  `.work/constraints.md` (полная копия), не перезаписывая существующие,
-  затем создаёт `.inbox/messages`/`.inbox/releases` и регистрирует проект в
-  `~/.orchestra/projects.json`.
+  project-ключи для fallback. `launchers\cc-config.cmd`/`.sh` fail-closed creates a missing
+  `~/.orchestra/root-config.md`, then renders `.work/config.md` as a fully commented catalog
+  of every schema project key. Each block includes its schema default, allowed values,
+  effect, and a generated comment with the current root-config value; an existing file is
+  never regenerated. Immediately after creating or detecting that local file,
+  `config-runtime.ps1` synchronously opens it through `VISUAL`, `EDITOR`, or a discovered
+  console editor; only after the editor exits successfully does the launcher continue
+  with constraints, permissions, registration, and inbox initialization. The same launcher
+  still copies `.work/constraints.md` in full.
 - `constraints.example.md` — шаблон человекочитаемой политики ограничений проекта
   (`.work/constraints.md`): denylist путей, ветки/remotes, push/merge policy, обязательные
   проверки, пороги размера, human-review категории. Сеется целиком через `cc-config`.
@@ -1861,7 +2200,7 @@ codex-правил (`Bash(pwsh -File tools/codex-runtime.ps1 *)` и `Bash(pwsh -
 | `.work/constraints.md` | человекочитаемая политика ограничений проекта (denylist путей, ветки/remotes, push/merge policy, обязательные проверки, пороги, human-review категории); шаблон — `constraints.example.md`, сеет `cc-config`; читают processor/planner/coder/reviewer, нет файла — деградация без ошибок |
 | `.work/orchestrator.lock` | аренда владельца прогона (каталог; защита от двух processor независимо от provider). Содержит `lease.json` — запись аренды (owner/session id, корень, host, heartbeat, TTL, pid+время создания как доказательство живости, поколение и опциональный `processkit_run_id`); ведётся через `tools/state-tx.ps1`, см. `docs/queue_contract.md`, §14-§16 |
 | `.work/codex_processor_session.json` | адресованный UUID root-thread Codex-provider (`orchestra/codex-processor-session@1`), provider/root/timestamps и `last_action=start\|resume\|handoff`; атомарно пишет только `tools/codex-processor-runtime.ps1`, читает `cc-resume codex`; handoff инвалидирует старый UUID после lease-preflight и записывает новый thread, файл не заменяет lease и не используется Claude-provider |
-| `.work/cycle/` | Separate sequential-profile state: checksummed phase/session state, invocation intents and reports, immutable handoffs, publication/CI evidence, session archives and an OS-held runtime lock. Owned only by the cycle runtime, never by queue roles; the shared processor lease still excludes concurrent owners. |
+| `.work/cycle/` | Separate sequential-profile state: checksummed phase/session state, invocation intents and reports, immutable handoffs, publication/CI evidence, session archives and an OS-held runtime lock. Each Claude attempt adds a `usage-<attempt>.json` record, and each Claude role has the recovery copy `prompts/<role>.txt`. Frozen views reserve the path `__runtime__/prompt.txt`. Owned only by the cycle runtime, never by queue roles; the shared processor lease still excludes concurrent owners. |
 | `.work/codex-processor-runtime.lock` | OS-held exclusive file lock внешнего Codex TUI root process; сериализует `start`/`resume`/`handoff` до модельного `orchestrator.lock`, чтобы конкурентные rollout `session_meta` не перезаписали addressed UUID. Пустой файл может оставаться, владение определяется только открытым handle и автоматически исчезает при crash |
 | `.work/orchestrator.lock/lease.json` | запись аренды (`schema: orchestra/lease@1`); мутируется только транзакционно через `tools/state-tx.ps1` (acquire/heartbeat/release/takeover) |
 | `.work/state-tx.lock` | краткоживущий атомарный лок мутации control plane (аренда/поколение состояния); держит `state-tx.ps1` на время одной транзакции; отдельный от `orchestrator.lock` и `queue-tx.lock` |

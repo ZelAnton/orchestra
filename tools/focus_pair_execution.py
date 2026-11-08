@@ -164,7 +164,8 @@ class PairExecution:
         record = artifact(self.store, f"pair-reviews/{state['iteration']}/{pair['id']}/executor-{len(pair['resolutions'])}.json",
             {'sources': execution['reports'], 'resolutions': resolutions, 'candidate_after': digest(encode(after)),
              'handoff': {k: list(dict.fromkeys(v for r in reports for v in r['handoff'][k]))
-                         for k in ('decisions', 'assumptions', 'checks')}})
+                         for k in ('decisions', 'assumptions', 'checks')},
+             'phase': pair['phase'], 'round': pair.get('round')})
         state.setdefault('pair_handoff', []).append(record)
         edited = bool(self.changes(pair['snapshot'], after))
         if disputed:
