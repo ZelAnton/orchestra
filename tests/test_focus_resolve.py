@@ -786,6 +786,7 @@ class CleanupTests(ResolverFixture):
         self.assertNotIn("resolver_cleanup", self.state)
         self.assertFalse(held.exists())
 
+    @unittest.skipIf(os.name == "nt", "POSIX descriptor-based removal; Windows removes by path.")
     def test_a_directory_without_access_keeps_the_entry_and_raises_nothing(self):
         path = self.root / ".work" / "r" / "0000abcf"
         (path / "locked").mkdir(parents=True)
@@ -800,6 +801,7 @@ class CleanupTests(ResolverFixture):
             self.assertFalse(focus_resolve.remove_worktree(self.cycle, self.members[MEMBER], path))
         self.assertTrue(focus_resolve.remove_worktree(self.cycle, self.members[MEMBER], path))
 
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits; Windows keeps only a read-only flag.")
     def test_a_retry_does_not_change_the_target_of_a_link(self):
         path = self.root / ".work" / "r" / "0000abd0"
         path.mkdir(parents=True)

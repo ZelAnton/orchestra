@@ -203,6 +203,27 @@ class CycleTests(unittest.TestCase):
         with self.assertRaisesRegex(Blocked, "checksum"):
             self.store.read()
 
+    def test_a_replace_that_another_handle_blocks_is_tried_again_on_windows(self):
+        import cycle_state
+        target, real, calls = self.root / "state-copy.json", os.replace, []
+        def blocked(count):
+            def attempt(source, destination):
+                calls.append(destination)
+                if len(calls) <= count:
+                    raise PermissionError(13, "Access is denied", str(destination))
+                return real(source, destination)
+            return attempt
+        with patch.object(cycle_state, "REPLACE_RETRIES", (0, 0)), patch.object(cycle_state.os, "replace", blocked(2)):
+            atomic_write(target, b"second try")
+        self.assertEqual((target.read_bytes(), len(calls)), (b"second try", 3))
+        calls.clear()
+        with patch.object(cycle_state, "REPLACE_RETRIES", (0, 0)), patch.object(cycle_state.os, "replace", blocked(3)), \
+                self.assertRaises(PermissionError):
+            atomic_write(target, b"never")
+        self.assertEqual((target.read_bytes(), len(calls)), (b"second try", 3))
+        self.assertEqual([p.name for p in self.root.glob("state-copy.json.*.tmp")], [])  # No temporary file remains.
+        self.assertEqual(cycle_state.REPLACE_RETRIES == (), os.name != "nt")
+
     def test_local_lock_is_exclusive_and_reusable(self):
         with LocalLock(self.store.directory):
             with self.assertRaises(Blocked):

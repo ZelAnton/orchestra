@@ -635,7 +635,8 @@ class RefusalHistoryTests(unittest.TestCase):
         (home / ".claude").mkdir()
         (home / ".claude" / "CLAUDE.md").write_bytes(b"User rule")
         environment = {k: v for k, v in os.environ.items() if k != "CLAUDE_CONFIG_DIR"}
-        with patch.dict(os.environ, dict(environment, HOME=str(home)), clear=True):
+        # On Windows, Path.home() and the Claude CLI use USERPROFILE.
+        with patch.dict(os.environ, dict(environment, HOME=str(home), USERPROFILE=str(home)), clear=True):
             files = [f for f in instruction_files(project) if f["path"].startswith(str(self.root))]
         self.assertEqual([(f["scope"], f["path"]) for f in files], [("user", str(home / ".claude" / "CLAUDE.md"))])
 

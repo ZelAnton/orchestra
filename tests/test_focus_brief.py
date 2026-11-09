@@ -352,7 +352,8 @@ class CommandTests(BriefFixture, unittest.TestCase):
             self.assertIn("runtime.lock", err)
 
     def test_show_reports_records_source_and_escapes_text(self):
-        source = self.brief_file(name="brief\x1b[31m.md")
+        # Windows refuses control characters in file names, so only POSIX checks the escaped name.
+        source = self.brief_file(name="brief.md" if os.name == "nt" else "brief\x1b[31m.md")
         with contextlib.redirect_stdout(io.StringIO()):
             focus_brief.command(self.root, "set", source)
         self.start_stage()

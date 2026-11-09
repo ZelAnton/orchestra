@@ -19,8 +19,9 @@ class SnapshotArchiveTests(unittest.TestCase):
     tearDown = fixtures.CycleTests.tearDown
 
     def view(self, legacy=False):
-        (self.root / 'App.csproj').write_text('<Project/>\n')
-        (self.root / 'Example.cs').write_text('class Example {}\n')
+        # Bytes, not text: Windows text mode writes CRLF, and the tests compare exact bytes.
+        (self.root / 'App.csproj').write_bytes(b'<Project/>\n')
+        (self.root / 'Example.cs').write_bytes(b'class Example {}\n')
         pair = {'id': uuid.uuid4().hex, 'phase': 'final', 'snapshot': self.repo.snapshot()}
         view = materialize(self.cycle, pair)
         if legacy:

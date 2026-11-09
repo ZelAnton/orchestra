@@ -54,6 +54,22 @@ def encode(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+# On Windows, a replace fails while another handle holds the target, for example a status read or a virus scan.
+# Such a hold is short, so the replace tries again after these delays. Other platforms do not try again.
+REPLACE_RETRIES = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0) if os.name == "nt" else ()
+
+
+def replace(source, target):
+    for delay in (*REPLACE_RETRIES, None):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if delay is None:
+                raise
+            time.sleep(delay)
+
+
 def atomic_write(path, data):
     """Flush the file before rename, then the directory where supported."""
     path = Path(path)
@@ -64,7 +80,7 @@ def atomic_write(path, data):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        replace(temporary, path)
         if os.name != "nt":
             directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
