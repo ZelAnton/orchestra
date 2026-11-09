@@ -116,6 +116,17 @@ def read_source(path):
     return data
 
 
+def plain(text):
+    """The path without a Windows device prefix. Under a concurrent change, Path.resolve can keep that prefix."""
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    return text[4:] if text.startswith("\\\\?\\") else text
+
+
+def resolved(path):
+    return Path(plain(str(Path(path).resolve())))
+
+
 def control_directory(root):
     """The development control store. Store already refuses a state path outside the repository."""
     directory = Store(root).control_directory
@@ -124,7 +135,7 @@ def control_directory(root):
         raise Blocked("brief-path", f"The brief copies directory is a link, a reparse point, or not a directory: {terminal_text(copies)}. "
                       "Replace it with a regular directory. Then run cc-focus brief restore FILE or cc-focus brief set FILE. "
                       "Then run the retry command that the run names, or repeat the command.")
-    if not copies.resolve().is_relative_to(directory.resolve()):
+    if not resolved(copies).is_relative_to(resolved(directory)):
         raise Blocked("brief-path", "The brief copies resolve outside the control store. "
                       "Replace .work/cycle/briefs with a regular directory. Then run cc-focus brief restore FILE or "
                       "cc-focus brief set FILE. Then run the retry command that the run names, or repeat the command.")

@@ -241,6 +241,18 @@ class CommandTests(BriefFixture, unittest.TestCase):
                 self.assertEqual(raised.exception.code, "brief-drift")
                 self.assertIn("pointer_error", focus_brief.status_entry(self.root, None))
 
+    def test_a_device_prefix_of_a_resolved_path_is_not_an_escape(self):
+        # Windows can keep the \\?\ prefix when another command creates the copies directory at the same time.
+        self.assertEqual(focus_brief.plain("\\\\?\\C:\\cycle\\briefs"), "C:\\cycle\\briefs")
+        self.assertEqual(focus_brief.plain("\\\\?\\UNC\\server\\share"), "\\\\server\\share")
+        self.assertEqual(focus_brief.plain("/srv/cycle/briefs"), "/srv/cycle/briefs")
+        original = Path.resolve
+        def prefixed(path, *args, **kwargs):
+            value = original(path, *args, **kwargs)
+            return Path("\\\\?\\" + str(value)) if value.name == focus_brief.COPIES else value
+        with patch.object(Path, "resolve", prefixed):
+            self.assertEqual(focus_brief.control_directory(self.root), Store(self.root).control_directory)
+
     def test_concurrent_set_and_clear_leave_one_complete_pointer(self):
         paths = [self.brief_file(f"Brief {n}.\n", f"b{n}.md") for n in range(4)]
         errors = []
