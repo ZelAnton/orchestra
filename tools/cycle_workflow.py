@@ -18,7 +18,7 @@ from focus_pair_profile import PAIRS, PAIR_ROLES, PAIR_WRITERS
 from focus_pair_view import read_record, artifact
 from focus_snapshot_archive import compact_legacy_views
 from cycle_state import Blocked, ProviderQuota, ProviderTransient, transient_exhausted, changed, command, digest, encode
-from cycle_transport import (concise_summary, enum_problems, field_name, parse_report, report_object,
+from cycle_transport import (LoginWatch, concise_summary, enum_problems, field_name, parse_report, report_object,
                              repairable_enum, repairable_executor_accounting, repairable_repair_mode,
                              repairable_substantial_accounting)
 from focus_status import accept_task, new_reviews, reset_notice, review_event
@@ -149,6 +149,7 @@ class Cycle(PairedReview, FinalReview):
         self.scripts, self.pwsh = Path(scripts), pwsh
         self.control, self.progress = control, progress
         self.messages = Messages(store)
+        self.login_watch = LoginWatch()  # Shared by the quota waits of the invocation and of pair participants.
         self.state_lock = threading.RLock()
 
     def save(self):
@@ -1447,9 +1448,12 @@ class Cycle(PairedReview, FinalReview):
         pending["quota_wait"] = {"resets_at": error.resets_at,
                                  "retry_at": max(error.resets_at + 5, time.time() + 60),
                                  "no_work": no_work}
+        if getattr(error, "account", None):
+            pending["quota_wait"]["account"] = error.account  # A hash of the refused login, not its address.
         self.save()
         retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(pending["quota_wait"]["retry_at"]))
-        print(f"cc-focus: quota wait until {retry}; same phase/session will retry automatically. No review credit earned.", flush=True)
+        login = ", or at once after a Claude login change" if getattr(error, "account", None) else ""
+        print(f"cc-focus: quota wait until {retry}; same phase/session will retry automatically{login}. No review credit earned.", flush=True)
 
     def defer_transient(self, error):
         pending = self.state["pending"]
@@ -1499,11 +1503,19 @@ class Cycle(PairedReview, FinalReview):
         quota = (self.state.get("pending") or {}).get("quota_wait")
         if not quota or time.time() >= quota["retry_at"]:
             return False
+        # A new Claude login can have quota now. Like an explicit --retry, this waits for unresolved messages.
+        if self.login_watch.changed(quota.get("account")) and not self.messages.unresolved(self.state["iteration"]):
+            quota["retry_at"] = time.time()
+            self.save()
+            print("cc-focus: the Claude login changed after the quota refusal; retrying now with the current login. "
+                  "Same invocation and session.", flush=True)
+            return False
         if self.progress:
             if self.progress.operation != "quota":
                 self.progress.runtime("quota")
             retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
-            self.progress.activity = f"Waiting for Claude quota until {retry}; automatic retry; no model is running"
+            login = "a login change retries at once" if quota.get("account") else "after a login change, use /resume or --retry"
+            self.progress.activity = f"Waiting for Claude quota until {retry}; automatic retry; {login}; no model is running"
             self.progress.pulse()
         # Re-enter the normal boundary for stop, PAUSE, lease and input checks.
         time.sleep(min(0.25, max(0, quota["retry_at"] - time.time())))

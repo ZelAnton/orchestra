@@ -272,7 +272,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
                     "/resume — продолжить · /messages — сообщения · /exit — закрыть")
     elif quota:
         retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
-        activity = f"Claude · повтор {retry} · через {duration(quota['retry_at'] - time.time())} · автоматически · модель не запущена"
+        login = "смена логина — повтор сразу" if quota.get("account") else "после смены логина — /resume"
+        activity = f"Claude · повтор {retry} · через {duration(quota['retry_at'] - time.time())} · автоматически · {login} · модель не запущена"
     elif transient:
         activity = (f"{transient.get('provider', 'Claude')} · серверная ошибка · повтор {transient['attempt']}/{transient['limit']} "
                     f"через {duration(transient['retry_at'] - time.time())} · автоматически · модель не запущена")

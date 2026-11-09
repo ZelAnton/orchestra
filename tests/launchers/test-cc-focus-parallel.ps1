@@ -2,5 +2,6 @@
 . (Join-Path $PSScriptRoot 'focus-suites.ps1')
 Invoke-FocusSuites @(
     @('tests/test_focus_parallel.py', 'Focus parallel member tests'),
-    @('tests/test_focus_context_budget.py', 'Focus context budget tests')
+    @('tests/test_focus_context_budget.py', 'Focus context budget tests'),
+    @('tests/test_focus_quota_login.py', 'Focus quota login tests')
 )

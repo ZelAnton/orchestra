@@ -531,6 +531,49 @@ def field_name(path):
                    for index, part in enumerate(path))
 
 
+def claude_account(env=None):
+    """A hash of the current Claude login, or None when the login is unknown. The hash keeps no address.
+
+    The CLI keeps oauthAccount in .claude.json: in CLAUDE_CONFIG_DIR when it is set, else in the home directory.
+    An API key or token in the environment replaces the login, so the account is unknown then.
+    """
+    env = os.environ if env is None else env
+    if env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN"):
+        return None
+    folder = env.get("CLAUDE_CONFIG_DIR")
+    try:
+        path = Path(folder) / ".claude.json" if folder else Path.home() / ".claude.json"
+        if path.stat().st_size > 64 * 1024 * 1024:
+            return None
+        account = json.loads(path.read_bytes()).get("oauthAccount")
+    except (OSError, RuntimeError, ValueError, AttributeError):
+        return None  # No file, no home, or a file that the CLI writes at this moment.
+    if not isinstance(account, dict):
+        return None
+    for key in ("accountUuid", "emailAddress"):
+        value = account.get(key)
+        if isinstance(value, str) and value:
+            organization = account.get("organizationUuid")
+            return digest(f"{key}\0{value}\0{organization if isinstance(organization, str) else ''}".encode("utf-8"))
+    return None
+
+
+class LoginWatch:
+    """Tell if the Claude login differs from the login of a quota refusal. It reads the login at most every PERIOD seconds."""
+    PERIOD = 10
+
+    def __init__(self):
+        self.checked, self.current = None, None
+
+    def changed(self, saved):
+        if not saved:
+            return False  # A wait from before this check has no login. The operator retries it.
+        now = time.monotonic()
+        if self.checked is None or now - self.checked >= self.PERIOD:
+            self.checked, self.current = now, claude_account()
+        return self.current is not None and self.current != saved
+
+
 PROMPT_MARKERS = ("Runtime context:", "Runtime assignment:", "Executor assignment:", "Report schema:")
 
 
@@ -803,6 +846,8 @@ class Transport:
         except OSError:
             transport_digest = None
         attempt = self.mark_attempt(directory, role, session, resumed)
+        # A quota refusal names the login of this launch, so a later login change can retry the wait.
+        account = claude_account(env)
         # No work may run between process creation and the try block that closes it.
         process = Process(argv, self.root, Path(directory) / "protocol.jsonl", self.heartbeat, self.lock_fd, env, progress=self.progress, control=self.control)
         try:
@@ -921,7 +966,7 @@ class Transport:
                                           "if access remains unavailable. Restore authorized access, then resume this same phase. "
                                           "This invocation did not complete; no review credit is granted.")
                         if code == "rate_limit" and quota_reset is not None:
-                            raise ProviderQuota(quota_reset, no_work=not work_started)
+                            raise ProviderQuota(quota_reset, no_work=not work_started, account=account)
                         if code in ("server_error", "overloaded_error"):
                             raise ProviderTransient(code, detail, no_work=not work_started)
                         raise Blocked("claude-api-error", f"Claude API error ({str(code)[:120]}): {detail[:2000]} "
@@ -950,7 +995,7 @@ class Transport:
                         raise Blocked("provider-profile", "Claude result lacks the matching initialization/session.")
                     if (event.get("is_error") is True and event.get("terminal_reason") == "api_error"
                             and event.get("api_error_status") == 429 and quota_reset is not None):
-                        raise ProviderQuota(quota_reset, no_work=not work_started)
+                        raise ProviderQuota(quota_reset, no_work=not work_started, account=account)
                     if (event.get("is_error") is True and event.get("terminal_reason") == "api_error"
                             and type(event.get("api_error_status")) is int
                             and event["api_error_status"] in (500, 502, 503, 504, 529)):

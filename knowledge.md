@@ -885,6 +885,13 @@ the retry starts a provider. No refusal earns review credit. Progress and
 the status panel show runtime waiting, UTC deadline and countdown; status JSON
 exposes `quota_wait`. Invalid/missing reset data uses ordinary API-error recovery.
 
+`ProviderQuota.account` is `claude_account()` at the launch, a hash of `oauthAccount` in `.claude.json`.
+The file is in `CLAUDE_CONFIG_DIR` when it is set, else in the home directory.
+`defer_quota` stores the hash as `quota_wait.account`, and a pair job stores it as `wait_account`.
+
+`Cycle.login_watch` reads the login at most every `LoginWatch.PERIOD` seconds. A changed login moves `retry_at` to now, unless messages are unresolved.
+Older waits and API-key logins have no account, so they keep their deadline. `tests/test_focus_quota_login.py` covers this.
+
 A pair participant waits in `run_jobs` instead.
 When no pair participant runs, `run_jobs` checks the stop control, for example during a quota wait.
 An emergency stop raises `FocusStop`, and a safe stop returns `None` to the run boundary.

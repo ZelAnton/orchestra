@@ -303,7 +303,7 @@ def run_jobs(cycle, pair, requests, manifest):
                 if isinstance(error, ProviderTransient):
                     job["transient_retries"] = count + 1
                 job.update(status="waiting", retry_at=max(time.time() + delay, getattr(error, "resets_at", 0) + 5),
-                           wait_reason=error.code)
+                           wait_reason=error.code, wait_account=getattr(error, "account", None))
                 cycle.save()
         except BaseException:
             with cycle.state_lock:
@@ -331,6 +331,14 @@ def run_jobs(cycle, pair, requests, manifest):
                     return None
                 for key, _, _ in requests:
                     job = jobs[key]
+                    if (key not in running and not job.get("result") and job.get("status") == "waiting"
+                            and job.get("wait_reason") == "claude-quota" and time.time() < job.get("retry_at", 0)
+                            and cycle.login_watch.changed(job.get("wait_account"))):
+                        # A new Claude login can have quota now. Pending input stopped the group above.
+                        with cycle.state_lock:
+                            job["retry_at"] = time.time()
+                            cycle.save()
+                        print(f"cc-focus: the Claude login changed after the quota refusal of {job['role']}; retrying it now.", flush=True)
                     if key not in running and not job.get("result") and time.time() >= job.get("retry_at", 0):
                         running[key] = pool.submit(worker, key)
                         launched.append(running[key])

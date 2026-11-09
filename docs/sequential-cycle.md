@@ -2223,6 +2223,14 @@ conversation. Every refusal imposes at least a 60-second delay, including stale
 reset times. A new refusal schedules another wait; the timestamp alone never
 proves that the provider admitted the request.
 
+The runtime also records the login of the refused launch, as a hash of its account and organization IDs.
+The hash keeps no address.
+
+During the wait, the runtime reads the current Claude login at most every 10 seconds.
+After a login change, it retries the same invocation at once, like an explicit `--retry`, also for a pair participant that waits.
+A wait from before this change has no login, and an API key in the environment leaves the login unknown.
+In these cases, the wait keeps its deadline until an explicit retry. The panel shows which case applies.
+
 Stop, emergency stop, PAUSE and uncertain-message checks remain active while
 waiting. A plain restart retains the deadline. After changing the Claude login or
 otherwise restoring quota, exit the waiting process and run `cc-focus --retry` to
