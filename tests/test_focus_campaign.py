@@ -2,6 +2,7 @@
 
 import copy
 import asyncio
+import contextlib
 import io
 import json
 from pathlib import Path
@@ -25,6 +26,17 @@ from focus_review_scope import load_request, make_request, plan_index, save_requ
 from focus_review_contract import validate_coverage
 from focus_picker import Selection
 from focus_status import build_panel
+
+
+@contextlib.contextmanager
+def inside(path):
+    """Enter PATH for one block. A cleanup with addCleanup runs after tearDown, which is too late on Windows."""
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 PLAN = """# S2. System
@@ -444,47 +456,45 @@ class CampaignTests(unittest.TestCase):
         import cc_focus
         self.remote()
         original = self.repo.snapshot()
-        previous = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, previous)
-        self.assertEqual(cc_focus.main(["review", "--scope", "Inspect", "--preview"]), 0)
-        self.assertFalse(Store(self.root).path.exists())
-        self.assertFalse((self.root / ".work/cycle/review-runs").exists())
-        class Lease:
-            pwsh = "pwsh"
-            def __init__(self, *args): pass
-            def __enter__(self): return self
-            def __exit__(self, *args): pass
-            def heartbeat(self): pass
-        with patch.object(cc_focus, "Lease", Lease), patch.object(cc_focus, "Transport", return_value=CampaignTransport(self.root)), patch.object(ReviewCycle, "wait_ci", return_value=None):
-            self.assertEqual(cc_focus.main(["review", "--scope", "Inspect", "--ui", "off"]), 0)
-        self.assertEqual(self.repo.snapshot(), original)
-        self.assertIsNone(pending_run(self.root))
-        self.assertFalse(Store(self.root).path.exists())
+        # Leave the root before tearDown: Windows cannot remove the current directory of a process.
+        with inside(self.root):
+            self.assertEqual(cc_focus.main(["review", "--scope", "Inspect", "--preview"]), 0)
+            self.assertFalse(Store(self.root).path.exists())
+            self.assertFalse((self.root / ".work/cycle/review-runs").exists())
+            class Lease:
+                pwsh = "pwsh"
+                def __init__(self, *args): pass
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def heartbeat(self): pass
+            with patch.object(cc_focus, "Lease", Lease), patch.object(cc_focus, "Transport", return_value=CampaignTransport(self.root)), patch.object(ReviewCycle, "wait_ci", return_value=None):
+                self.assertEqual(cc_focus.main(["review", "--scope", "Inspect", "--ui", "off"]), 0)
+            self.assertEqual(self.repo.snapshot(), original)
+            self.assertIsNone(pending_run(self.root))
+            self.assertFalse(Store(self.root).path.exists())
 
     def test_review_cli_takes_several_scope_files_in_one_campaign(self):
         import cc_focus
         self.remote()
-        previous = Path.cwd()
-        os.chdir(self.root)
-        self.addCleanup(os.chdir, previous)
-        scopes = Path(self.temp.name) / "scopes"
-        scopes.mkdir()
-        for name in ("a", "b"):
-            (scopes / f"{name}.md").write_text(f"# Part {name}\nInspect part {name}.\n")
-        output = io.StringIO()
-        with patch("sys.stdout", output):
-            self.assertEqual(cc_focus.main(["review", "--scope-file", str(scopes / "a.md"), str(scopes / "b.md"), "--preview"]), 0)
-        preview = json.loads(output.getvalue()[output.getvalue().index("{"):])
-        self.assertEqual((preview["mode"], [t["title"] for t in preview["targets"]]), ("separate targets", ["Part a", "Part b"]))
-        output = io.StringIO()
-        with patch("sys.stdout", output):  # A repeated option adds its files in the same order.
-            self.assertEqual(cc_focus.main(["review", "--scope-file", str(scopes / "b.md"), "--scope-file", str(scopes / "a.md"), "--preview"]), 0)
-        self.assertEqual([t["title"] for t in json.loads(output.getvalue()[output.getvalue().index("{"):])["targets"]], ["Part b", "Part a"])
-        for extra in (["--integration"], ["--plan", "PLAN.md"], [str(scopes / "a.md")], ["--scope", "Also"]):
-            with self.subTest(extra=extra), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
-                cc_focus.main(["review", "--scope-file", str(scopes / "a.md"), str(scopes / "b.md"), *extra, "--preview"])
-        self.assertFalse((self.root / ".work/cycle/review-runs").exists())
+        # Leave the root before tearDown: Windows cannot remove the current directory of a process.
+        with inside(self.root):
+            scopes = Path(self.temp.name) / "scopes"
+            scopes.mkdir()
+            for name in ("a", "b"):
+                (scopes / f"{name}.md").write_text(f"# Part {name}\nInspect part {name}.\n")
+            output = io.StringIO()
+            with patch("sys.stdout", output):
+                self.assertEqual(cc_focus.main(["review", "--scope-file", str(scopes / "a.md"), str(scopes / "b.md"), "--preview"]), 0)
+            preview = json.loads(output.getvalue()[output.getvalue().index("{"):])
+            self.assertEqual((preview["mode"], [t["title"] for t in preview["targets"]]), ("separate targets", ["Part a", "Part b"]))
+            output = io.StringIO()
+            with patch("sys.stdout", output):  # A repeated option adds its files in the same order.
+                self.assertEqual(cc_focus.main(["review", "--scope-file", str(scopes / "b.md"), "--scope-file", str(scopes / "a.md"), "--preview"]), 0)
+            self.assertEqual([t["title"] for t in json.loads(output.getvalue()[output.getvalue().index("{"):])["targets"]], ["Part b", "Part a"])
+            for extra in (["--integration"], ["--plan", "PLAN.md"], [str(scopes / "a.md")], ["--scope", "Also"]):
+                with self.subTest(extra=extra), patch("sys.stderr", io.StringIO()), self.assertRaises(SystemExit):
+                    cc_focus.main(["review", "--scope-file", str(scopes / "a.md"), str(scopes / "b.md"), *extra, "--preview"])
+            self.assertFalse((self.root / ".work/cycle/review-runs").exists())
 
     def test_a_campaign_with_several_scopes_reviews_each_target_in_order(self):
         self.start(make_request(scopes=["# Part one\nCheck source behavior.", "# Part two\nCheck source behavior again."]))

@@ -806,7 +806,10 @@ class CleanupTests(ResolverFixture):
         outside = Path(self.temp.name) / "outside.txt"
         outside.write_text("outside\n")
         outside.chmod(0o644)
-        (path / "link").symlink_to(outside)
+        try:
+            (path / "link").symlink_to(outside)
+        except OSError:
+            self.skipTest("symlink creation unavailable")
         original, failed = os.unlink, []
 
         def fail_once(name, *args, **kwargs):

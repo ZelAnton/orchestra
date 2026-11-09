@@ -1077,6 +1077,13 @@ healer's prose alone, and do not force an old report onto a changed snapshot.
 `tests/test_cycle.py`, invoked by `tests/launchers/test-cc-focus.ps1`, uses only
 protocol fixtures and disposable Git repositories; it never starts paid models.
 
+The focus Python modules run in groups: `tests/launchers/test-cc-focus.ps1` and the `test-cc-focus-*.ps1` files.
+`focus-suites.ps1` runs each module of a group and then fails with the full list.
+On Windows, these modules take several times longer than on Linux.
+Thus each group must stay below the limit of 1800 seconds for one test file in `run-all.ps1`.
+Add a new module to a group with time left, or start a new group.
+A test that changes the current directory must restore it before `tearDown`, because Windows cannot remove the current directory.
+
 ### Queue processor workflow
 
 ```text

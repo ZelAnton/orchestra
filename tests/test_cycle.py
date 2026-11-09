@@ -3914,7 +3914,8 @@ class CycleTests(unittest.TestCase):
             progress.start("publish", self.store.directory)
             progress.event({"method": "item/commandExecution/requestApproval", "params": {}})
             before = output.getvalue()
-            with patch("focus_progress.time.monotonic", return_value=progress.started + 3600):
+            # A half second keeps the whole seconds exact: a large monotonic value loses float precision.
+            with patch("focus_progress.time.monotonic", return_value=progress.started + 3600.5):
                 progress.pulse()
             self.assertEqual(output.getvalue(), before)
             self.assertEqual(updates[-1]["elapsed_seconds"], 3600)

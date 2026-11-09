@@ -275,8 +275,10 @@ class ViewSearchTests(unittest.TestCase):
         return result["contentItems"][0]["text"]
 
     def test_search_finds_literal_text_in_path_and_line_order(self):
+        # Windows needs a privilege for symbolic links, so the link entry is a POSIX fixture.
+        links = [] if os.name == "nt" else [("link.md", "docs/a.md")]
         _, view = self.view({"docs/b.md": "needle b\n", "docs/a.md": "one\nNeedle\nthe needle here\n",
-                             "src/c.txt": "needle c\n", "bin.dat": b"needle\0needle\n"}, [("link.md", "docs/a.md")])
+                             "src/c.txt": "needle c\n", "bin.dat": b"needle\0needle\n"}, links)
         reader = ViewInspector(view)
         rows = self.text(reader, "search", ".", "needle").splitlines()
         self.assertEqual(rows[0], "Matches shown: 3; offset: 0")
