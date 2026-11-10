@@ -46,7 +46,7 @@ No A/B cross-return or fixed OUTER clean-streak gate applies.
 | Pair A fixes / minor cleanup | opus | high or xhigh, chosen by assessment |
 | Pair A, independent peers | opus + gpt-6.1-sol | xhigh + xhigh |
 | Pair B, independent peers | gpt-6-astra + opus | xhigh + max |
-| Final, independent initial inputs, sequential invocation | opus → claude-fable-5-1 | max → xhigh |
+| Final, independent initial inputs, sequential invocation | opus → claude-fable-5-2 | max → xhigh |
 | B/final fixer and test executor | opus | xhigh |
 | B/final inner review | same opus session, or independent opus + gpt-6-astra | xhigh |
 | Binding arbiter, separate session | gpt-6-astra | max |
@@ -1887,6 +1887,7 @@ Other marked synthetic errors become `claude-api-error` with the original error 
 They receive the normal Astra/xhigh recovery attempt.
 These errors do not replace the native session or earn review credit.
 An answer from another model still fails as `model-rerouted`.
+The CLI can add `[1m]` to the name of a model with a 1M context. The check accepts this name for the pinned model.
 
 A Claude response with `stop_reason=refusal` stops the cycle as `claude-refusal`.
 The transport first checks the session and the response source.

@@ -506,7 +506,7 @@ class PairTests(unittest.TestCase):
             self.cycle.paired_review_step()
         self.state = self.store.read()  # Persisted objects reorder their JSON keys.
         self.cycle.state = self.state
-        self.assertIn("claude-fable-5-1/xhigh: прерван", "\n".join(build_panel(self.state).lines))
+        self.assertIn("claude-fable-5-2/xhigh: прерван", "\n".join(build_panel(self.state).lines))
         self.transport.handlers.pop("pair_final_fable_discuss")
         self.cycle.paired_review_step()
         self.assertEqual(self.state["pair_review"]["discussion"], 1)

@@ -966,7 +966,7 @@ class CycleTests(unittest.TestCase):
 
     def test_four_reviewer_profiles_are_fixed(self):
         self.assertEqual(PROFILES['sol'], ('codex', 'gpt-6.1-sol', 'xhigh'))
-        self.assertEqual(PROFILES['claude'], ('claude', 'claude-fable-5-1', 'xhigh'))
+        self.assertEqual(PROFILES['claude'], ('claude', 'claude-fable-5-2', 'xhigh'))
         self.assertEqual(PROFILES['astra'], ('codex', 'gpt-6-astra', 'xhigh'))
         self.assertEqual(PROFILES['opus'], ('claude', 'opus', 'xhigh'))
         self.assertEqual(PROFILES['code'], ('claude', 'opus', 'xhigh'))
@@ -1443,6 +1443,26 @@ class CycleTests(unittest.TestCase):
                 with self.assertRaises(Blocked) as caught:
                     transport.run('code', 'Implement with Opus', {'id': variant}, directory)
                 self.assertEqual(caught.exception.code, code)
+
+    def test_a_pinned_model_accepts_its_1m_name_but_no_other_model(self):
+        self.state['inspection'] = {'root': str(self.root), 'files': {'source.txt': __import__('hashlib').sha256((self.root / 'source.txt').read_bytes()).hexdigest()}, 'stage_paths': ['source.txt'], 'diffs': {}}
+        self.state['inspection_path'] = str(self.root / 'manifest.json')
+        for variant in ('pinned-1m', 'pinned-other'):
+            with self.subTest(variant=variant):
+                self.state['sessions'].pop('pair_final_fable', None)
+                transport = Transport(self.root, self.state, self.store.save, lambda: None)
+                transport.commands['claude'] = [sys.executable, str(Path(__file__).resolve()), 'fixture', 'claude', variant]
+                directory = self.store.directory / variant
+                directory.mkdir(parents=True)
+                with patch.dict(os.environ, ORCHESTRA_FIXTURE_MODEL='claude-fable-5-2', ORCHESTRA_FIXTURE_EFFORT='xhigh',
+                                ORCHESTRA_FIXTURE_ROLE='pair_final_fable'):
+                    if variant == 'pinned-1m':
+                        result = transport.run('pair_final_fable', 'Inspect', {'id': variant}, directory)
+                        self.assertEqual(parse_report(result, 'pair_final_fable')['status'], 'done')
+                    else:
+                        with self.assertRaises(Blocked) as caught:
+                            transport.run('pair_final_fable', 'Inspect', {'id': variant}, directory)
+                        self.assertEqual(caught.exception.code, 'provider-profile')
 
     def test_opus_alias_records_resolved_version_and_rejects_resume_drift(self):
         transport = Transport(self.root, self.state, self.store.save, lambda: None)
@@ -4409,7 +4429,7 @@ def fixture(provider):
     if provider == "claude":
         assert args[args.index("--permission-mode") + 1] == "bypassPermissions"
         requested_model = args[args.index("--model") + 1]
-        assert requested_model in ("claude-fable-5-1", "opus")
+        assert requested_model in ("claude-fable-5-2", "opus")
         effective_model = "claude-opus-5-5" if requested_model == "opus" else requested_model
         assert args[args.index("--effort") + 1] == os.environ["CLAUDE_CODE_EFFORT_LEVEL"]
         if 'ORCHESTRA_FIXTURE_MODEL' in os.environ:
@@ -4472,7 +4492,11 @@ def fixture(provider):
         if missing_session:
             assert "new conversation for the SAME runtime phase" in prompt
         if 'opus-wrong-family' in args:
-            effective_model = 'claude-fable-5-1'
+            effective_model = 'claude-fable-5-2'
+        if 'pinned-1m' in args:
+            effective_model += '[1m]'  # The CLI names the 1M context variant of the pinned model.
+        if 'pinned-other' in args:
+            effective_model = 'claude-fable-5-1'  # An older Fable instead of the pinned one.
         if 'opus-before-init' in args:
             emit({'type': 'assistant', 'message': {'model': effective_model}})
         if "synthetic-org-preinit" not in args and "quota-preinit" not in args and "refusal-preinit" not in args:

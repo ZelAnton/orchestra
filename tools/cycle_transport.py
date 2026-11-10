@@ -896,7 +896,7 @@ class Transport:
                             or event.get("parent_tool_use_id") is not None):
                         raise Blocked("provider-profile", "Claude streamed refusal lacks the matching main session.")
                     answer_model = refusal["model"]
-                    if model == "opus" and isinstance(answer_model, str):
+                    if isinstance(answer_model, str):
                         answer_model = answer_model.removesuffix("[1m]")
                     if answer_model != resolved_model:
                         raise Blocked("model-rerouted", "Claude streamed refusal belongs to a different model.")
@@ -931,12 +931,13 @@ class Transport:
                             or any(name not in (("mcp__focus__inspect",) if role in PAIR_READONLY else ("Read", "Glob", "Grep")) for name in event["tools"])):
                         raise Blocked("provider-profile", "Claude inspection exposed a tool outside the pinned read-only set.")
                     actual_model = event.get("model")
+                    # The CLI can name the 1M context variant with [1m]. It is the same model, not a substitute.
                     valid_model = (isinstance(actual_model, str) and bool(re.fullmatch(r"claude-opus-\d+(?:-\d+)*(?:\[1m\])?", actual_model))
-                                   if model == "opus" else actual_model == model)
+                                   if model == "opus" else isinstance(actual_model, str) and actual_model.removesuffix("[1m]") == model)
                     if (event.get("session_id") != session or not valid_model
                             or event.get("permissionMode") != "bypassPermissions"):
                         raise Blocked("provider-profile", "Claude session/model does not match the pinned profile.")
-                    resolved = actual_model.removesuffix("[1m]") if model == "opus" else actual_model
+                    resolved = actual_model.removesuffix("[1m]")
                     if resolved_model is not None and resolved != resolved_model:
                         raise Blocked("model-rerouted", "Claude changed its resolved model during the invocation.")
                     resolved_model = resolved
@@ -972,7 +973,7 @@ class Transport:
                         raise Blocked("claude-api-error", f"Claude API error ({str(code)[:120]}): {detail[:2000]} "
                                       "Resolve the provider error, then resume this same phase; no review credit is granted.")
                     answer_model = message.get("model")
-                    if model == "opus" and isinstance(answer_model, str):
+                    if isinstance(answer_model, str):
                         answer_model = answer_model.removesuffix("[1m]")
                     if answer_model != (resolved_model if model == "opus" else model) or answer_model is None:
                         raise Blocked("model-rerouted", "Claude emitted an answer from a different model; refusing the result.")

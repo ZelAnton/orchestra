@@ -173,7 +173,7 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     profile = ""
     if active_role in PROFILES:
         _, model, effort = PROFILES[active_role]
-        model = {"claude-fable-5-1": "Fable 5.1", "opus": "Opus", "gpt-6.1-sol": "Sol 6.1",
+        model = {"claude-fable-5-2": "Fable 5.2", "opus": "Opus", "gpt-6.1-sol": "Sol 6.1",
                  "gpt-6-astra": "Astra", "gpt-5.6-luna": "Luna"}.get(model, model)
         profile = f" · {effort}" if active_role in (*REVIEW_ROLES, *FINAL_ROLES) else f" · {model}/{effort}"
     remaining = len(PHASES) - index - 1
