@@ -43,7 +43,7 @@ def prose(root):
         for node in ast.walk(tree):
             if names is None and isinstance(node, ast.Assign):
                 if any(isinstance(t, ast.Name) and t.id in {
-                        'PROMPTS', 'CONTRACT', 'PAIR_CONTRACT', 'CODE_IMPLEMENTATION_CONTRACT', 'COMMAND_EXECUTION_CONTRACT', 'WRITING_CONTRACT', 'EXECUTOR_ACCOUNTING_CONTRACT', 'DISCUSSION_CONSENSUS_CONTRACT',
+                        'PROMPTS', 'CONTRACT', 'PAIR_CONTRACT', 'CODE_IMPLEMENTATION_CONTRACT', 'COMMAND_EXECUTION_CONTRACT', 'WRITING_CONTRACT', 'EXECUTOR_ACCOUNTING_CONTRACT', 'DISCUSSION_CONSENSUS_CONTRACT', 'REPAIR_ASSIGNMENT_CONTRACT',
                         'PROJECT_BRIEF_RULE', 'BRIEF_CHANGE_CORRECTION', 'PROJECT_INSTRUCTIONS_RULE', 'PARALLEL_REPOSITORIES_RULE', 'REPORT_SCHEMA',
                         'READER_SEARCH_CONTRACT', 'COMPACTION_RULE', 'READER_COMPACTION_RULE'} for t in node.targets):
                     roots.append(node.value)

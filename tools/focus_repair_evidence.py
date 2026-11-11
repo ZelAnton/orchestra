@@ -16,6 +16,25 @@ from focus_pair_view import artifact, read_record
 from focus_snapshot_archive import SnapshotWriter, read_source
 
 
+def deferred_fixes(tasks, report):
+    """The fix assignments that a B/final fix invocation returned deferred, if no other outcome breaks the gate.
+
+    The fix invocation cannot build or test, so it cannot defer a fix. A report-only correction decides
+    these assignments again: fixed, or disputed for the readers and the arbiter. Other cases return [].
+    """
+    outcomes = {row["source_id"]: row["outcome"] for row in report["resolutions"]}
+    # A blocked report defers its work for another reason. Its retry runs the executor again.
+    if (report["status"] != "done" or set(outcomes) != {task["source_id"] for task in tasks}
+            or report["repair"]["tests"]["status"] != "deferred"):
+        return []
+    # The allowed outcomes of the fix step, as in accept_repair_result.
+    wrong = [task for task in tasks if outcomes[task["source_id"]] not in (
+        ("disputed", "deferred") if task["action"] == "verify" else ("fixed", "disputed"))]
+    if not wrong or any(task["action"] != "fix" or outcomes[task["source_id"]] != "deferred" for task in wrong):
+        return []
+    return [task["source_id"] for task in wrong]
+
+
 class RepairEvidence:
     @staticmethod
     def earlier_views(reader):
@@ -34,10 +53,11 @@ class RepairEvidence:
                 "assignments": assignment_key(gate["snapshot"], gate["accepted"] if gate["step"] == "test" else gate["tasks"])}
 
     def saved_repair_fix(self, pair):
-        """The intent of the last executor run of this fix step, when only a report-only correction can save its report.
+        """The intent of the last executor run of this fix step that a retry can continue.
 
-        After a stop on such a report, the step starts the correction again instead of a drift stop.
-        Any other saved result is not adopted, so a retry runs the executor again.
+        This is a run whose report only a report-only correction can save, a valid report with deferred fix
+        assignments, or an unfinished correction without its result. The step then starts or resumes the
+        correction instead of a drift stop. Any other saved result is not adopted, so a retry runs the executor again.
         """
         gate = pair["repair"]
         if gate["step"] != "fix" or self.state.get("pending"):
@@ -56,18 +76,41 @@ class RepairEvidence:
         if latest is None:
             return None
         intent, directory = latest
-        if (intent.get("report_repair") or intent.get("restart_reviews")
-                or intent.get("correction_revision") != self.state.get("correction_revision")):
-            return None  # A correction gets no second correction. An operator change runs the executor again.
+        reason = (intent.get("report_repair") or {}).get("reason")
+        if intent.get("restart_reviews") or intent.get("correction_revision") != self.state.get("correction_revision"):
+            return None  # An operator change runs the executor again.
         try:
+            if reason and not (directory / "result.json").exists():
+                # A correction that stopped before its result, for example on a provider failure, resumes against
+                # its unchanged source and files. Without this, the changed files would stop the retry as drift.
+                repair = intent["report_repair"]
+                unchanged = (digest(Path(repair["source"]).read_bytes()) == repair["sha256"]
+                             and self.snapshot(repair["after"]) == self.snapshot() and self.snapshot(intent["before"]) == gate["snapshot"])
+                return intent if unchanged else None
+            if reason == "deferred-fix":
+                return None  # Each completed correction runs once.
             result = json.loads((directory / "result.json").read_text(encoding="utf-8"))
             if self.snapshot(intent["before"]) != gate["snapshot"] or self.snapshot(result["after"]) != self.snapshot():
                 return None
             try:
-                parse_report(result["raw"], "repair_execute")
-                return None  # A valid report is not replayed. The retry runs the executor again.
+                report = parse_report(result["raw"], "repair_execute")
             except Blocked:
-                pass
+                report = None
+            if report is not None:
+                # A valid report replays only when its fix assignments wait for checks. The step then requests
+                # the report-only correction. Another valid report is not replayed, and the retry runs the executor.
+                # The corrected report of another correction can also replay, because a deferred-fix correction can follow it.
+                # A correction that invoke() rejected does not replay, so its retry runs the executor again.
+                if not deferred_fixes(gate["tasks"], report):
+                    return None
+                if reason:
+                    try:
+                        self.validate_executor_correction(intent, report)
+                    except Blocked:
+                        return None
+                return intent
+            if reason:
+                return None  # Another correction of a correction is not possible.
             # The same recognizers as in invoke(), in the same order.
             correctable = (repairable_executor_accounting(result["raw"], "repair_execute",
                                                           self.snapshot(result["before"]), self.snapshot(result["after"]))

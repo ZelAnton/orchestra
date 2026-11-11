@@ -44,7 +44,7 @@ PROVIDER_UNAVAILABLE_BLOCKERS = {"claude-transient", "codex-transient"}
 COUNTERS = ("implementation_fixes", "other_fixes", "minor_edits")
 # Report-only corrections in which an executor corrects its own report against frozen work.
 ACCOUNTING_REPAIRS = ("invocation-accounting", "substantial-accounting", "changed-file-accounting", "unchanged-accounting",
-                      "repair-mode", "report-enum")
+                      "repair-mode", "report-enum", "deferred-fix")
 PROVIDER_RETRY_DELAYS = (15, 30, 60)
 ESCALATION_REASONS = {
     "manual-action": "This action requires the operator; the recovery agent cannot supply consent or account access.",
@@ -605,6 +605,27 @@ class Cycle(PairedReview, FinalReview):
             ) + json.dumps({"source": str(source), "changed_paths": repair.get("changed_paths", []), "invalid": [
                 {"field": field_name(problem["path"]), "value": problem["value"], "allowed": problem["allowed"]}
                 for problem in problems], "original_report": original}, ensure_ascii=False))
+        if repair.get("reason") == "deferred-fix":
+            result = json.loads(source.read_text(encoding="utf-8"))
+            original, listed = self.deferred_fix_source(result["raw"])
+            if not listed or self.snapshot(result["after"]) != self.snapshot(repair["after"]):
+                raise Blocked("report-repair-source", "The original fix report no longer has the deferred fix assignments of the frozen correction.")
+            return ((
+                'REPORT-ONLY CORRECTION of the ORIGINAL repair invocation. This is not another execution or test run. '
+                'In a Pair B or final fix invocation, a fix assignment closes as fixed or disputed. This invocation '
+                'does not build or test. A separate test invocation runs the checks after two clean static passes. '
+                'The original report returned the listed fix assignments as deferred, so the runtime rejects it.\n\n'
+                'Decide again for each listed assignment. If the original invocation completed every part of the '
+                'assignment, return fixed. Otherwise, return disputed. A part that waits for check results is a valid '
+                'reason for disputed. In its resolution, name that part and propose how to split the assignment. The '
+                'repair readers and the arbiter decide again on a disputed assignment.\n\n'
+                'Change only the outcome and the resolution of the listed assignments, the summary, and the '
+                'description. Keep every other field exactly. This includes evidence, counters, substantial, and repair.\n\n'
+                'Do not run tools, tests, builds, or formatting. Do not edit files, journals, staging, or runtime '
+                'records. If you cannot correct the report accurately, return blocked. This call gives no extra '
+                'review credit. '
+            ) + json.dumps({"source": str(source), "deferred_fix_assignments": listed, "original_report": original},
+                           ensure_ascii=False))
         if repair.get("reason") == "repair-mode":
             result = json.loads(source.read_text(encoding="utf-8"))
             original = repairable_repair_mode(result["raw"], pending["role"])
@@ -642,6 +663,16 @@ class Cycle(PairedReview, FinalReview):
                     'report blocked. This invocation gives no additional review pass. '
                 )
             ) + json.dumps({k: v for k, v in repair.items() if k != "after"}, ensure_ascii=False))
+
+    def deferred_fix_source(self, raw):
+        """The original fix report and its fix assignments that returned deferred against the open repair gate."""
+        from focus_repair_evidence import deferred_fixes
+        try:
+            original = report_object(raw)
+            tasks = ((self.state.get("pair_review") or {}).get("repair") or {}).get("tasks") or []
+            return original, deferred_fixes(tasks, original)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None, []
 
     def executor_result_candidate(self, directory, intent):
         """Return saved result metadata, or the frozen source of an unfinished correction.
@@ -703,6 +734,24 @@ class Cycle(PairedReview, FinalReview):
                 raise Blocked("report-repair-content", "The original invocation changed files, so the corrected report needs at least one positive edit counter.")
             if not repair.get("changed_paths") and (report["substantial"] or any(report[k] for k in counters)):
                 raise Blocked("report-repair-content", "The original invocation changed no files, so every counter must be 0 and substantial must be false.")
+            return
+        if repair["reason"] == "deferred-fix":
+            listed = set(self.deferred_fix_source(json.loads(Path(repair["source"]).read_text(encoding="utf-8"))["raw"])[1])
+
+            def kept(value):
+                value = json.loads(json.dumps(value))
+                for row in value.get("resolutions", []):
+                    if isinstance(row, dict) and row.get("source_id") in listed:
+                        row.pop("outcome", None)
+                        row.pop("resolution", None)
+                value.pop("summary", None)
+                value.pop("description", None)
+                return value
+            if not listed or kept(original) != kept(report):
+                raise Blocked("report-repair-content", "A deferred-fix correction may change only the outcome and the "
+                              "resolution of the listed fix assignments, the summary, and the description.")
+            if any(row["outcome"] not in ("fixed", "disputed") for row in report["resolutions"] if row["source_id"] in listed):
+                raise Blocked("report-repair-content", "Each listed fix assignment needs the outcome fixed or disputed.")
             return
         if repair["reason"] == "repair-mode":
             # Unchanged work drops counters copied from its batch. Changed work with zero counters counts its changes.

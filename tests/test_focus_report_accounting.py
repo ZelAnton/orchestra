@@ -810,6 +810,279 @@ class ReportEnumTests(unittest.TestCase):
         self.assertEqual(pair['repair']['step'], 'review')
 
 
+
+class DeferredFixTests(unittest.TestCase):
+    """A B/final fix invocation returns a fix assignment deferred, as an assignment that waits for checks can ask."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'until', 'assign', 'writer', 'set_writer', 'step'):
+        locals()[_name] = getattr(repair_tests.RepairTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def deferred_fix(self, correction, mode='self'):
+        """The executor does the static part and defers the fix, as the assignment told it."""
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer(mode)
+        self.runs = []
+        def writer(c, h):
+            value = execute(c, h)
+            self.runs.append(c['operation'])
+            if c['operation'] == 'fix':
+                for row in value['resolutions']:
+                    row.update(outcome='deferred', resolution='Static part done. The check results come only from the test invocation.')
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport(correction)
+        return pair['repair']
+
+    def outcome(self, outcome, resolution='Static part done. Recording the check results needs the test invocation; split it.'):
+        return lambda value: dict(value, resolutions=[dict(row, outcome=outcome, resolution=resolution) for row in value['resolutions']])
+
+    def test_a_deferred_fix_is_disputed_by_one_correction_and_goes_to_the_readers(self):
+        gate = self.deferred_fix(self.outcome('disputed'))
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs, ['fix'])  # The correction does not run the executor again.
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-fix'])
+        prompt = self.corrections[0][1]
+        self.assertIn('a fix assignment closes as fixed or disputed', prompt)
+        self.assertIn('"deferred_fix_assignments": ["assigned"]', prompt)
+        self.assertIn('Do not run tools, tests, builds', prompt)
+        # A disputed repair needs independent readers, who decide again with the arbiter.
+        self.assertEqual((gate['mode'], gate['step']), ('pair', 'review'))
+        self.assertEqual(gate['resolutions']['assigned']['outcome'], 'disputed')
+
+    def test_a_fix_that_was_complete_continues_as_fixed_with_independent_readers(self):
+        gate = self.deferred_fix(self.outcome('fixed', 'Every part of the assignment is done.'))
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        # The executor deferred the fix first, so its own session does not review the claim.
+        self.assertEqual((gate['mode'], gate['step']), ('pair', 'review'))
+        self.assertEqual(gate['reason'], 'A corrected deferred fix requires independent reviewers')
+        self.assertEqual(gate['resolutions']['assigned']['outcome'], 'fixed')
+
+    def test_the_final_pair_and_a_pair_mode_report_get_the_same_correction(self):
+        for phase, mode in (('final', 'self'), ('pair_b', 'pair')):
+            with self.subTest(phase=phase, mode=mode):
+                self.tearDown()
+                self.setUp()
+                pair = self.assign(phase, 'low', False)
+                execute = self.set_writer(mode)
+                def writer(c, h):
+                    value = execute(c, h)
+                    if c['operation'] == 'fix':
+                        for row in value['resolutions']:
+                            row['outcome'] = 'deferred'
+                    return value
+                self.transport.handlers['repair_execute'] = writer
+                self.correction_transport(self.outcome('disputed'))
+                self.step()
+                self.assertIsNone(self.state['blocker'])
+                self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-fix'])
+                self.assertEqual((pair['repair']['mode'], pair['repair']['step']), ('pair', 'review'))
+
+    def test_a_correction_that_returns_blocked_uses_normal_recovery(self):
+        self.deferred_fix(lambda value: dict(value, status='blocked', summary='Cannot decide the outcome.'))
+        with self.assertRaises(Blocked) as caught:
+            self.step()
+        self.assertEqual(caught.exception.code, 'reported-blocker')
+        self.assertEqual(len(self.corrections), 1)
+
+    def test_the_fix_step_asks_for_fixed_or_disputed(self):
+        self.deferred_fix(self.outcome('disputed'))
+        prompts = []
+        normal = self.transport.run
+        def run(role, prompt, pending, directory):
+            if not pending.get('report_repair'):
+                prompts.append(prompt)
+            return normal(role, prompt, pending, directory)
+        self.transport.run = run
+        self.step()
+        self.assertIn('Return each fix assignment fixed or disputed. If a part of it waits for check results, '
+                      'return disputed and name that part.', prompts[0])
+
+    def test_the_correction_may_change_only_the_listed_outcomes_and_their_text(self):
+        changes = (lambda value: dict(self.outcome('disputed')(value), implementation_fixes=3),
+                   lambda value: dict(self.outcome('disputed')(value), resolutions=[
+                       dict(row, outcome='disputed', evidence=['Invented evidence']) for row in value['resolutions']]),
+                   lambda value: dict(self.outcome('disputed')(value), repair=dict(value['repair'], mode='pair')),
+                   self.outcome('deferred'))
+        for change in changes:
+            with self.subTest(change=change):
+                self.tearDown()
+                self.setUp()
+                self.deferred_fix(change)
+                with self.assertRaises(Blocked) as caught:
+                    self.step()
+                self.assertEqual(caught.exception.code, 'report-repair-content')
+                self.assertEqual(len(self.corrections), 1)
+
+    def test_a_deferred_fix_stopped_by_an_older_runtime_is_corrected_after_a_retry(self):
+        gate = self.deferred_fix(self.outcome('disputed'))
+        with patch('focus_pair_repair.deferred_fixes', return_value=[]):  # The runtime that stopped the live campaign.
+            with self.assertRaises(Blocked) as caught:
+                self.step()
+        self.assertEqual(caught.exception.code, 'repair-closure')
+        self.cycle.handle_block(caught.exception)
+        # cc-focus --retry clears the blocker. The step adopts the saved run instead of running the executor again.
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs, ['fix'])
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-fix'])
+        self.assertEqual((gate['mode'], gate['step']), ('pair', 'review'))
+
+    def test_a_blocked_report_with_deferred_fixes_runs_the_executor_again_after_a_retry(self):
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer('self')
+        runs = []
+        def writer(c, h):
+            runs.append(c['operation'])
+            if len(runs) == 1:  # The first run meets an obstacle, changes nothing, and defers its fix.
+                value = self.writer(c, 'self')
+                for row in value['resolutions']:
+                    row['outcome'] = 'deferred'
+                return dict(value, status='blocked')
+            return execute(c, h)
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport()
+        with self.assertRaises(Blocked) as caught:
+            self.step()
+        self.assertEqual(caught.exception.code, 'reported-blocker')
+        self.cycle.handle_block(caught.exception)
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.assertIsNone(self.cycle.saved_repair_fix(pair))  # A blocked report is not replayed.
+        self.step()
+        self.assertEqual(runs, ['fix', 'fix'])
+        self.assertEqual(self.corrections, [])
+        self.assertEqual(pair['repair']['step'], 'review')
+
+    def chained(self):
+        """A fix that defers its assignment and also lists a risk in self mode: two report-only corrections."""
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer('self')
+        self.runs = []
+        def writer(c, h):
+            value = execute(c, h)
+            self.runs.append(c['operation'])
+            if c['operation'] == 'fix':
+                value['repair']['risks'] = ['contracts']  # Self mode with a risk needs a repair-mode correction.
+                for row in value['resolutions']:
+                    row['outcome'] = 'deferred'
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        def correction(value):
+            if self.corrections[-1][2]['report_repair']['reason'] == 'repair-mode':
+                return dict(value, repair=dict(value['repair'], mode='pair', reason='Contract change'))
+            return self.outcome('disputed')(value)
+        self.correction_transport(correction)
+        return pair['repair']
+
+    def test_a_deferred_fix_correction_follows_another_report_correction(self):
+        gate = self.chained()
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs, ['fix'])
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode', 'deferred-fix'])
+        self.assertEqual((gate['mode'], gate['step']), ('pair', 'review'))
+        self.assertEqual(gate['resolutions']['assigned']['outcome'], 'disputed')
+
+    def test_a_chained_stop_by_an_older_runtime_is_corrected_after_a_retry(self):
+        gate = self.chained()
+        with patch('focus_pair_repair.deferred_fixes', return_value=[]):  # The older runtime stops after repair-mode.
+            with self.assertRaises(Blocked) as caught:
+                self.step()
+        self.assertEqual(caught.exception.code, 'repair-closure')
+        self.cycle.handle_block(caught.exception)
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.step()
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs, ['fix'])
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['repair-mode', 'deferred-fix'])
+        self.assertEqual((gate['mode'], gate['step']), ('pair', 'review'))
+
+    def test_a_rejected_earlier_correction_does_not_replay_after_a_retry(self):
+        pair = self.assign('pair_b', 'low', False)
+        execute = self.set_writer('self')
+        runs = []
+        def writer(c, h):
+            runs.append(c['operation'])
+            if len(runs) == 1:  # No edits, a copied substantial flag, and a deferred fix.
+                value = self.writer(c, 'self', substantial=True)
+                for row in value['resolutions']:
+                    row['outcome'] = 'deferred'
+                return value
+            return execute(c, h)
+        self.transport.handlers['repair_execute'] = writer
+        # The invocation-accounting correction changes evidence, which the runtime rejects.
+        self.correction_transport(lambda value: dict(value, resolutions=[
+            dict(row, evidence=['Invented evidence']) for row in value['resolutions']]))
+        with self.assertRaises(Blocked) as caught:
+            self.step()
+        self.assertEqual(caught.exception.code, 'report-repair-content')
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['invocation-accounting'])
+        self.cycle.handle_block(caught.exception)
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.assertIsNone(self.cycle.saved_repair_fix(pair))
+        self.step()
+        self.assertEqual(runs, ['fix', 'fix'])  # The retry runs the executor again.
+        self.assertEqual(pair['repair']['step'], 'review')
+
+    def test_a_correction_that_stopped_before_its_result_resumes_after_a_retry(self):
+        failures = []
+        def correction(value):
+            if not failures:  # The provider fails once during the correction.
+                failures.append(1)
+                raise Blocked('claude-transient', 'Provider failed during the correction.')
+            return self.outcome('disputed')(value)
+        gate = self.deferred_fix(correction)
+        with self.assertRaises(Blocked) as caught:
+            self.step()
+        self.assertEqual(caught.exception.code, 'claude-transient')
+        self.cycle.handle_block(caught.exception)
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.step()  # The unfinished correction resumes; the changed files do not stop it as drift.
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs, ['fix'])
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-fix', 'deferred-fix'])
+        self.assertEqual(self.corrections[0][2]['id'], self.corrections[1][2]['id'])  # The same correction.
+        self.assertEqual((gate['mode'], gate['step']), ('pair', 'review'))
+
+    def test_other_closure_problems_still_stop_without_a_correction(self):
+        from focus_repair_evidence import deferred_fixes
+        tasks = [{'source_id': 'f', 'action': 'fix'}, {'source_id': 'v', 'action': 'verify'}]
+        def value(fix, verify, status='deferred', report_status='done'):
+            return {'status': report_status, 'resolutions': [{'source_id': 'f', 'outcome': fix}, {'source_id': 'v', 'outcome': verify}],
+                    'repair': {'tests': {'status': status}}}
+        self.assertEqual(deferred_fixes(tasks, value('deferred', 'deferred')), ['f'])
+        for fix, verify, status in (('fixed', 'deferred', 'deferred'), ('deferred', 'verified', 'deferred'),
+                                    ('deferred', 'deferred', 'passed'), ('done', 'deferred', 'deferred')):
+            with self.subTest(fix=fix, verify=verify, status=status):
+                self.assertEqual(deferred_fixes(tasks, value(fix, verify, status)), [])
+        self.assertEqual(deferred_fixes(tasks[:1], value('deferred', 'deferred')), [])  # An extra resolution.
+        self.assertEqual(deferred_fixes(tasks, value('deferred', 'deferred', report_status='blocked')), [])
+        # A verified outcome in the fix step is another problem: the runtime stops without a correction.
+        pair = self.assign('pair_b', 'low', False, action='verify')
+        execute = self.set_writer('self')
+        def writer(c, h):
+            value = execute(c, h)
+            for row in value['resolutions']:
+                row['outcome'] = 'verified'
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport()
+        with self.assertRaises(Blocked) as caught:
+            self.step()
+        self.assertEqual(caught.exception.code, 'repair-closure')
+        self.assertEqual(self.corrections, [])
+
+    def test_only_the_authors_of_repair_assignments_get_the_rule(self):
+        from cycle_prompts import REPAIR_ASSIGNMENT_CONTRACT
+        from focus_pair_profile import PAIR_DISCUSSERS
+        for role in PROFILES:
+            with self.subTest(role=role):
+                self.assertEqual(REPAIR_ASSIGNMENT_CONTRACT in role_contract(role), role in PAIR_DISCUSSERS or role == 'pair_arbiter')
+        self.assertNotIn(REPAIR_ASSIGNMENT_CONTRACT, PAIR_CONTRACT)  # Saved pair prompts keep their contract.
+        self.assertIn('In a fix assignment, do not tell the executor to wait for check results or to return deferred.', REPAIR_ASSIGNMENT_CONTRACT)
+
 class ReportEnumCounterTests(unittest.TestCase):
     """A value correction also fixes the counters of a test run, as the repair-mode correction does."""
     for _name in ('setUp', 'tearDown', 'edit', 'start', 'assign', 'until', 'step', 'resolution', 'result'):

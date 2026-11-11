@@ -649,6 +649,16 @@ Use search to find a name, a requirement ID, or a heading. Then read only the li
 Do not read a large file from its start to find one place.
 Read each instruction file once in one conversation. Read it again only after a compaction."""
 
+# Pair discussers and the arbiter write the repair assignments. A B/final fix invocation cannot wait for checks.
+REPAIR_ASSIGNMENT_CONTRACT = """
+Repair assignments in Pair B and the final pair:
+The fix invocation of the inner repair gate does not build or test.
+A separate test invocation runs the checks after two clean static passes. It reports their results in JSON.
+
+Write each fix assignment so that the fix invocation can complete it without check results.
+Name the checks of a fix assignment in its check field. The test invocation runs them.
+In a fix assignment, do not tell the executor to wait for check results or to return deferred."""
+
 DISCUSSION_CONSENSUS_CONTRACT = """Discussion consensus field:
 To endorse the supplied proposal, copy the proposal_hash value from the runtime assignment into consensus.
 The consensus value is only these 64 hexadecimal characters.
@@ -731,6 +741,8 @@ def role_contract(role):
     if role in PAIR_DISCUSSERS:
         # Saved discussion prompts embed PAIR_CONTRACT, so the exact consensus format is added here.
         contract += DISCUSSION_CONSENSUS_CONTRACT
+    if role in PAIR_DISCUSSERS or role == "pair_arbiter":
+        contract += REPAIR_ASSIGNMENT_CONTRACT
     if role in PAIR_READONLY:
         contract += READER_SEARCH_CONTRACT
     # Observed Claude coding runs with this block ended in reasoning_extraction

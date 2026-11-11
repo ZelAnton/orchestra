@@ -10,7 +10,7 @@ from cycle_prompts import PAIR_CONTRACT, PROFILES
 from focus_pair_protocol import validate_decisions
 from focus_pair_profile import significant
 from focus_pair_view import artifact, materialize, read_record
-from focus_repair_evidence import RepairEvidence
+from focus_repair_evidence import RepairEvidence, deferred_fixes
 
 
 # A test invocation makes no patch. It reports only the risks that its checks expose.
@@ -141,10 +141,11 @@ class RepairReview(RepairEvidence):
                              if testing else (
                                  'Correct only the supplied assignments. Do NOT build or run tests in this invocation. '
                                  'Return tests.status=deferred. Mark verify assignments deferred with the exact planned'
-                                 ' check. Select self or pair from actual patch risk, separately from finding severity.'
-                                 ' Contracts, storage, security, concurrency, cross-component effects, algorithms, or '
-                                 'uncertainty require pair.\n\nThe runtime can keep a stricter mode. Do not review your '
-                                 'corrections in this writing invocation.'
+                                 ' check.\n\nReturn each fix assignment fixed or disputed. If a part of it waits for check '
+                                 'results, return disputed and name that part.\n\nSelect self or pair from actual patch '
+                                 'risk, separately from finding severity. Contracts, storage, security, concurrency, '
+                                 'cross-component effects, algorithms, or uncertainty require pair. The runtime can keep '
+                                 'a stricter mode. Do not review your corrections in this writing invocation.'
                              ))},
             ensure_ascii=False, sort_keys=True)
 
@@ -246,6 +247,19 @@ class RepairReview(RepairEvidence):
             return
         self.accept_repair_result(pair, report, before, after, testing, (self.state.get("pending") or {}).get("id"))
 
+    def correct_deferred_fixes(self, pair, pending):
+        """Request one report-only correction of a fix report with deferred fix assignments, then accept its result."""
+        path = self.store.directory / "invocations" / pending["id"] / "result.json"
+        result = json.loads(path.read_text(encoding="utf-8"))
+        self.check_protected(self.snapshot(result["after"]))
+        report, before, after, _ = self.begin_report_repair("repair_execute", pending, result, path, "deferred-fix")
+        if (self.state.get("pending") or {}).get("restart_reviews"):
+            self.reset_reviews("Оператор изменил задание исполнителю; пары проверяются заново")
+            self.state.update(pending=None, last_snapshot=after)
+            self.save()
+            return
+        self.accept_repair_result(pair, report, before, after, False, (self.state.get("pending") or {}).get("id"))
+
     def accept_repair_result(self, pair, report, before, after, testing, invocation, evidence_approval=None):
         gate = pair["repair"]
         tasks = gate["accepted"] if testing else gate["tasks"]
@@ -276,6 +290,14 @@ class RepairReview(RepairEvidence):
             if not testing and task["action"] == "verify":
                 allowed.discard("verified")
             if outcome not in allowed:
+                pending = self.state.get("pending") or {}
+                if (not testing and not evidence_approval and deferred_fixes(tasks, report) and pending.get("id") == invocation
+                        and pending.get("role") == "repair_execute"
+                        and (pending.get("report_repair") or {}).get("reason") != "deferred-fix"):
+                    # The executor followed an assignment that waits for checks. It decides these outcomes again.
+                    # Another report-only correction keeps the outcomes, so this correction can follow it once.
+                    self.correct_deferred_fixes(pair, pending)
+                    return
                 raise Blocked("repair-closure", "Resolution contradicts the fix/verification assignment or the current gate.")
         if testing and tests["status"] in ("passed", "not_needed") and any(r["outcome"] in ("disputed", "deferred") for r in resolutions.values()):
             raise Blocked("repair-closure", "Successful test completion cannot leave unresolved assignments.")
@@ -288,8 +310,13 @@ class RepairReview(RepairEvidence):
                            "evidence_approval": evidence_approval, "accepted_resolutions": list(resolutions.values())})
         gate["executions"].append(record)
         gate["choices"].append({"mode": repair["mode"], "reason": repair["reason"], "risks": repair["risks"], "report": record})
-        if repair["mode"] == "pair" or report["substantial"] or any(r["outcome"] == "disputed" for r in resolutions.values()):
-            gate.update(mode="pair", reason=repair["reason"] if repair["mode"] == "pair" else "Substantial or disputed repair requires independent reviewers")
+        # A fix that the executor deferred and then decided again gets independent readers, not a self-review in its session.
+        corrected = (self.state.get("pending") or {}).get("report_repair", {}).get("reason") == "deferred-fix"
+        if (repair["mode"] == "pair" or report["substantial"] or corrected
+                or any(r["outcome"] == "disputed" for r in resolutions.values())):
+            gate.update(mode="pair", reason=repair["reason"] if repair["mode"] == "pair" else
+                        "A corrected deferred fix requires independent reviewers" if corrected else
+                        "Substantial or disputed repair requires independent reviewers")
         elif gate["mode"] == "self":
             gate["reason"] = repair["reason"]
         gate["resolutions"].update(resolutions)

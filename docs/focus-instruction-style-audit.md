@@ -1035,3 +1035,77 @@ The seven unchecked rules count as failures.
 This is an internal assessment, not certification.
 
 The change keeps roles, models, efforts, review targets, and CI requirements.
+
+
+## Deferred fix correction addendum
+
+Assessment date: 2026-11-11.
+The scope covers `REPAIR_ASSIGNMENT_CONTRACT` in `tools/cycle_prompts.py` and the `deferred-fix` correction prompt in `tools/cycle_workflow.py`.
+It also covers the new fixed-or-disputed paragraph of the fix-step instruction in `tools/focus_pair_repair.py`.
+It also covers the new paragraphs in `docs/sequential-cycle.md` and `knowledge.md`.
+`tools/check_focus_instructions.py` scans the new provider text and reports 0 findings.
+
+A script count found at most 25 words in each new description and at most 20 words in each new instruction.
+Each new paragraph has at most six sentences. The new text has no semicolons and no contractions.
+
+| Rule | Result | Evidence or limitation |
+| --- | --- | --- |
+| 1.1 | Unchecked | A full dictionary check of every ordinary word remains incomplete. |
+| 1.2 | Unchecked | Every word occurrence has not been checked against its approved part of speech. |
+| 1.3 | Unchecked | Every occurrence has not been checked against its approved dictionary meaning. |
+| 1.4 | Unchecked | A complete check of approved inflections remains incomplete. |
+| 1.5 | Satisfied | Technical nouns name the fix assignment, the fix invocation, the test invocation, and the correction. |
+| 1.6 | Unchecked | Nonapproved ordinary words have not all been separated from permitted technical nouns. |
+| 1.7 | Satisfied | Technical nouns keep noun use. Tool names, paths, and variables stay unchanged. |
+| 1.8 | Satisfied | Fix assignment, verify assignment, and report-only correction keep one meaning in the prompts and the documentation. |
+| 1.9 | Satisfied | Short terms name the concepts: fixed, disputed, deferred, check results. |
+| 1.10 | Satisfied | The text has no regional variants, slang, or informal labels. |
+| 1.11 | Satisfied | Fixed, disputed, and deferred have distinct meanings. |
+| 1.12 | Satisfied | Build, test, and split describe software operations. |
+| 1.13 | Satisfied | Operation nouns keep established software meanings. |
+| 1.14 | Satisfied | The prose uses US forms. Exact names stay unchanged. |
+| 2.1 | Satisfied | Noun groups stay short. Code, paths, and tool names count as one unit. |
+| 2.2 | Satisfied | Longer concepts use prepositions, for example "the outcome and the resolution of the listed assignments". |
+| 3.1 | Unchecked | Every verb inflection has not been checked against the dictionary. |
+| 3.2 | Satisfied | Instructions use imperatives. Descriptions use the simple present. |
+| 3.3 | Satisfied | Past participles such as listed and corrected modify nouns. |
+| 3.4 | Satisfied | The text has no complex chains of auxiliary verbs. |
+| 3.5 | Satisfied | The new prose has no -ing verb forms. |
+| 3.6 | Satisfied | The text names the actor, for example "The repair readers and the arbiter decide again". |
+| 3.7 | Satisfied | The text uses direct verbs such as return, name, and split. |
+| 4.1 | Satisfied | Long rules become short sentences, and their conditions stay complete. |
+| 4.2 | Satisfied | The text keeps articles and necessary words. It has no contractions. |
+| 4.3 | Satisfied | The text separates the correction rule from the assignment rule. |
+| 4.4 | Satisfied | Then and so connect related steps. |
+| 4.5 | Satisfied | Articles and demonstratives identify the assignment, the invocation, and the report. |
+| 5.1 | Satisfied | Each new instruction sentence has at most 20 words. |
+| 5.2 | Satisfied | Each instruction sentence gives one action, or one action and its target. |
+| 5.3 | Satisfied | The role contract uses direct commands. Descriptions stay separate from commands. |
+| 5.4 | Satisfied | Conditions come first, for example "If you cannot correct the report accurately". |
+| 5.5 | Satisfied | Reference facts are separate from commands. The tool description contains no hidden action. |
+| 6.1 | Satisfied | The documentation gives the gate rule, then the correction, then the retry. |
+| 6.2 | Satisfied | Repeated terms connect the fix assignment, the correction, and the readers. |
+| 6.3 | Satisfied | Each new description sentence has at most 25 words. |
+| 6.4 | Satisfied | Paragraphs group the gate rule, the correction, and the retry. |
+| 6.5 | Satisfied | Each paragraph has one subject. |
+| 6.6 | Satisfied | Each new or changed paragraph has at most six sentences. |
+| 7.1 | Not applicable | The text has software workflow rules, with no physical hazard. |
+| 7.2 | Not applicable | The text has no safety warning. |
+| 7.3 | Not applicable | No physical hazard needs a consequence statement. |
+| 8.1 | Satisfied | The new text has no semicolons. |
+| 8.2 | Satisfied | Hyphens join report-only. |
+| 8.3 | Satisfied | Parentheses contain no hidden instructions. |
+| 8.4 | Satisfied | A colon introduces the heading of the role contract rule. |
+| 8.5 | Satisfied | The counter treats code spans as units. |
+| 8.6 | Satisfied | Machine literals such as `deferred-fix` and `deferred_fix_assignments` stay exact. |
+| 8.7 | Satisfied | The counter treats hyphenated forms as one word. |
+| 9.1 | Satisfied | The change has its own semantic review and design review. |
+| 9.2 | Unchecked | A complete lexical and meaning audit remains incomplete. |
+| 9.3 | Satisfied | The text uses direct verbs, for example "return" and "decide", instead of phrasal verbs. |
+| 9.4 | Satisfied | The correction prompt, the role contract, and the documentation use the same terms. |
+
+The assessment of this scope is **43 satisfied rules / 50 applicable rules = 86 percent**.
+The seven unchecked rules count as failures.
+This is an internal assessment, not certification.
+
+The change keeps roles, models, efforts, review targets, and CI requirements.

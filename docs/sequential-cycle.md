@@ -1341,6 +1341,22 @@ The correction cannot change pair to self. The counters follow the rules of the 
 A fix step can stop on such a report, for example in an older runtime. The retry then adopts the saved fix run and starts the correction.
 The retry adopts only a saved run whose report a correction can save. Another saved report does not replay, so the executor runs again.
 
+A B/final fix step does not build or test, so it accepts only fixed or disputed for a fix assignment.
+An assignment can still ask the executor to defer a fix, for example until check results exist.
+Then the report gets one report-only correction in the same session, not a stop.
+
+The executor returns fixed only if it completed every part of the assignment. Otherwise it returns disputed and names the part that waits.
+A corrected report always gets independent repair readers. If they do not agree, the arbiter decides. The readers or the arbiter can split the assignment.
+The correction can change only the outcome and the resolution text of the listed assignments, the summary, and the description.
+
+A fix step that stopped on such a report retries the same way. The retry adopts the saved fix run and starts the correction.
+A saved report with the status blocked does not replay, so the retry runs the executor again.
+A correction that stopped before its result, for example on a provider failure, resumes after a retry.
+If another report-only correction came first, the deferred-fix correction follows it once.
+
+The fix step tells the executor to return fixed or disputed for each fix assignment, so the executor seldom needs this correction.
+Discussion roles and the arbiter also get a role contract rule. In Pair B and the final pair, a fix assignment must not wait for check results.
+
 All three pairs use the same exit rule. A finding is **significant** when it blocks
 publication or has critical/high/medium severity; only low, nonblocking findings
 are minor. After significant findings are fixed or verified, the SAME pair performs

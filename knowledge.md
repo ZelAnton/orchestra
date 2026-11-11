@@ -788,6 +788,14 @@ replay a saved test run, and its successful checks do not run again. Test invoca
 `valid_choice` searches a few choices of allowed values, item removals, and both repair modes. `repairable_enum` starts a `report-enum` correction.
 `enum_fields` names what the correction can change, and `validate_executor_correction` checks it. `saved_repair_fix` lets a retried fix step adopt such a saved run.
 
+`deferred_fixes` in `focus_repair_evidence.py` names the fix assignments that a B/final fix report returned deferred, when nothing else breaks the gate.
+`accept_repair_result` then calls `correct_deferred_fixes`, which starts one `deferred-fix` correction, also after another correction. The executor returns fixed or disputed.
+A corrected report sets the gate to pair mode. `deferred_fixes` needs status done, so a blocked report does not replay.
+
+`validate_executor_correction` allows only the outcome and resolution of those assignments, summary, and description to change. `saved_repair_fix` also adopts such a valid saved report.
+`saved_repair_fix` also resumes a correction without `result.json` when its source and files are unchanged.
+`cycle_prompts.REPAIR_ASSIGNMENT_CONTRACT` tells discussion roles and the arbiter that a B/final fix assignment must not wait for check results.
+
 `cycle_prompts.DISCUSSION_CONSENSUS_CONTRACT` gives discussion roles the exact `consensus` format.
 Both Claude and Codex discussion readers put prose around the hash. The old rule said "name the hash".
 The parser does not check the format of `consensus`. `pair_inspection_step` rejects a wrong value after both readers finish.
