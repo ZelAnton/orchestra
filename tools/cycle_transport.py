@@ -1,7 +1,9 @@
 """Serial CLI transports. Codex approvals are answered only by the operator."""
 
+import atexit
 from collections import deque
 import contextlib
+import getpass
 import io
 import json
 import os
@@ -10,11 +12,14 @@ import queue
 import re
 import signal
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
+import weakref
 
 from cycle_prompts import (CLAUDE_COMPACT_WINDOW, COMPACTION_RULE, CONTRACT, PAIR_CONTRACT, PROFILES, READER_COMPACTION_RULE,
                            REPORT_SCHEMA, READONLY_REVIEW_ROLES, role_contract)
@@ -22,7 +27,7 @@ from focus_pair_profile import PAIR_ROLES, PAIR_READONLY, PAIR_WRITERS
 from focus_pair_view import ViewInspector
 from focus_review import report_schema, validate_findings
 from focus_readonly import Inspector, READ_TOOL, READONLY_FEATURE_OVERRIDES, VIEW_TOOL
-from cycle_state import Blocked, ProviderQuota, ProviderTransient, atomic_write, digest, encode
+from cycle_state import QUOTA_PROBE_PERIOD, Blocked, ProviderQuota, ProviderTransient, atomic_write, digest, encode
 from focus_messages import MessagePending, message_text
 from focus_diagnostics import ClaudeTrace, instruction_files
 
@@ -572,6 +577,162 @@ class LoginWatch:
         if self.checked is None or now - self.checked >= self.PERIOD:
             self.checked, self.current = now, claude_account()
         return self.current is not None and self.current != saved
+
+
+QUOTA_PROBE_PROMPT = "Reply with the single word OK."
+
+
+def probe_outcome(lines):
+    """The result of a quota check stream: answered, refused or failed.
+
+    A successful result decides, as in a real launch. A paid answer from extra usage can follow a rejected window event.
+    """
+    result, rejected = None, False
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        info = event.get("rate_limit_info")
+        if event.get("type") == "rate_limit_event" and isinstance(info, dict) and info.get("status") == "rejected":
+            rejected = True
+        if event.get("type") == "result":
+            result = event
+    if result and result.get("subtype") == "success" and result.get("is_error") is False:
+        return "answered"
+    if rejected or (result or {}).get("api_error_status") == 429:
+        return "refused"
+    return "failed"
+
+
+def probe_folder():
+    """A fixed empty folder for quota checks, so that the CLI does not record a new project for each check."""
+    try:
+        user = getpass.getuser()
+    except (KeyError, OSError, ImportError):
+        user = "user"
+    folder = Path(tempfile.gettempdir()) / f"focus-quota-probe-{re.sub(r'[^A-Za-z0-9_.-]', '_', user)}"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = folder.lstat()
+    # A shared temp folder can hold a link or a folder of another user. The check then fails and reports it.
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+            or hasattr(os, "getuid") and info.st_uid != os.getuid()):
+        raise OSError(f"{folder} is not a private folder of this user")
+    return folder
+
+
+_PROBES = weakref.WeakSet()
+
+
+@atexit.register
+def _close_probes():
+    for probe in list(_PROBES):
+        probe.close()
+
+
+class QuotaProbe:
+    """Ask Claude for a minimal answer during a quota wait, so that a quota reset of the same login retries at once.
+
+    A check of a model starts at most every PERIOD seconds, and a waiter asks for one PERIOD seconds after its wait starts.
+    It runs in a fixed empty folder with no tools, settings, MCP servers or saved session.
+    A refused check uses no quota. An answered check uses a few tokens.
+    After each early retry of one waiter, the next early retry of it waits twice as long, up to 2**BACKOFF_LIMIT periods.
+    """
+    PERIOD = QUOTA_PROBE_PERIOD
+    TIMEOUT = 120
+    ANSWER_AGE = 120  # An answer is valid for waiters that check within this time after it.
+    BACKOFF_LIMIT = 6
+
+    def __init__(self, command):
+        self.command = command  # A callable that gives the claude command of the transport, or None.
+        self.lock = threading.Lock()
+        self.started, self.running, self.answers, self.outcome = {}, {}, {}, {}
+        self.first, self.seen, self.retried = {}, {}, {}
+        _PROBES.add(self)
+
+    def answered(self, model, waiter, wait, ready=lambda: True):
+        """True one time when a check that started during this wait got an answer. Start a check when one is due.
+
+        waiter names the invocation or the participant, and wait names its current wait. ready() tells if a retry can start.
+        """
+        command = self.command() if callable(self.command) else self.command
+        if not command:
+            return False
+        with self.lock:
+            now = time.monotonic()
+            self.collect(model)
+            first = self.first.setdefault((waiter, wait), now)
+            last = self.retried.get(waiter)
+            if last and now - last[0] < self.PERIOD * 2 ** min(last[1], self.BACKOFF_LIMIT):
+                return False  # An early retry of this waiter came back to a wait. Back off.
+            answer = self.answers.get(model)
+            if (answer and answer[0] >= first and now - answer[1] < self.ANSWER_AGE
+                    and self.seen.get(waiter) != answer and ready()):
+                self.seen[waiter] = answer
+                self.retried[waiter] = (now, last[1] + 1 if last else 1)
+                return True
+            if (model not in self.running and now - first >= self.PERIOD
+                    and now - self.started.get(model, -self.PERIOD) >= self.PERIOD and ready()):
+                self.started[model] = now
+                entry = {"started": now, "process": None, "result": None}
+                entry["thread"] = threading.Thread(target=self.run, args=(list(command), model, entry), daemon=True,
+                                                   name="focus-quota-probe")
+                self.running[model] = entry
+                entry["thread"].start()
+            return False
+
+    def collect(self, model):
+        entry = self.running.get(model)
+        if not entry or entry["thread"].is_alive():
+            return
+        del self.running[model]
+        status, detail, finished = entry["result"] or ("failed", "no result", time.monotonic())
+        if status == "failed" and (self.outcome.get(model) or ("",))[0] != "failed":
+            from focus_output import terminal_text
+            print(terminal_text(f"cc-focus: the Claude quota check of {model} failed ({detail}). The wait keeps its deadline."),
+                  flush=True)
+        self.outcome[model] = (status, detail)
+        if status == "answered":
+            self.answers[model] = (entry["started"], finished)
+
+    def last_outcome(self, model):
+        with self.lock:
+            return (self.outcome.get(model) or (None,))[0]
+
+    def run(self, command, model, entry):
+        status, detail = "failed", ""
+        try:
+            argv = [shutil.which(command[0]) or command[0], *command[1:],
+                    "--model", model, "--effort", "low", "--print", "--verbose", "--output-format", "stream-json",
+                    "--no-session-persistence", "--tools", "", "--strict-mcp-config", "--mcp-config",
+                    '{"mcpServers":{}}', "--setting-sources", "", "--disable-slash-commands",
+                    "--system-prompt", QUOTA_PROBE_PROMPT]
+            process = subprocess.Popen(argv, cwd=probe_folder(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+            entry["process"] = process
+            try:
+                output, errors = process.communicate(QUOTA_PROBE_PROMPT, timeout=self.TIMEOUT)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+                detail = f"no answer in {self.TIMEOUT} s"
+            else:
+                status = probe_outcome(output.splitlines())
+                if status == "failed":
+                    lines = [line for line in errors.splitlines() if line.strip()]
+                    detail = f"exit code {process.returncode}" + (": " + lines[-1][:200] if lines else "")
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            detail = f"{type(error).__name__}: {str(error)[:200]}"
+        entry["result"] = (status, detail, time.monotonic())
+
+    def close(self):
+        """Stop the checks that still run, for example when the runtime stops."""
+        for entry in list(self.running.values()):
+            process = entry.get("process")
+            if process and process.poll() is None:
+                process.kill()
 
 
 PROMPT_MARKERS = ("Runtime context:", "Runtime assignment:", "Executor assignment:", "Report schema:")

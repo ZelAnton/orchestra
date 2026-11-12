@@ -5,6 +5,7 @@ from pathlib import Path
 import time
 
 from cycle_prompts import PROFILES, REVIEW_ROLES, REVIEW_TARGETS, review_target, FINAL_ROLES
+from cycle_state import QUOTA_PROBE_PERIOD
 from focus_output import terminal_text
 
 
@@ -273,7 +274,8 @@ def build_panel(state, live=None, paused=False, approval=False, notice="", stop=
     elif quota:
         retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
         login = "смена логина — повтор сразу" if quota.get("account") else "после смены логина — /resume"
-        activity = f"Claude · повтор {retry} · через {duration(quota['retry_at'] - time.time())} · автоматически · {login} · модель не запущена"
+        activity = (f"Claude · повтор {retry} · через {duration(quota['retry_at'] - time.time())} · автоматически · {login} · "
+                    f"проверка квоты каждые {QUOTA_PROBE_PERIOD // 60} мин · модель не запущена")
     elif transient:
         activity = (f"{transient.get('provider', 'Claude')} · серверная ошибка · повтор {transient['attempt']}/{transient['limit']} "
                     f"через {duration(transient['retry_at'] - time.time())} · автоматически · модель не запущена")

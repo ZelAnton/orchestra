@@ -431,6 +431,8 @@ def main(argv=None, interaction=None, review_request=None):
                     focus_brief.report_apply(store, {"iteration": state["iteration"], "sha256": applied})
                 raise
             finally:
+                if saves.get("cycle"):
+                    saves["cycle"].quota_probe.close()  # A quota check does not outlive a stop of the runtime.
                 delivery.close_target()
                 try:
                     progress.note(f"Runtime exited with code {exit_code}; phase={state['phase']} status={state['status']}.")

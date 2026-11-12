@@ -23,6 +23,10 @@ class Blocked(RuntimeError):
         self.code = code
 
 
+# A quota wait checks the Claude quota every QUOTA_PROBE_PERIOD seconds. The panel names this period.
+QUOTA_PROBE_PERIOD = 900
+
+
 class ProviderQuota(Blocked):
     """A protocol-confirmed refusal with a server-advertised reset, not a report."""
     def __init__(self, resets_at, no_work=False, account=None):

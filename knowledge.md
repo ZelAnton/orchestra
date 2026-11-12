@@ -912,7 +912,18 @@ The file is in `CLAUDE_CONFIG_DIR` when it is set, else in the home directory.
 `defer_quota` stores the hash as `quota_wait.account`, and a pair job stores it as `wait_account`.
 
 `Cycle.login_watch` reads the login at most every `LoginWatch.PERIOD` seconds. A changed login moves `retry_at` to now, unless messages are unresolved.
-Older waits and API-key logins have no account, so they keep their deadline. `tests/test_focus_quota_login.py` covers this.
+Older waits and API-key logins have no account, so a login change does not end their wait. `tests/test_focus_quota_login.py` covers this.
+
+`Cycle.quota_probe` (`QuotaProbe` in `cycle_transport.py`) finds a quota reset that keeps the login.
+Every `QUOTA_PROBE_PERIOD` seconds of a wait, it runs `claude --print` with the model of the role that waits.
+It uses the fixed folder of `probe_folder`, without tools, settings, MCP servers or session persistence.
+It runs in a thread, so the wait keeps its stop, pause and lease checks. `cc_focus.main` closes it when the runtime stops.
+
+`probe_outcome` lets the result decide, as a real launch does. An answer after a `rejected` event comes from extra usage.
+
+`answered(model, waiter, wait, ready)` counts only a check that started during this wait, and it uses an answer one time for each waiter.
+After the n-th early retry of a waiter, its next one waits at least `PERIOD * 2**n`, with n up to `BACKOFF_LIMIT`. `ready()` skips a check while messages are unresolved.
+An answer moves `retry_at` to now, also for pair participants. The invocation panel and its progress text name the check.
 
 A pair participant waits in `run_jobs` instead.
 When no pair participant runs, `run_jobs` checks the stop control, for example during a quota wait.

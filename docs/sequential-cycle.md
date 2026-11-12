@@ -2283,7 +2283,21 @@ The hash keeps no address.
 During the wait, the runtime reads the current Claude login at most every 10 seconds.
 After a login change, it retries the same invocation at once, like an explicit `--retry`, also for a pair participant that waits.
 A wait from before this change has no login, and an API key in the environment leaves the login unknown.
-In these cases, the wait keeps its deadline until an explicit retry. The panel shows which case applies.
+In these cases, only the quota check below or an explicit retry ends the wait early. The panel shows which case applies.
+
+The runtime also checks the quota every 15 minutes during a wait, with the Claude model of the role that waits.
+The check is a minimal request in a fixed empty folder, with no tools, settings, MCP servers or saved session.
+It is the only provider request during the wait. A refused check uses no quota, and an answered check uses a few tokens.
+After an answer, the runtime retries at once, as after a login change, also for a pair participant.
+So a quota reset of the same login, for example by the operator, needs no explicit retry.
+
+The first check comes 15 minutes after the wait starts. Only a check that started during the wait can end it.
+A small check can get an answer while the real request still gets a refusal, for example because of its size.
+So after each early retry of an invocation or participant, its next early retry waits twice as long, up to 16 hours.
+The runtime keeps these times in memory. After a restart, the first check again comes 15 minutes later.
+
+A failed check, for example after a change of the CLI options, prints one message. The wait keeps its deadline.
+The progress text names the result of the last check. A stop of the runtime also stops a check that runs.
 
 Stop, emergency stop, PAUSE and uncertain-message checks remain active while
 waiting. A plain restart retains the deadline. After changing the Claude login or
@@ -2292,7 +2306,7 @@ attempt the same invocation immediately with the current login. `/resume` from a
 stopped quota wait has the same effect. This explicit retry advances only the local
 retry deadline; it preserves the refusal evidence, invocation and conversation,
 checks ownership and HEAD normally, and cannot bypass uncertain message delivery.
-A fresh refusal schedules a new wait rather than polling. No credentials, billing
+A fresh refusal schedules a new wait. Only the minimal quota check repeats during it. No credentials, billing
 settings or models are changed. Corrections that replace an invocation
 also retire its wait. Admission refusal before any model work on an unchanged
 checkout preserves earlier clean passes and grants no new credit. Ownership and

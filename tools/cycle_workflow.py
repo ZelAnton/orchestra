@@ -9,7 +9,7 @@ import time
 import threading
 import uuid
 
-from cycle_prompts import (PROMPTS, REVIEW_PROFILE_VERSION, REVIEW_ROLES, REVIEW_TARGETS, review_target,
+from cycle_prompts import (PROFILES, PROMPTS, REVIEW_PROFILE_VERSION, REVIEW_ROLES, REVIEW_TARGETS, review_target,
                            FINAL_ROLES, READONLY_REVIEW_ROLES, BRIEF_CHANGE_CORRECTION)
 import focus_brief
 from focus_review import FinalReview
@@ -18,7 +18,7 @@ from focus_pair_profile import PAIRS, PAIR_ROLES, PAIR_WRITERS
 from focus_pair_view import read_record, artifact
 from focus_snapshot_archive import compact_legacy_views
 from cycle_state import Blocked, ProviderQuota, ProviderTransient, transient_exhausted, changed, command, digest, encode
-from cycle_transport import (LoginWatch, concise_summary, enum_problems, field_name, parse_report, report_object,
+from cycle_transport import (LoginWatch, QuotaProbe, concise_summary, enum_problems, field_name, parse_report, report_object,
                              repairable_enum, repairable_executor_accounting, repairable_repair_mode,
                              repairable_substantial_accounting)
 from focus_status import accept_task, new_reviews, reset_notice, review_event
@@ -155,6 +155,8 @@ class Cycle(PairedReview, FinalReview):
         self.control, self.progress = control, progress
         self.messages = Messages(store)
         self.login_watch = LoginWatch()  # Shared by the quota waits of the invocation and of pair participants.
+        # A periodic minimal Claude request finds a quota reset that keeps the login, for example an operator reset.
+        self.quota_probe = QuotaProbe(lambda: (getattr(self.transport, "commands", None) or {}).get("claude"))
         self.state_lock = threading.RLock()
 
     def save(self):
@@ -1593,23 +1595,35 @@ class Cycle(PairedReview, FinalReview):
         time.sleep(min(0.25, max(0, wait["retry_at"] - time.time())))
         return True
 
+    def quota_answered(self, role, waiter, wait, ready=lambda: True):
+        """True when a periodic quota check with the Claude model of this role got an answer during this wait."""
+        provider, model, _ = PROFILES.get(role, (None, None, None))
+        return provider == "claude" and self.quota_probe.answered(model, waiter, wait, ready)
+
     def wait_quota(self):
         quota = (self.state.get("pending") or {}).get("quota_wait")
         if not quota or time.time() >= quota["retry_at"]:
             return False
-        # A new Claude login can have quota now. Like an explicit --retry, this waits for unresolved messages.
-        if self.login_watch.changed(quota.get("account")) and not self.messages.unresolved(self.state["iteration"]):
+        # A new Claude login or a quota check that got an answer can have quota now.
+        # Like an explicit --retry, this waits for unresolved messages.
+        pending = self.state["pending"]
+        ready = lambda: not self.messages.unresolved(self.state["iteration"])
+        changed = self.login_watch.changed(quota.get("account"))
+        if (changed and ready()) or (not changed and self.quota_answered(pending["role"], pending["id"], quota["retry_at"], ready)):
             quota["retry_at"] = time.time()
             self.save()
             print("cc-focus: the Claude login changed after the quota refusal; retrying now with the current login. "
-                  "Same invocation and session.", flush=True)
+                  "Same invocation and session." if changed else "cc-focus: a Claude quota check got an answer; retrying "
+                  "now. Same invocation and session.", flush=True)
             return False
         if self.progress:
             if self.progress.operation != "quota":
                 self.progress.runtime("quota")
             retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
             login = "a login change retries at once" if quota.get("account") else "after a login change, use /resume or --retry"
-            self.progress.activity = f"Waiting for Claude quota until {retry}; automatic retry; {login}; no model is running"
+            last = self.quota_probe.last_outcome(PROFILES.get(pending["role"], (None, None))[1])
+            check = f"a quota check every {QuotaProbe.PERIOD // 60} min" + (f" (last check: {last})" if last else "")
+            self.progress.activity = f"Waiting for Claude quota until {retry}; automatic retry; {login}; {check}; no model is running"
             self.progress.pulse()
         # Re-enter the normal boundary for stop, PAUSE, lease and input checks.
         time.sleep(min(0.25, max(0, quota["retry_at"] - time.time())))
