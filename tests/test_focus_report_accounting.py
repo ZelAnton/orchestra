@@ -845,6 +845,7 @@ class DeferredFixTests(unittest.TestCase):
         prompt = self.corrections[0][1]
         self.assertIn('a fix assignment closes as fixed or disputed', prompt)
         self.assertIn('"deferred_fix_assignments": ["assigned"]', prompt)
+        self.assertIn('did all of the assignment except the "Later work:" part of its check field, return fixed.', prompt)
         self.assertIn('Do not run tools, tests, builds', prompt)
         # A disputed repair needs independent readers, who decide again with the arbiter.
         self.assertEqual((gate['mode'], gate['step']), ('pair', 'review'))
@@ -898,6 +899,9 @@ class DeferredFixTests(unittest.TestCase):
         self.step()
         self.assertIn('Return each fix assignment fixed or disputed. If a part of it waits for check results, '
                       'return disputed and name that part.', prompts[0])
+        # The fix step does not dispute a part that the assignment names as later work.
+        self.assertIn('A part of the check field after the label \\"Later work:\\" follows the tests. Do not do it, and do not return '
+                      'disputed for it. Name it in your resolution after the same label.', prompts[0])
 
     def test_the_correction_may_change_only_the_listed_outcomes_and_their_text(self):
         changes = (lambda value: dict(self.outcome('disputed')(value), implementation_fixes=3),
@@ -1082,6 +1086,263 @@ class DeferredFixTests(unittest.TestCase):
                 self.assertEqual(REPAIR_ASSIGNMENT_CONTRACT in role_contract(role), role in PAIR_DISCUSSERS or role == 'pair_arbiter')
         self.assertNotIn(REPAIR_ASSIGNMENT_CONTRACT, PAIR_CONTRACT)  # Saved pair prompts keep their contract.
         self.assertIn('In a fix assignment, do not tell the executor to wait for check results or to return deferred.', REPAIR_ASSIGNMENT_CONTRACT)
+
+
+class DeferredTestTests(unittest.TestCase):
+    """A passed B/final test report leaves an assignment deferred for later work, as an assignment can ask."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'until', 'assign', 'writer', 'set_writer', 'step'):
+        locals()[_name] = getattr(repair_tests.RepairTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def deferred_test(self, correction, repeat=True):
+        # A medium finding repeats the outer pair after the gate. A low one only cleans up, without a repeat.
+        pair = self.assign('pair_b', 'medium' if repeat else 'low', False)
+        execute = self.set_writer('self')
+        self.runs = []
+        def writer(c, h):
+            value = execute(c, h)
+            self.runs.append(c['operation'])
+            if c['operation'] == 'test':
+                for row in value['resolutions']:
+                    row.update(outcome='deferred', resolution='Checks passed. Later work: record the results in the plan.')
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport(correction)
+        return pair
+
+    def closed(self, outcome='verified'):
+        return lambda value: dict(value, resolutions=[dict(row, outcome=outcome, resolution=(
+            'Checks passed. Later work for the outer pair: record the results in the plan.')) for row in value['resolutions']])
+
+    def test_passed_tests_close_a_deferred_assignment_and_the_outer_pair_gets_its_later_work(self):
+        pair = self.deferred_test(self.closed())
+        self.until(lambda: pair.get('repair', {}).get('step') == 'test')
+        self.assertTrue(pair['repair']['repeat_outer'])
+        self.until(lambda: self.state.get('pair_review') is None)
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs.count('test'), 1)  # The correction does not run the checks again.
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-test'])
+        prompt = self.corrections[0][1]
+        self.assertIn('Its checks passed, so this report must close every assignment.', prompt)
+        self.assertIn('"deferred_assignments": ["assigned"]', prompt)
+        carried = {row['source_id']: row for row in self.state['pair_carry']}
+        self.assertIn('Later work for the outer pair', carried['assigned']['resolution']['resolution'])
+        self.assertEqual(carried['assigned']['resolution']['outcome'], 'fixed')  # verified confirms the earlier fix.
+
+    def test_without_an_outer_repeat_the_gate_still_stops(self):
+        self.deferred_test(self.closed(), repeat=False)
+        prompts = []
+        normal = self.transport.run
+        def run(role, prompt, pending, directory):
+            if role == 'repair_execute' and not pending.get('report_repair'):
+                prompts.append(prompt)
+            return normal(role, prompt, pending, directory)
+        self.transport.run = run
+        with self.assertRaises(Blocked) as caught:
+            self.until(lambda: False)
+        self.assertEqual(caught.exception.code, 'repair-closure')
+        self.assertEqual(self.corrections, [])  # Later work would be lost, so the runtime does not correct.
+        # The test step tells the executor to keep later work deferred, so the stop stays visible.
+        test_prompt = next(p for p in prompts if '"operation": "test"' in p)
+        self.assertIn('This gate cannot pass later work to the outer pair.', test_prompt)
+        self.assertNotIn('When all checks pass, close every assignment', test_prompt)
+
+    def test_the_final_pair_gets_the_same_correction(self):
+        pair = self.assign('final', 'medium', False)
+        execute = self.set_writer('self')
+        def writer(c, h):
+            value = execute(c, h)
+            if c['operation'] == 'test':
+                for row in value['resolutions']:
+                    row['outcome'] = 'deferred'
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport(self.closed())
+        self.until(lambda: self.state.get('pair_review') is None)
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-test'])
+        self.assertIn('Later work for the outer pair', self.state['pair_carry'][0]['resolution']['resolution'])
+
+    def test_an_interrupted_test_correction_resumes_after_a_retry(self):
+        failures = []
+        def correction(value):
+            if not failures:
+                failures.append(1)
+                raise Blocked('claude-transient', 'Provider failed during the correction.')
+            return self.closed()(value)
+        self.deferred_test(correction)
+        with self.assertRaises(Blocked) as caught:
+            self.until(lambda: False)
+        self.assertEqual(caught.exception.code, 'claude-transient')
+        self.cycle.handle_block(caught.exception)
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.until(lambda: self.state.get('pair_review') is None)
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs.count('test'), 1)
+        self.assertEqual([c[2]['id'] for c in self.corrections][0], [c[2]['id'] for c in self.corrections][1])
+
+    def test_the_correction_may_only_close_the_listed_assignments(self):
+        # A fix row closes as verified, so the runtime checks its earlier fixed record.
+        changes = (self.closed('disputed'), self.closed('deferred'), self.closed('fixed'),
+                   lambda value: dict(self.closed()(value), repair=dict(value['repair'], tests=dict(
+                       value['repair']['tests'], reason='Another reason'))),
+                   lambda value: dict(self.closed()(value), implementation_fixes=1))
+        for change in changes:
+            with self.subTest(change=change):
+                self.tearDown()
+                self.setUp()
+                self.deferred_test(change)
+                with self.assertRaises(Blocked) as caught:
+                    self.until(lambda: False)
+                self.assertEqual(caught.exception.code, 'report-repair-content')
+                self.assertEqual(len(self.corrections), 1)
+
+    def test_a_verify_assignment_closes_only_as_verified(self):
+        self.assign('pair_b', 'medium', False, action='verify')
+        execute = self.set_writer('self')
+        def writer(c, h):
+            value = execute(c, h)
+            if c['operation'] == 'test':
+                for row in value['resolutions']:
+                    row['outcome'] = 'deferred'
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        self.correction_transport(self.closed('fixed'))
+        with self.assertRaises(Blocked) as caught:
+            self.until(lambda: False)
+        self.assertEqual(caught.exception.code, 'report-repair-content')
+
+    def test_a_test_stop_by_an_older_runtime_is_corrected_after_a_retry_without_new_checks(self):
+        pair = self.deferred_test(self.closed())
+        with patch.object(type(self.cycle), 'carries_later_work', return_value=False):  # The runtime that stopped.
+            with self.assertRaises(Blocked) as caught:
+                self.until(lambda: False)
+        self.assertEqual(caught.exception.code, 'repair-closure')
+        self.cycle.handle_block(caught.exception)
+        self.state.update(blocker=None, pending=None, status='ready')
+        self.until(lambda: self.state.get('pair_review') is None)
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs.count('test'), 1)  # The saved test result is replayed, not run again.
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-test'])
+
+    def test_the_test_step_and_the_assignment_rule_name_later_work(self):
+        from cycle_prompts import REPAIR_ASSIGNMENT_CONTRACT
+        self.assertIn('Do not write an assignment that plans a fix after its own tests.', REPAIR_ASSIGNMENT_CONTRACT)
+        self.assertIn('Write it after the label "Later work:" in the check field of the assignment that names those checks.',
+                      REPAIR_ASSIGNMENT_CONTRACT)
+        self.assertIn('An assignment with later work makes the outer pair repeat after its gate, also after minor-only corrections.',
+                      REPAIR_ASSIGNMENT_CONTRACT)
+        # A test report can raise the review mode. A defect of that review still gets a fix.
+        self.assertIn('A defect that a later review in the gate finds still gets a fix.', REPAIR_ASSIGNMENT_CONTRACT)
+        self.deferred_test(self.closed())
+        prompts = []
+        normal = self.transport.run
+        def run(role, prompt, pending, directory):
+            if role == 'repair_execute' and not pending.get('report_repair'):
+                prompts.append(prompt)
+            return normal(role, prompt, pending, directory)
+        self.transport.run = run
+        self.until(lambda: self.state.get('pair_review') is None)
+        test_prompt = next(p for p in prompts if '"operation": "test"' in p)
+        self.assertIn('When all checks pass, close every assignment as verified.', test_prompt)
+        # Only labelled later work goes to the outer pair, so a record of each round does not repeat it without end.
+        self.assertIn('Name later work only when the check field of an assignment names it.', test_prompt)
+        self.assertIn('Name it in the resolution of that assignment, after the label \\"Later work:\\".', test_prompt)
+        self.assertNotIn('This gate cannot pass later work to the outer pair.', test_prompt)
+        self.assertIn('in its resolution after the label "Later work:".', self.corrections[0][1])
+        # The repeated outer pair assigns the later work, although its row is closed.
+        # A reset can also carry the rows to Pair A, so the rule names every outer pair.
+        self.assertIn('Carried later work in an outer pair, not in an inner repair review:', REPAIR_ASSIGNMENT_CONTRACT)
+        self.assertIn('Such later work is open, and the closure rules of the discussion and the arbitration do not apply to it.',
+                      REPAIR_ASSIGNMENT_CONTRACT)
+        self.assertIn('Decide such a carried assignment as fix, with the later work as its repair, unless the candidate '
+                      'already contains it.', REPAIR_ASSIGNMENT_CONTRACT)
+        # The outer pair gives the new fix executor the data, and the fix step does an unlabelled repair.
+        self.assertIn('Copy into the repair the data that the later work needs, such as check results and their evidence.',
+                      REPAIR_ASSIGNMENT_CONTRACT)
+        self.assertIn('Do not copy the label "Later work:" into the new assignment, also not in a quote.', REPAIR_ASSIGNMENT_CONTRACT)
+
+    def test_labelled_later_work_makes_a_cleanup_gate_repeat_the_outer_pair(self):
+        original = pairs.decision
+        def labelled(*args, **kwargs):
+            value = original(*args, **kwargs)
+            return dict(value, check=value['check'] + ' Later work: record the check results in the plan.')
+        with patch.object(pairs, 'decision', labelled):
+            pair = self.deferred_test(self.closed(), repeat=False)
+        self.assertEqual(pair['repair_kind'], 'cleanup')  # A low row alone does not repeat the outer pair.
+        self.assertTrue(pair['repair']['repeat_outer'])
+        self.until(lambda: self.state.get('pair_review') is None)
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.state['phase'], 'pair_b')  # Not a cleanup finish: the outer pair repeats.
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['deferred-test'])
+        carried = {row['source_id']: row for row in self.state['pair_carry']}
+        self.assertIn('Later work for the outer pair', carried['assigned']['resolution']['resolution'])
+
+    def test_later_work_that_comes_back_after_its_outer_pair_stops_for_the_operator(self):
+        pair = self.deferred_test(lambda value: dict(value, resolutions=[dict(
+            row, outcome='verified', resolution='Checks passed. Later work: record the results in the plan.')
+            for row in value['resolutions']]))
+        self.until(lambda: self.state.get('pair_review') is None)
+        carried = copy.deepcopy(self.state['pair_carry'])
+        pair['carry'] = carried  # The next outer pair received the row, and its gate named later work again.
+        with self.assertRaises(Blocked) as caught:
+            self.cycle.finish_repair(pair)
+        self.assertEqual(caught.exception.code, 'later-work-repeat')
+        self.assertIn('assigned', str(caught.exception))
+        self.cycle.handle_block(caught.exception)
+        self.assertEqual(self.state['blocker']['escalation_reason'], 'operator-decision')  # No recovery agent.
+        self.assertEqual(self.state['status'], 'blocked')
+        self.assertIn('cc-focus correct', str(caught.exception))
+        gate = pair['repair']
+        named = gate['resolutions']['assigned']
+        gate['resolutions']['assigned'] = dict(named, resolution='Checks passed. Later work: none.')
+        self.cycle.finish_repair(pair)  # A label without work names no work.
+        gate['resolutions']['assigned'] = named
+        # One round of later work is allowed: a carried row without it does not stop.
+        pair['carry'] = [dict(row, resolution=dict(row['resolution'], resolution='Fixed earlier.')) for row in carried]
+        self.cycle.finish_repair(pair)
+
+    def test_only_the_check_field_names_later_work(self):
+        from focus_pair_repair import names_later_work
+        self.assertTrue(names_later_work({'check': 'Run T. Later work: record the results.'}))
+        for key in ('title', 'body', 'repair', 'reason'):
+            with self.subTest(key=key):  # A quote of a carried resolution does not repeat the outer pair again.
+                self.assertFalse(names_later_work({key: 'The carried resolution names Later work: a record.', 'check': 'Run T.'}))
+        self.assertFalse(names_later_work({'check': None}))
+        for empty in ('Run T. Later work: none.', 'Run T. Later work:', 'Run T. Later work: n/a', 'Run T. Later work: нет',
+                      'Run T. Later work: none required.', 'Run T. Later work: not needed.', 'Run T. Later work: no further work.',
+                      'Run T. Later work: nothing further.', 'Run T. Later work: \u2014', 'Run T. Later work: No.',
+                      'Run T. Later work: no', 'Run T. Later work: no\nEvidence: 42/42', 'Run T. Later work: not applicable.', 'Run T. Later work: Не требуется.'):
+            with self.subTest(empty=empty):
+                self.assertFalse(names_later_work({'check': empty}))
+        for work in ('Run T. Later work: none\nLater work: record the results.', 'Run T. Later work:\nrecord the results.',
+                     'Run T. Later work:\n- record the results', 'Run T. Later work: no record yet, write one.',
+                     'Run T. Later work: No-op guard of the record.'):
+            with self.subTest(work=work):  # Work on the next line, a list item, and a word that starts with "no".
+                self.assertTrue(names_later_work({'check': work}))
+
+    def test_a_correction_after_another_correction_uses_up_the_whole_chain(self):
+        pair = self.deferred_test(None)
+        normal = self.transport.handlers['repair_execute']
+        def writer(c, h):
+            value = normal(c, h)
+            if c['operation'] == 'test':
+                value['repair']['mode'] = 'solo'  # A value correction comes first and keeps the outcomes.
+            return value
+        self.transport.handlers['repair_execute'] = writer
+        def correction(value):
+            if self.corrections[-1][2]['report_repair']['reason'] == 'report-enum':
+                return dict(value, repair=dict(value['repair'], mode='self'))
+            return self.closed()(value)
+        self.correction_transport(correction)
+        self.until(lambda: pair.get('repair', {}).get('step') == 'complete' or self.state.get('pair_review') is None)
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual(self.runs.count('test'), 1)
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum', 'deferred-test'])
+        chain = self.cycle.with_correction_source(self.corrections[1][2]['id'])
+        self.assertEqual(chain[:2], [self.corrections[1][2]['id'], self.corrections[0][2]['id']])
+        self.assertEqual(len(chain), 3)  # The original test run is the last name.
+        self.assertTrue(set(chain) <= set(pair['repair']['consumed_tests']))
 
 class ReportEnumCounterTests(unittest.TestCase):
     """A value correction also fixes the counters of a test run, as the repair-mode correction does."""

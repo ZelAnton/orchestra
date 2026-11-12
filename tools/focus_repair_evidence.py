@@ -35,6 +35,24 @@ def deferred_fixes(tasks, report):
     return [task["source_id"] for task in wrong]
 
 
+def deferred_checks(tasks, report):
+    """The assignments that a passed B/final test report left deferred, if no other outcome breaks the gate.
+
+    Passed tests close every assignment, and the gate has no fix after its tests. A report-only correction
+    closes these assignments and names their later work, which the repeated outer pair receives. Other cases return [].
+    """
+    outcomes = {row["source_id"]: row["outcome"] for row in report["resolutions"]}
+    if (report["status"] != "done" or set(outcomes) != {task["source_id"] for task in tasks}
+            or report["repair"]["tests"]["status"] != "passed"):
+        return []
+    # The outcomes that close an assignment after passed tests, as in accept_repair_result.
+    wrong = [task for task in tasks if outcomes[task["source_id"]] not in (
+        ("verified",) if task["action"] == "verify" else ("fixed", "verified"))]
+    if not wrong or any(outcomes[task["source_id"]] != "deferred" for task in wrong):
+        return []
+    return [task["source_id"] for task in wrong]
+
+
 class RepairEvidence:
     @staticmethod
     def earlier_views(reader):

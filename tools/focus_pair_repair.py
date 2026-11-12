@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 import time
 import uuid
 
@@ -10,7 +11,7 @@ from cycle_prompts import PAIR_CONTRACT, PROFILES
 from focus_pair_protocol import validate_decisions
 from focus_pair_profile import significant
 from focus_pair_view import artifact, materialize, read_record
-from focus_repair_evidence import RepairEvidence, deferred_fixes
+from focus_repair_evidence import RepairEvidence, deferred_checks, deferred_fixes
 
 
 # A test invocation makes no patch. It reports only the risks that its checks expose.
@@ -28,6 +29,27 @@ FULL_RUN_DONE = ('The full run already ran. Do not run it again. Run again only 
                  'the checks that later corrections can affect.')
 
 
+LATER_WORK = "Later work:"
+# Text after the label that names no work, for example "Later work: none required." A dash alone also names none.
+# A list item such as "- record the results" and a word such as "No-op" still name work.
+NO_WORK = re.compile(r"(?:none|nothing|n/a|нет|not (?:needed|required|applicable)|no (?:further |more |later )?work"
+                     r"|не (?:требуется|нужно))(?![\w-])"
+                     r"|no(?=[ \t]*(?:[.;,)\n]|$))|[-\u2013\u2014]+(?!\s*\w)", re.IGNORECASE)
+
+
+def later_work(text):
+    """True when the text names work after the label "Later work:", also when the work starts on the next line."""
+    return any(part.strip() and not NO_WORK.match(part.strip()) for part in str(text or "").split(LATER_WORK)[1:])
+
+
+def names_later_work(task):
+    """An assignment that names work after its checks. Only a repeated outer pair can receive that work.
+
+    The label belongs in the check field. A quote of it in another field does not repeat the outer pair.
+    """
+    return later_work(task.get("check"))
+
+
 def final_gate_row(row):
     # Report schemas reject this field, so only the runtime gate row has it.
     return row.get("final_gate") is True
@@ -43,7 +65,8 @@ class RepairReview(RepairEvidence):
             "clean": 0, "clean_candidate": None, "round": 0, "reader": None,
             "tasks": copy.deepcopy(pair["tasks"]), "accepted": copy.deepcopy(pair["tasks"]),
             "issues": copy.deepcopy(pair["issues"]), "resolutions": {}, "reviews": [],
-            "executions": [], "repeat_outer": pair["repair_kind"] == "fix" or pair["impact"] == "substantial",
+            "executions": [], "repeat_outer": pair["repair_kind"] == "fix" or pair["impact"] == "substantial"
+                                              or any(names_later_work(t) for t in pair["tasks"]),
             "started": time.time(), "choices": [], "tests": [], **fields}
         pair.update(step="repair", executor_role="repair_execute")
         # One native executor conversation per repair batch, reused for self review
@@ -136,14 +159,25 @@ class RepairReview(RepairEvidence):
                 'only failed or incomplete checks and necessary prerequisites. A runtime storage '
                 'repair archives review copies without changes to the candidate or tests. This repair '
                 'does not prove that a failed check now passes. Close every deferred verification. Do '
-                'not use not_needed while a required diagnostic remains.\n\n' + TEST_RISKS
+                'not use not_needed while a required diagnostic remains.\n\n' + (
+                    # Only a gate that carries its rows to a repeated outer pair can close a row with later work.
+                    'When all checks pass, close every assignment as verified. Name later work only when the check '
+                    'field of an assignment names it. Name it in the resolution of that assignment, after the label '
+                    '"Later work:". Without later work, do not write the label. The outer pair repeats after this '
+                    'gate and receives every assignment with its resolution.' if self.carries_rows(gate) else
+                    'This gate cannot pass later work to the outer pair. If an assignment still has later work, for '
+                    'example a result record, keep it deferred and name that work. The runtime then stops for the '
+                    'operator.') + '\n\n' + TEST_RISKS
             )
                              if testing else (
                                  'Correct only the supplied assignments. Do NOT build or run tests in this invocation. '
                                  'Return tests.status=deferred. Mark verify assignments deferred with the exact planned'
                                  ' check.\n\nReturn each fix assignment fixed or disputed. If a part of it waits for check '
-                                 'results, return disputed and name that part.\n\nSelect self or pair from actual patch '
-                                 'risk, separately from finding severity. Contracts, storage, security, concurrency, '
+                                 'results, return disputed and name that part. A part of the check field after the '
+                                 'label "Later work:" follows the tests. Do not do it, and do not return disputed for '
+                                 'it. Name it in your resolution after the same label. Do not write the label '
+                                 'otherwise.\n\nSelect self or pair from actual patch risk, separately from finding '
+                                 'severity. Contracts, storage, security, concurrency, '
                                  'cross-component effects, algorithms, or uncertainty require pair. The runtime can keep '
                                  'a stricter mode. Do not review your corrections in this writing invocation.'
                              ))},
@@ -247,18 +281,28 @@ class RepairReview(RepairEvidence):
             return
         self.accept_repair_result(pair, report, before, after, testing, (self.state.get("pending") or {}).get("id"))
 
-    def correct_deferred_fixes(self, pair, pending):
-        """Request one report-only correction of a fix report with deferred fix assignments, then accept its result."""
+    @staticmethod
+    def carries_rows(gate):
+        """finish_repair carries every accepted row except a final-gate row, and only when the outer pair repeats."""
+        issues = {row["source_id"]: row for row in gate["issues"]}
+        return bool(gate["repeat_outer"]) and not any(final_gate_row(issues.get(t["source_id"], {})) for t in gate["accepted"])
+
+    def carries_later_work(self, gate, report):
+        """A passed test report whose only open rows are deferred, when the repeated outer pair receives them all."""
+        return bool(deferred_checks(gate["accepted"], report)) and self.carries_rows(gate)
+
+    def correct_deferred(self, pair, pending, reason, testing):
+        """Request one report-only correction of deferred outcomes, then accept its result in the same step."""
         path = self.store.directory / "invocations" / pending["id"] / "result.json"
         result = json.loads(path.read_text(encoding="utf-8"))
         self.check_protected(self.snapshot(result["after"]))
-        report, before, after, _ = self.begin_report_repair("repair_execute", pending, result, path, "deferred-fix")
+        report, before, after, _ = self.begin_report_repair("repair_execute", pending, result, path, reason)
         if (self.state.get("pending") or {}).get("restart_reviews"):
             self.reset_reviews("Оператор изменил задание исполнителю; пары проверяются заново")
             self.state.update(pending=None, last_snapshot=after)
             self.save()
             return
-        self.accept_repair_result(pair, report, before, after, False, (self.state.get("pending") or {}).get("id"))
+        self.accept_repair_result(pair, report, before, after, testing, (self.state.get("pending") or {}).get("id"))
 
     def accept_repair_result(self, pair, report, before, after, testing, invocation, evidence_approval=None):
         gate = pair["repair"]
@@ -291,12 +335,16 @@ class RepairReview(RepairEvidence):
                 allowed.discard("verified")
             if outcome not in allowed:
                 pending = self.state.get("pending") or {}
-                if (not testing and not evidence_approval and deferred_fixes(tasks, report) and pending.get("id") == invocation
-                        and pending.get("role") == "repair_execute"
-                        and (pending.get("report_repair") or {}).get("reason") != "deferred-fix"):
+                current = pending.get("id") == invocation and pending.get("role") == "repair_execute" and not evidence_approval
+                reason = (pending.get("report_repair") or {}).get("reason")
+                if not testing and current and reason != "deferred-fix" and deferred_fixes(tasks, report):
                     # The executor followed an assignment that waits for checks. It decides these outcomes again.
                     # Another report-only correction keeps the outcomes, so this correction can follow it once.
-                    self.correct_deferred_fixes(pair, pending)
+                    self.correct_deferred(pair, pending, "deferred-fix", False)
+                    return
+                if testing and current and reason != "deferred-test" and self.carries_later_work(gate, report):
+                    # Passed tests close every assignment. The repeated outer pair receives the later work.
+                    self.correct_deferred(pair, pending, "deferred-test", True)
                     return
                 raise Blocked("repair-closure", "Resolution contradicts the fix/verification assignment or the current gate.")
         if testing and tests["status"] in ("passed", "not_needed") and any(r["outcome"] in ("disputed", "deferred") for r in resolutions.values()):
@@ -403,7 +451,7 @@ class RepairReview(RepairEvidence):
             raise Blocked("repair-deferral", "Relevant repair findings must be fixed; unrelated suggestions must be rejected with a scope reason.")
         tasks = [d for d in decisions if d["action"] in ("fix", "verify")]
         fixes = [d for d in tasks if d["action"] == "fix"]
-        gate["repeat_outer"] |= any(significant(t) for t in tasks)
+        gate["repeat_outer"] |= any(significant(t) or names_later_work(t) for t in tasks)
         gate["repeat_outer"] |= reader["impact"] == "substantial"
         seen = {r["source_id"] for r in gate["issues"]}
         gate["issues"].extend(r for r in reader["issues"] if r["source_id"] not in seen)
@@ -447,6 +495,19 @@ class RepairReview(RepairEvidence):
         gate["reader"] = None
         self.save()
 
+    @staticmethod
+    def check_later_work_repeat(pair, gate):
+        """Later work gets one outer round for each assignment. A second round of it needs the operator."""
+        earlier = {row["source_id"]: (row.get("resolution") or {}).get("resolution") for row in pair.get("carry", [])}
+        repeated = [t["source_id"] for t in gate["accepted"]
+                    if later_work(earlier.get(t["source_id"]))
+                    and later_work((gate["resolutions"].get(t["source_id"]) or {}).get("resolution"))]
+        if repeated:
+            raise Blocked("later-work-repeat", "These assignments named later work again after their outer pair: "
+                          + ", ".join(repeated) + ". A retry stops again. An operator correction with cc-focus correct says "
+                          "whether that work is still needed. It resumes the stage at the code step, or at Pair A in a review "
+                          "run, and all reviews run again.")
+
     def finish_repair(self, pair):
         gate = pair["repair"]
         for approval in gate.get("evidence_changes", []):
@@ -465,6 +526,8 @@ class RepairReview(RepairEvidence):
             read_record(self.store, execution)
         if not gate["tests"]:
             raise Blocked("repair-seal", "The separate test/applicability invocation is missing.")
+        if gate["repeat_outer"]:
+            self.check_later_work_repeat(pair, gate)
         test = read_record(self.store, gate["tests"][-1])
         if (test["operation"] != "test"
                 or self.repair_evidence_hash(gate, test["before"], gate["clean_candidate"]) != gate["clean_candidate"]

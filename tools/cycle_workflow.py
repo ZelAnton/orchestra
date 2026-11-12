@@ -41,10 +41,12 @@ UNSAFE_PROVIDER_BLOCKERS = {"cleanup-incomplete", "turn-active"}
 CATCH_UPS = 3  # Catch-ups of parallel members for reported blockers in one stage.
 # Server-error retries are exhausted. A recovery agent cannot retry a provider.
 PROVIDER_UNAVAILABLE_BLOCKERS = {"claude-transient", "codex-transient"}
+# Later work that came back after its outer pair. Only the operator can decide that it is not needed.
+OPERATOR_DECISION_BLOCKERS = {"later-work-repeat"}
 COUNTERS = ("implementation_fixes", "other_fixes", "minor_edits")
 # Report-only corrections in which an executor corrects its own report against frozen work.
 ACCOUNTING_REPAIRS = ("invocation-accounting", "substantial-accounting", "changed-file-accounting", "unchanged-accounting",
-                      "repair-mode", "report-enum", "deferred-fix")
+                      "repair-mode", "report-enum", "deferred-fix", "deferred-test")
 PROVIDER_RETRY_DELAYS = (15, 30, 60)
 ESCALATION_REASONS = {
     "manual-action": "This action requires the operator; the recovery agent cannot supply consent or account access.",
@@ -58,6 +60,9 @@ ESCALATION_REASONS = {
     "healer-failed": "Astra/xhigh attempted recovery and could not complete it.",
     "verification-failed": "Astra/xhigh reported a repair, but the next work step could not verify recovery.",
     "repeated-blocker": "This blocker already received an Astra/xhigh recovery attempt in the current iteration.",
+    "operator-decision": ("Later work came back after its outer pair. A retry stops again. Only an operator correction "
+                          "with cc-focus correct continues. It says whether that work is still needed. It resumes the "
+                          "stage at the code step, or at Pair A in a review run, and all reviews run again."),
 }
 
 
@@ -615,9 +620,10 @@ class Cycle(PairedReview, FinalReview):
                 'In a Pair B or final fix invocation, a fix assignment closes as fixed or disputed. This invocation '
                 'does not build or test. A separate test invocation runs the checks after two clean static passes. '
                 'The original report returned the listed fix assignments as deferred, so the runtime rejects it.\n\n'
-                'Decide again for each listed assignment. If the original invocation completed every part of the '
-                'assignment, return fixed. Otherwise, return disputed. A part that waits for check results is a valid '
-                'reason for disputed. In its resolution, name that part and propose how to split the assignment. The '
+                'Decide again for each listed assignment. If the original invocation did all of the assignment except '
+                'the "Later work:" part of its check field, return fixed. Otherwise, return disputed. '
+                'Another part that waits for check results is a valid reason for disputed. In its resolution, '
+                'name that part and propose how to split the assignment. The '
                 'repair readers and the arbiter decide again on a disputed assignment.\n\n'
                 'Change only the outcome and the resolution of the listed assignments, the summary, and the '
                 'description. Keep every other field exactly. This includes evidence, counters, substantial, and repair.\n\n'
@@ -625,6 +631,26 @@ class Cycle(PairedReview, FinalReview):
                 'records. If you cannot correct the report accurately, return blocked. This call gives no extra '
                 'review credit. '
             ) + json.dumps({"source": str(source), "deferred_fix_assignments": listed, "original_report": original},
+                           ensure_ascii=False))
+        if repair.get("reason") == "deferred-test":
+            result = json.loads(source.read_text(encoding="utf-8"))
+            original, listed = self.deferred_check_source(result["raw"])
+            if not listed or self.snapshot(result["after"]) != self.snapshot(repair["after"]):
+                raise Blocked("report-repair-source",
+                              "The original test report no longer has the deferred assignments of the frozen correction.")
+            return ((
+                'REPORT-ONLY CORRECTION of the ORIGINAL test invocation. This is not another test run. Its checks '
+                'passed, so this report must close every assignment. The original report left the listed assignments '
+                'deferred, so the runtime rejects it.\n\nIf every check of a listed assignment ran and passed in the '
+                'original invocation, return verified. Name any later work, for example a record of check results, in '
+                'its resolution after the label "Later work:". Without later work, do not write the label. After '
+                'this gate, the outer pair repeats and receives every assignment with its resolution.\n\nIf a '
+                'check of a listed assignment did not run or did not pass, return blocked. Change '
+                'only the outcome and the resolution of the listed assignments, the summary, and the description. Keep '
+                'every other field exactly. This includes evidence, tests, counters, and repair.\n\nDo not run tools, '
+                'tests, builds, or formatting. Do not edit files, journals, staging, or runtime records. This call '
+                'gives no extra review credit. '
+            ) + json.dumps({"source": str(source), "deferred_assignments": listed, "original_report": original},
                            ensure_ascii=False))
         if repair.get("reason") == "repair-mode":
             result = json.loads(source.read_text(encoding="utf-8"))
@@ -671,6 +697,16 @@ class Cycle(PairedReview, FinalReview):
             original = report_object(raw)
             tasks = ((self.state.get("pair_review") or {}).get("repair") or {}).get("tasks") or []
             return original, deferred_fixes(tasks, original)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None, []
+
+    def deferred_check_source(self, raw):
+        """The original test report and its assignments that passed tests left deferred against the open repair gate."""
+        from focus_repair_evidence import deferred_checks
+        try:
+            original = report_object(raw)
+            tasks = ((self.state.get("pair_review") or {}).get("repair") or {}).get("accepted") or []
+            return original, deferred_checks(tasks, original)
         except (ValueError, KeyError, TypeError, AttributeError):
             return None, []
 
@@ -735,8 +771,10 @@ class Cycle(PairedReview, FinalReview):
             if not repair.get("changed_paths") and (report["substantial"] or any(report[k] for k in counters)):
                 raise Blocked("report-repair-content", "The original invocation changed no files, so every counter must be 0 and substantial must be false.")
             return
-        if repair["reason"] == "deferred-fix":
-            listed = set(self.deferred_fix_source(json.loads(Path(repair["source"]).read_text(encoding="utf-8"))["raw"])[1])
+        if repair["reason"] in ("deferred-fix", "deferred-test"):
+            raw = json.loads(Path(repair["source"]).read_text(encoding="utf-8"))["raw"]
+            testing = repair["reason"] == "deferred-test"
+            listed = set((self.deferred_check_source(raw) if testing else self.deferred_fix_source(raw))[1])
 
             def kept(value):
                 value = json.loads(json.dumps(value))
@@ -748,10 +786,13 @@ class Cycle(PairedReview, FinalReview):
                 value.pop("description", None)
                 return value
             if not listed or kept(original) != kept(report):
-                raise Blocked("report-repair-content", "A deferred-fix correction may change only the outcome and the "
-                              "resolution of the listed fix assignments, the summary, and the description.")
-            if any(row["outcome"] not in ("fixed", "disputed") for row in report["resolutions"] if row["source_id"] in listed):
-                raise Blocked("report-repair-content", "Each listed fix assignment needs the outcome fixed or disputed.")
+                raise Blocked("report-repair-content", f"A {repair['reason']} correction may change only the outcome and "
+                              "the resolution of the listed assignments, the summary, and the description.")
+            # A verified fix row needs its earlier fixed record. accept_repair_result checks it.
+            closing = ("verified",) if testing else ("fixed", "disputed")
+            if any(row["outcome"] not in closing for row in report["resolutions"] if row["source_id"] in listed):
+                raise Blocked("report-repair-content", "Each listed assignment needs the outcome verified after passed "
+                              "tests." if testing else "Each listed fix assignment needs the outcome fixed or disputed.")
             return
         if repair["reason"] == "repair-mode":
             # Unchanged work drops counters copied from its batch. Changed work with zero counters counts its changes.
@@ -795,19 +836,22 @@ class Cycle(PairedReview, FinalReview):
             return report
 
     def with_correction_source(self, identity):
-        """Name an invocation and, for a report-only correction, the original that it corrects.
+        """Name an invocation and, for a report-only correction, each earlier invocation that it corrects.
 
+        A correction can correct another correction, so the last name is the original run.
         Discovery must not adopt a corrected original again, for example after a heal.
         """
         names = [identity]
-        try:
-            intent = json.loads((self.store.directory / "invocations" / identity / "intent.json").read_text(encoding="utf-8"))
-            source = Path(intent["report_repair"]["source"])
-            if source.parent.parent.resolve() == (self.store.directory / "invocations").resolve():
+        invocations = (self.store.directory / "invocations").resolve()
+        while True:
+            try:
+                intent = json.loads((invocations / names[-1] / "intent.json").read_text(encoding="utf-8"))
+                source = Path(intent["report_repair"]["source"])
+                if source.parent.parent.resolve() != invocations or source.parent.name in names:
+                    return names
                 names.append(source.parent.name)
-        except (OSError, ValueError, KeyError, TypeError):
-            pass  # A normal invocation has no correction source.
-        return names
+            except (OSError, ValueError, KeyError, TypeError):
+                return names  # A normal invocation has no correction source.
 
     def begin_report_repair(self, role, pending, result, result_path, reason="changed-file-accounting"):
         if self.messages.unresolved(self.state["iteration"]):
@@ -1412,6 +1456,7 @@ class Cycle(PairedReview, FinalReview):
                       "manual-action" if error.code in MANUAL_BLOCKERS else
                       "unsafe-provider" if error.code in UNSAFE_PROVIDER_BLOCKERS else
                       "provider-unavailable" if error.code in PROVIDER_UNAVAILABLE_BLOCKERS else
+                      "operator-decision" if error.code in OPERATOR_DECISION_BLOCKERS else
                       # No provider work remains after a completed stage. The healer result
                       # would also be checked against the finished stage, not against main.
                       "stage-boundary" if self.stage_completed() else

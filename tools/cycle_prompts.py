@@ -657,7 +657,22 @@ A separate test invocation runs the checks after two clean static passes. It rep
 
 Write each fix assignment so that the fix invocation can complete it without check results.
 Name the checks of a fix assignment in its check field. The test invocation runs them.
-In a fix assignment, do not tell the executor to wait for check results or to return deferred."""
+In a fix assignment, do not tell the executor to wait for check results or to return deferred.
+
+Passed tests close every assignment of the gate.
+Do not write an assignment that plans a fix after its own tests.
+Work that must follow the tests, such as a record of check results, is later work.
+Write it after the label "Later work:" in the check field of the assignment that names those checks.
+An assignment with later work makes the outer pair repeat after its gate, also after minor-only corrections.
+A defect that a later review in the gate finds still gets a fix.
+
+Carried later work in an outer pair, not in an inner repair review:
+An outer pair can receive the assignments of an earlier repair gate with their resolutions.
+A carried resolution can name later work after the label "Later work:", also when its outcome is verified or fixed.
+Such later work is open, and the closure rules of the discussion and the arbitration do not apply to it.
+Decide such a carried assignment as fix, with the later work as its repair, unless the candidate already contains it.
+Copy into the repair the data that the later work needs, such as check results and their evidence.
+Do not copy the label "Later work:" into the new assignment, also not in a quote."""
 
 DISCUSSION_CONSENSUS_CONTRACT = """Discussion consensus field:
 To endorse the supplied proposal, copy the proposal_hash value from the runtime assignment into consensus.

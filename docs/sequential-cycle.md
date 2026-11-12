@@ -1356,6 +1356,43 @@ If another report-only correction came first, the deferred-fix correction follow
 
 The fix step tells the executor to return fixed or disputed for each fix assignment, so the executor seldom needs this correction.
 Discussion roles and the arbiter also get a role contract rule. In Pair B and the final pair, a fix assignment must not wait for check results.
+The rule also says that an assignment must not plan a fix after its own tests.
+Work that follows the tests gets the label "Later work:" in the check field. The fix step leaves that part out and does not dispute it.
+
+The test step has a similar rule. Passed tests must close every assignment.
+A defect that a later review in the gate finds still gets a fix, for example after a test report raises the review mode.
+If a passed test report leaves an assignment deferred for later work, it gets one report-only correction.
+The executor closes the assignment as verified and names the later work after the label "Later work:" in its resolution.
+A verified fix assignment still needs its earlier fixed record.
+
+If the correction returns blocked, for example because a check did not run, the gate stops.
+A retry replays that result, so only an operator correction continues.
+
+The correction happens only when the outer pair repeats after the gate and receives every assignment with its resolution.
+The test step tells the executor which case applies. In the other case, it keeps such an assignment deferred.
+The gate then stops as before, a retry stops again, and only an operator correction continues.
+It resumes the stage at the code step, or at Pair A in a review run, and all reviews run again.
+A retry after a stop by an older runtime replays the saved test result and starts the correction, so the checks do not run again.
+
+An assignment with the label "Later work:" in its check field makes the outer pair repeat after its gate, also in a cleanup batch.
+So labelled later work stops a gate only when a final-gate row is in it.
+The fix executor names the skipped part in its resolution after the same label.
+The test step names later work only when the check field names it.
+A label without work, for example "Later work: none", names no work.
+
+Later work gets one outer round for each assignment. Then the gate of the repeated outer pair must not name it again.
+If that resolution names later work again, the runtime stops with `later-work-repeat` before the seal.
+The recovery agent does not start, and a retry stops again. Only an operator correction with `cc-focus correct` continues, and it says whether that work is still needed.
+Then the stage resumes at the code step, or at Pair A in a review run, and all reviews run again.
+
+The role contract tells discussion roles and the arbiter of each outer pair that later work in a carried resolution is open.
+This also applies to Pair A, because a reset of the reviews carries the rows there too.
+They decide such an assignment as fix, with the later work as its repair, unless the candidate already contains it.
+The closure rules of the discussion and the arbitration do not apply to later work.
+The new assignment contains the data that the later work needs, such as check results. It does not copy the label, also not in a quote.
+
+A correction can follow an earlier report-only correction of the same test run.
+The gate then marks every invocation of that chain as used, so discovery does not adopt one of them again.
 
 All three pairs use the same exit rule. A finding is **significant** when it blocks
 publication or has critical/high/medium severity; only low, nonblocking findings

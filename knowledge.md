@@ -789,12 +789,26 @@ replay a saved test run, and its successful checks do not run again. Test invoca
 `enum_fields` names what the correction can change, and `validate_executor_correction` checks it. `saved_repair_fix` lets a retried fix step adopt such a saved run.
 
 `deferred_fixes` in `focus_repair_evidence.py` names the fix assignments that a B/final fix report returned deferred, when nothing else breaks the gate.
-`accept_repair_result` then calls `correct_deferred_fixes`, which starts one `deferred-fix` correction, also after another correction. The executor returns fixed or disputed.
+`accept_repair_result` then calls `correct_deferred` with the reason `deferred-fix`, which starts one correction, also after another correction. The executor returns fixed or disputed.
 A corrected report sets the gate to pair mode. `deferred_fixes` needs status done, so a blocked report does not replay.
 
 `validate_executor_correction` allows only the outcome and resolution of those assignments, summary, and description to change. `saved_repair_fix` also adopts such a valid saved report.
 `saved_repair_fix` also resumes a correction without `result.json` when its source and files are unchanged.
 `cycle_prompts.REPAIR_ASSIGNMENT_CONTRACT` tells discussion roles and the arbiter that a B/final fix assignment must not wait for check results.
+
+`deferred_checks` names the assignments that a passed test report left deferred. `carries_later_work` allows a `deferred-test` correction
+only when the outer pair repeats and no accepted row is a final-gate row. The correction closes them as verified.
+`finish_repair` then carries every accepted row with its resolution, so the next outer pair receives the later work.
+The resolution names it after the label "Later work:". `REPAIR_ASSIGNMENT_CONTRACT` tells each outer pair, also Pair A after a reset, to decide it as fix.
+
+An assignment marks work that follows its checks with the label "Later work:" in its check field. The fix-step text and the `deferred-fix`
+prompt exclude that part, so it is no reason for disputed. `names_later_work` looks only in the check field, so a quote elsewhere does not count.
+`start_repair` and `repair_review_result` then set `repeat_outer`, so a cleanup gate also carries its rows.
+
+`later_work` ignores a label without work, for example "Later work: none". `check_later_work_repeat` stops `finish_repair` with `later-work-repeat` when a carried row with later work gets later work again.
+`OPERATOR_DECISION_BLOCKERS` sends that blocker to the operator without the recovery agent, because a record of each round could repeat.
+
+`with_correction_source` follows the whole chain of corrections, so `consumed_tests` names the original test run too.
 
 `cycle_prompts.DISCUSSION_CONSENSUS_CONTRACT` gives discussion roles the exact `consensus` format.
 Both Claude and Codex discussion readers put prose around the hash. The old rule said "name the hash".

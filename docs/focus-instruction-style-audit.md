@@ -1039,9 +1039,11 @@ The change keeps roles, models, efforts, review targets, and CI requirements.
 
 ## Deferred fix correction addendum
 
-Assessment date: 2026-11-11.
+Assessment date: 2026-11-12.
 The scope covers `REPAIR_ASSIGNMENT_CONTRACT` in `tools/cycle_prompts.py` and the `deferred-fix` correction prompt in `tools/cycle_workflow.py`.
 It also covers the new fixed-or-disputed paragraph of the fix-step instruction in `tools/focus_pair_repair.py`.
+It also covers the `deferred-test` correction prompt, the later-work paragraph of the test-step instruction, and the
+paragraphs of `REPAIR_ASSIGNMENT_CONTRACT` about work after the tests and about carried later work.
 It also covers the new paragraphs in `docs/sequential-cycle.md` and `knowledge.md`.
 `tools/check_focus_instructions.py` scans the new provider text and reports 0 findings.
 
