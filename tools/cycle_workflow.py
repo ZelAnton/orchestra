@@ -1609,7 +1609,8 @@ class Cycle(PairedReview, FinalReview):
         pending = self.state["pending"]
         ready = lambda: not self.messages.unresolved(self.state["iteration"])
         changed = self.login_watch.changed(quota.get("account"))
-        if (changed and ready()) or (not changed and self.quota_answered(pending["role"], pending["id"], quota["retry_at"], ready)):
+        if (changed and ready()) or (not changed and self.quota_answered(
+                pending.get("role"), pending.get("id"), quota["retry_at"], ready)):
             quota["retry_at"] = time.time()
             self.save()
             print("cc-focus: the Claude login changed after the quota refusal; retrying now with the current login. "
@@ -1621,7 +1622,7 @@ class Cycle(PairedReview, FinalReview):
                 self.progress.runtime("quota")
             retry = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(quota["retry_at"]))
             login = "a login change retries at once" if quota.get("account") else "after a login change, use /resume or --retry"
-            last = self.quota_probe.last_outcome(PROFILES.get(pending["role"], (None, None))[1])
+            last = self.quota_probe.last_outcome(PROFILES.get(pending.get("role"), (None, None))[1])
             check = f"a quota check every {QuotaProbe.PERIOD // 60} min" + (f" (last check: {last})" if last else "")
             self.progress.activity = f"Waiting for Claude quota until {retry}; automatic retry; {login}; {check}; no model is running"
             self.progress.pulse()
