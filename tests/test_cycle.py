@@ -965,12 +965,12 @@ class CycleTests(unittest.TestCase):
                 self.assertNotIn("Full unabridged implementation description", prompt)
 
     def test_four_reviewer_profiles_are_fixed(self):
-        self.assertEqual(PROFILES['sol'], ('codex', 'gpt-6.1-sol', 'xhigh'))
+        self.assertEqual(PROFILES['sol'], ('codex', 'gpt-6.2-sol', 'xhigh'))
         self.assertEqual(PROFILES['claude'], ('claude', 'claude-fable-5-2', 'xhigh'))
-        self.assertEqual(PROFILES['astra'], ('codex', 'gpt-6-astra', 'xhigh'))
+        self.assertEqual(PROFILES['astra'], ('codex', 'gpt-6.2-astra', 'xhigh'))
         self.assertEqual(PROFILES['opus'], ('claude', 'opus', 'xhigh'))
         self.assertEqual(PROFILES['code'], ('claude', 'opus', 'xhigh'))
-        self.assertEqual(PROFILES['heal'], ('codex', 'gpt-6-astra', 'xhigh'))
+        self.assertEqual(PROFILES['heal'], ('codex', 'gpt-6.2-astra', 'xhigh'))
         self.assertEqual(PROFILES['publish'], ('codex', 'gpt-5.6-luna', 'xhigh'))
         self.assertEqual(PROFILES['coordinate'], ('codex', 'gpt-5.6-luna', 'xhigh'))
         self.assertEqual(REVIEW_ROLES, ('opus', 'sol', 'astra', 'opus_final'))
@@ -3726,7 +3726,7 @@ class CycleTests(unittest.TestCase):
         healing_prompt = self.transport.calls[1][1]
         self.assertIn("a claim to check", healing_prompt)
         self.assertIn("Use existing operator authorization", healing_prompt)
-        self.assertEqual(PROFILES["heal"], ("codex", "gpt-6-astra", "xhigh"))
+        self.assertEqual(PROFILES["heal"], ("codex", "gpt-6.2-astra", "xhigh"))
         self.assertEqual(self.state["status"], "complete")
 
     def test_blocker_routing_only_skips_recovery_for_manual_or_unsafe_actions(self):
@@ -4753,7 +4753,7 @@ def fixture(provider):
             result = {"userAgent": "fixture"}
         elif method == "model/list":
             result = {"data": [{"model": model, "supportedReasoningEfforts": [{"reasoningEffort": "high"}, {"reasoningEffort": "xhigh"}, {"reasoningEffort": "max"}]}
-                               for model in ((() if old_sol_only else ("gpt-6.1-sol",)) + ("gpt-6-sol", "gpt-6-astra", "gpt-5.6-luna"))], "nextCursor": None}
+                               for model in ((() if old_sol_only else ("gpt-6.2-sol",)) + ("gpt-6.1-sol", "gpt-6-sol", "gpt-6.2-astra", "gpt-6-astra", "gpt-5.6-luna"))], "nextCursor": None}
         elif method in ("thread/start", "thread/resume"):
             assert COMMAND_EXECUTION_CONTRACT in params['developerInstructions']
             assert WRITING_CONTRACT in params['developerInstructions']

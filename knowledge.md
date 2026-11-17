@@ -531,7 +531,7 @@ pair (Opus/max then Fable/xhigh). A/B initial readers run concurrently on one fr
 candidate; the final initial reports stay hidden from each other until both finish.
 Two exchanges seek endorsement of the exact proposal hash; a separate Astra/max
 arbiter binds remaining disputes. Reviewers, arbiter and complexity assessor never
-edit, build or test. In pair A, after agreement, Codex `gpt-6-sol/high` assesses every
+edit, build or test. In pair A, after agreement, Codex `gpt-6.2-sol/high` assesses every
 accepted assignment and selects Opus/high or xhigh (maximum of the batch).
 The sealed assessment binds the exact candidate and all assignment details; restart
 retains it and its chosen effort. Severity and repair complexity are independent.

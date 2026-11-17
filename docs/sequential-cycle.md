@@ -42,15 +42,15 @@ No A/B cross-return or fixed OUTER clean-streak gate applies.
 | --- | --- | --- |
 | Coordinator / publication preparation | gpt-5.6-luna | xhigh |
 | Implementation | opus | xhigh |
-| Pair A repair complexity assessment | gpt-6-sol | high |
+| Pair A repair complexity assessment | gpt-6.2-sol | high |
 | Pair A fixes / minor cleanup | opus | high or xhigh, chosen by assessment |
-| Pair A, independent peers | opus + gpt-6.1-sol | xhigh + xhigh |
-| Pair B, independent peers | gpt-6-astra + opus | xhigh + max |
+| Pair A, independent peers | opus + gpt-6.2-sol | xhigh + xhigh |
+| Pair B, independent peers | gpt-6.2-astra + opus | xhigh + max |
 | Final, independent initial inputs, sequential invocation | opus → claude-fable-5-2 | max → xhigh |
 | B/final fixer and test executor | opus | xhigh |
-| B/final inner review | same opus session, or independent opus + gpt-6-astra | xhigh |
-| Binding arbiter, separate session | gpt-6-astra | max |
-| Technical blocker recovery | gpt-6-astra | xhigh |
+| B/final inner review | same opus session, or independent opus + gpt-6.2-astra | xhigh |
+| Binding arbiter, separate session | gpt-6.2-astra | max |
+| Technical blocker recovery | gpt-6.2-astra | xhigh |
 
 `opus` is the Claude Code model alias, rather than a pinned version or menu
 display label. The runtime requires an Opus model
@@ -677,7 +677,7 @@ Orbit · P05.2 · Content safety and redaction
 ✓ Реализация ─ ✓ Пара A ─ ▶ Пара B ─ ○ Финальная пара ─ ○ Публикация ─ ○ CI
 A: ✓ завершён · B: до устранения значимых · Финал: до устранения значимых
 Раунд 4 · discuss · обмен 1/2 · находок 2
-gpt-6-astra/xhigh: отчёт сохранён
+gpt-6.2-astra/xhigh: отчёт сохранён
 opus/max: работает
 ────────────────────────────────────────────────────────────
 ```
@@ -1232,7 +1232,7 @@ independent of severity: a serious defect can have a simple repair. The assessor
 cannot alter accepted findings, severity, blocking or scope. Its report is sealed
 against the exact candidate and complete assignment list; restart reuses that
 assessment and the pinned executor effort. An unavailable model/effort is reported,
-never silently substituted. The assessor is explicitly pinned to `gpt-6-sol/high`.
+never silently substituted. The assessor is explicitly pinned to `gpt-6.2-sol/high`.
 
 Pair A uses the selected **Opus/high or Opus/xhigh** executor; B/final always use **Opus/xhigh**. It
 accounts for every source ID with a fixed/verified/disputed/deferred outcome and concrete

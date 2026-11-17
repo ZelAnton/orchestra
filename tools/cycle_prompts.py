@@ -4,17 +4,17 @@ PROFILES = {
     "coordinate": ("codex", "gpt-5.6-luna", "xhigh"),
     "code": ("claude", "opus", "xhigh"),
     "opus": ("claude", "opus", "xhigh"),
-    "sol": ("codex", "gpt-6.1-sol", "xhigh"),
-    "astra": ("codex", "gpt-6-astra", "xhigh"),
+    "sol": ("codex", "gpt-6.2-sol", "xhigh"),
+    "astra": ("codex", "gpt-6.2-astra", "xhigh"),
     "opus_final": ("claude", "opus", "xhigh"),
     "final_opus": ("claude", "opus", "max"),
-    "final_astra": ("codex", "gpt-6-astra", "max"),
+    "final_astra": ("codex", "gpt-6.2-astra", "max"),
     "claude": ("claude", "claude-fable-5-2", "xhigh"),
-    "final_triage": ("codex", "gpt-6-astra", "xhigh"),
+    "final_triage": ("codex", "gpt-6.2-astra", "xhigh"),
     "final_fix": ("claude", "opus", "xhigh"),
     "final_cleanup": ("claude", "opus", "xhigh"),
     "publish": ("codex", "gpt-5.6-luna", "xhigh"),
-    "heal": ("codex", "gpt-6-astra", "xhigh"),
+    "heal": ("codex", "gpt-6.2-astra", "xhigh"),
 }
 
 # Claude Code compacts the conversation of each Claude role at this context size. The model keeps its window.
@@ -412,13 +412,13 @@ REPORT_SCHEMA["required"].append("task")
 from focus_pair_profile import PAIRS, PAIR_SCANNERS, PAIR_DISCUSSERS, PAIR_READONLY, PAIR_WRITERS, PAIR_ROLES
 PROFILES.update({
     "pair_opus": ("claude", "opus", "xhigh"),
-    "pair_sol": ("codex", "gpt-6.1-sol", "xhigh"),
-    "pair_astra": ("codex", "gpt-6-astra", "xhigh"),
+    "pair_sol": ("codex", "gpt-6.2-sol", "xhigh"),
+    "pair_astra": ("codex", "gpt-6.2-astra", "xhigh"),
     "pair_opus_max": ("claude", "opus", "max"),
     "pair_final_opus": ("claude", "opus", "max"),
     "pair_final_fable": ("claude", "claude-fable-5-2", "xhigh"),
-    "pair_arbiter": ("codex", "gpt-6-astra", "max"),
-    "pair_complexity": ("codex", "gpt-6-sol", "high"),
+    "pair_arbiter": ("codex", "gpt-6.2-astra", "max"),
+    "pair_complexity": ("codex", "gpt-6.2-sol", "high"),
     "pair_fix": ("claude", "opus", "xhigh"),
     "pair_cleanup": ("claude", "opus", "xhigh"),
     "pair_fix_high": ("claude", "opus", "high"),
@@ -426,7 +426,7 @@ PROFILES.update({
     "repair_execute": ("claude", "opus", "xhigh"),
     "repair_self": ("claude", "opus", "xhigh"),
     "repair_opus": ("claude", "opus", "xhigh"),
-    "repair_astra": ("codex", "gpt-6-astra", "xhigh"),
+    "repair_astra": ("codex", "gpt-6.2-astra", "xhigh"),
     "repair_evidence": ("claude", "opus", "xhigh"),
 })
 for _role in PAIR_SCANNERS:

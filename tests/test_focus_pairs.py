@@ -133,9 +133,9 @@ class PairTests(unittest.TestCase):
 
     def test_fixed_profiles(self):
         self.assertEqual(PROFILES["pair_opus_max"], ("claude", "opus", "max"))
-        self.assertEqual(PROFILES["pair_arbiter"], ("codex", "gpt-6-astra", "max"))
-        self.assertEqual(PROFILES["pair_sol"], ("codex", "gpt-6.1-sol", "xhigh"))
-        self.assertEqual(PROFILES["pair_complexity"], ("codex", "gpt-6-sol", "high"))
+        self.assertEqual(PROFILES["pair_arbiter"], ("codex", "gpt-6.2-astra", "max"))
+        self.assertEqual(PROFILES["pair_sol"], ("codex", "gpt-6.2-sol", "xhigh"))
+        self.assertEqual(PROFILES["pair_complexity"], ("codex", "gpt-6.2-sol", "high"))
 
     def test_current_service_roles_receive_only_the_paired_route(self):
         self.state.update(publication_review_profile=5, review_profile_archive="archived-profile.json",
@@ -429,7 +429,7 @@ class PairTests(unittest.TestCase):
     def test_status_exposes_assessment_then_chosen_executor_effort(self):
         from focus_control import status
         pair = self.assign()
-        self.assertIn("оценка сложности gpt-6-sol/high", "\n".join(build_panel(self.state).lines))
+        self.assertIn("оценка сложности gpt-6.2-sol/high", "\n".join(build_panel(self.state).lines))
         self.cycle.paired_review_step()
         self.assertIn("исправления Opus/high", "\n".join(build_panel(self.state).lines))
         self.assertEqual(status(self.store, self.state)["pair_review"]["executor_role"], "pair_fix_high")
@@ -1036,7 +1036,7 @@ class PairTests(unittest.TestCase):
         self.start()
         self.cycle.paired_review_step()
         panel = "\n".join(build_panel(self.state).lines)
-        self.assertIn("gpt-6.1-sol/xhigh", panel)
+        self.assertIn("gpt-6.2-sol/xhigh", panel)
         self.assertIn("opus/xhigh", panel)
         self.assertIn("A: до устранения значимых", panel)
 
