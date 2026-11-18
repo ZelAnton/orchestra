@@ -114,6 +114,40 @@ class InstructionTests(unittest.TestCase):
         self.assertIn('If the changes justify a full run before publication, set final_gate.full_run=true.', PAIR_CONTRACT)
         self.assertNotIn('Full test suites are optional.', PAIR_CONTRACT)
 
+    def test_roles_that_write_review_or_assign_tests_get_the_test_economy_rule(self):
+        from cycle_prompts import (CODE_CONTRACT, CURRENT_CONTRACT, FINAL_ROLES, REVIEW_ROLES, TEST_ECONOMY_CONTRACT,
+                                   TEST_ECONOMY_EXEMPT)
+        from focus_pair_profile import PAIR_DISCUSSERS, PAIR_SCANNERS, PAIR_WRITERS
+        # Only these roles neither add, review nor assign tests.
+        self.assertEqual(TEST_ECONOMY_EXEMPT, ("coordinate", "publish", "heal", "pair_complexity", "repair_evidence"))
+        for role in PROFILES:
+            with self.subTest(role=role):
+                self.assertEqual(TEST_ECONOMY_CONTRACT in role_contract(role), role not in TEST_ECONOMY_EXEMPT)
+        for role in ("code", "pair_arbiter", *REVIEW_ROLES, *PAIR_SCANNERS, *PAIR_DISCUSSERS, *PAIR_WRITERS,
+                     *(r for r in FINAL_ROLES if r not in TEST_ECONOMY_EXEMPT)):
+            with self.subTest(role=role):
+                self.assertIn(TEST_ECONOMY_CONTRACT, role_contract(role))  # Writers, readers and assignment authors.
+        # Saved prompts embed these contracts, so the rule stays outside them.
+        for saved in (PAIR_CONTRACT, CONTRACT, CODE_CONTRACT, CURRENT_CONTRACT):
+            self.assertNotIn(TEST_ECONOMY_CONTRACT, saved)
+        for sentence in ('Each new test must prove a rule, an acceptance criterion or a corrected defect that no other test proves.',
+                         'A test proves such a rule, criterion or defect only if it fails when the code breaks it.',
+                         'If a test already proves the rule, do not add a test.',
+                         'If an existing parameterized test covers the code path, add the new case to it.',
+                         'Do not test a state that no input, no environment fault and no threat in the requirements can cause.',
+                         # Negative and compatibility tests stay: outside data and earlier saved data are inputs.
+                         'Inputs include invalid outside data and saved data of earlier versions that the code still reads.',
+                         'If such a finding has no reason, check the existing tests before you decide it.',
+                         'A new test of the change that only repeats an existing test is a low finding.',
+                         # A removal must not repeat an outer pair as a substantial change.
+                         'A removal of only such a test has minor impact. Such a removal alone does not make substantial true.',
+                         'Environment faults include I/O errors, timeouts and process stops.',
+                         # A review campaign does not remove the legacy tests of the reviewed items.
+                         'In a review run, only the tests that the repair diff adds are new tests.',
+                         'Project instructions and the plan can require more tests. Then obey them.'):
+            self.assertIn(sentence, TEST_ECONOMY_CONTRACT)
+        self.assertIn('\n\nTest economy:\n', role_contract('pair_sol'))  # A blank line separates it from the reader rule.
+
     def test_known_revision_keeps_saved_job_bytes_and_context(self):
         before, after = self.prompts()
         saved, current = self.render(before, True), self.render(after)

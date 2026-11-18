@@ -674,6 +674,32 @@ Decide such a carried assignment as fix, with the later work as its repair, unle
 Copy into the repair the data that the later work needs, such as check results and their evidence.
 Do not copy the label "Later work:" into the new assignment, also not in a quote."""
 
+# Agents add more tests than a change needs. Roles that write, review or assign tests get this rule in role_contract().
+# Saved pair prompts embed PAIR_CONTRACT, so the rule stays outside it.
+TEST_ECONOMY_CONTRACT = """Test economy:
+Each new test must prove a rule, an acceptance criterion or a corrected defect that no other test proves.
+A test proves such a rule, criterion or defect only if it fails when the code breaks it.
+Before you add a test, search the existing tests. If a test already proves the rule, do not add a test.
+If an existing parameterized test covers the code path, add the new case to it.
+
+Do not test a state that no input, no environment fault and no threat in the requirements can cause.
+Inputs include invalid outside data and saved data of earlier versions that the code still reads.
+Environment faults include I/O errors, timeouts and process stops.
+
+A finding that asks for a new test names the rule and the reason that no existing test proves it.
+If such a finding has no reason, check the existing tests before you decide it.
+
+A new test of the change that only repeats an existing test is a low finding.
+The same applies to a new test of such a state. The repair removes such a test.
+A removal of only such a test has minor impact. Such a removal alone does not make substantial true.
+In a review run, only the tests that the repair diff adds are new tests.
+
+Project instructions and the plan can require more tests. Then obey them.
+"""
+
+# Roles that do not add, review or assign tests. Recovery corrections go through the reviews.
+TEST_ECONOMY_EXEMPT = ("coordinate", "publish", "heal", "pair_complexity", "repair_evidence")
+
 DISCUSSION_CONSENSUS_CONTRACT = """Discussion consensus field:
 To endorse the supplied proposal, copy the proposal_hash value from the runtime assignment into consensus.
 The consensus value is only these 64 hexadecimal characters.
@@ -760,6 +786,8 @@ def role_contract(role):
         contract += REPAIR_ASSIGNMENT_CONTRACT
     if role in PAIR_READONLY:
         contract += READER_SEARCH_CONTRACT
+    if role not in TEST_ECONOMY_EXEMPT:
+        contract = contract.rstrip("\n") + "\n\n" + TEST_ECONOMY_CONTRACT
     # Observed Claude coding runs with this block ended in reasoning_extraction
     # refusals. Claude writers load the same policy from user settings.
     # Claude inspectors write no instructions or knowledge text.

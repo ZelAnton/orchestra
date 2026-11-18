@@ -1572,6 +1572,24 @@ A test invocation cannot use `not_needed` for a `full_suite` assignment.
 Report failures and unrun checks honestly.
 The absence of a full run alone is not a defect.
 
+Agents tend to add more tests than a change needs, and each extra test costs run time and review time.
+So `role_contract()` gives a test economy rule to each role that adds, reviews or assigns tests.
+The coordinator, publication, recovery, the complexity assessment and the evidence audit do not get it.
+
+A new test must prove a rule, an acceptance criterion or a corrected defect that no other test proves.
+A test proves such a rule, criterion or defect only if it fails when the code breaks it.
+A new case of a code path goes into an existing parameterized test when one covers that path.
+A test of a state that no input, no environment fault and no threat in the requirements can cause is not added.
+Inputs include invalid outside data and saved data of earlier versions that the code still reads.
+Environment faults include I/O errors, timeouts and process stops.
+
+A finding that asks for a new test names the rule and the reason that no existing test proves it.
+A new test of the change that repeats an existing test or tests such a state is a low finding.
+Its repair removes the test, and a removal of only such a test has minor impact.
+Such a removal alone does not make `substantial` true, so the outer pair does not repeat for it.
+In a review run, only the tests that the repair diff adds count as new tests.
+Project instructions and the plan can require more tests, and then they apply.
+
 ### Final gate
 
 Each initial report of the final pair contains `final_gate` with `full_run` and `reason`.

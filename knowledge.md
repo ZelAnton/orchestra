@@ -810,6 +810,14 @@ prompt exclude that part, so it is no reason for disputed. `names_later_work` lo
 
 `with_correction_source` follows the whole chain of corrections, so `consumed_tests` names the original test run too.
 
+`cycle_prompts.TEST_ECONOMY_CONTRACT` limits new tests to a rule, acceptance criterion or corrected defect that no other test proves.
+`role_contract()` adds it to every role except `TEST_ECONOMY_EXEMPT`. Saved pair prompts embed `PAIR_CONTRACT`, so the rule stays outside it.
+A new test that repeats an existing test is a low finding.
+So is a new test of a state that no input, no environment fault and no threat in the requirements can cause.
+
+The repair removes such a test. The removal alone does not make `substantial` true, so it does not repeat an outer pair.
+In a review run, only the tests that the repair diff adds count as new. Legacy tests of the reviewed items stay.
+
 `cycle_prompts.DISCUSSION_CONSENSUS_CONTRACT` gives discussion roles the exact `consensus` format.
 Both Claude and Codex discussion readers put prose around the hash. The old rule said "name the hash".
 The parser does not check the format of `consensus`. `pair_inspection_step` rejects a wrong value after both readers finish.
