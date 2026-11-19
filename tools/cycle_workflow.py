@@ -14,7 +14,7 @@ from cycle_prompts import (PROFILES, PROMPTS, REVIEW_PROFILE_VERSION, REVIEW_ROL
 import focus_brief
 from focus_review import FinalReview
 from focus_pairs import PairedReview
-from focus_pair_profile import PAIRS, PAIR_ROLES, PAIR_WRITERS
+from focus_pair_profile import PAIR_A_ROUND_LIMIT, PAIRS, PAIR_ROLES, PAIR_WRITERS
 from focus_pair_view import read_record, artifact
 from focus_snapshot_archive import compact_legacy_views
 from cycle_state import Blocked, ProviderQuota, ProviderTransient, transient_exhausted, changed, command, digest, encode
@@ -372,7 +372,8 @@ class Cycle(PairedReview, FinalReview):
             context.update(review_route=list(PAIRS), review_targets={"pair_a": 1, "pair_b": 1, "final": 1},
                            pair_completed=state.get("pair_completed", {}),
                            review_exit=(
-                               'Each pair repeats after significant findings. B/final repairs first require two clean'
+                               f'Each pair repeats after significant findings, but Pair A has at most {PAIR_A_ROUND_LIMIT} '
+                               'rounds. Then Pair B takes its open rows. B/final repairs first require two clean'
                                ' inner passes and targeted tests. Minor-only repairs advance after that gate. Do not '
                                'return across pairs. If a final inspector requests a full run, the runtime can run '
                                'one final gate after the pair passes.'
@@ -1866,7 +1867,7 @@ class Cycle(PairedReview, FinalReview):
                           corrections=[], correction_revision=None, correction_pending=None, coordination=None,
                           publication_started=False)
         self.state.pop("stage_completed", None)
-        for key in ("pair_review", "pair_clean", "pair_completed", "pair_return", "pair_b_substantial", "pair_return_changed", "pair_carry", "pair_handoff", "pair_decisions", "pair_instructions", "pair_round", "pair_full_runs", "refused_sessions", "caught_up"):
+        for key in ("pair_review", "pair_clean", "pair_completed", "pair_return", "pair_b_substantial", "pair_return_changed", "pair_carry", "pair_handoff", "pair_decisions", "pair_instructions", "pair_round", "pair_a_rounds", "pair_a_handoff_rounds", "pair_full_runs", "refused_sessions", "caught_up"):
             self.state.pop(key, None)
         self.state.pop("publication_prepared", None)
         self.state.pop("publication_push_url", None)

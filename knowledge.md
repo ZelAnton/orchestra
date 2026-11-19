@@ -813,10 +813,23 @@ prompt exclude that part, so it is no reason for disputed. `names_later_work` lo
 `cycle_prompts.TEST_ECONOMY_CONTRACT` limits new tests to a rule, acceptance criterion or corrected defect that no other test proves.
 `role_contract()` adds it to every role except `TEST_ECONOMY_EXEMPT`. Saved pair prompts embed `PAIR_CONTRACT`, so the rule stays outside it.
 A new test that repeats an existing test is a low finding.
-So is a new test of a state that no input, no environment fault and no threat in the requirements can cause.
+So is a new test of a state that no input, no environment fault and no threat can cause.
 
 The repair removes such a test. The removal alone does not make `substantial` true, so it does not repeat an outer pair.
 In a review run, only the tests that the repair diff adds count as new. Legacy tests of the reviewed items stay.
+
+`cycle_prompts.REVIEW_REALISM_CONTRACT` goes to `REVIEW_REALISM_ROLES`: review roles, pair and repair readers, discussion roles, the arbiter and final readers.
+A behavior finding names a realistic scenario, and deciders reject it as unrealistic only when no realistic scenario exists.
+Threats include common attacks on the product. Documentation and contract errors need no scenario.
+
+`focus_pair_profile.PAIR_A_ROUND_LIMIT` (5) ends Pair A. `new_pair` counts `pair_a_rounds`, and `reset_pairs`, `accept_pair_input` and a new review target set it to 0.
+After the last round, `pass_to_pair_b` writes the Pair A conclusion with `round_limit` and gives Pair B the rows with their resolutions.
+`pair_a_rounds()` uses `pair_round` for a state from before the count.
+
+Past the limit, `stop_round_past_limit` stops a Pair A round in its scans and also carries the findings of finished scan jobs.
+A Pair A round that `after_catch_up` drops gives its count back. `pair_a_handoff_rounds` keeps the real count for the panel.
+
+`PAIR_A_LIMIT_CONTRACT` tells `PAIR_A_LIMIT_ROLES` (Pair B and the arbiter) to check the closure of these rows.
 
 `cycle_prompts.DISCUSSION_CONSENSUS_CONTRACT` gives discussion roles the exact `consensus` format.
 Both Claude and Codex discussion readers put prose around the hash. The old rule said "name the hash".

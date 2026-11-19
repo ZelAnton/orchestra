@@ -127,6 +127,8 @@ class ProjectCycle(Cycle):
             phase = self.state["pair_review"]["phase"]
             self.state.update(pair_carry=self.pair_obligations(), pair_review=None, pending=None, reviewed=None)
             self.state.setdefault("pair_clean", {})[phase] = 0
+            if phase == "pair_a" and self.state.get("pair_a_rounds"):
+                self.state["pair_a_rounds"] -= 1  # The dropped round starts again and does not use up the limit.
         self.save()
 
     def admit_parallel(self):

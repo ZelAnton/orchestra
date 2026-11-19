@@ -184,5 +184,8 @@ class PairExecution:
             by_id = {r['source_id']: r for r in pair['issues']}
             by_resolution = {r['source_id']: r for r in resolutions}
             carry = [dict(by_id[t['source_id']], previous_decision=t, resolution=by_resolution[t['source_id']]) for t in pair['tasks']]
+            if self.pair_a_limit_reached(pair):
+                self.pass_to_pair_b(pair, carry, after)
+                return
             state.update(pair_carry=carry, pair_review=None, last_snapshot=after)
             self.save()

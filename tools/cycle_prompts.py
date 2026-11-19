@@ -409,7 +409,7 @@ REPORT_SCHEMA["required"].append("task")
 
 
 # Profile 8: legacy identities above remain readable for interrupted publication.
-from focus_pair_profile import PAIRS, PAIR_SCANNERS, PAIR_DISCUSSERS, PAIR_READONLY, PAIR_WRITERS, PAIR_ROLES
+from focus_pair_profile import PAIR_A_ROUND_LIMIT, PAIRS, PAIR_SCANNERS, PAIR_DISCUSSERS, PAIR_READONLY, PAIR_WRITERS, PAIR_ROLES
 PROFILES.update({
     "pair_opus": ("claude", "opus", "xhigh"),
     "pair_sol": ("codex", "gpt-6.2-sol", "xhigh"),
@@ -682,9 +682,10 @@ A test proves such a rule, criterion or defect only if it fails when the code br
 Before you add a test, search the existing tests. If a test already proves the rule, do not add a test.
 If an existing parameterized test covers the code path, add the new case to it.
 
-Do not test a state that no input, no environment fault and no threat in the requirements can cause.
-Inputs include invalid outside data and saved data of earlier versions that the code still reads.
+Do not test a state that no input, no environment fault and no threat can cause.
+Inputs include invalid outside data, operator actions and saved data of earlier versions that the code still reads.
 Environment faults include I/O errors, timeouts and process stops.
+Threats include those in the requirements and common attacks on this kind of product.
 
 A finding that asks for a new test names the rule and the reason that no existing test proves it.
 If such a finding has no reason, check the existing tests before you decide it.
@@ -695,6 +696,26 @@ A removal of only such a test has minor impact. Such a removal alone does not ma
 In a review run, only the tests that the repair diff adds are new tests.
 
 Project instructions and the plan can require more tests. Then obey them.
+"""
+
+# Agents also report defects that only an impossible state can cause. Roles that report or decide findings get this rule.
+REVIEW_REALISM_CONTRACT = """Realistic scenarios:
+A behavior defect needs a scenario that can occur in use.
+Such a scenario starts from an input, an environment fault or a threat.
+Inputs include invalid outside data, operator actions and saved data of earlier versions that the code still reads.
+Environment faults include I/O errors, timeouts and process stops.
+Threats include those in the requirements and common attacks on this kind of product.
+
+A race or a deadlock between concurrent users, processes, threads or tasks is realistic when the product allows that concurrency.
+Do not report a defect that only a clearly unrealistic scenario can cause.
+
+In each behavior finding, name the scenario that causes the defect.
+If a behavior finding names no scenario, look for one before you decide it.
+Reject a behavior finding as unrealistic only when no realistic scenario can cause the defect.
+If you are not sure that a scenario is realistic, report it and state the doubt.
+Errors in documentation, contracts and required formats need no scenario.
+
+Project instructions and the plan can name more scenarios. Then obey them.
 """
 
 # Roles that do not add, review or assign tests. Recovery corrections go through the reviews.
@@ -773,6 +794,19 @@ BRIEF_CHANGE_CORRECTION = (
 )
 
 
+# Pair B readers, their discussion roles and the arbiter learn the Pair A limit. Saved pair prompts embed PAIR_CONTRACT.
+PAIR_A_LIMIT_ROLES = (*PAIRS["pair_b"], *(role + "_discuss" for role in PAIRS["pair_b"]), "pair_arbiter")
+PAIR_A_LIMIT_CONTRACT = f"""Pair A round limit:
+Pair A has at most {PAIR_A_ROUND_LIMIT} rounds. This limit is an exception to the review by the same pair.
+After its last round, Pair B gets the open rows of Pair A. Fixed rows have their resolutions.
+No pair has reviewed the last fixes of these rows. Check the closure of each such row.
+"""
+
+# Roles that report or decide findings: review roles, pair and repair readers, discussion roles, the arbiter and final readers.
+REVIEW_REALISM_ROLES = tuple(role for role in (*REVIEW_ROLES, *READONLY_REVIEW_ROLES)
+                             if role not in ("pair_complexity", "repair_evidence"))
+
+
 def role_contract(role):
     contract = (CODE_CONTRACT if role == "code" else PAIR_CONTRACT if role in PAIR_ROLES
                 else CURRENT_CONTRACT if role in ("coordinate", "heal", "publish") else CONTRACT)
@@ -786,6 +820,10 @@ def role_contract(role):
         contract += REPAIR_ASSIGNMENT_CONTRACT
     if role in PAIR_READONLY:
         contract += READER_SEARCH_CONTRACT
+    if role in PAIR_A_LIMIT_ROLES:
+        contract = contract.rstrip("\n") + "\n\n" + PAIR_A_LIMIT_CONTRACT
+    if role in REVIEW_REALISM_ROLES:
+        contract = contract.rstrip("\n") + "\n\n" + REVIEW_REALISM_CONTRACT
     if role not in TEST_ECONOMY_EXEMPT:
         contract = contract.rstrip("\n") + "\n\n" + TEST_ECONOMY_CONTRACT
     # Observed Claude coding runs with this block ended in reasoning_extraction

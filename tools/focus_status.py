@@ -337,7 +337,8 @@ def pair_panel(state, live=None, paused=False, approval=False, notice="", stop="
     summary = f"A: {counts.get('pair_a', 0)}/2 чистых · B: {counts.get('pair_b', 0)}/2 чистых · финал: 1 раунд без блокеров"
     if state.get("review_profile", 0) >= 7:
         completed = state.get("pair_completed", {})
-        summary = " · ".join(f"{label}: {'✓ завершён' if key in completed else 'до устранения значимых'}"
+        limit = state.get("pair_a_handoff_rounds")
+        summary = " · ".join(f"{label}: {('✓ передан в B после ' + str(limit) + ' раундов') if key == 'pair_a' and limit and key in completed else '✓ завершён' if key in completed else 'до устранения значимых'}"
                              for key, label in (("pair_a", "A"), ("pair_b", "B"), ("final", "Финал")))
     rows = [title, headline, timeline, summary]
     if pair:

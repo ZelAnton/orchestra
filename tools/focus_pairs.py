@@ -7,7 +7,7 @@ import uuid
 from cycle_state import Blocked, digest, encode
 from cycle_prompts import BRIEF_CHANGE_CORRECTION, PAIR_CONTRACT, PARALLEL_REPOSITORIES_RULE, PROJECT_INSTRUCTIONS_RULE
 import focus_brief
-from focus_pair_profile import PAIRS, PAIR_WRITERS, significant
+from focus_pair_profile import PAIR_A_ROUND_LIMIT, PAIRS, PAIR_WRITERS, significant
 from focus_pair_protocol import (assignment_key, consensus_error, proposal_key, validate_complexity,
                                  validate_decisions)
 from focus_pair_view import artifact, materialize, read_record, view_instructions
@@ -48,7 +48,8 @@ class PairedReview(PairExecution, RepairReview):
         carried = self.pair_obligations()
         self.state.update(phase="pair_a", pair_review=None, pair_clean={"pair_a": 0, "pair_b": 0},
                           pair_return=None, pair_b_substantial=False, pair_return_changed=False,
-                          pair_carry=carried, pair_completed={}, review_plan=[], reviewed=None)
+                          pair_carry=carried, pair_completed={}, review_plan=[], reviewed=None,
+                          pair_a_rounds=0, pair_a_handoff_rounds=None)
 
     def pair_prompt(self, pair, role, assignment):
         view = materialize(self, pair)
@@ -248,7 +249,8 @@ class PairedReview(PairExecution, RepairReview):
         obligations = {r["source_id"]: r for r in [*self.pair_obligations(), *self.pair_obligations(pair)]}
         self.state.update(pair_review=None, pair_carry=list(obligations.values()), pending=None, reviewed=None,
                           pair_clean={"pair_a": 0, "pair_b": 0}, phase="pair_a", coordinated=None,
-                          pair_return=None, pair_b_substantial=False, pair_return_changed=False, pair_completed={})
+                          pair_return=None, pair_b_substantial=False, pair_return_changed=False, pair_completed={},
+                          pair_a_rounds=0, pair_a_handoff_rounds=None)
         self.state.pop("pair_input_pending", None)
         self.save()
 
@@ -263,6 +265,8 @@ class PairedReview(PairExecution, RepairReview):
             # Readers list the instruction files of their frozen view. Inner readers and the final gate copy the marker.
             # The pair keeps the parallel members of its stage, so a saved reader prompt does not change.
             pair.update(project_instructions_version=2, parallel_repositories=list(state.get("parallel", [])))
+        if pair["phase"] == "pair_a":
+            state["pair_a_rounds"] = self.pair_a_rounds() + 1  # Before pair_round moves, for a state without the count.
         state.update(pair_review=pair, pair_round=pair["round"])
         # Each outer pair starts the Pair A executor sessions again, so a session does not grow over the whole stage.
         # The writer gets the earlier work of the stage as stage_handoff.
@@ -418,6 +422,9 @@ class PairedReview(PairExecution, RepairReview):
         # entry snapshot. Readers must never use a snapshot after a concurrent edit.
         if pair["step"] not in ("fix", "cleanup") and self.snapshot() != pair["snapshot"]:
             raise Blocked("pair-drift", "The frozen candidate changed; reconcile it before granting pair credit.")
+        if pair["phase"] == "pair_a" and pair["step"] == "scan" and self.pair_a_rounds() > PAIR_A_ROUND_LIMIT:
+            self.stop_round_past_limit(pair)
+            return
         if pair["step"] in ("scan", "discuss", "arbitrate"):
             self.pair_inspection_step(pair)
             return
@@ -432,6 +439,9 @@ class PairedReview(PairExecution, RepairReview):
                     {"phase": pair["phase"], "pair": pair["id"], "decisions": decisions}))
             tasks = [r for r in decisions if r["action"] in ("fix", "verify")]
             if not tasks and pair.get("needs_inspection"):
+                if self.pair_a_limit_reached(pair):
+                    self.pass_to_pair_b(pair, pair["issues"], pair["snapshot"])
+                    return
                 state.update(pair_review=None, pair_carry=pair["issues"], last_snapshot=pair["snapshot"])
                 self.save()
                 return
@@ -479,6 +489,61 @@ class PairedReview(PairExecution, RepairReview):
             self.pair_executor_step(pair)
             return
         raise Blocked("pair-route", "Unknown pair step: " + str(pair["step"]))
+
+    def pair_a_rounds(self):
+        """The Pair A rounds since Pair A started. A state from before the count uses the outer pair round."""
+        return self.state.get("pair_a_rounds", self.state.get("pair_round", 0))
+
+    def pair_a_limit_reached(self, pair):
+        return pair["phase"] == "pair_a" and self.pair_a_rounds() >= PAIR_A_ROUND_LIMIT
+
+    def stop_round_past_limit(self, pair):
+        """A state from before the limit can start a Pair A round past it, or be in its scans.
+
+        That round stops before its discussion. Pair B takes the rows of the last finished round and the findings
+        of each scan that already finished, with the source IDs that pair_registry gives them.
+        """
+        state = self.state
+        pending = state.get("pending") or {}
+        if pending.get("role") == "pair_group" and pending.get("pair") == pair["id"]:
+            if self.messages.unresolved(state["iteration"], pending["id"]):
+                self.accept_pair_input(pair, pending)  # Operator input wins, as at the end of run_jobs.
+                return
+            state["pending"] = None  # The interrupted scans of this round do not run again.
+        carry = list(pair["carry"])
+        for key, job in sorted(pair["jobs"].items()):
+            if key.startswith("scan/") and job.get("result"):
+                role = key.split("/", 1)[1]
+                carry += [dict(finding, source_id=pair["id"] + "/" + role + "/" + finding["id"])
+                          for finding in read_record(self.store, job["result"])["findings"]]
+        self.pass_to_pair_b(pair, carry, pair["snapshot"], rounds=self.pair_a_rounds() - 1)
+
+    def pass_to_pair_b(self, pair, carry, snapshot, rounds=None):
+        """After the last allowed Pair A round, Pair B takes its rows. They keep their resolutions as closure evidence.
+
+        rounds is the number of finished Pair A rounds. It is smaller than the count when a round stops in its scans.
+        """
+        state = self.state
+        rounds = self.pair_a_rounds() if rounds is None else rounds
+        self.check_protected(snapshot)
+        record = artifact(self.store, f"pair-reviews/{state['iteration']}/{pair['id']}/conclusion.json",
+                          {"candidate": digest(encode(pair["snapshot"])), "decisions": pair.get("decisions", []),
+                           "candidate_after": digest(encode(snapshot)), "impact": pair.get("impact"),
+                           "cleanup_without_rereview": False, "resolutions": pair["resolutions"],
+                           "assessment": pair.get("assessment"), "repair_gate": pair.get("repair_seal"),
+                           "round_limit": PAIR_A_ROUND_LIMIT, "rounds": rounds, "stopped_in_scans": pair["step"] == "scan",
+                           "carried": [row["source_id"] for row in carry],
+                           "sources": [job["result"] for job in pair["jobs"].values() if job.get("result")],
+                           "phase": pair["phase"], "round": pair.get("round"), **self.pair_brief_record(pair)})
+        state.setdefault("pair_handoff", []).append(record)
+        state.setdefault("pair_completed", {})["pair_a"] = record
+        state.setdefault("pair_clean", {"pair_a": 0, "pair_b": 0})["pair_a"] = 0
+        # The panel names the real count. A state from before the count can be past the limit.
+        state.update(phase="pair_b", coordinated=None, pair_review=None, pair_carry=carry, last_snapshot=snapshot,
+                     pair_a_handoff_rounds=rounds)
+        self.save()
+        print(f"cc-focus: Pair A ran {rounds} rounds, and its limit is {PAIR_A_ROUND_LIMIT}. Pair B takes "
+              "the open rows and checks the closure of their fixes.", flush=True)
 
     def finish_pair(self, pair, snapshot=None, cleanup=False):
         state, phase = self.state, pair["phase"]

@@ -134,9 +134,10 @@ class InstructionTests(unittest.TestCase):
                          'A test proves such a rule, criterion or defect only if it fails when the code breaks it.',
                          'If a test already proves the rule, do not add a test.',
                          'If an existing parameterized test covers the code path, add the new case to it.',
-                         'Do not test a state that no input, no environment fault and no threat in the requirements can cause.',
+                         'Do not test a state that no input, no environment fault and no threat can cause.',
+                         'Threats include those in the requirements and common attacks on this kind of product.',
                          # Negative and compatibility tests stay: outside data and earlier saved data are inputs.
-                         'Inputs include invalid outside data and saved data of earlier versions that the code still reads.',
+                         'Inputs include invalid outside data, operator actions and saved data of earlier versions that the code still reads.',
                          'If such a finding has no reason, check the existing tests before you decide it.',
                          'A new test of the change that only repeats an existing test is a low finding.',
                          # A removal must not repeat an outer pair as a substantial change.
@@ -147,6 +148,53 @@ class InstructionTests(unittest.TestCase):
                          'Project instructions and the plan can require more tests. Then obey them.'):
             self.assertIn(sentence, TEST_ECONOMY_CONTRACT)
         self.assertIn('\n\nTest economy:\n', role_contract('pair_sol'))  # A blank line separates it from the reader rule.
+
+    def test_roles_that_report_or_decide_findings_get_the_realistic_scenario_rule(self):
+        from cycle_prompts import CODE_CONTRACT, CURRENT_CONTRACT, REVIEW_REALISM_CONTRACT, REVIEW_REALISM_ROLES
+        for role in PROFILES:
+            with self.subTest(role=role):
+                self.assertEqual(REVIEW_REALISM_CONTRACT in role_contract(role), role in REVIEW_REALISM_ROLES)
+        self.assertEqual(set(REVIEW_REALISM_ROLES), {
+            'opus', 'sol', 'astra', 'opus_final', 'claude', 'final_opus', 'final_astra', 'final_triage',
+            'pair_opus', 'pair_sol', 'pair_astra', 'pair_opus_max', 'pair_final_opus', 'pair_final_fable',
+            'repair_self', 'repair_opus', 'repair_astra', 'pair_opus_discuss', 'pair_sol_discuss', 'pair_astra_discuss',
+            'pair_opus_max_discuss', 'pair_final_opus_discuss', 'pair_final_fable_discuss', 'repair_self_discuss',
+            'repair_opus_discuss', 'repair_astra_discuss', 'pair_arbiter'})
+        for role in ('opus', 'sol', 'astra', 'opus_final', 'final_triage', 'pair_sol', 'pair_opus', 'pair_astra',
+                     'pair_opus_max', 'pair_final_opus', 'pair_final_fable', 'repair_self', 'repair_opus', 'repair_astra',
+                     'pair_sol_discuss', 'pair_final_fable_discuss', 'repair_self_discuss', 'pair_arbiter'):
+            with self.subTest(role=role):
+                self.assertIn(role, REVIEW_REALISM_ROLES)  # Readers, discussion roles, the arbiter and final readers.
+        for role in ('code', 'pair_fix', 'pair_cleanup', 'repair_execute', 'final_fix', 'coordinate', 'publish', 'heal',
+                     'pair_complexity', 'repair_evidence'):
+            with self.subTest(role=role):
+                self.assertNotIn(role, REVIEW_REALISM_ROLES)  # Writers and roles without findings.
+        for saved in (PAIR_CONTRACT, CONTRACT, CODE_CONTRACT, CURRENT_CONTRACT):
+            self.assertNotIn(REVIEW_REALISM_CONTRACT, saved)
+        for sentence in ('A behavior defect needs a scenario that can occur in use.',
+                         # A security defect counts also when the requirements name no threat model.
+                         'Threats include those in the requirements and common attacks on this kind of product.',
+                         'A race or a deadlock between concurrent users, processes, threads or tasks is realistic when the product allows that concurrency.',
+                         'Do not report a defect that only a clearly unrealistic scenario can cause.',
+                         'In each behavior finding, name the scenario that causes the defect.',
+                         # A finding without a named scenario is not dropped without a search.
+                         'If a behavior finding names no scenario, look for one before you decide it.',
+                         'Reject a behavior finding as unrealistic only when no realistic scenario can cause the defect.',
+                         'If you are not sure that a scenario is realistic, report it and state the doubt.',
+                         'Errors in documentation, contracts and required formats need no scenario.'):
+            self.assertIn(sentence, REVIEW_REALISM_CONTRACT)
+        from cycle_prompts import PAIR_A_LIMIT_ROLES, PAIR_A_LIMIT_CONTRACT
+        from focus_pair_profile import PAIR_A_ROUND_LIMIT
+        for role in PROFILES:
+            with self.subTest(role=role):
+                self.assertEqual(PAIR_A_LIMIT_CONTRACT in role_contract(role), role in PAIR_A_LIMIT_ROLES)
+        # Only Pair B receives carried Pair A rows. The arbiter decides disputes of every pair.
+        self.assertEqual(set(PAIR_A_LIMIT_ROLES), {'pair_astra', 'pair_opus_max', 'pair_astra_discuss', 'pair_opus_max_discuss',
+                                                 'pair_arbiter'})
+        self.assertIn(f'Pair A has at most {PAIR_A_ROUND_LIMIT} rounds.', PAIR_A_LIMIT_CONTRACT)
+        self.assertIn('No pair has reviewed the last fixes of these rows. Check the closure of each such row.', PAIR_A_LIMIT_CONTRACT)
+        self.assertNotIn(PAIR_A_LIMIT_CONTRACT, PAIR_CONTRACT)  # Saved pair prompts keep their contract.
+        self.assertIn('\n\nRealistic scenarios:\n', role_contract('pair_sol'))
 
     def test_known_revision_keeps_saved_job_bytes_and_context(self):
         before, after = self.prompts()

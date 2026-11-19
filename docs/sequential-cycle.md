@@ -1402,6 +1402,19 @@ and closure proofs survive as mandatory questions after both initial reports fin
 The outer pair repeats until significant findings are gone. There is no fixed OUTER clean-streak
 requirement and no return from B to A.
 
+Pair A has a limit of five rounds (`PAIR_A_ROUND_LIMIT`), because a large stage can find new defects in each round.
+Normal stages need three to five rounds. After the fifth round, its executor still fixes the round's findings.
+Then Pair B starts instead of another Pair A round, and it gets those rows with their resolutions.
+Pair B checks the closure of these fixes and also reviews the stage on its own.
+Pair B readers, their discussion roles and the arbiter get a notice that no pair has reviewed these last fixes.
+
+A reset to Pair A, for example after an operator correction, starts the count again, and each review target has its own count.
+A state from before the count uses the outer pair round of the stage.
+
+Such a state can be past the limit. Then its current or next Pair A round stops before its discussion.
+Pair B takes the rows of the last finished round and the findings of each finished scan.
+The conclusion records `stopped_in_scans`. A round that a catch-up drops does not use up the limit.
+
 When only minor findings remain, Opus closes them and proceeds to the
 next pair, or publication from final, **without repeating the outer pair**. B/final
 still require the inner repair gate, including for minor repairs. If the repair
@@ -1579,9 +1592,8 @@ The coordinator, publication, recovery, the complexity assessment and the eviden
 A new test must prove a rule, an acceptance criterion or a corrected defect that no other test proves.
 A test proves such a rule, criterion or defect only if it fails when the code breaks it.
 A new case of a code path goes into an existing parameterized test when one covers that path.
-A test of a state that no input, no environment fault and no threat in the requirements can cause is not added.
-Inputs include invalid outside data and saved data of earlier versions that the code still reads.
-Environment faults include I/O errors, timeouts and process stops.
+A test of a state that no input, no environment fault and no threat can cause is not added.
+Inputs, faults and threats are as in the rule for realistic scenarios below.
 
 A finding that asks for a new test names the rule and the reason that no existing test proves it.
 A new test of the change that repeats an existing test or tests such a state is a low finding.
@@ -1589,6 +1601,18 @@ Its repair removes the test, and a removal of only such a test has minor impact.
 Such a removal alone does not make `substantial` true, so the outer pair does not repeat for it.
 In a review run, only the tests that the repair diff adds count as new tests.
 Project instructions and the plan can require more tests, and then they apply.
+
+Roles that report or decide findings also get a rule for realistic scenarios.
+A behavior defect needs a scenario that can occur in use, from an input, an environment fault or a threat.
+Inputs include invalid outside data, operator actions and saved data of earlier versions that the code still reads.
+Environment faults include I/O errors, timeouts and process stops.
+Threats include those in the requirements and common attacks on this kind of product.
+A race or a deadlock between concurrent users, processes, threads or tasks is realistic when the product allows that concurrency.
+
+Each behavior finding names its scenario. If it names none, the deciders look for one.
+They reject the finding as unrealistic only when no realistic scenario can cause the defect.
+A reader who is not sure that a scenario is realistic reports the finding and states the doubt.
+Errors in documentation, contracts and required formats need no scenario.
 
 ### Final gate
 

@@ -11,6 +11,9 @@ PAIR_WRITERS = ("pair_fix", "pair_cleanup", "pair_fix_high", "pair_cleanup_high"
 # Pair A executors. Each new outer pair starts their sessions again. repair_execute gets a new session for each batch.
 PAIR_A_WRITERS = PAIR_WRITERS[:4]
 PAIR_ROLES = (*PAIR_READONLY, *PAIR_WRITERS)
+# After this many Pair A rounds, Pair B takes the open rows instead of another Pair A round.
+# Normal stages need 3-5 rounds. Pair B checks the closure of the carried fixes and reviews on its own.
+PAIR_A_ROUND_LIMIT = 5
 
 
 def significant(decision):

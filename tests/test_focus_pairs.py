@@ -185,6 +185,161 @@ class PairTests(unittest.TestCase):
                 self.assertTrue(conclusion["cleanup_without_rereview"])
                 self.assertEqual(conclusion["candidate_after"], digest(encode(self.repo.snapshot())))
 
+    def test_pair_a_passes_its_rows_to_pair_b_after_its_round_limit(self):
+        import focus_pairs
+        from focus_pair_profile import PAIR_A_ROUND_LIMIT
+        self.assertEqual(PAIR_A_ROUND_LIMIT, 5)
+        with patch.object(focus_pairs, "PAIR_A_ROUND_LIMIT", 1):
+            pair = self.assign(severity="medium", blocking=False, effort="high")
+            self.assertEqual(self.state["pair_a_rounds"], 1)
+            self.cycle.paired_review_step()  # Complexity selects the executor.
+            self.cycle.paired_review_step()  # The executor fixes the significant row of the last round.
+        # No new Pair A round: Pair B takes the fixed row with its resolution as closure evidence.
+        self.assertEqual(self.state["phase"], "pair_b")
+        self.assertIsNone(self.state["pair_review"])
+        self.assertEqual([row["source_id"] for row in self.state["pair_carry"]], ["assigned"])
+        self.assertEqual(self.state["pair_carry"][0]["resolution"]["outcome"], "fixed")
+        conclusion = read_record(self.store, self.state["pair_completed"]["pair_a"])
+        self.assertEqual((conclusion["round_limit"], conclusion["rounds"], conclusion["carried"]), (1, 1, ["assigned"]))
+        self.assertEqual(self.state["pair_a_handoff_rounds"], 1)
+        self.assertIn("A: ✓ передан в B после 1 раундов", "\n".join(build_panel(self.state).lines))
+        # A reset starts Pair A again with a new count.
+        self.cycle.reset_pairs()
+        self.assertEqual((self.state["pair_a_rounds"], self.state["pair_a_handoff_rounds"]), (0, None))
+
+    def test_below_the_round_limit_pair_a_repeats_and_counts_its_rounds(self):
+        pair = self.assign(severity="medium", blocking=False, effort="high")
+        self.cycle.paired_review_step()
+        self.cycle.paired_review_step()
+        self.assertEqual((self.state["phase"], self.state["pair_a_rounds"]), ("pair_a", 1))
+        self.cycle.new_pair()
+        self.assertEqual(self.state["pair_a_rounds"], 2)
+
+    def test_a_state_from_before_the_count_uses_the_outer_pair_round(self):
+        self.start()
+        self.state.pop("pair_a_rounds", None)
+        self.state["pair_round"] = 9  # A live stage in its ninth Pair A round.
+        self.assertEqual(self.cycle.pair_a_rounds(), 9)
+        pair = self.cycle.new_pair()
+        self.assertEqual(self.state["pair_a_rounds"], 10)
+        self.assertTrue(self.cycle.pair_a_limit_reached(pair))
+        pair["phase"] = "pair_b"
+        self.assertFalse(self.cycle.pair_a_limit_reached(pair))  # The limit applies only to Pair A.
+
+    def test_a_repeat_for_inspection_also_passes_to_pair_b_at_the_limit(self):
+        import focus_pairs
+        self.start()
+        pair = self.cycle.new_pair()
+        row = dict(finding(), source_id="disputed", severity="high")
+        pair.update(step="decide", issues=[row], decisions=[decision(row, "reject", False)], impact="minor",
+                    needs_inspection=True, resolutions=[])
+        with patch.object(focus_pairs, "PAIR_A_ROUND_LIMIT", 1):
+            self.cycle.paired_review_step()
+        self.assertEqual(self.state["phase"], "pair_b")
+        self.assertEqual([r["source_id"] for r in self.state["pair_carry"]], ["disputed"])
+        self.assertEqual(read_record(self.store, self.state["pair_completed"]["pair_a"])["carried"], ["disputed"])
+
+    def test_a_live_stage_without_the_count_passes_to_pair_b_after_its_current_round(self):
+        self.start()
+        self.state["pair_round"] = 8
+        pair = self.cycle.new_pair()  # Round 9 runs under the earlier runtime.
+        self.state.pop("pair_a_rounds")  # The earlier runtime saved no count.
+        row = dict(finding(), source_id="assigned", severity="high")
+        pair.update(step="decide", issues=[row], decisions=[decision(row, "fix", True)], impact="minor")
+        self.transport.handlers["pair_complexity"] = lambda c, h: report(complexity=complexity(c["assignment"], "high"))
+        for _ in range(3):
+            self.cycle.paired_review_step()
+        self.assertEqual((pair["round"], self.state["phase"]), (9, "pair_b"))
+        conclusion = read_record(self.store, self.state["pair_completed"]["pair_a"])
+        self.assertEqual((conclusion["rounds"], self.state["pair_a_handoff_rounds"]), (9, 9))  # The real count, not the limit.
+        self.assertIn("A: ✓ передан в B после 9 раундов", "\n".join(build_panel(self.state).lines))
+
+    def test_a_round_past_the_limit_stops_in_its_scans_and_pair_b_takes_the_rows(self):
+        self.start()
+        row = dict(finding(), source_id="carried", severity="high")
+        self.state.update(pair_round=11, pair_carry=[row])
+        pair = self.cycle.new_pair()  # Round 12 under the earlier runtime, which saved no count.
+        self.state.pop("pair_a_rounds")
+        from focus_pair_view import artifact
+        report = artifact(self.store, "invocations/scan/reports/finished.json", {"findings": [finding("missed")]})
+        pair["jobs"]["scan/pair_sol"] = {"status": "done", "result": report}  # One reader finished its scan.
+        pair["jobs"]["scan/pair_opus"] = {"status": "interrupted"}
+        self.state["pending"] = {"id": "group", "role": "pair_group", "pair": pair["id"], "participants": {}}
+        self.cycle.paired_review_step()
+        self.assertEqual(self.transport.calls, [])  # No reader runs again.
+        self.assertEqual(self.state["phase"], "pair_b")
+        self.assertIsNone(self.state["pending"])  # The interrupted scans of round 12 do not stay pending.
+        # Pair B gets the rows of round 11 and the finding of the finished scan, so no finding is lost.
+        self.assertEqual([r["source_id"] for r in self.state["pair_carry"]], ["carried", pair["id"] + "/pair_sol/missed"])
+        conclusion = read_record(self.store, self.state["pair_completed"]["pair_a"])
+        self.assertEqual((conclusion["rounds"], conclusion["stopped_in_scans"], conclusion["decisions"]), (11, True, []))
+        self.assertIn("A: ✓ передан в B после 11 раундов", "\n".join(build_panel(self.state).lines))
+        # The count of the earlier runtime stays above the limit, but Pair B runs its own scans.
+        self.cycle.paired_review_step()
+        self.assertEqual(sorted(r for r, _ in self.transport.calls), ["pair_astra", "pair_opus_max"])
+
+    def test_the_last_round_at_the_limit_runs_its_scans(self):
+        import focus_pairs
+        with patch.object(focus_pairs, "PAIR_A_ROUND_LIMIT", 2):
+            self.assign(severity="high", blocking=True, effort="high")
+            self.cycle.paired_review_step()
+            self.cycle.paired_review_step()
+            self.assertEqual((self.state["phase"], self.state["pair_a_rounds"]), ("pair_a", 1))
+            self.until(lambda: self.state["phase"] == "pair_b")
+        scans = [r for r, c in self.transport.calls if c.get("assignment", {}).get("mode") == "independent_initial"]
+        self.assertEqual(sorted(scans), ["pair_opus", "pair_sol"])  # Round 2, at the limit, ran both scans.
+        self.assertFalse(read_record(self.store, self.state["pair_completed"]["pair_a"]).get("stopped_in_scans"))
+
+    def test_operator_input_for_a_stopped_round_restarts_pair_a(self):
+        self.start()
+        self.state.update(pair_round=11, pair_carry=[])
+        pair = self.cycle.new_pair()
+        self.state.pop("pair_a_rounds")
+        self.state["pending"] = {"id": "group", "role": "pair_group", "pair": pair["id"], "participants": {}}
+        with patch.object(self.cycle.messages, "unresolved", return_value=[{"id": "m"}]), \
+                patch.object(self.cycle, "accept_pair_input") as accept:
+            self.cycle.paired_review_step()
+        accept.assert_called_once()  # The message wins over the limit, as at the end of run_jobs.
+        self.assertEqual(self.state["phase"], "pair_a")
+
+    def test_a_round_dropped_by_a_catch_up_does_not_use_up_the_limit(self):
+        self.start()
+        self.state["pair_a_rounds"] = 0
+        self.cycle.new_pair()
+        self.assertEqual(self.state["pair_a_rounds"], 1)
+        import focus_publication
+        focus_publication.ProjectCycle.after_catch_up(self.cycle, {})  # A project catch-up of no member path.
+        self.assertEqual((self.state["pair_a_rounds"], self.state["pair_review"]), (0, None))
+
+    def test_a_pause_between_rounds_at_the_limit_starts_pair_b(self):
+        self.start()
+        row = dict(finding(), source_id="carried", severity="high")
+        self.state.update(pair_a_rounds=5, pair_carry=[row], pair_review=None)
+        self.cycle.paired_review_step()
+        self.assertEqual(self.transport.calls, [])
+        self.assertEqual((self.state["phase"], self.state["pair_a_handoff_rounds"]), ("pair_b", 5))
+        self.assertEqual([r["source_id"] for r in self.state["pair_carry"]], ["carried"])
+
+    def test_operator_input_after_the_handoff_starts_pair_a_again(self):
+        import focus_pairs
+        with patch.object(focus_pairs, "PAIR_A_ROUND_LIMIT", 1):
+            self.assign(severity="medium", blocking=False, effort="high")
+            self.cycle.paired_review_step()
+            self.cycle.paired_review_step()
+        self.assertEqual(self.state["phase"], "pair_b")
+        self.cycle.accept_pair_input(self.cycle.new_pair(), {"id": "operator-input"})
+        self.assertEqual((self.state["phase"], self.state["pair_a_rounds"], self.state["pair_a_handoff_rounds"]),
+                         ("pair_a", 0, None))
+        self.assertIn("assigned", [r["source_id"] for r in self.state["pair_carry"]])  # The rows stay obligations.
+        self.assertEqual(self.state["pair_completed"], {})
+
+    def test_each_review_target_gets_its_own_pair_a_rounds(self):
+        from focus_review_run import activate
+        state = {"review_run": {"current": 0}, "iteration": 3, "pair_round": 12, "pair_a_rounds": 7,
+                 "pair_a_handoff_rounds": 5}
+        activate(state, {"targets": [{"id": "T1", "title": "Target"}], "plan": {"path": "plan.md"}})
+        self.assertEqual((state["pair_a_rounds"], state["pair_a_handoff_rounds"]), (0, None))
+
     def test_significance_and_repair_complexity_are_independent(self):
         cases = (("medium", False, "high", "fix", True),
                  ("low", True, "high", "fix", True),

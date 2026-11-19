@@ -130,7 +130,8 @@ def activate(state, request):
     state.update(phase="pair_a", status="ready", coordinated=None,
                  task={"id": target["id"], "title": target["title"], "plan": (request.get("plan") or {}).get("path", ""),
                        "iteration": state["iteration"]},
-                 sessions={}, pair_clean={"pair_a": 0, "pair_b": 0}, pair_completed={})
+                 sessions={}, pair_clean={"pair_a": 0, "pair_b": 0}, pair_completed={},
+                 pair_a_rounds=0, pair_a_handoff_rounds=None)  # Each target gets its own Pair A rounds.
 
 
 class ReviewMode:
