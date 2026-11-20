@@ -1144,6 +1144,7 @@ The focus Python modules run in groups: `tests/launchers/test-cc-focus.ps1` and 
 On Windows, these modules take several times longer than on Linux.
 Thus each group must stay below the limit of 1800 seconds for one test file in `run-all.ps1`.
 Add a new module to a group with time left, or start a new group.
+`test-cc-focus-accounting.ps1` has the two accounting modules. With them, the pairs group passed the limit on Windows.
 A test that changes the current directory must restore it before `tearDown`, because Windows cannot remove the current directory.
 
 ### Queue processor workflow
