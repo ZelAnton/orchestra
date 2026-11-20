@@ -444,6 +444,8 @@ def repairable_repair_mode(raw, role):
 def enum_problems(raw, role):
     """Recognize, never accept, a writer report whose only invalid values are outside their allowed values.
 
+    One text in place of an array of texts also counts. Its only allowed value is that text in an array.
+
     Return the original report and the problems, or None. A problem names the path, the value, and the
     allowed values. A Claude writer gets the schema as text, so its provider does not enforce the enums.
     The report is recognized when some choice of allowed values makes it valid. In an array, the choice
@@ -474,6 +476,10 @@ def enum_problems(raw, role):
             elif kind == "array" and isinstance(value, list):
                 for index, item in enumerate(value):
                     walk(item, schema.get("items", {}), [*path, index])
+            elif (kind == "array" and isinstance(value, str) and value.strip()
+                  and (schema.get("items") or {}).get("type") == "string" and "enum" not in schema.get("items", {})):
+                # One text where the schema needs an array of texts. The only allowed value keeps that text.
+                problems.append({"path": path, "value": value, "allowed": [[value]], "text_array": True})
         walk(original, report_schema(role), [])
         if not problems:
             return None

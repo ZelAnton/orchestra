@@ -1387,6 +1387,63 @@ class ReportEnumCounterTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 'report-repair-content')
 
 
+class ReportShapeTests(unittest.TestCase):
+    """A writer gives one text where the schema needs an array of texts, as a live repair executor did."""
+    for _name in ('setUp', 'tearDown', 'edit', 'start', 'assign', 'until', 'step', 'resolution', 'result'):
+        locals()[_name] = getattr(execution_tests.PairExecutionTests, _name)
+    correction_transport = accounting_tests.ExecutorAccountingTests.correction_transport
+
+    def text_evidence_fix(self, correction):
+        pair = self.assign('pair_b', 'low', False)
+        normal = self.transport.dispatch
+        def dispatch(role, prompt, heartbeat):
+            value = json.loads(normal(role, prompt, heartbeat))
+            if role == 'repair_execute' and value['repair']['tests']['status'] == 'deferred':
+                value['repair']['tests']['evidence'] = 'Planned: run the targeted guard test after two clean passes.'
+            return json.dumps(value)
+        self.transport.dispatch = dispatch
+        self.correction_transport(correction)
+        return pair['repair']
+
+    def test_one_text_in_place_of_an_array_gets_one_value_correction(self):
+        def wrap(value):
+            tests = dict(value['repair']['tests'], evidence=[value['repair']['tests']['evidence']])
+            return dict(value, repair=dict(value['repair'], tests=tests))
+        gate = self.text_evidence_fix(wrap)
+        self.until(lambda: gate['step'] != 'fix')
+        self.assertIsNone(self.state['blocker'])
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
+        prompt = self.corrections[0][1]
+        self.assertIn('A text where the schema needs an array of texts also counts.', prompt)
+        self.assertIn('"field": "repair.tests.evidence"', prompt)
+        self.assertIn('"allowed": [["Planned: run the targeted guard test after two clean passes."]]', prompt)
+        self.assertIn('You may split the text into items, but do not change its words.', prompt)
+
+    def test_the_correction_may_split_the_text_into_items(self):
+        def split(value):
+            tests = dict(value['repair']['tests'], evidence=['Planned: run the targeted guard test', 'after two clean\npasses.'])
+            return dict(value, repair=dict(value['repair'], tests=tests))
+        gate = self.text_evidence_fix(split)
+        self.until(lambda: gate['step'] != 'fix')
+        self.assertIsNone(self.state['blocker'])  # Split items and line breaks keep the words.
+
+    def test_the_correction_may_not_change_the_text_or_another_field(self):
+        changes = (lambda value: dict(value, repair=dict(value['repair'], tests=dict(
+                       value['repair']['tests'], evidence=['Another text.']))),
+                   lambda value: dict(value, repair=dict(value['repair'], tests=dict(
+                       value['repair']['tests'], evidence=['Planned: run the targeted guard test.']))),  # A dropped word.
+                   lambda value: dict(value, repair=dict(value['repair'], tests=dict(
+                       value['repair']['tests'], evidence=[value['repair']['tests']['evidence']], reason='Another reason'))))
+        for change in changes:
+            with self.subTest(change=change):
+                self.tearDown()
+                self.setUp()
+                gate = self.text_evidence_fix(change)
+                with self.assertRaises(Blocked) as caught:
+                    self.until(lambda: gate['step'] != 'fix')
+                self.assertEqual(caught.exception.code, 'report-repair-content')
+
+
 class ReportEnumEvidenceTests(unittest.TestCase):
     """A test run that changed a journal, counted nothing, and named a risk in words."""
     for _name in ('setUp', 'tearDown', 'edit', 'start', 'until', 'assign', 'writer', 'set_writer', 'step', 'audit'):

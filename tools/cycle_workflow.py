@@ -587,6 +587,7 @@ class Cycle(PairedReview, FinalReview):
                 raise Blocked("report-repair-source", "The original report values no longer match the frozen correction.")
             original, problems = found
             fields = enum_fields(problems)
+            text_problem = any(problem.get("text_array") for problem in problems)
             examples = {"status": ("status",), "evidence": ("evidence",), "resolutions": ("resolutions",), "handoff": ("handoff",)}
             if not counter_fields(repair, original):
                 examples.update(counters=("implementation_fixes",), substantial=("substantial",))
@@ -599,8 +600,11 @@ class Cycle(PairedReview, FinalReview):
             return ((
                 'REPORT-ONLY CORRECTION of the ORIGINAL invocation. This is not another execution, review, or '
                 'test run. The runtime rejects its report, because the listed fields have values outside their '
-                'allowed values.\n\nFor each listed field, choose the allowed value that describes the original '
-                'work. In an array, you may also merge or remove items. Each remaining item must be an allowed value '
+                'allowed values.' + (
+                    ' A text where the schema needs an array of texts also counts. Its allowed value is the same '
+                    'text in an array. You may split the text into items, but do not change its words.'
+                    if text_problem else '') + '\n\nFor each listed field, choose the allowed value that describes the original '
+                'work. In an array with invalid items, you may also merge or remove items. Each remaining item must be an allowed value '
                 'that applies. Change only these fields or arrays, summary, description, and the fields that the '
                 'rules below name. ' + (
                     'Keep repair.mode=pair. You may change repair.reason to match the risks. ' if risks and keep_pair else
@@ -758,6 +762,27 @@ class Cycle(PairedReview, FinalReview):
             if not same:
                 raise Blocked("report-repair-content", "A value correction may change only the fields with values "
                               "outside their allowed values, the summary, and the description.")
+            for problem in found[1]:
+                if isinstance(problem["path"][-1], int):
+                    continue  # An array with an invalid item can merge or remove items.
+                target = report
+                for part in problem["path"]:
+                    try:
+                        target = target[part]
+                    except (KeyError, IndexError, TypeError):
+                        target = None
+                        break
+                if problem.get("text_array"):
+                    # One text in place of an array: its items keep the words of that text, split or not.
+                    words = problem["value"].split()
+                    if (isinstance(target, list) and target and all(isinstance(item, str) and item.strip() for item in target)
+                            and " ".join(target).split() == words):
+                        continue
+                    raise Blocked("report-repair-content", f"A value correction must keep the words of "
+                                  f"{field_name(problem['path'])} in an array of texts.")
+                if target not in problem["allowed"]:
+                    raise Blocked("report-repair-content", f"A value correction must give {field_name(problem['path'])} "
+                                  "one of its allowed values.")
             mode_problem = any(problem["path"] == ["repair", "mode"] for problem in found[1])
             if (original.get("repair") or {}).get("mode") == "pair" and not mode_problem and report["repair"]["mode"] != "pair":
                 raise Blocked("report-repair-content", "A value correction can raise the repair mode, but it cannot lower pair to self.")

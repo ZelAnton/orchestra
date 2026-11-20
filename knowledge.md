@@ -785,8 +785,9 @@ replay a saved test run, and its successful checks do not run again. Test invoca
 `TEST_RISKS`: they list only the risks that their checks expose.
 
 `enum_problems` in `cycle_transport.py` recognizes a pair writer report whose only invalid values are outside their enums.
+One text in place of an array of texts is such a value (`text_array`). The correction keeps its words in one or more items.
 `valid_choice` searches a few choices of allowed values, item removals, and both repair modes. `repairable_enum` starts a `report-enum` correction.
-`enum_fields` names what the correction can change, and `validate_executor_correction` checks it. `saved_repair_fix` lets a retried fix step adopt such a saved run.
+`enum_fields` names what the correction can change, and `validate_executor_correction` checks it and each corrected field's value. `saved_repair_fix` lets a retried fix step adopt such a saved run.
 
 `deferred_fixes` in `focus_repair_evidence.py` names the fix assignments that a B/final fix report returned deferred, when nothing else breaks the gate.
 `accept_repair_result` then calls `correct_deferred` with the reason `deferred-fix`, which starts one correction, also after another correction. The executor returns fixed or disputed.

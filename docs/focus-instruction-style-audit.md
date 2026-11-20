@@ -1256,3 +1256,75 @@ The 7 unchecked rules count as failures.
 This is an internal assessment, not certification.
 
 The change keeps roles, models, efforts, review targets, and CI requirements.
+
+## Text in place of an array addendum
+
+Assessment date: 2026-11-20.
+The scope covers the new sentences of the `report-enum` correction prompt in `tools/cycle_workflow.py`.
+It also covers the new paragraph in `docs/sequential-cycle.md` and the changed lines in `knowledge.md`.
+`tools/check_focus_instructions.py` reports 0 findings.
+
+A script count found at most 25 words in each new description and at most 20 words in each new instruction.
+Each new paragraph has at most six sentences. The new text has no semicolons and no contractions.
+
+| Rule | Result | Evidence or limitation |
+| --- | --- | --- |
+| 1.1 | Unchecked | A full dictionary check of every ordinary word remains incomplete. |
+| 1.2 | Unchecked | Every word occurrence has not been checked against its approved part of speech. |
+| 1.3 | Unchecked | Every occurrence has not been checked against its approved dictionary meaning. |
+| 1.4 | Unchecked | A complete check of approved inflections remains incomplete. |
+| 1.5 | Satisfied | Technical nouns name the text, the array, the schema, and the allowed value. |
+| 1.6 | Unchecked | Nonapproved ordinary words have not all been separated from permitted technical nouns. |
+| 1.7 | Satisfied | Technical nouns keep noun use. Tool names, paths, and variables stay unchanged. |
+| 1.8 | Satisfied | Text, array, and allowed value keep one meaning in the prompt and the documentation. |
+| 1.9 | Satisfied | Short terms name the concepts: text, array, schema, allowed value. |
+| 1.10 | Satisfied | The text has no regional variants, slang, or informal labels. |
+| 1.11 | Satisfied | Text and array have distinct meanings. |
+| 1.12 | Satisfied | Count and check describe software operations. |
+| 1.13 | Satisfied | Operation nouns keep established software meanings. |
+| 1.14 | Satisfied | The prose uses US forms. Exact names stay unchanged. |
+| 2.1 | Satisfied | Noun groups stay short. Code, paths, and tool names count as one unit. |
+| 2.2 | Satisfied | Longer concepts use prepositions, for example "an array of texts". |
+| 3.1 | Unchecked | Every verb inflection has not been checked against the dictionary. |
+| 3.2 | Satisfied | Instructions use imperatives. Descriptions use the simple present. |
+| 3.3 | Not applicable | The new text has no participle that modifies a noun. |
+| 3.4 | Satisfied | The text has no complex chains of auxiliary verbs. |
+| 3.5 | Satisfied | The new prose has no -ing verb forms. |
+| 3.6 | Satisfied | The text names the actor, for example "A text where the schema needs an array of texts also counts". |
+| 3.7 | Satisfied | The text uses direct verbs such as count and need. |
+| 4.1 | Satisfied | Long rules become short sentences, and their conditions stay complete. |
+| 4.2 | Satisfied | The text keeps articles and necessary words. It has no contractions. |
+| 4.3 | Satisfied | The text adds one case to the value correction. |
+| 4.4 | Satisfied | But connects the permission to split with the rule to keep the words. |
+| 4.5 | Satisfied | Articles and demonstratives identify the text, the schema, and the value. |
+| 5.1 | Satisfied | Each new instruction sentence has at most 20 words. |
+| 5.2 | Satisfied | Each instruction sentence gives one action, or one action and its target. |
+| 5.3 | Satisfied | The role contract uses direct commands. Descriptions stay separate from commands. |
+| 5.4 | Satisfied | Conditions come first, for example "where the schema needs an array of texts". |
+| 5.5 | Satisfied | The new sentences are reference facts for the existing commands. |
+| 6.1 | Satisfied | The documentation gives the case, then its allowed value. |
+| 6.2 | Satisfied | Repeated terms connect the text, the array, and the allowed value. |
+| 6.3 | Satisfied | Each new description sentence has at most 25 words. |
+| 6.4 | Satisfied | Paragraphs group the case and its allowed value. |
+| 6.5 | Satisfied | Each paragraph has one subject. |
+| 6.6 | Satisfied | Each new or changed paragraph has at most six sentences. |
+| 7.1 | Not applicable | The text has software workflow rules, with no physical hazard. |
+| 7.2 | Not applicable | The text has no safety warning. |
+| 7.3 | Not applicable | No physical hazard needs a consequence statement. |
+| 8.1 | Satisfied | The new text has no semicolons. |
+| 8.2 | Not applicable | The new text has no hyphenated words. |
+| 8.3 | Satisfied | Parentheses contain no hidden instructions. |
+| 8.4 | Satisfied | A colon introduces the heading the existing correction prompt. |
+| 8.5 | Satisfied | The counter treats code spans as units. |
+| 8.6 | Satisfied | Machine literals such as `repair.tests.evidence` and `enum_problems` stay exact. |
+| 8.7 | Not applicable | The new text has no hyphenated words. |
+| 9.1 | Satisfied | The change has its own semantic review and design review. |
+| 9.2 | Unchecked | A complete lexical and meaning audit remains incomplete. |
+| 9.3 | Satisfied | The text uses direct verbs, for example "count" and "need", instead of phrasal verbs. |
+| 9.4 | Satisfied | The correction prompt, the documentation, and `knowledge.md` use the same terms for the text, the array, and the allowed value. |
+
+The assessment of this scope is **40 satisfied rules / 47 applicable rules = 85 percent**.
+The 7 unchecked rules count as failures.
+This is an internal assessment, not certification.
+
+The change keeps roles, models, efforts, review targets, and CI requirements.

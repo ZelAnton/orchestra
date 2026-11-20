@@ -1334,9 +1334,12 @@ A Claude executor gets the schema as text, so its provider does not refuse such 
 If some choice of allowed values makes the report valid, it gets one report-only correction in the same session.
 The correction lists each such field, its value, and the allowed values. The executor chooses the allowed values that apply.
 
-In an array, the executor can also merge or remove items. Only these fields, summary, description, and the counters can change.
+In an array with invalid items, the executor can also merge or remove items. Only these fields, summary, description, and the counters can change.
 With a `repair.risks` problem, `repair.reason` can also change. `repair.mode` can change from self to pair, because listed risks require pair mode.
 The correction cannot change pair to self. The counters follow the rules of the repair-mode correction.
+
+One text in place of an array of texts also counts, for example a plan in `repair.tests.evidence` as one string.
+Its allowed value is the same text in an array. The executor can split it into items but must keep its words.
 
 A fix step can stop on such a report, for example in an older runtime. The retry then adopts the saved fix run and starts the correction.
 The retry adopts only a saved run whose report a correction can save. Another saved report does not replay, so the executor runs again.
