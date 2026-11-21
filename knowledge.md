@@ -795,6 +795,10 @@ A corrected report sets the gate to pair mode. `deferred_fixes` needs status don
 
 `validate_executor_correction` allows only the outcome and resolution of those assignments, summary, and description to change. `saved_repair_fix` also adopts such a valid saved report.
 `saved_repair_fix` also resumes a correction without `result.json` when its source and files are unchanged.
+`Cycle.reset_on_drift` resets the reviews when the files changed after the last accepted result (`last_snapshot`).
+`saved_writer_run` prevents the reset when the pair step adopts a saved writer run: `saved_pair_execution`, `saved_repair_fix`, or `saved_repair_test`.
+`heal()` reads it before the healer starts. A healer that changes no files then keeps the reviews, and the step adopts the run.
+Before this rule, a retry after a rejected writer report reset the reviews before the adoption, and the stage started Pair A again.
 `cycle_prompts.REPAIR_ASSIGNMENT_CONTRACT` tells discussion roles and the arbiter that a B/final fix assignment must not wait for check results.
 
 `deferred_checks` names the assignments that a passed test report left deferred. `carries_later_work` allows a `deferred-test` correction

@@ -1523,6 +1523,7 @@ class Cycle(PairedReview, FinalReview):
         paired = self.state.get("pair_review")
         saved_test = self.saved_repair_test(paired)
         saved_execution = self.saved_pair_execution(paired)
+        saved_writer = self.saved_writer_run()  # Before the healer gets its own pending invocation.
         if saved_test:
             paired["repair"]["test_invocation"] = saved_test[0]["id"]
         if saved_execution:
@@ -1541,6 +1542,8 @@ class Cycle(PairedReview, FinalReview):
             stale_pair = False  # Classification is still required; no credit is granted here.
         if saved_execution and self.snapshot(saved_execution[1]["after"]) == after:
             stale_pair = False  # Still requires exhaustive executor closure, then the usual pair review.
+        if saved_writer:
+            stale_pair = False  # The pair step adopts the stopped writer run. A change by the healer still resets.
         if self.changes(before, after) or stale_pair:
             self.reset_reviews("Восстановление требует ревью текущего содержимого")
             if blocker["phase"] == "code":
@@ -1667,6 +1670,34 @@ class Cycle(PairedReview, FinalReview):
             self.save()
             print(f"cc-focus: Archived {len(receipts)} legacy review snapshots; original manifests and review evidence preserved.", flush=True)
 
+    def reset_on_drift(self):
+        """Reset the reviews when the files changed after the last accepted result.
+
+        A retry after a rejected writer report finds the files of that writer run. If the current pair step adopts
+        the saved run, these files are its own work and not an outside change. The reviews then stay, and the step
+        continues with the saved run. An outside change on top of that run still resets the reviews.
+        """
+        current = self.snapshot()
+        if not self.changes(self.state["last_snapshot"], current):
+            return False
+        self.check_protected(current)
+        if self.saved_writer_run():
+            return False
+        self.reset_reviews("Файлы изменились после ревью")
+        self.state["last_snapshot"] = current
+        self.save()
+        return True
+
+    def saved_writer_run(self):
+        """Whether the current pair step adopts a saved writer run whose result is the current checkout."""
+        pair = self.state.get("pair_review")
+        if self.state["phase"] not in PAIRS or not pair:
+            return False
+        if pair.get("step") == "repair":
+            step = pair["repair"]["step"]
+            return bool(self.saved_repair_fix(pair) if step == "fix" else self.saved_repair_test(pair) if step == "test" else None)
+        return bool(self.saved_pair_execution(pair))
+
     def retry_command(self):
         return ("cc-focus review --resume " + self.state["review_run"]["id"] + " --retry"
                 if self.state.get("review_run") else "cc-focus --retry")
@@ -1734,14 +1765,8 @@ class Cycle(PairedReview, FinalReview):
                         return 0
                     continue
                 pending = self.state["pending"]
-                if not pending and phase in (*REVIEW_ROLES, *PAIRS, "publish"):
-                    current = self.snapshot()
-                    if self.changes(self.state["last_snapshot"], current):
-                        self.check_protected(current)
-                        self.reset_reviews("Файлы изменились после ревью")
-                        self.state["last_snapshot"] = current
-                        self.save()
-                        continue
+                if not pending and phase in (*REVIEW_ROLES, *PAIRS, "publish") and self.reset_on_drift():
+                    continue
                 if phase not in PAIRS and self.state["coordinated"] != phase and (not pending or pending["role"] == "coordinate"):
                     report, _, after, _ = self.invoke("coordinate")
                     if report["status"] == "complete":

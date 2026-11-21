@@ -1342,7 +1342,14 @@ One text in place of an array of texts also counts, for example a plan in `repai
 Its allowed value is the same text in an array. The executor can split it into items but must keep its words.
 
 A fix step can stop on such a report, for example in an older runtime. The retry then adopts the saved fix run and starts the correction.
-The retry adopts only a saved run whose report a correction can save. Another saved report does not replay, so the executor runs again.
+The retry adopts only a saved run whose report a correction can save. Another saved report does not replay.
+If that run changed no files, the executor runs again. If it changed files, the reviews reset, as the next paragraphs say.
+
+The files of the stopped run differ from the last accepted result. Usually, such a change resets the reviews before the step starts.
+The reset does not occur when the current pair step adopts a saved writer run whose result is the current checkout.
+A recovery agent that changes no files keeps the reviews in the same way. This rule also applies to a saved Pair A executor run and to a saved repair test run.
+
+If the step does not adopt the stopped run, for example after a failed correction, the reviews reset. An outside change on top of the saved run also resets them.
 
 A B/final fix step does not build or test, so it accepts only fixed or disputed for a fix assignment.
 An assignment can still ask the executor to defer a fix, for example until check results exist.

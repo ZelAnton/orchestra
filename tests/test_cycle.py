@@ -61,6 +61,24 @@ def strict_objects(schema):
     return all(strict_objects(value) for key, value in schema.items() if key != "properties") and all(map(strict_objects, properties.values()))
 
 
+
+def run_one_pass(cycle):
+    """Run one pass of the run loop, as a retry does, and stop safely at the next boundary."""
+    class OnePass:
+        passes = 0
+
+        def boundary(self, publication_window=False):
+            self.passes += 1
+            return self.passes > 1
+
+        def request(self):
+            return None
+    cycle.control = OnePass()
+    try:
+        return cycle.run()
+    finally:
+        cycle.control = None
+
 def report(**kwargs):
     value = dict(status="done", summary="Validated fixture result", description="Full coding result, details and deferred work.",
                  implementation_fixes=0, other_fixes=0, minor_edits=0, substantial=False, evidence=["Focused fixture validation"])

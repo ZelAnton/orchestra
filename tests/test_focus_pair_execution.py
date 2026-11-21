@@ -284,6 +284,15 @@ class PairExecutionTests(unittest.TestCase):
         self.step()
         self.assertEqual(len(self.calls), 2)
 
+    def test_a_retry_in_the_run_loop_adopts_the_saved_executor_run(self):
+        pair = self.prepare()
+        before = self.state['last_snapshot']
+        self.legacy_result(pair)
+        self.state['last_snapshot'] = before  # A rejected report keeps the files known before the run.
+        self.assertEqual(fixtures.run_one_pass(self.cycle), 0)
+        self.assertEqual((self.state['phase'], self.state['pair_review']['id']), ('pair_a', pair['id']))
+        self.assertEqual(len(self.calls), 1)  # The saved run is adopted, and the executor does not run again.
+
     def test_changed_shared_operator_instructions_reject_legacy_replay(self):
         pair = self.prepare()
         self.legacy_result(pair)

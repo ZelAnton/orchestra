@@ -1405,11 +1405,48 @@ class ReportShapeTests(unittest.TestCase):
         self.correction_transport(correction)
         return pair['repair']
 
+    @staticmethod
+    def wrap(value):
+        tests = dict(value['repair']['tests'], evidence=[value['repair']['tests']['evidence']])
+        return dict(value, repair=dict(value['repair'], tests=tests))
+
+    def stopped_text_fix(self, retry=True):
+        """The live stop: a runtime without this correction rejects the fix report after the executor changed files."""
+        gate = self.text_evidence_fix(self.wrap)
+        with patch('cycle_workflow.repairable_enum', return_value=None):
+            with self.assertRaisesRegex(Blocked, 'invalid finding array') as caught:
+                self.until(lambda: gate['step'] != 'fix')
+        self.cycle.handle_block(caught.exception)
+        self.assertTrue(self.cycle.changes(self.state['last_snapshot'], self.cycle.snapshot()))
+        if retry:
+            self.state.update(blocker=None, pending=None, status='ready')  # cc-focus --retry clears the blocker.
+
+    def test_a_retry_in_the_run_loop_keeps_pair_b_and_corrects_the_report(self):
+        self.stopped_text_fix()
+        self.assertEqual(fixtures.run_one_pass(self.cycle), 0)
+        self.assertEqual((self.state['phase'], self.state['pair_review']['repair']['step']), ('pair_b', 'review'))
+        self.assertEqual([role for role, _ in self.transport.calls].count('repair_execute'), 1)  # No second run.
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
+
+    def test_a_healer_that_changes_nothing_keeps_pair_b(self):
+        self.stopped_text_fix(retry=False)
+        transport = self.cycle.transport
+        self.cycle.transport = fixtures.FixtureTransport(self.root, [('heal', report())])
+        self.cycle.heal()
+        self.cycle.transport = transport
+        self.assertEqual(fixtures.run_one_pass(self.cycle), 0)
+        self.assertEqual((self.state['phase'], self.state['pair_review']['repair']['step']), ('pair_b', 'review'))
+        self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
+
+    def test_an_outside_change_after_the_stop_still_resets_the_reviews(self):
+        self.stopped_text_fix()
+        (self.root / 'source.txt').write_text('operator edit\n', encoding='utf-8')
+        self.assertEqual(fixtures.run_one_pass(self.cycle), 0)
+        self.assertEqual((self.state['phase'], self.state['pair_review']), ('pair_a', None))
+        self.assertEqual(self.corrections, [])
+
     def test_one_text_in_place_of_an_array_gets_one_value_correction(self):
-        def wrap(value):
-            tests = dict(value['repair']['tests'], evidence=[value['repair']['tests']['evidence']])
-            return dict(value, repair=dict(value['repair'], tests=tests))
-        gate = self.text_evidence_fix(wrap)
+        gate = self.text_evidence_fix(self.wrap)
         self.until(lambda: gate['step'] != 'fix')
         self.assertIsNone(self.state['blocker'])
         self.assertEqual([c[2]['report_repair']['reason'] for c in self.corrections], ['report-enum'])
